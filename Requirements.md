@@ -1,6 +1,6 @@
 # Forecourt Middleware — Requirements Specification
 
-Version: 1.0
+Version: 1.2
 Status: Draft
 Last Updated: 2026-03-10
 
@@ -17,7 +17,7 @@ Last Updated: 2026-03-10
 7. [REQ-4: Site Connectivity Mode (Connected / Disconnected)](#req-4-site-connectivity-mode-connected--disconnected)
 8. [REQ-5: Fiscalization Configuration](#req-5-fiscalization-configuration)
 9. [REQ-6: Pre-Authorization Orders](#req-6-pre-authorization-orders)
-10. [REQ-7: Unsolicited Transactions (Normal Orders)](#req-7-unsolicited-transactions-normal-orders)
+10. [REQ-7: Normal Orders (FCC-Initiated Transactions)](#req-7-normal-orders-fcc-initiated-transactions)
 11. [REQ-8: Pre-Auth Reconciliation and Volume Adjustment](#req-8-pre-auth-reconciliation-and-volume-adjustment)
 12. [REQ-9: Automatic Order Creation in Odoo](#req-9-automatic-order-creation-in-odoo)
 13. [REQ-10: Payload Normalization and Field Mapping](#req-10-payload-normalization-and-field-mapping)
@@ -43,13 +43,15 @@ Last Updated: 2026-03-10
 | DODO | Dealer Owned, Dealer Operated — a third-party dealer owns and operates the site. |
 | DOCO | Dealer Owned, Company Operated — a third-party dealer owns the site but the fuel company operates it. |
 | FCC | Forecourt Controller — hardware/software system controlling fuel pumps at a site. |
-| HHT | Handheld Terminal — Android device used by fuel attendants, running Odoo POS. |
-| Pre-Auth | Pre-Authorization — an order authorized in Odoo before fuel is dispensed. The FCC authorizes the pump for a specific amount/volume. |
-| Unsolicited Transaction | A dispense transaction that occurs without a prior pre-auth order. The attendant lifts the nozzle and dispenses directly. |
+| HHT | Handheld Terminal — Android device used by fuel attendants, running Odoo POS. **Device in use: Urovo i9100 running Android 12.** |
+| Pre-Auth | Pre-Authorization — an order authorized in Odoo before fuel is dispensed. The FCC authorizes the pump for a specific amount/volume. Used specifically for customers requesting a fiscalized invoice with their Tax ID. |
+| Normal Order | A dispense transaction that occurs without a prior pre-auth order. The attendant lifts the nozzle and dispenses directly. This is the predominant transaction type at all sites. Previously referred to as "unsolicited transaction" (an FCC-level term). |
+| Unsolicited Transaction | FCC-level term for a transaction surfaced by the FCC without a prior pre-auth request (i.e., via Pull or Push without a correlated authorization). At the application level, these are referred to as **Normal Orders**. |
 | Fiscalization | The process of reporting a transaction to a government tax authority (e.g., TRA in Tanzania, MRA in Malawi) for tax compliance. |
 | Pull Mode | The middleware periodically polls the FCC for new transactions. |
 | Push Mode | The FCC actively sends transactions to the middleware as they occur. |
-| Edge Agent | A lightweight service running on the HHT (Android) or station-level device, communicating with FCC over local LAN. |
+| Edge Agent | A native **Kotlin/Java** Android application running on the HHT alongside Odoo POS. Communicates with the FCC over local LAN and includes the FCC adapter logic on-device. |
+| Sure MDM | The Mobile Device Management platform used to manage the HHT fleet. Used for distributing Edge Agent APK updates. |
 | Adapter | A vendor-specific integration module that translates between the middleware canonical model and a specific FCC protocol. |
 | Canonical Model | The standardized internal data format used by the middleware regardless of FCC vendor. |
 | MRA | Malawi Revenue Authority. |
@@ -99,7 +101,7 @@ Last Updated: 2026-03-10
 | REQ-4 | Site Connectivity Mode | P0 | Yes |
 | REQ-5 | Fiscalization Configuration | P0 | Yes |
 | REQ-6 | Pre-Authorization Orders | P0 | Yes |
-| REQ-7 | Unsolicited Transactions (Normal Orders) | P0 | Yes |
+| REQ-7 | Normal Orders (FCC-Initiated Transactions) | P0 | Yes |
 | REQ-8 | Pre-Auth Reconciliation and Volume Adjustment | P0 | Yes |
 | REQ-9 | Automatic Order Creation in Odoo | P0 | Yes |
 | REQ-10 | Payload Normalization and Field Mapping | P0 | Yes |
@@ -233,6 +235,7 @@ Each site may have zero or one FCC assigned. The middleware must know which FCC 
 | `authCredentials` | Encrypted String | API key, username/password, or certificate reference |
 | `transactionMode` | Enum | PULL, PUSH, HYBRID |
 | `pullIntervalSeconds` | Integer (nullable) | Polling interval for PULL mode (e.g., 30, 60) |
+| `ingestionMode` | Enum | `CLOUD_DIRECT` (default), `RELAY`, `BUFFER_ALWAYS` — controls where the FCC is configured to send data |
 | `isActive` | Boolean | Whether this FCC is currently operational |
 | `lastHeartbeatAt` | DateTime (nullable) | Last successful communication timestamp |
 | `registeredAt` | DateTime | When this FCC was first registered |
@@ -350,18 +353,22 @@ Fiscalization requirements vary by country and by site. The middleware must know
 
 ## Description
 
-Pre-authorization is the process where an Odoo POS order is created BEFORE fuel is dispensed. The middleware sends a pre-auth request to the FCC, which authorizes a specific pump for a requested amount or volume. The attendant then dispenses fuel, and the actual dispense transaction is returned later (see REQ-8).
+Pre-authorization is **not the default transaction flow**. It is used specifically when a customer requests a **fiscalized invoice with their Tax ID** (TIN). At most sites the majority of transactions are Normal Orders (see REQ-7). Pre-auth and Normal Order transactions can coexist at the same site (mixed mode).
+
+When pre-auth is required: an Odoo POS order is created BEFORE fuel is dispensed. The Edge Agent sends a pre-auth request to the FCC over LAN, which authorizes a specific pump for a requested **amount** (in local currency). The attendant then dispenses fuel. The actual dispensed **volume** is recorded in the final dispense transaction returned via the FCC's cloud push, and this actual volume becomes the quantity on the Odoo order (see REQ-8).
+
+Pre-auth always routes via the **Edge Agent** — never directly from Odoo to the cloud middleware for FCC command forwarding. This is because the Edge Agent has the FCC adapter logic and direct LAN access to the FCC.
 
 ## Flow
 
 1. **Attendant** creates an order in Odoo POS (captures customer details, vehicle, product, amount).
-2. **Odoo** sends a pre-auth request to the **Middleware API**.
-3. **Middleware** resolves the site, FCC, and adapter.
-4. **Adapter** translates and sends the pre-auth command to the **FCC**.
-5. **FCC** authorizes the pump and responds with confirmation.
-6. **Middleware** stores the pre-auth record and responds to Odoo.
+2. **Odoo POS** sends a pre-auth request to the **Edge Agent's local API** (localhost on the same HHT).
+3. **Edge Agent** translates and sends the pre-auth command to the **FCC** over the station LAN.
+4. **FCC** authorizes the pump and responds with confirmation.
+5. **Edge Agent** stores the pre-auth response locally and returns confirmation to Odoo POS.
+6. **Edge Agent** queues the pre-auth record to the **Cloud Middleware** for reconciliation tracking (async, with retry when internet is available).
 7. Fuel is dispensed physically.
-8. The final dispense transaction is received later via Pull/Push (see REQ-8, REQ-12).
+8. The final dispense transaction is received by the Cloud Middleware via the FCC's direct push and reconciled (see REQ-8, REQ-12).
 
 ## Pre-Auth Request Payload (Canonical)
 
@@ -372,9 +379,8 @@ Pre-authorization is the process where an Odoo POS order is created BEFORE fuel 
 | `pumpNumber` | Integer | Yes | Target pump |
 | `nozzleNumber` | Integer | Yes | Target nozzle |
 | `productCode` | String | Yes | Fuel product (PMS, AGO, IK) |
-| `requestedAmount` | Decimal | Yes | Authorized amount in local currency |
-| `requestedVolume` | Decimal | No | Authorized volume in litres (if applicable) |
-| `unitPrice` | Decimal | Yes | Price per litre at time of auth |
+| `requestedAmount` | Decimal | Yes | Authorized amount in local currency. **Pre-auth is always by amount — volume authorization is not used.** |
+| `unitPrice` | Decimal | Yes | Price per litre at time of auth. Used by Odoo to display the estimated volume (`requestedAmount / unitPrice`) before dispense, but the FCC authorizes by amount only. |
 | `vehicleNumber` | String | No | Vehicle registration (if captured) |
 | `customerName` | String | Conditional | Required if `requireCustomerTaxId` = true |
 | `customerTaxId` | String | Conditional | Customer TIN — required if `requireCustomerTaxId` = true (REQ-5) |
@@ -395,33 +401,44 @@ Pre-authorization is the process where an Odoo POS order is created BEFORE fuel 
 
 ## Business Rules
 
-- BR-6.1: Pre-auth is only applicable for sites in **connected** mode with `fiscalizationMode` = `FCC_DIRECT` or where the business process requires pump authorization.
+- BR-6.1: Pre-auth is used when a customer requests a fiscalized invoice with their Tax ID. It is applicable for sites in **connected** mode with `fiscalizationMode` = `FCC_DIRECT`.
+- BR-6.1b: Pre-auth is **always authorized by amount** (local currency). The FCC receives `requestedAmount` and authorizes the pump to dispense up to that monetary value. Volume authorization is not sent to the FCC.
+- BR-6.1c: The estimated dispensable volume (`requestedAmount / unitPrice`) may be displayed to the attendant in Odoo POS for guidance, but this is informational only. The Odoo Order quantity is set from the actual dispensed volume returned by the FCC in the final dispense transaction (see BR-8.5).
+- BR-6.1a: Odoo POS **always** sends pre-auth requests to the Edge Agent's local API (localhost). The cloud middleware is not in the pre-auth command path. This applies in both online and offline modes because pre-auth operates over LAN.
 - BR-6.2: Each pre-auth must be uniquely identifiable by `odooOrderId` + `siteCode`. Duplicate pre-auth requests for the same order must be rejected (idempotency).
 - BR-6.3: Customer tax details (`customerTaxId`, `customerName`, `customerBusinessName`) are passed through to the FCC adapter when `requireCustomerTaxId` = true on the site's fiscalization config.
 - BR-6.4: A pre-auth that is not completed or cancelled within a configurable timeout (e.g., 15 minutes) must transition to `EXPIRED` and release the pump authorization.
 - BR-6.5: Cancellation is allowed only in `PENDING` or `AUTHORIZED` states.
-- BR-6.6: The middleware must support cancellation via API: `POST /preauth/{id}/cancel`.
+- BR-6.6: The Edge Agent must support cancellation via its local API: `POST /api/preauth/{id}/cancel`.
+- BR-6.7: The Edge Agent must forward the pre-auth record to the Cloud Middleware for reconciliation. If the cloud is unreachable, the record must be queued locally and retried with exponential backoff when internet returns.
+- BR-6.8: The Cloud Middleware must be able to receive and store pre-auth records from the Edge Agent so it can match final dispense transactions arriving via FCC push.
 
 ## Acceptance Criteria
 
-- AC-6.1: A pre-auth request from Odoo is successfully sent to the correct FCC via the appropriate adapter.
-- AC-6.2: The FCC response is correctly mapped and stored; the pre-auth state is updated.
+- AC-6.1: A pre-auth request from Odoo POS is sent to the Edge Agent local API and forwarded to the FCC over LAN.
+- AC-6.2: The FCC response is correctly mapped and stored in the Edge Agent; Odoo POS receives the confirmation.
 - AC-6.3: Customer tax details are included in the FCC payload for fiscalized sites.
 - AC-6.4: Duplicate pre-auth requests are rejected with an appropriate error.
 - AC-6.5: Expired pre-auths are automatically transitioned and the pump authorization is released.
+- AC-6.6: The pre-auth record is successfully forwarded to the Cloud Middleware; if offline, it queues and retries automatically.
+- AC-6.7: The Cloud Middleware can use the pre-auth record to match final dispense transactions arriving via FCC push (REQ-8).
 
 ------------------------------------------------------------------------
 
-# REQ-7: Unsolicited Transactions (Normal Orders)
+# REQ-7: Normal Orders (FCC-Initiated Transactions)
 
 **Priority:** P0
 **MVP:** Yes
 
+> **Terminology note**: "Unsolicited" and "Solicited" are FCC-level terms describing how the FCC surfaces transactions (Push vs Pull). At the application level these are called **Normal Orders** — transactions not initiated by an Odoo pre-auth. This is the **default transaction type** at all sites.
+
 ## Description
 
-Unsolicited transactions occur when an attendant dispenses fuel WITHOUT creating a pre-auth order in Odoo. The attendant lifts the nozzle and dispenses directly. The FCC records the transaction, and the middleware ingests it via Pull or Push (see REQ-12).
+Normal Orders occur when an attendant dispenses fuel WITHOUT creating a pre-auth order in Odoo. The attendant lifts the nozzle and dispenses directly. The FCC records the transaction, and the middleware ingests it via Pull or Push (see REQ-12).
 
-These transactions have no corresponding Odoo order at the time of dispense. The middleware must ingest them and create orders in Odoo (see REQ-9).
+These transactions have no corresponding Odoo order at the time of dispense. The middleware must ingest and store them so Odoo can poll and create orders (see REQ-9).
+
+Normal Orders and Pre-Auth orders can coexist at the same site (mixed mode). Normal Orders are predominant at all sites; Pre-Auth is reserved for customers requesting a fiscalized invoice with their Tax ID (see REQ-6).
 
 ## Transaction Payload (Canonical — Received from FCC)
 
@@ -442,15 +459,15 @@ These transactions have no corresponding Odoo order at the time of dispense. The
 
 ## Business Rules
 
-- BR-7.1: Unsolicited transactions arrive via Pull or Push (REQ-12). The middleware must handle both modes per site/FCC configuration.
+- BR-7.1: Normal Orders arrive via Pull or Push (REQ-12). The middleware must handle both modes per site/FCC configuration.
 - BR-7.2: The middleware must NOT assume a fixed batch size. Payloads may contain a single transaction or multiple transactions. The system must process whatever the FCC sends — whether one-by-one or bulk — without requiring a configuration flag. The adapter must handle payload inspection and iteration.
-- BR-7.3: Each unsolicited transaction must be checked for duplicates before processing (REQ-13).
-- BR-7.4: After deduplication, the transaction is normalized to the canonical model and forwarded for Odoo order creation (REQ-9).
+- BR-7.3: Each Normal Order must be checked for duplicates before processing (REQ-13).
+- BR-7.4: After deduplication, the transaction is normalized to the canonical model and stored with status `PENDING`, making it available for Odoo to poll and create an order (REQ-9).
 - BR-7.5: The raw FCC payload must be preserved alongside the canonical model for audit purposes.
 
 ## Acceptance Criteria
 
-- AC-7.1: Unsolicited transactions from DOMS are correctly ingested and normalized.
+- AC-7.1: Normal Orders from DOMS are correctly ingested and normalized.
 - AC-7.2: Single-transaction and bulk payloads are both processed correctly without configuration changes.
 - AC-7.3: Duplicate transactions are detected and skipped without error.
 - AC-7.4: Raw payloads are stored for audit trail.
@@ -464,17 +481,18 @@ These transactions have no corresponding Odoo order at the time of dispense. The
 
 ## Description
 
-When a pre-auth order is completed, the actual dispensed volume/amount may differ from the pre-authorized amount. The middleware must match the final dispense transaction to the original pre-auth and update the Odoo order with the actual quantities.
+When a pre-auth order is completed, the actual dispensed amount may differ from the pre-authorized amount. The middleware matches the final dispense transaction to the original pre-auth, calculates the variance on amount, and stores the reconciled transaction with the **actual dispensed volume from the FCC**. Odoo polls this reconciled transaction and creates the order using the actual volume as the order quantity.
 
 ## Flow
 
-1. A final dispense transaction is received from the FCC (via Pull/Push).
+1. A final dispense transaction is received from the FCC (via Pull/Push). It contains the **actual dispensed volume** (litres) and **actual amount** (local currency).
 2. The middleware matches it to an existing pre-auth record using FCC transaction correlation IDs, pump/nozzle, and time window.
-3. If the actual dispensed amount differs from the pre-authorized amount:
-   a. The middleware calculates the adjustment (over-dispense or under-dispense).
-   b. The middleware sends an order update to Odoo with the actual volume, amount, and unit price.
-4. The pre-auth record transitions to `COMPLETED`.
-5. A reconciliation record is created capturing the variance.
+3. The middleware calculates the **amount variance** (`actualAmount - requestedAmount`).
+   - Within tolerance → auto-approved.
+   - Exceeds tolerance → flagged for Ops Manager review.
+4. Regardless of variance, the reconciled transaction is stored with the **actual volume and actual amount** from the FCC. This is what Odoo polls when creating the order — the Odoo Order quantity = `actualVolume`.
+5. The pre-auth record transitions to `COMPLETED`.
+6. A reconciliation record is created capturing the variance.
 
 ## Reconciliation Record
 
@@ -483,13 +501,12 @@ When a pre-auth order is completed, the actual dispensed volume/amount may diffe
 | `reconciliationId` | UUID | Internal identifier |
 | `preAuthId` | UUID (FK) | Original pre-auth |
 | `fccTransactionId` | String | Final dispense transaction from FCC |
-| `authorizedAmount` | Decimal | Original pre-auth amount |
-| `actualAmount` | Decimal | Actual dispensed amount |
-| `authorizedVolume` | Decimal | Original pre-auth volume (if set) |
-| `actualVolume` | Decimal | Actual dispensed volume |
-| `variance` | Decimal | Difference (actual - authorized) |
-| `variancePercentage` | Decimal | Percentage variance |
-| `odooOrderUpdated` | Boolean | Whether Odoo was successfully updated |
+| `authorizedAmount` | Decimal | Amount sent in the pre-auth request (always in local currency) |
+| `actualAmount` | Decimal | Actual dispensed amount returned by FCC |
+| `actualVolume` | Decimal | Actual dispensed volume (litres) returned by FCC — this becomes the Odoo Order quantity |
+| `variance` | Decimal | Amount difference: `actualAmount - authorizedAmount` |
+| `variancePercentage` | Decimal | Amount variance as a percentage of authorized amount |
+| `odooOrderAvailable` | Boolean | Whether the reconciled transaction has been stored as PENDING for Odoo to poll |
 | `reconciledAt` | DateTime | Timestamp of reconciliation |
 | `status` | Enum | MATCHED, VARIANCE_WITHIN_TOLERANCE, VARIANCE_FLAGGED, UNMATCHED |
 
@@ -497,52 +514,90 @@ When a pre-auth order is completed, the actual dispensed volume/amount may diffe
 
 - BR-8.1: The middleware must attempt to correlate every dispense transaction at a pre-auth site to an existing pre-auth record.
 - BR-8.2: Correlation uses: FCC-provided correlation ID (if available), pump number + nozzle number + time window, and `odooOrderId` echoed by the FCC (if supported by the adapter).
-- BR-8.3: If the variance is within a configurable tolerance (e.g., ±2%), the reconciliation is auto-approved.
-- BR-8.4: If the variance exceeds tolerance, the reconciliation is flagged for Operations Manager review.
-- BR-8.5: Odoo must be updated with actual volume and amount regardless of variance.
+- BR-8.3: **Variance is calculated on amount only** (`actualAmount - authorizedAmount`). If within a configurable tolerance (e.g., ±2%), the reconciliation is auto-approved.
+- BR-8.4: If the amount variance exceeds tolerance, the reconciliation is flagged for Operations Manager review. The transaction is still stored as PENDING for Odoo to poll regardless of variance outcome.
+- BR-8.5: The reconciled transaction stored as PENDING must include the **actual dispensed volume from the FCC** as the order quantity and the **actual amount** as the order value. When Odoo polls and creates the order, the Odoo Order quantity = `actualVolume` (litres). There is no authorized volume — volume is never part of the pre-auth authorization.
 - BR-8.6: If no matching pre-auth is found for a dispense transaction at a pre-auth site, the transaction is flagged as `UNMATCHED` for investigation.
-- BR-8.7: Unmatched transactions at pre-auth sites should still create Odoo orders (as unsolicited) but with a reconciliation flag.
+- BR-8.7: Unmatched transactions at pre-auth sites are still stored as PENDING (with a reconciliation flag) so Odoo can poll and create an order as if it were a normal transaction.
 
 ## Acceptance Criteria
 
-- AC-8.1: A dispense transaction that matches a pre-auth correctly updates the Odoo order with actual amounts.
+- AC-8.1: A dispense transaction that matches a pre-auth is stored with actual volume and actual amount from the FCC. When Odoo polls this transaction, the Odoo Order quantity equals the actual dispensed volume.
 - AC-8.2: Variance within tolerance is auto-approved.
 - AC-8.3: Variance exceeding tolerance is flagged for review.
-- AC-8.4: Unmatched transactions at pre-auth sites are flagged and still create Odoo orders.
+- AC-8.4: Unmatched transactions at pre-auth sites are flagged and still available for Odoo to poll and create orders.
 
 ------------------------------------------------------------------------
 
-# REQ-9: Automatic Order Creation in Odoo
+# REQ-9: Odoo Order Creation (Odoo-Polled Model)
 
 **Priority:** P0
 **MVP:** Yes
 
 ## Description
 
-For unsolicited transactions (REQ-7) and unmatched transactions at pre-auth sites (REQ-8), the middleware must automatically create orders in Odoo POS.
+For Normal Orders (REQ-7) and reconciled transactions at pre-auth sites (REQ-8), the middleware exposes transactions for Odoo to consume. **The middleware does not call Odoo to create orders.** Odoo polls the middleware and creates orders itself.
 
-## Flow
+Two polling sources are supported — Odoo polls whichever is reachable:
 
-1. A normalized transaction passes duplicate detection (REQ-13).
-2. The middleware constructs an Odoo order payload with: site, pump, nozzle, product, volume, amount, unit price, timestamps, fiscal receipt (if any).
-3. The middleware calls the Odoo API to create the order.
-4. Odoo returns the created order ID.
-5. The middleware stores the mapping: `fccTransactionId` <-> `odooOrderId`.
+| Source | When Used | Network |
+|--------|-----------|---------|
+| **Cloud Middleware** | Primary path. Internet is available. Odoo polls `GET /transactions?status=PENDING` on a schedule or via manual bulk trigger. | Internet |
+| **Edge Agent local API** | Offline path. Internet is down. Odoo POS switches to polling `GET /api/transactions` on the Edge Agent (localhost). | LAN (localhost or station WiFi) |
+
+After Odoo creates an order, it **acknowledges the transaction** back to the middleware. The middleware marks acknowledged transactions as `SYNCED_TO_ODOO`. The Edge Agent polls this status and will not serve already-acknowledged transactions to Odoo via the local API.
+
+The `fccTransactionId` idempotency key prevents Odoo from creating duplicate orders for a transaction it may have already processed during offline mode.
+
+## Flow (Primary — Online, Odoo polls Cloud Middleware)
+
+1. FCC pushes transaction to Cloud Middleware.
+2. Normalized transaction passes duplicate detection (REQ-13).
+3. Cloud Middleware stores transaction with status `PENDING`. Transaction is now available for Odoo to poll.
+4. Odoo polls `GET /transactions?status=PENDING` (scheduled or manual bulk).
+5. Odoo creates order(s) in its own system using the returned transaction data (site, pump, nozzle, product, volume, amount, unit price, timestamps, fiscal receipt if any).
+6. Odoo calls `POST /transactions/acknowledge` with the list of processed `fccTransactionId` values.
+7. Cloud Middleware stores the mapping `fccTransactionId` <-> `odooOrderId` and marks transactions `SYNCED_TO_ODOO`.
+
+## Flow (Offline — Odoo polls Edge Agent)
+
+1. Internet is down. Odoo POS detects outage and switches to Edge Agent local API.
+2. Edge Agent has transactions buffered locally (collected via LAN catch-up poll from FCC).
+3. Odoo polls `GET /api/transactions` on Edge Agent (localhost or LAN IP).
+4. Odoo creates orders from the returned transactions.
+5. Odoo calls `POST /api/transactions/acknowledge` on Edge Agent to mark them as locally consumed.
+6. Edge Agent marks those buffer entries as locally acknowledged.
+7. On internet recovery:
+   - Edge Agent uploads buffered transactions to Cloud Middleware.
+   - Odoo switches back to polling Cloud Middleware.
+   - For transactions Odoo already created during offline, Odoo acknowledges them to the cloud using the same `fccTransactionId` idempotency key — no duplicate orders are created.
+   - Cloud Middleware marks transactions `SYNCED_TO_ODOO`.
+
+## Manual Bulk-Create
+
+- The Ops team may trigger a manual bulk-create at any time (e.g., end-of-shift) by initiating a poll + order creation run covering a specified time range or all PENDING transactions.
+- This is equivalent to the scheduled polling path but operator-initiated.
 
 ## Business Rules
 
-- BR-9.1: Every unsolicited transaction that passes deduplication MUST result in an Odoo order.
-- BR-9.2: The Odoo order creation must be idempotent — if the middleware retries (e.g., after a failure), it must not create duplicate orders. This is enforced via `fccTransactionId` as an idempotency key.
-- BR-9.3: If Odoo order creation fails, the transaction must be queued for retry with exponential backoff.
-- BR-9.4: After a configurable number of retries (e.g., 5), the transaction is marked as `FAILED_TO_SYNC` and an alert is raised for the Operations Manager.
-- BR-9.5: Operator tax details (from site config) must be included in the Odoo order where applicable (CODO/DODO sites).
+- BR-9.1: Every Normal Order that passes deduplication MUST be made available for Odoo to poll and create an order.
+- BR-9.2: Odoo order creation must be idempotent — `fccTransactionId` is the idempotency key. If Odoo polls the same transaction twice (e.g., during reconnection), it must not create a duplicate order.
+- BR-9.3: The Cloud Middleware must expose a `GET /transactions?status=PENDING` endpoint that returns normalized, deduplicated transactions available for Odoo to consume.
+- BR-9.4: The Cloud Middleware must expose a `POST /transactions/acknowledge` endpoint (or bulk equivalent) for Odoo to signal that it has created orders. This triggers the `SYNCED_TO_ODOO` marking.
+- BR-9.5: The Edge Agent must expose equivalent `GET /api/transactions` and `POST /api/transactions/acknowledge` endpoints for Odoo's offline polling path.
+- BR-9.6: Operator tax details (from site config) must be included in transaction data returned to Odoo where applicable (CODO/DODO sites).
+- BR-9.7: The Edge Agent must not serve transactions already marked `SYNCED_TO_ODOO` via its local API. Transactions consumed via the offline path that are later confirmed synced to cloud must be excluded from future local API results.
+- BR-9.8: If a transaction is not acknowledged (Odoo polling failure), it must remain in `PENDING` status and be returned on the next poll. Transactions do not expire from the PENDING queue automatically — they stay until acknowledged or manually resolved.
+- BR-9.9: After a configurable retention period (e.g., 7 days) with no acknowledgement, a transaction is flagged as `STALE_PENDING` and an alert is raised for the Operations Manager.
 
 ## Acceptance Criteria
 
-- AC-9.1: Unsolicited transactions automatically create orders in Odoo.
-- AC-9.2: Retry logic correctly handles transient Odoo API failures.
-- AC-9.3: No duplicate orders are created in Odoo for the same FCC transaction.
-- AC-9.4: Failed syncs are visible to the Operations Manager with retry capability.
+- AC-9.1: Transactions stored by the Cloud Middleware after FCC push are visible via `GET /transactions?status=PENDING`.
+- AC-9.2: Odoo can poll, create orders, and acknowledge transactions in a single cycle with no duplicates.
+- AC-9.3: When internet is down, Odoo successfully polls the Edge Agent local API and creates orders from buffered transactions.
+- AC-9.4: On internet recovery, transactions created during offline are correctly acknowledged to the cloud and marked `SYNCED_TO_ODOO` without creating duplicates in Odoo.
+- AC-9.5: Transactions marked `SYNCED_TO_ODOO` are excluded from both the Cloud Middleware poll endpoint and the Edge Agent local API results.
+- AC-9.6: Stale unacknowledged transactions are flagged to the Operations Manager after the configured retention period.
 
 ------------------------------------------------------------------------
 
@@ -638,9 +693,11 @@ Master data (legal entities, sites, pumps, nozzles, products, operators) is sour
 
 ## Description
 
-The middleware supports two modes for receiving transactions from FCCs, configured per FCC.
+The middleware supports two modes for receiving transactions from FCCs (`transactionMode`), configured per FCC. Separately, `ingestionMode` controls where the FCC is configured to deliver data (cloud or Edge Agent).
 
-## Modes
+> **Key constraint**: Most FCC vendors can only be configured to push or send to **one endpoint**. Some FCC vendors also do not expose a Pull API. The ingestion architecture is designed to work within these constraints.
+
+## Transaction Modes (How FCC Surfaces Data)
 
 ### Pull Mode
 
@@ -648,30 +705,53 @@ The middleware supports two modes for receiving transactions from FCCs, configur
 - Poll interval is configurable per FCC (`pullIntervalSeconds`).
 - The adapter sends a fetch request and processes the response.
 - The middleware must track the last successfully fetched transaction (cursor/offset/timestamp) to avoid re-fetching.
+- In `CLOUD_DIRECT` mode: the cloud middleware performs the pull directly. In `RELAY`/`BUFFER_ALWAYS` modes: the Edge Agent performs the pull over LAN.
 
 ### Push Mode
 
-- The FCC actively sends transactions to a webhook/endpoint exposed by the middleware or Edge Agent.
-- The middleware must expose a vendor-specific or generic ingest endpoint.
+- The FCC actively sends transactions to a configured endpoint.
+- In `CLOUD_DIRECT` mode (default): the FCC pushes to the **Cloud Middleware** endpoint.
+- In `RELAY`/`BUFFER_ALWAYS` modes: the FCC pushes to the **Edge Agent** over LAN.
+- The receiving endpoint must acknowledge receipt before processing (at-least-once delivery).
 - Push payloads may contain single or multiple transactions.
 
 ### Hybrid Mode
 
 - Some FCCs support both Pull and Push. In hybrid mode, Push is the primary channel, and Pull acts as a fallback/catch-up mechanism to ensure no transactions are missed.
 
+## Ingestion Routing Modes (Where FCC Data Flows)
+
+`transactionMode` (Pull/Push/Hybrid) describes **how** the FCC surfaces data. `ingestionMode` describes **where** it is delivered. These are independent settings configured per FCC.
+
+| Mode | Default | Description | When to Use |
+|------|---------|-------------|-------------|
+| `CLOUD_DIRECT` | **Yes** | **FCC is configured to push/send directly to the Cloud Middleware.** Edge Agent polls FCC over LAN as a catch-up safety net and uploads missed transactions to cloud. Cloud deduplicates dual-path arrivals. | Default for all sites. Requires FCC to be able to reach the cloud endpoint (public IP, VPN, or SIM-connected FCC). |
+| `RELAY` | No | FCC is configured to push/pull via the Edge Agent over LAN. Edge Agent immediately relays to cloud when internet is available; buffers locally if not. | Sites where the FCC cannot reach the cloud directly (isolated LAN, no VPN). |
+| `BUFFER_ALWAYS` | No | FCC delivers to Edge Agent. Edge Agent always buffers locally first and syncs on schedule — regardless of internet status. | High-volume sites, bursty connectivity, or where scheduled batch sync is preferred. |
+
 ## Business Rules
 
-- BR-12.1: The transaction mode is configured per FCC (REQ-3).
+- BR-12.1: The `transactionMode` (Pull/Push/Hybrid) and `ingestionMode` (CLOUD_DIRECT/RELAY/BUFFER_ALWAYS) are configured independently per FCC (REQ-3). `CLOUD_DIRECT` is the default `ingestionMode`.
 - BR-12.2: In Pull mode, the polling schedule must be managed by a background worker. Missed polls (e.g., due to downtime) must be caught up on restart.
 - BR-12.3: In Push mode, the ingest endpoint must be highly available and must acknowledge receipt before processing (at-least-once delivery).
 - BR-12.4: In Hybrid mode, Pull runs on a less frequent schedule (e.g., every 5 minutes) as a catch-up, while Push handles real-time flow.
-- BR-12.5: Regardless of mode, all transactions pass through the same deduplication and normalization pipeline.
+- BR-12.5: In `CLOUD_DIRECT` mode, the Edge Agent must still poll the FCC over LAN at a configured interval as a catch-up safety net. Transactions collected via LAN catch-up are uploaded to the cloud, which handles deduplication against FCC push arrivals.
+- BR-12.6: In `CLOUD_DIRECT` mode, if the Edge Agent cannot reach the cloud when it collects a catch-up transaction, it must buffer locally and upload on reconnection.
+- BR-12.7: In `RELAY` mode, the Edge Agent must detect cloud unavailability and switch to local buffering automatically, then resume relay when cloud is reachable again — without manual intervention.
+- BR-12.8: In `BUFFER_ALWAYS` mode, the Edge Agent syncs buffered transactions on a configurable schedule (e.g., every 5 minutes).
+- BR-12.9: `CLOUD_DIRECT` mode requires the FCC to have a cloud-reachable endpoint. Sites where this is not possible must use `RELAY` or `BUFFER_ALWAYS`.
+- BR-12.10: Regardless of ingestion mode, all transactions pass through the same deduplication and normalization pipeline at the cloud middleware.
+- BR-12.11: Pre-auth commands always route via the Edge Agent regardless of `ingestionMode` (see REQ-6). `ingestionMode` only affects Normal Order (transaction) ingestion.
 
 ## Acceptance Criteria
 
 - AC-12.1: Pull mode correctly polls DOMS at the configured interval and ingests new transactions.
-- AC-12.2: Push mode correctly receives and acknowledges incoming transaction payloads.
+- AC-12.2: Push mode correctly receives and acknowledges incoming transaction payloads at the configured endpoint (cloud or Edge Agent, per `ingestionMode`).
 - AC-12.3: Hybrid mode does not produce duplicates when the same transaction arrives via both Push and Pull.
+- AC-12.4: In `CLOUD_DIRECT` mode, transactions reach the cloud via FCC push; Edge Agent catch-up poll uploads do not result in duplicate records available for Odoo to poll.
+- AC-12.5: In `RELAY` mode, transactions reach the cloud in real-time when internet is available; local buffering activates automatically when cloud is unreachable.
+- AC-12.6: In `BUFFER_ALWAYS` mode, transactions are always buffered locally and synced on schedule.
+- AC-12.7: Switching a site's `ingestionMode` takes effect without redeploying the Edge Agent (config-driven).
 
 ------------------------------------------------------------------------
 
@@ -682,7 +762,7 @@ The middleware supports two modes for receiving transactions from FCCs, configur
 
 ## Description
 
-Transactions may arrive multiple times due to retries, Pull/Push overlap, or Edge Agent replay. The middleware must detect and suppress duplicates.
+Transactions may arrive multiple times due to retries, Pull/Push overlap, Edge Agent catch-up poll overlap with FCC direct push, or Edge Agent replay after reconnection. The middleware must detect and suppress duplicates transparently. In the default `CLOUD_DIRECT` ingestion mode, the same transaction may legitimately arrive via two paths simultaneously: the FCC's direct cloud push AND the Edge Agent's LAN catch-up poll. This is expected and handled by primary key deduplication.
 
 ## Deduplication Strategy
 
@@ -708,6 +788,7 @@ If `fccTransactionId` is not available or not trustworthy:
 - AC-13.1: Identical transactions received via Push and Pull are deduplicated.
 - AC-13.2: Edge Agent replay after reconnection does not create duplicates.
 - AC-13.3: Secondary-check matches are flagged for review.
+- AC-13.4: A transaction arriving via both the FCC's direct cloud push and the Edge Agent's LAN catch-up poll is stored exactly once — the second arrival is silently skipped.
 
 ------------------------------------------------------------------------
 
@@ -755,65 +836,221 @@ All transaction processing must produce an immutable audit trail published to th
 # REQ-15: Edge Android Agent (HHT)
 
 **Priority:** P1
-**MVP:** Partial (detailed requirements to follow)
+**MVP:** Partial
 
 ## Description
 
-The Edge Agent runs on the same Android HHT device that runs Odoo POS. It provides local LAN connectivity to the FCC when internet connectivity is unavailable or unreliable.
+The Edge Agent is a native **Kotlin/Java** Android application running on the same **Urovo i9100 (Android 12) HHT** that runs Odoo POS. It provides local LAN connectivity to the FCC and offline transaction buffering when internet connectivity is unavailable or unreliable.
+
+The FCC adapter logic (protocol handling for DOMS, Radix, etc.) is implemented **within the Edge Agent** — not a separate cloud-only component. This means the Edge Agent is self-contained for FCC communication.
 
 ## Architecture
 
 - **Odoo POS** is installed on the HHT and connects to Odoo cloud via internet (SIM or WiFi).
-- **Edge Agent** is a lightweight service on the same HHT that communicates with the FCC over **local WiFi LAN**.
-- The Edge Agent and Odoo POS coexist on the same device but serve different purposes.
+- **Edge Agent** is a separate Android app (APK) on the same HHT that communicates with the FCC over **local WiFi LAN**.
+- Both apps coexist on the same physical device.
+- The station **LAN is always on** — independent of internet availability. Internet outages do not affect LAN connectivity to the FCC.
+- In the default `CLOUD_DIRECT` ingestion mode, the **FCC pushes transactions directly to the Cloud Middleware**. The Edge Agent is not the primary transaction receiver — it acts as a LAN catch-up safety net and is always the pre-auth handler.
 
 ## Connectivity Topology
 
 ```
-[Odoo Cloud] <-- Internet (SIM/WiFi) --> [HHT: Odoo POS]
-                                          [HHT: Edge Agent] <-- Local WiFi LAN --> [FCC]
+[Forecourt Controller]
+    │
+    ├── Push (primary) ──────────────────────────► [Cloud Middleware] ──► [Odoo Cloud]
+    │                                                       ▲  │
+    │                                              pre-auth │  │ SYNCED_TO_ODOO status
+    │                                                       │  │ catch-up upload
+    └── Poll LAN (catch-up) ◄──────────────── [Edge Agent] ◄──┘
+                                                    │
+                              ┌─────────────────────┤
+                              │                     │
+                   (online) [Odoo Cloud]    (offline) [Edge Agent API]
+                              │                     │
+                              └────────[Odoo POS]───┘
+
+Pre-Auth (always over LAN):
+  [Odoo POS] ──► [Edge Agent local API] ──► [FCC]
+  [Edge Agent] ──► [Cloud Middleware] (queues pre-auth for reconciliation)
 ```
 
 ## Operating Modes
 
-| Mode | Internet | Edge Agent Role |
-|------|----------|----------------|
-| **Online** | Available | Edge Agent relays FCC transactions to cloud middleware via internet. Odoo POS operates normally. |
-| **Offline** | Unavailable | Edge Agent continues to communicate with FCC over LAN. Buffers transactions locally. Odoo POS can fetch transactions from the local Edge Agent instead of the cloud middleware. |
-| **Recovery** | Restored | Edge Agent replays buffered transactions to the cloud middleware. Odoo POS resumes normal cloud operation. |
+Behaviour in the table below reflects the default `ingestionMode = CLOUD_DIRECT`. See REQ-12 for `RELAY` and `BUFFER_ALWAYS` variants.
 
-## Key Capabilities (Preliminary)
+| Mode | Internet | FCC LAN | Behaviour (CLOUD_DIRECT — default) |
+|------|----------|---------|--------------------------------------|
+| **Fully Online** | Up | Up | FCC pushes transactions to Cloud Middleware. Edge Agent polls FCC over LAN as catch-up; uploads any missed transactions to cloud. Cloud stores transactions (status: PENDING). **Odoo polls Cloud Middleware** and creates orders; acknowledges back to cloud; cloud marks `SYNCED_TO_ODOO`. Edge Agent syncs this status. |
+| **Internet Down** | Down | Up | FCC push to cloud fails/queues at FCC. Edge Agent **polls FCC over LAN and buffers transactions locally**. **Odoo POS polls Edge Agent local API** and creates orders from buffered transactions. Pre-auth still works (LAN only). On recovery, Edge Agent uploads buffer; cloud deduplicates; Odoo switches back to polling Cloud Middleware. |
+| **FCC Unreachable** | Up or Down | Down | Alert site supervisor. LAN catch-up not possible. FCC-to-cloud push may still work independently. Log LAN connectivity gap. |
+| **Fully Offline** | Down | Down | No ingestion possible. Odoo POS operates in manual mode. Alert on recovery. |
 
-- KC-15.1: Communicate with FCC over local WiFi LAN using the appropriate adapter protocol.
-- KC-15.2: Support both Pull and Push modes from the FCC over LAN.
-- KC-15.3: Buffer transactions locally (SQLite) when internet is unavailable.
-- KC-15.4: Expose a local API that Odoo POS on the same HHT can call to fetch transactions in offline mode.
-- KC-15.5: Automatically replay buffered transactions to the cloud middleware when internet is restored.
-- KC-15.6: Deduplicate transactions during replay (coordinate with cloud middleware deduplication).
-- KC-15.7: Allow attendants to trigger a manual Pull from the FCC via the Edge Agent.
+Mode transitions are automatic (no manual intervention) and logged as audit events.
 
-## Open Questions (To Be Detailed)
+## REQ-15.1: FCC Communication over LAN
 
-- OQ-15.1: How does Odoo POS discover the local Edge Agent API? (localhost on same device?)
-- OQ-15.2: What is the offline Odoo POS workflow — does it create orders locally and sync later, or does it just display transaction data from the Edge Agent?
-- OQ-15.3: How are FCC adapter libraries packaged for Android? (Same .NET adapters via MAUI, or separate lightweight implementations?)
-- OQ-15.4: How is the Edge Agent updated/managed on HHT devices at scale?
-- OQ-15.5: What happens if multiple HHTs are at the same site — which one acts as the Edge Agent? Or do all of them?
-- OQ-15.6: How does the Edge Agent authenticate with the FCC (credentials stored locally on HHT)?
+- The Edge Agent communicates with the FCC over the station's local WiFi LAN.
+- It uses the same adapter protocol logic as the cloud middleware (DOMS, Radix, etc.) — implemented natively in Kotlin/Java.
+- Connection details (FCC IP, port, credentials) are provisioned to the agent during setup.
+- The agent maintains a persistent or periodic connection depending on the vendor protocol.
+- Heartbeat monitoring: the agent periodically pings the FCC and reports health status.
+
+## REQ-15.2: LAN Catch-Up Poll (Safety Net Ingestion)
+
+In the default `CLOUD_DIRECT` ingestion mode, the FCC pushes transactions directly to the Cloud Middleware. The Edge Agent is **not** the primary transaction receiver. Its role in ingestion is a safety-net catch-up:
+
+- The Edge Agent polls the FCC over LAN at a configured interval (`pullIntervalSeconds`). This catches any transactions the cloud may have missed (e.g., FCC's cloud push failed or queued during an outage).
+- The agent normalizes collected transactions using the embedded adapter logic.
+- Catch-up transactions are forwarded to the Cloud Middleware. The cloud deduplicates against any transactions already received via the FCC's direct push.
+- If the cloud is unreachable when the agent polls, transactions are written to the local buffer and uploaded on reconnection.
+
+In `RELAY` or `BUFFER_ALWAYS` ingestion modes, the Edge Agent is the **primary receiver** (FCC is configured to deliver to the Edge Agent, not the cloud):
+- `RELAY`: immediately forwards to cloud if internet is available; buffers locally if not.
+- `BUFFER_ALWAYS`: always writes to local buffer first; syncs on schedule.
+
+The `ingestionMode` is a configuration value pushed to the agent by the cloud middleware. Changing it does not require an APK update.
+
+## REQ-15.3: Pre-Auth Relay and Cloud Queue
+
+Pre-auth **always** routes via the Edge Agent, regardless of `ingestionMode`:
+
+- Odoo POS sends the pre-auth request to the **Edge Agent's local API** (localhost on the same HHT). This applies in both online and offline modes — no internet is required for authorization.
+- The Edge Agent sends the pre-auth command to the FCC over LAN and receives the authorization response.
+- The Edge Agent returns the authorization result to Odoo POS.
+- The Edge Agent **queues the pre-auth record to the Cloud Middleware** asynchronously for reconciliation. If the cloud is unreachable, the record is queued locally and forwarded with retry when internet returns.
+- The Cloud Middleware stores the pre-auth record so it can match the final dispense transaction when it arrives via the FCC's cloud push (REQ-8).
+
+## REQ-15.3a: Transaction Status Sync (SYNCED_TO_ODOO)
+
+- The Cloud Middleware marks each transaction `SYNCED_TO_ODOO` after **Odoo acknowledges** that it has created the order (via `POST /transactions/acknowledge`).
+- The Edge Agent **periodically polls the Cloud Middleware** to fetch `SYNCED_TO_ODOO` status updates for transactions it holds in its local buffer.
+- Transactions confirmed as `SYNCED_TO_ODOO` are flagged in the local buffer accordingly.
+- The Edge Agent's local API (`GET /api/transactions`) must **exclude** `SYNCED_TO_ODOO` transactions from results returned to Odoo POS. This prevents Odoo from seeing transactions it has already created orders for when polling the cloud.
+- The status sync runs on the same connectivity check cycle as the cloud health ping (e.g., every 30 seconds when online).
+
+## REQ-15.4: Offline Transaction Buffering (Store-and-Forward)
+
+- In `CLOUD_DIRECT` mode (default): buffering activates **only when the cloud is unreachable** during catch-up poll upload. Under normal conditions, catch-up transactions are forwarded directly to the cloud without being stored in the buffer first.
+- In `RELAY` mode: buffering activates when the cloud becomes unreachable. Under normal conditions, transactions are relayed in real-time.
+- In `BUFFER_ALWAYS` mode: all transactions are written to the local buffer regardless of internet status, then synced on schedule.
+- In all modes, the Edge Agent **continues to poll the FCC over LAN** uninterrupted when internet is down.
+- All buffered transactions are stored in a **local SQLite database** (WAL mode for crash resilience) on the HHT.
+- Each buffered transaction stores: full canonical payload, raw FCC payload, timestamp, sync status (`PENDING`, `SYNCED`, `SYNCED_TO_ODOO`, `FAILED`).
+- Buffer survives app restarts and device reboots.
+- **Buffer capacity**: Must handle at least **30 days × 1,000 transactions/day** (30,000+ transactions) on the Urovo i9100 without storage issues.
+
+## REQ-15.5: Automatic Replay on Reconnection
+
+- Agent continuously monitors internet connectivity (ping cloud middleware health endpoint, e.g., every 30 seconds).
+- On connectivity restored: replay all `PENDING` buffered transactions to cloud middleware in chronological order.
+- Replay is idempotent — cloud middleware handles deduplication (REQ-13).
+- Batched uploads: configurable batch size (e.g., 50 transactions per request).
+- Failed replays: exponential backoff. Agent does not skip ahead — order is maintained.
+- On confirmed sync: transaction status updated to `SYNCED`. `SYNCED` transactions retained locally for a configurable period (e.g., 7 days) before cleanup.
+
+## REQ-15.6: Local API for Odoo POS (Offline Mode)
+
+The Edge Agent exposes a **REST API on localhost** (e.g., `http://localhost:8585`) accessible to Odoo POS on the same device:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/transactions` | Fetch recent transactions from local buffer (paginated, filterable by time, pump, product). **Excludes** transactions with status `SYNCED_TO_ODOO`. |
+| `GET /api/transactions/{id}` | Fetch a specific transaction |
+| `GET /api/pump-status` | Get current pump statuses from FCC (live, over LAN) |
+| `POST /api/preauth` | Submit a pre-auth request — **this endpoint is always available** (online or offline). Odoo POS always sends pre-auth here, not to the cloud. |
+| `POST /api/preauth/{id}/cancel` | Cancel a local pre-auth |
+| `GET /api/status` | Agent health: FCC connectivity, internet status, buffer depth, last sync time, `SYNCED_TO_ODOO` count |
+
+- When internet is available: Odoo POS fetches transaction data from the cloud. Pre-auth requests are always sent to the Edge Agent local API.
+- When internet is down: Odoo POS automatically switches to the local Edge Agent API for transaction visibility. Pre-auth continues to work uninterrupted. Switch should be automatic with a manual override for the attendant.
+
+## REQ-15.7: Attendant-Triggered Manual Pull
+
+- Attendant can trigger an on-demand Pull from the FCC via a button in Odoo POS.
+- Useful for immediately surfacing a just-completed dispense without waiting for the next poll cycle.
+- Manual pull result is returned to Odoo POS and stored in the local buffer.
+
+## REQ-15.8: Multi-HHT Site Handling
+
+- Busy sites may have **multiple HHTs** (one per attendant).
+- Only **one HHT per site acts as the primary Edge Agent** for FCC communication (configuration choice, not automatic election — for MVP simplicity).
+- **All HHTs must see the same transaction data**. Attendants always select pump and nozzle when creating orders (pre-auth or normal orders). Non-primary HHTs must be able to query the primary Edge Agent over the station LAN.
+- The primary agent's LAN API must be accessible to other HHTs on the same WiFi (not just localhost). Non-primary HHT requests require an API key.
+- **Failover (Post-MVP)**: Manual promotion of a secondary HHT to primary if the primary goes offline. Automatic failover is deferred.
+
+## REQ-15.9: Connectivity Detection and Mode Switching
+
+- FCC detection: periodic heartbeat to FCC (vendor-specific, e.g., every 15 seconds).
+- Internet detection: periodic ping to cloud middleware health endpoint (e.g., every 30 seconds).
+- On internet recovery: upload buffered transactions to cloud; fetch `SYNCED_TO_ODOO` status updates; flush queued pre-auth records to cloud.
+- Mode transitions are automatic — no manual intervention required.
+- All transitions are logged as audit events.
+
+## REQ-15.10: Security
+
+- FCC credentials stored **encrypted** on the HHT (Android Keystore).
+- Local API binds to localhost by default (primary HHT, same-device-only access).
+- When LAN access is enabled for other HHTs: API requires an **API key** provisioned during setup.
+- Cloud-to-agent communication uses mutual TLS or API key authentication.
+- Agent authenticates to cloud middleware with a device-level service token. No Odoo user credentials stored.
+
+## REQ-15.11: Provisioning and Configuration
+
+- Edge Agent installed as a separate Android APK on the HHT.
+- Initial configuration via:
+  - **QR code scan** (preferred for field deployment) — encodes site code, FCC connection details, cloud middleware URL, device token.
+  - **Manual entry** — fallback.
+  - **Cloud push** — cloud middleware pushes config after registration (for updates).
+- Configuration includes: site code, FCC vendor, FCC IP/port, credentials, cloud middleware URL, device token, poll interval, buffer settings.
+- Remote config updates: cloud middleware can push updated config (e.g., new FCC IP) on each cloud sync.
+
+## REQ-15.12: Monitoring and Diagnostics
+
+- Agent reports telemetry to cloud middleware when online: FCC connectivity, buffer depth, last sync timestamp, battery level, storage availability, app version.
+- Cloud dashboard shows per-site agent health.
+- Local diagnostics screen on HHT (Site Supervisor access): FCC connection status, internet status, buffer depth, last sync time, manual pull button, last 100 log entries.
+
+## REQ-15.13: Update and Lifecycle Management
+
+- Agent updates distributed via **Sure MDM** or enterprise sideload as fallback.
+- Agent must be backward-compatible with cloud middleware (older agent works with newer cloud, within a supported version range).
+- Cloud middleware exposes `/agent/version-check` — agent calls on startup. If below minimum supported version, agent alerts Site Supervisor and disables FCC communication until updated.
+
+## REQ-15.14: Data Integrity and Recovery
+
+- SQLite buffer uses **WAL mode** for crash resilience.
+- On startup: buffer integrity check (`PRAGMA integrity_check`).
+- If corruption detected: backup corrupted DB, start fresh buffer, alert cloud middleware for forensic retrieval.
+- Transactions never deleted until confirmed synced to cloud.
 
 ## Business Rules
 
-- BR-15.1: The Edge Agent must continue FCC communication even when internet is down.
-- BR-15.2: Buffered transactions must survive Edge Agent restarts (persisted to SQLite).
-- BR-15.3: Replay must be idempotent — the cloud middleware handles deduplication.
-- BR-15.4: The Edge Agent must not require manual intervention to switch between online/offline/recovery modes.
+- BR-15.1: The Edge Agent must continue FCC LAN communication (catch-up polling and pre-auth) even when internet is down.
+- BR-15.2: Buffered transactions must survive Edge Agent restarts (persisted SQLite, WAL mode).
+- BR-15.3: Catch-up and replay must be idempotent — cloud middleware handles deduplication (REQ-13).
+- BR-15.4: Mode transitions (online/offline/recovery) must be automatic — no manual intervention required.
+- BR-15.5: All HHTs at a site must have access to the same transaction data (via primary agent's LAN API).
+- BR-15.6: FCC adapter logic runs on-device (Kotlin/Java). The Edge Agent is self-contained for FCC communication.
+- BR-15.7: Buffer must be sized for a minimum of 30 days × 1,000 transactions/day on the Urovo i9100.
+- BR-15.8: The `ingestionMode` is config-driven and pushed from the cloud middleware. Changing it must not require an APK update or manual device intervention.
+- BR-15.9: In `RELAY` mode, the transition from relay to buffer (on cloud loss) and back (on cloud recovery) must be fully automatic and transparent to Odoo POS and the attendant.
+- BR-15.10: Pre-auth requests from Odoo POS must always be routed to the Edge Agent local API, regardless of `ingestionMode` or internet availability.
+- BR-15.11: The Edge Agent must queue pre-auth records to the Cloud Middleware for reconciliation. If offline, it must retry with exponential backoff when internet returns.
+- BR-15.12: The Edge Agent must poll the Cloud Middleware for `SYNCED_TO_ODOO` status and must not offer transactions already confirmed as `SYNCED_TO_ODOO` to Odoo POS via the local API.
 
 ## Acceptance Criteria
 
-- AC-15.1: The Edge Agent successfully communicates with a DOMS FCC over local LAN.
-- AC-15.2: Transactions are buffered when internet is unavailable and replayed when restored.
-- AC-15.3: Odoo POS on the same HHT can fetch transactions from the Edge Agent in offline mode.
-- AC-15.4: No duplicate transactions are created after replay and reconciliation.
+- AC-15.1: The Edge Agent (Kotlin/Java) successfully communicates with a DOMS FCC over local LAN.
+- AC-15.2: Transactions buffered during an internet outage are uploaded to the cloud on reconnection without data loss.
+- AC-15.3: Odoo POS on the same HHT can fetch transactions from the Edge Agent local API in offline mode. Transactions already `SYNCED_TO_ODOO` are excluded from results.
+- AC-15.4: No duplicate Odoo orders are created after cloud-path processing and Edge Agent catch-up, thanks to deduplication and `SYNCED_TO_ODOO` status checking.
+- AC-15.5: Non-primary HHTs at the same site can query the primary agent's LAN API and see the same transaction data.
+- AC-15.6: QR code provisioning correctly configures the agent for a new site deployment.
+- AC-15.7: Agent updates can be pushed and applied via Sure MDM without data loss.
+- AC-15.8: In `RELAY` mode, the agent immediately forwards transactions to cloud when online and seamlessly falls back to buffering when cloud becomes unreachable — with no data loss or manual action.
+- AC-15.9: Changing `ingestionMode` via cloud config push takes effect on the agent without requiring an APK update.
+- AC-15.10: Pre-auth requests submitted offline (via Edge Agent) are correctly queued and forwarded to the cloud when internet returns, enabling proper reconciliation.
+- AC-15.11: In `CLOUD_DIRECT` mode, the Edge Agent's catch-up LAN poll detects and uploads a transaction that the FCC failed to push to the cloud directly.
 
 ------------------------------------------------------------------------
 
@@ -898,8 +1135,8 @@ The middleware serves multiple legal entities (countries) from a single deployme
 - DOMS adapter (first FCC vendor)
 - Connected / Disconnected mode
 - Fiscalization configuration (FCC_DIRECT for Tanzania, EXTERNAL_INTEGRATION for Malawi)
-- Pre-authorization order flow
-- Unsolicited transaction ingestion (Pull and Push)
+- Pre-authorization order flow (Tax ID fiscalization use case)
+- Normal Order ingestion (Pull and Push) — default transaction type
 - Pre-auth reconciliation with volume adjustment
 - Automatic Odoo order creation
 - Payload normalization (DOMS)
@@ -908,7 +1145,7 @@ The middleware serves multiple legal entities (countries) from a single deployme
 - Audit trail and event logging
 - Error handling with retry and dead-letter queue
 - Multi-tenancy with row-level isolation
-- Edge Android Agent — basic LAN communication and offline buffering (partial)
+- Edge Android Agent (Urovo i9100, Android 12, Kotlin/Java) — LAN communication, offline buffering, local API, multi-HHT LAN visibility (partial — failover and OTA deferred)
 
 ## Out of Scope (Post-MVP)
 
@@ -917,5 +1154,5 @@ The middleware serves multiple legal entities (countries) from a single deployme
 - Admin portal (Angular) for configuration management
 - Physical database isolation per legal entity
 - Horizontal auto-scaling
-- Edge Agent fleet management and OTA updates
+- Edge Agent fleet management and OTA updates (Sure MDM push is MVP; advanced OTA lifecycle is post-MVP)
 - Advanced analytics and reporting
