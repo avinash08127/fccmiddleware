@@ -8,6 +8,7 @@ import com.fccmiddleware.edge.connectivity.ConnectivityTransitionListener
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.sync.CloudUploadWorker
+import com.fccmiddleware.edge.sync.ConfigPollWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -44,6 +45,8 @@ class CadenceController(
     private val scope: CoroutineScope,
     /** Nullable until PreAuthHandler is fully wired (EA-2.5). Null disables expiry checks. */
     private val preAuthHandler: PreAuthHandler? = null,
+    /** Config poll worker — polls cloud for config updates. Nullable until EA-3.3 wired. */
+    private val configPollWorker: ConfigPollWorker? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) : ConnectivityTransitionListener {
 

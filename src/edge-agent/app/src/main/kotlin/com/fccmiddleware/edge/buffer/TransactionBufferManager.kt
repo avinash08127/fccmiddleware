@@ -78,6 +78,15 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
     }
 
     /**
+     * Return FCC transaction IDs for records at UPLOADED status.
+     * Used by the status poller to check which records have reached SYNCED_TO_ODOO in cloud.
+     *
+     * @param limit Max IDs to return (cloud API supports up to 500 per call).
+     */
+    suspend fun getUploadedFccTransactionIds(limit: Int): List<String> =
+        dao.getUploadedFccTransactionIds(limit)
+
+    /**
      * Buffer-backed query for GET /api/transactions.
      *
      * Excludes SYNCED_TO_ODOO records per §5.3 to prevent double-consumption.
@@ -91,6 +100,31 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
         } else {
             dao.getForLocalApi(limit, offset)
         }
+
+    /**
+     * Record a failed upload attempt against a single buffered transaction.
+     *
+     * Increments [BufferedTransaction.uploadAttempts], stores the [error] message,
+     * and updates [BufferedTransaction.lastUploadAttemptAt] and [BufferedTransaction.updatedAt].
+     * The record's [SyncStatus] stays `PENDING` so the next cadence tick will retry it.
+     *
+     * Called by [CloudUploadWorker] on transport failures and per-record REJECTED outcomes.
+     *
+     * @param id         Local Room primary key (UUID).
+     * @param attempts   New total attempt count (caller increments from current value).
+     * @param attemptAt  ISO 8601 UTC timestamp of this attempt.
+     * @param error      Error message or cloud error code to store for diagnostics.
+     */
+    suspend fun recordUploadFailure(id: String, attempts: Int, attemptAt: String, error: String) {
+        dao.updateSyncStatus(
+            id = id,
+            syncStatus = SyncStatus.PENDING.name,
+            attempts = attempts,
+            lastAttemptAt = attemptAt,
+            error = error,
+            now = attemptAt,
+        )
+    }
 
     /**
      * Per-status record counts for telemetry reporting.

@@ -15,10 +15,11 @@ using Microsoft.AspNetCore.Mvc;
 namespace FccMiddleware.Api.Controllers;
 
 /// <summary>
-/// Handles transaction ingestion, Edge Agent uploads, and Odoo polling.
-/// POST /api/v1/transactions/ingest  — single raw FCC payload (FCC API key auth, not yet enforced).
-/// POST /api/v1/transactions/upload  — batch canonical upload from Edge Agent (device JWT).
-/// GET  /api/v1/transactions         — Odoo poll: paginated PENDING transactions (Odoo API key).
+/// Handles transaction ingestion, Edge Agent uploads, Odoo polling, and Odoo acknowledgement.
+/// POST /api/v1/transactions/ingest       — single raw FCC payload (FCC API key auth, not yet enforced).
+/// POST /api/v1/transactions/upload       — batch canonical upload from Edge Agent (device JWT).
+/// GET  /api/v1/transactions              — Odoo poll: paginated PENDING transactions (Odoo API key).
+/// POST /api/v1/transactions/acknowledge  — Odoo acknowledge: batch stamp PENDING → SYNCED_TO_ODOO (Odoo API key).
 /// </summary>
 [ApiController]
 [Route("api/v1/transactions")]
@@ -281,6 +282,68 @@ public sealed class TransactionsController : ControllerBase
                 NextCursor = result.NextCursor,
                 TotalCount = result.TotalCount
             }
+        };
+
+        return Ok(response);
+    }
+
+    /// <summary>
+    /// Batch-acknowledges transactions as Odoo-processed, transitioning PENDING → SYNCED_TO_ODOO.
+    /// </summary>
+    /// <remarks>
+    /// Authenticated via Odoo API key in the X-Api-Key header.
+    /// Idempotent: re-acknowledging a transaction with the same odooOrderId returns ALREADY_ACKNOWLEDGED.
+    /// Up to 500 items per request. Per-record outcomes: ACKNOWLEDGED, ALREADY_ACKNOWLEDGED, CONFLICT, NOT_FOUND, FAILED.
+    /// </remarks>
+    /// <param name="request">Batch of acknowledgement items (transactionId + odooOrderId).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    [HttpPost("acknowledge")]
+    [Authorize(Policy = OdooApiKeyAuthOptions.PolicyName)]
+    [ProducesResponseType(typeof(AcknowledgeResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> Acknowledge(
+        [FromBody] AcknowledgeRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.Acknowledgements is { Count: 0 })
+            return BadRequest(BuildError("VALIDATION.EMPTY_BATCH", "Acknowledgements must contain at least one item."));
+
+        if (request.Acknowledgements.Count > 500)
+            return BadRequest(BuildError("VALIDATION.BATCH_TOO_LARGE",
+                $"Batch size {request.Acknowledgements.Count} exceeds maximum of 500."));
+
+        var leiStr = User.FindFirstValue("lei");
+        if (!Guid.TryParse(leiStr, out var legalEntityId))
+            return Unauthorized(BuildError("UNAUTHORIZED", "Missing or invalid 'lei' claim."));
+
+        var command = new AcknowledgeTransactionsBatchCommand
+        {
+            LegalEntityId = legalEntityId,
+            Items = request.Acknowledgements.Select(a => new AcknowledgeTransactionItem
+            {
+                TransactionId = a.Id,
+                OdooOrderId   = a.OdooOrderId
+            }).ToList()
+        };
+
+        var result = await _mediator.Send(command, cancellationToken);
+
+        var response = new AcknowledgeResponse
+        {
+            Results = result.Results.Select(r => new AcknowledgeResult
+            {
+                Id      = r.TransactionId,
+                Outcome = r.Outcome.ToString(),
+                Error   = r.ErrorCode is null ? null : new AcknowledgeError
+                {
+                    Code    = r.ErrorCode,
+                    Message = r.ErrorMessage ?? string.Empty
+                }
+            }).ToList(),
+            SucceededCount = result.SucceededCount,
+            FailedCount    = result.FailedCount
         };
 
         return Ok(response);

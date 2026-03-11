@@ -131,6 +131,19 @@ interface TransactionBufferDao {
     suspend fun countByStatus(): List<StatusCount>
 
     /**
+     * Return FCC transaction IDs for records at UPLOADED status.
+     * Used by the SYNCED_TO_ODOO status poller to query cloud for confirmed statuses.
+     * Limited to [limit] to respect the cloud API's 500-ID-per-call constraint.
+     */
+    @Query(
+        "SELECT fcc_transaction_id FROM buffered_transactions " +
+        "WHERE sync_status = 'UPLOADED' " +
+        "ORDER BY created_at ASC " +
+        "LIMIT :limit"
+    )
+    suspend fun getUploadedFccTransactionIds(limit: Int): List<String>
+
+    /**
      * Total count of records visible to the local API (excludes SYNCED_TO_ODOO).
      * Used by CadenceController for backlog depth and by the /api/v1/status endpoint.
      */

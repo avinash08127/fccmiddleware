@@ -1,6 +1,9 @@
 package com.fccmiddleware.edge.api
 
+import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
@@ -11,17 +14,22 @@ import java.time.Instant
 import java.util.UUID
 
 /**
- * Transaction endpoints — locally buffered transaction access.
+ * Transaction endpoints — locally buffered transaction access and on-demand FCC pull.
  * All routes use /api/v1/ prefix per edge-agent-local-api.yaml.
  *
  * GET  /api/v1/transactions             — list buffered transactions (p95 <= 150 ms at 30k records)
  * GET  /api/v1/transactions/{id}        — get single buffered transaction by middleware UUID
  * POST /api/v1/transactions/acknowledge — Odoo POS marks a batch of transactions as consumed
+ * POST /api/v1/transactions/pull        — on-demand FCC pull (EA-2.7)
  *
- * Never depends on live FCC access. Excludes SYNCED_TO_ODOO records per §5.3 of
- * the state machine spec to prevent Odoo double-consumption.
+ * Never depends on live FCC access for read/acknowledge paths. Excludes SYNCED_TO_ODOO
+ * records per §5.3 of the state machine spec to prevent Odoo double-consumption.
  */
-fun Routing.transactionRoutes(dao: TransactionBufferDao) {
+fun Routing.transactionRoutes(
+    dao: TransactionBufferDao,
+    ingestionOrchestrator: IngestionOrchestrator? = null,
+    connectivityManager: ConnectivityManager? = null,
+) {
 
     /**
      * GET /api/v1/transactions
@@ -145,5 +153,79 @@ fun Routing.transactionRoutes(dao: TransactionBufferDao) {
 
         val found = request.transactionIds.count { id -> dao.getById(id) != null }
         call.respond(HttpStatusCode.OK, BatchAcknowledgeResponse(acknowledged = found))
+    }
+
+    /**
+     * POST /api/v1/transactions/pull
+     *
+     * On-demand FCC pull — Odoo POS can call this to surface a just-completed dispense
+     * without waiting for the next scheduled poll cycle (EA-2.7 / REQ-15.7).
+     *
+     * The pull is serialized with the background poller via [IngestionOrchestrator.pollMutex]
+     * so manual and scheduled polls never race or corrupt cursor state.
+     *
+     * Request body (optional JSON):
+     *   pumpNumber (Int, optional) — informational; logged for diagnostics only.
+     *                                All transactions since the last cursor are fetched.
+     *
+     * Responses:
+     *   200 — pull completed; body contains [ManualPullResponse] with counts.
+     *   503 — FCC is unreachable or ingestion is not yet configured.
+     */
+    post("/api/v1/transactions/pull") {
+        // Check FCC reachability via ConnectivityManager when available
+        val cm = connectivityManager
+        if (cm != null) {
+            val state = cm.state.value
+            val fccReachable = state == ConnectivityState.FULLY_ONLINE ||
+                state == ConnectivityState.INTERNET_DOWN
+            if (!fccReachable) {
+                call.respond(
+                    HttpStatusCode.ServiceUnavailable,
+                    ErrorResponse(
+                        errorCode = "FCC_UNREACHABLE",
+                        message = "FCC is not reachable (connectivity state: ${state.name}). Manual pull unavailable.",
+                        traceId = UUID.randomUUID().toString(),
+                        timestamp = Instant.now().toString(),
+                    )
+                )
+                return@post
+            }
+        }
+
+        // Parse optional pumpNumber from request body (body may be absent)
+        val pullRequest = try {
+            call.receive<ManualPullRequest>()
+        } catch (_: Exception) {
+            ManualPullRequest()
+        }
+
+        val orchestrator = ingestionOrchestrator
+        if (orchestrator == null) {
+            call.respond(
+                HttpStatusCode.ServiceUnavailable,
+                ErrorResponse(
+                    errorCode = "FCC_UNREACHABLE",
+                    message = "FCC adapter is not yet configured. Manual pull unavailable.",
+                    traceId = UUID.randomUUID().toString(),
+                    timestamp = Instant.now().toString(),
+                )
+            )
+            return@post
+        }
+
+        val triggeredAt = Instant.now().toString()
+        val result = orchestrator.pollNow(pumpNumber = pullRequest.pumpNumber)
+
+        call.respond(
+            HttpStatusCode.OK,
+            ManualPullResponse(
+                newCount = result?.newCount ?: 0,
+                skippedCount = result?.skippedCount ?: 0,
+                fetchCycles = result?.fetchCycles ?: 0,
+                cursorAdvanced = result?.cursorAdvanced ?: false,
+                triggeredAtUtc = triggeredAt,
+            )
+        )
     }
 }

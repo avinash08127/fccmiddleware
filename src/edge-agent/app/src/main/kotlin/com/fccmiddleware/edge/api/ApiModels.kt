@@ -147,3 +147,34 @@ data class CancelPreAuthResponse(
     val success: Boolean,
     val message: String? = null,
 )
+
+/**
+ * Optional request body for POST /api/v1/transactions/pull.
+ * All fields are optional; omitting the body is equivalent to passing an empty object.
+ */
+@Serializable
+data class ManualPullRequest(
+    /**
+     * Informational pump number. Logged for diagnostics but does NOT restrict the fetch;
+     * the adapter returns all transactions since the last cursor. Pump-specific filtering
+     * is applied at the query layer, not during ingestion.
+     */
+    val pumpNumber: Int? = null,
+)
+
+/**
+ * Response for POST /api/v1/transactions/pull.
+ */
+@Serializable
+data class ManualPullResponse(
+    /** Transactions newly inserted into the local buffer during this pull. */
+    val newCount: Int,
+    /** Transactions skipped because they were already buffered (dedup). */
+    val skippedCount: Int,
+    /** Number of FCC fetch iterations performed. */
+    val fetchCycles: Int,
+    /** True if the FCC cursor was advanced at least once. */
+    val cursorAdvanced: Boolean,
+    /** UTC timestamp when the pull was triggered. */
+    val triggeredAtUtc: String,
+)

@@ -205,6 +205,67 @@ paths:
         "500":
           $ref: '#/components/responses/InternalServerError'
 
+  /api/v1/transactions/pull:
+    post:
+      operationId: manualFccPull
+      tags: [Transactions]
+      summary: Trigger an on-demand FCC pull
+      description: |
+        Called by Odoo POS (or a supervisor workflow) to surface a just-completed
+        dispense without waiting for the next scheduled poll cycle.
+
+        The Edge Agent fetches transactions from the FCC starting at the current
+        cursor, buffers any newly discovered transactions, and advances the cursor.
+        The operation is serialized with the background poller so manual pulls
+        never race with scheduled polls or corrupt cursor state.
+
+        `pumpNumber` in the request body is **informational** — logged for
+        diagnostics but does not restrict the fetch. All transactions since the
+        last cursor are fetched and buffered so no data is lost for other pumps.
+        Pump-specific filtering is available on the `GET /api/v1/transactions`
+        endpoint.
+      security:
+        - LanApiKey: []
+        - {}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualPullRequest'
+            example:
+              pumpNumber: 3
+      responses:
+        "200":
+          description: Pull completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManualPullResponse'
+              example:
+                newCount: 2
+                skippedCount: 0
+                fetchCycles: 1
+                cursorAdvanced: true
+                triggeredAtUtc: "2026-03-11T14:05:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "503":
+          description: |
+            FCC is not reachable or the FCC adapter is not yet configured.
+            Odoo POS should display a warning and retry after the poll interval.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                errorCode: FCC_UNREACHABLE
+                message: "FCC is not reachable (connectivity state: FCC_UNREACHABLE). Manual pull unavailable."
+                traceId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                timestamp: "2026-03-11T14:05:00Z"
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
   # ───────────────────────────────────────────────────────────────────────────
   # PUMP STATUS
   # ───────────────────────────────────────────────────────────────────────────
@@ -897,6 +958,45 @@ components:
             `false` means the cancel command was not sent (FCC unreachable) or was rejected;
             the pre-auth will expire naturally at `expiresAt`. The local record is still
             marked `CANCELLED`.
+
+    # ── Manual pull ─────────────────────────────────────────────────────────
+
+    ManualPullRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        pumpNumber:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: |
+            Informational pump number. Logged for diagnostics but does not restrict
+            the fetch. All transactions since the last FCC cursor are fetched.
+
+    ManualPullResponse:
+      type: object
+      required: [newCount, skippedCount, fetchCycles, cursorAdvanced, triggeredAtUtc]
+      additionalProperties: false
+      properties:
+        newCount:
+          type: integer
+          minimum: 0
+          description: Transactions newly inserted into the local buffer during this pull.
+        skippedCount:
+          type: integer
+          minimum: 0
+          description: Transactions skipped because they were already buffered (dedup).
+        fetchCycles:
+          type: integer
+          minimum: 0
+          description: Number of FCC fetch iterations performed in this pull.
+        cursorAdvanced:
+          type: boolean
+          description: True if the FCC cursor was advanced at least once during this pull.
+        triggeredAtUtc:
+          type: string
+          format: date-time
+          description: UTC timestamp when the pull was triggered.
 
     # ── Agent status ────────────────────────────────────────────────────────
 

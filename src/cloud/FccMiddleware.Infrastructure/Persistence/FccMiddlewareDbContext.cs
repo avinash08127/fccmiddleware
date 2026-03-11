@@ -1,4 +1,5 @@
 using FccMiddleware.Application.Ingestion;
+using FccMiddleware.Application.MasterData;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
@@ -21,7 +22,7 @@ namespace FccMiddleware.Infrastructure.Persistence;
 ///
 /// Outbox: <see cref="OutboxMessage"/> uses a bigint GENERATED ALWAYS AS IDENTITY column.
 /// </summary>
-public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext
+public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext
 {
     private readonly ICurrentTenantProvider _tenantProvider;
 
@@ -64,7 +65,8 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     // -------------------------------------------------------------------------
     // API key management
     // -------------------------------------------------------------------------
-    public DbSet<OdooApiKey> OdooApiKeys => Set<OdooApiKey>();
+    public DbSet<OdooApiKey>         OdooApiKeys         => Set<OdooApiKey>();
+    public DbSet<DatabricksApiKey>   DatabricksApiKeys   => Set<DatabricksApiKey>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -194,6 +196,22 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     }
 
     // -------------------------------------------------------------------------
+    // IAcknowledgeTransactionsDbContext implementation
+    // -------------------------------------------------------------------------
+
+    async Task<List<Transaction>> IAcknowledgeTransactionsDbContext.FindTransactionsByIdsAsync(
+        IReadOnlyList<Guid> ids,
+        Guid legalEntityId,
+        CancellationToken ct) =>
+        await Set<Transaction>()
+            .IgnoreQueryFilters()
+            .Where(t => t.LegalEntityId == legalEntityId && ids.Contains(t.Id))
+            .ToListAsync(ct);
+
+    void IAcknowledgeTransactionsDbContext.AddOutboxMessage(OutboxMessage message) =>
+        OutboxMessages.Add(message);
+
+    // -------------------------------------------------------------------------
     // IDeduplicationDbContext implementation
     // -------------------------------------------------------------------------
 
@@ -255,4 +273,69 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
 
         // LegalEntity and OutboxMessage have no LegalEntityId — no filter applied.
     }
+
+    // -------------------------------------------------------------------------
+    // IMasterDataSyncDbContext implementation
+    // All reads use IgnoreQueryFilters() so the sync logic sees all records
+    // regardless of current tenant context.
+    // -------------------------------------------------------------------------
+
+    Task<List<LegalEntity>> IMasterDataSyncDbContext.GetLegalEntitiesByIdsAsync(IReadOnlyList<Guid> ids, CancellationToken ct) =>
+        Set<LegalEntity>().IgnoreQueryFilters().Where(e => ids.Contains(e.Id)).ToListAsync(ct);
+
+    Task<List<Guid>> IMasterDataSyncDbContext.GetActiveLegalEntityIdsAsync(CancellationToken ct) =>
+        Set<LegalEntity>().IgnoreQueryFilters().Where(e => e.IsActive).Select(e => e.Id).ToListAsync(ct);
+
+    Task<List<Site>> IMasterDataSyncDbContext.GetSitesByIdsAsync(IReadOnlyList<Guid> ids, CancellationToken ct) =>
+        Set<Site>().IgnoreQueryFilters().Where(e => ids.Contains(e.Id)).ToListAsync(ct);
+
+    Task<List<Guid>> IMasterDataSyncDbContext.GetActiveSiteIdsAsync(CancellationToken ct) =>
+        Set<Site>().IgnoreQueryFilters().Where(e => e.IsActive).Select(e => e.Id).ToListAsync(ct);
+
+    Task<List<Pump>> IMasterDataSyncDbContext.GetPumpsByIdsAsync(IReadOnlyList<Guid> ids, CancellationToken ct) =>
+        Set<Pump>().IgnoreQueryFilters().Where(e => ids.Contains(e.Id)).ToListAsync(ct);
+
+    Task<List<Guid>> IMasterDataSyncDbContext.GetActivePumpIdsAsync(CancellationToken ct) =>
+        Set<Pump>().IgnoreQueryFilters().Where(e => e.IsActive).Select(e => e.Id).ToListAsync(ct);
+
+    async Task<Dictionary<string, Site>> IMasterDataSyncDbContext.GetSitesByCodesAsync(IReadOnlyList<string> siteCodes, CancellationToken ct)
+    {
+        var sites = await Set<Site>().IgnoreQueryFilters()
+            .Where(s => siteCodes.Contains(s.SiteCode))
+            .ToListAsync(ct);
+        return sites.ToDictionary(s => s.SiteCode);
+    }
+
+    Task<List<Nozzle>> IMasterDataSyncDbContext.GetNozzlesByPumpIdsAsync(IReadOnlyList<Guid> pumpIds, CancellationToken ct) =>
+        Set<Nozzle>().IgnoreQueryFilters().Where(n => pumpIds.Contains(n.PumpId)).ToListAsync(ct);
+
+    Task<List<Product>> IMasterDataSyncDbContext.GetProductsByIdsAsync(IReadOnlyList<Guid> ids, CancellationToken ct) =>
+        Set<Product>().IgnoreQueryFilters().Where(e => ids.Contains(e.Id)).ToListAsync(ct);
+
+    Task<List<Guid>> IMasterDataSyncDbContext.GetActiveProductIdsAsync(Guid legalEntityId, CancellationToken ct) =>
+        Set<Product>().IgnoreQueryFilters()
+            .Where(e => e.LegalEntityId == legalEntityId && e.IsActive)
+            .Select(e => e.Id)
+            .ToListAsync(ct);
+
+    Task<Product?> IMasterDataSyncDbContext.FindProductByCodeAsync(Guid legalEntityId, string productCode, CancellationToken ct) =>
+        Set<Product>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(p => p.LegalEntityId == legalEntityId && p.ProductCode == productCode, ct);
+
+    Task<List<Operator>> IMasterDataSyncDbContext.GetOperatorsByIdsAsync(IReadOnlyList<Guid> ids, CancellationToken ct) =>
+        Set<Operator>().IgnoreQueryFilters().Where(e => ids.Contains(e.Id)).ToListAsync(ct);
+
+    Task<List<Guid>> IMasterDataSyncDbContext.GetActiveOperatorIdsAsync(Guid legalEntityId, CancellationToken ct) =>
+        Set<Operator>().IgnoreQueryFilters()
+            .Where(e => e.LegalEntityId == legalEntityId && e.IsActive)
+            .Select(e => e.Id)
+            .ToListAsync(ct);
+
+    void IMasterDataSyncDbContext.AddLegalEntity(LegalEntity entity) => LegalEntities.Add(entity);
+    void IMasterDataSyncDbContext.AddSite(Site entity)               => Sites.Add(entity);
+    void IMasterDataSyncDbContext.AddPump(Pump entity)               => Pumps.Add(entity);
+    void IMasterDataSyncDbContext.AddNozzle(Nozzle entity)           => Nozzles.Add(entity);
+    void IMasterDataSyncDbContext.AddProduct(Product entity)         => Products.Add(entity);
+    void IMasterDataSyncDbContext.AddOperator(Operator entity)       => Operators.Add(entity);
+    void IMasterDataSyncDbContext.AddOutboxMessage(OutboxMessage msg) => OutboxMessages.Add(msg);
 }

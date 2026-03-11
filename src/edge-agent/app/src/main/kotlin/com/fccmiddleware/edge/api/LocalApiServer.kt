@@ -5,6 +5,7 @@ import com.fccmiddleware.edge.adapter.common.IFccAdapter
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -49,6 +50,7 @@ class LocalApiServer(
     private val preAuthHandler: PreAuthHandler,
     private val fccAdapter: IFccAdapter?,
     private val serviceScope: CoroutineScope,
+    private val ingestionOrchestrator: IngestionOrchestrator? = null,
     private val serviceStartMs: Long = System.currentTimeMillis(),
     private val deviceId: String = "00000000-0000-0000-0000-000000000000",
     private val siteCode: String = "UNPROVISIONED",
@@ -129,7 +131,7 @@ class LocalApiServer(
 
     private fun Application.configureRouting() {
         routing {
-            transactionRoutes(transactionDao)
+            transactionRoutes(transactionDao, ingestionOrchestrator, connectivityManager)
             preAuthRoutes(preAuthHandler, connectivityManager)
             pumpStatusRoutes(pumpStatusCache)
             statusRoutes(

@@ -70,10 +70,27 @@ val appModule = module {
     }
 
     // -------------------------------------------------------------------------
-    // Workers (stubs — full implementation follows EA-2.x)
+    // Workers
     // -------------------------------------------------------------------------
-    single { CloudUploadWorker() }
-    single { IngestionOrchestrator() }
+    single {
+        CloudUploadWorker(
+            bufferManager = get(),
+            syncStateDao = get(),
+            // cloudApiClient and tokenProvider require cloud URL and device JWT from the
+            // security / config modules (EA-2.x). Injected as null stubs until then;
+            // CloudUploadWorker safely no-ops when these are absent.
+            cloudApiClient = null,   // TODO (EA-2.x): HttpCloudApiClient.create(cloudBaseUrl)
+            tokenProvider = null,    // TODO (EA-2.x): inject EncryptedPrefsTokenProvider
+        )
+    }
+    single {
+        IngestionOrchestrator(
+            adapter = null,          // TODO (EA-2.x): inject from adapter factory once wired
+            bufferManager = get(),
+            syncStateDao = get(),
+            config = null,           // TODO (EA-2.x): inject from ConfigManager once wired
+        )
+    }
     single {
         PreAuthHandler(
             preAuthDao = get(),
@@ -115,6 +132,7 @@ val appModule = module {
             preAuthHandler = get(),
             fccAdapter = null,            // TODO (EA-2.x): resolve from adapter factory
             serviceScope = get<CoroutineScope>(),
+            ingestionOrchestrator = get(),
         )
     }
 

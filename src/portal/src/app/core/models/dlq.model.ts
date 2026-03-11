@@ -1,5 +1,12 @@
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
+export enum DeadLetterType {
+  TRANSACTION = 'TRANSACTION',
+  PRE_AUTH = 'PRE_AUTH',
+  TELEMETRY = 'TELEMETRY',
+  UNKNOWN = 'UNKNOWN',
+}
+
 export enum DeadLetterStatus {
   PENDING = 'PENDING',
   RETRYING = 'RETRYING',
@@ -19,6 +26,7 @@ export enum DeadLetterReason {
 
 export interface DeadLetter {
   id: string;
+  type: DeadLetterType;
   siteCode: string;
   legalEntityId: string;
   fccTransactionId: string | null;
@@ -36,6 +44,21 @@ export interface DeadLetter {
   updatedAt: string;
 }
 
+// ── Detail model (returned by GET /api/v1/dlq/:id) ────────────────────────────
+
+export interface RetryHistoryEntry {
+  attemptNumber: number;
+  attemptedAt: string;
+  outcome: 'SUCCESS' | 'FAILED';
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface DeadLetterDetail extends DeadLetter {
+  rawPayload: Record<string, unknown> | string | null;
+  retryHistory: RetryHistoryEntry[];
+}
+
 // ── Query params ──────────────────────────────────────────────────────────────
 
 export interface DeadLetterQueryParams {
@@ -43,6 +66,7 @@ export interface DeadLetterQueryParams {
   cursor?: string;
   pageSize?: number;
   siteCode?: string;
+  failureReason?: DeadLetterReason;
   status?: DeadLetterStatus;
   from?: string;
   to?: string;
@@ -58,4 +82,14 @@ export interface RetryResult {
   id: string;
   queued: boolean;
   error: import('./common.model').ErrorResponse | null;
+}
+
+export interface BatchDiscardItem {
+  id: string;
+  reason: string;
+}
+
+export interface BatchRetryResult {
+  succeeded: string[];
+  failed: Array<{ id: string; error: string }>;
 }

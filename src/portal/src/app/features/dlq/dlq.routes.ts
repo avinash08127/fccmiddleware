@@ -9,6 +9,11 @@ export const DLQ_ROUTES: Routes = [
   {
     path: 'list',
     loadComponent: () =>
-      import('./dlq.component').then((m) => m.DlqComponent),
+      import('./dlq-list.component').then((m) => m.DlqListComponent),
+  },
+  {
+    path: 'items/:id',
+    loadComponent: () =>
+      import('./dlq-detail.component').then((m) => m.DlqDetailComponent),
   },
 ];

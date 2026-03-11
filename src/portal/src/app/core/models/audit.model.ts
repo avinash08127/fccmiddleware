@@ -47,7 +47,8 @@ export interface AuditEventQueryParams {
   cursor?: string;
   pageSize?: number;
   correlationId?: string;
-  eventType?: EventType;
+  /** Multi-select: send each value as a repeated `eventTypes` query param. */
+  eventTypes?: EventType[];
   siteCode?: string;
   from?: string;
   to?: string;

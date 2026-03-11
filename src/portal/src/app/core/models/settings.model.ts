@@ -1,40 +1,84 @@
-// ── Settings ──────────────────────────────────────────────────────────────────
+// ── Global Defaults ──────────────────────────────────────────────────────────
 
-export interface ReconciliationToleranceSettings {
-  /** Variance threshold in basis points below which auto-match occurs. */
-  autoMatchThresholdBps: number;
-  /** Variance threshold in basis points above which the record is flagged. */
-  flagThresholdBps: number;
-  /** Absolute variance in minor currency units that always triggers a flag. */
-  absoluteThresholdMinorUnits: number;
+export interface ToleranceDefaults {
+  amountTolerancePercent: number;
+  amountToleranceAbsoluteMinorUnits: number;
+  timeWindowMinutes: number;
+  stalePendingThresholdDays: number;
 }
 
-export interface AlertChannelSettings {
-  emailEnabled: boolean;
-  emailRecipients: string[];
-  slackEnabled: boolean;
-  slackWebhookRef: string | null;
-}
-
-export interface RetentionSettings {
-  /** Days to retain raw payloads in blob storage. */
+export interface RetentionDefaults {
+  archiveRetentionMonths: number;
+  outboxCleanupDays: number;
   rawPayloadRetentionDays: number;
-  /** Days to retain audit events. */
   auditEventRetentionDays: number;
-  /** Days to retain dead-letter records after resolution. */
   deadLetterRetentionDays: number;
 }
 
+export interface GlobalDefaults {
+  tolerance: ToleranceDefaults;
+  retention: RetentionDefaults;
+}
+
+// ── Per-Legal-Entity Overrides ───────────────────────────────────────────────
+
+export interface LegalEntityOverride {
+  legalEntityId: string;
+  legalEntityName: string;
+  legalEntityCode: string;
+  amountTolerancePercent: number | null;
+  amountToleranceAbsoluteMinorUnits: number | null;
+  timeWindowMinutes: number | null;
+  stalePendingThresholdDays: number | null;
+}
+
+// ── Alert Configuration ──────────────────────────────────────────────────────
+
+export interface AlertThreshold {
+  alertKey: string;
+  label: string;
+  threshold: number;
+  unit: string;
+  evaluationWindowMinutes: number;
+}
+
+export interface AlertConfiguration {
+  thresholds: AlertThreshold[];
+  emailRecipientsHigh: string[];
+  emailRecipientsCritical: string[];
+  renotifyIntervalHours: number;
+  autoResolveHealthyCount: number;
+}
+
+// ── Aggregated Settings ──────────────────────────────────────────────────────
+
 export interface SystemSettings {
-  reconciliation: ReconciliationToleranceSettings;
-  alerts: AlertChannelSettings;
-  retention: RetentionSettings;
+  globalDefaults: GlobalDefaults;
+  legalEntityOverrides: LegalEntityOverride[];
+  alerts: AlertConfiguration;
   updatedAt: string | null;
   updatedBy: string | null;
 }
 
-export interface UpdateSettingsRequest {
-  reconciliation?: Partial<ReconciliationToleranceSettings>;
-  alerts?: Partial<AlertChannelSettings>;
-  retention?: Partial<RetentionSettings>;
+// ── Request DTOs ─────────────────────────────────────────────────────────────
+
+export interface UpdateGlobalDefaultsRequest {
+  tolerance: Partial<ToleranceDefaults>;
+  retention: Partial<RetentionDefaults>;
+}
+
+export interface UpsertLegalEntityOverrideRequest {
+  legalEntityId: string;
+  amountTolerancePercent: number | null;
+  amountToleranceAbsoluteMinorUnits: number | null;
+  timeWindowMinutes: number | null;
+  stalePendingThresholdDays: number | null;
+}
+
+export interface UpdateAlertConfigurationRequest {
+  thresholds: { alertKey: string; threshold: number; evaluationWindowMinutes: number }[];
+  emailRecipientsHigh: string[];
+  emailRecipientsCritical: string[];
+  renotifyIntervalHours: number;
+  autoResolveHealthyCount: number;
 }

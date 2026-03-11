@@ -3,6 +3,7 @@ using FccMiddleware.Adapter.Doms;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Application.Ingestion;
+using FccMiddleware.Application.MasterData;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
@@ -41,10 +42,14 @@ try
     // so that IConfiguration is resolved from the DI container at option-creation time, which
     // picks up WebApplicationFactory config overrides in integration tests rather than the
     // eagerly captured builder.Configuration.
-    builder.Services.AddAuthentication()
+    // JwtBearer is the default scheme so that the auth middleware resolves Edge Agent tokens
+    // without requiring an explicit scheme name on [Authorize] attributes that don't specify one.
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         .AddJwtBearer(JwtBearerDefaults.AuthenticationScheme)
         .AddScheme<OdooApiKeyAuthOptions, OdooApiKeyAuthHandler>(
-            OdooApiKeyAuthOptions.SchemeName, _ => { });
+            OdooApiKeyAuthOptions.SchemeName, _ => { })
+        .AddScheme<DatabricksApiKeyAuthOptions, DatabricksApiKeyAuthHandler>(
+            DatabricksApiKeyAuthOptions.SchemeName, _ => { });
 
     builder.Services
         .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
@@ -89,6 +94,12 @@ try
                 .AddAuthenticationSchemes(OdooApiKeyAuthOptions.SchemeName)
                 .RequireAuthenticatedUser()
                 .RequireClaim("lei"));
+
+        opts.AddPolicy(DatabricksApiKeyAuthOptions.PolicyName, policy =>
+            policy
+                .AddAuthenticationSchemes(DatabricksApiKeyAuthOptions.SchemeName)
+                .RequireAuthenticatedUser()
+                .RequireClaim("role", DatabricksApiKeyAuthOptions.RequiredRole));
     });
 
     builder.Services.AddEndpointsApiExplorer();
@@ -139,6 +150,8 @@ try
     builder.Services.AddScoped<IIngestDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IDeduplicationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IPollTransactionsDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IAcknowledgeTransactionsDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IMasterDataSyncDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
 
     // ── Infrastructure: Redis (StackExchange.Redis) ───────────────────────────
     builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
