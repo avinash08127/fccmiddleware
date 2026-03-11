@@ -1,4 +1,6 @@
+using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.ServiceDefaults;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Serilog;
 
 // Bootstrap logger — active only until DI container is built.
@@ -14,13 +16,7 @@ try
     // Registers: Serilog (structured JSON → console), OpenTelemetry, base health check
     builder.AddServiceDefaults();
 
-    builder.Services.AddControllers()
-        .AddJsonOptions(options =>
-        {
-            options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
-            options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
-        });
-
+    builder.Services.AddAuthorization();
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen(c =>
     {
@@ -29,6 +25,8 @@ try
             Title = "FCC Middleware API",
             Version = "v1"
         });
+
+        // JWT bearer auth button in Swagger UI
         c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.OpenApiSecurityScheme
         {
             Type = Microsoft.OpenApi.SecuritySchemeType.Http,
@@ -36,6 +34,12 @@ try
             BearerFormat = "JWT",
             Description = "Azure Entra JWT bearer token"
         });
+
+        // Include XML doc comments
+        var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+        var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+        if (File.Exists(xmlPath))
+            c.IncludeXmlComments(xmlPath);
     });
 
     builder.Services.AddMediatR(cfg =>
@@ -45,10 +49,14 @@ try
     });
 
     // Health checks: PostgreSQL + Redis (registered here; liveness stub registered in ServiceDefaults)
+    // Use factory overloads so connection strings are resolved lazily at health-check execution
+    // time — this is necessary for WebApplicationFactory overrides to take effect in tests.
     builder.Services.AddHealthChecks()
-        .AddNpgSql(builder.Configuration.GetConnectionString("FccMiddleware")!,
+        .AddNpgSql(
+            sp => sp.GetRequiredService<IConfiguration>().GetConnectionString("FccMiddleware") ?? string.Empty,
             name: "postgres", tags: ["ready"])
-        .AddRedis(builder.Configuration.GetConnectionString("Redis")!,
+        .AddRedis(
+            sp => sp.GetRequiredService<IConfiguration>().GetConnectionString("Redis") ?? string.Empty,
             name: "redis", tags: ["ready"]);
 
     var app = builder.Build();
@@ -62,26 +70,30 @@ try
     {
         app.UseSwagger();
         app.UseSwaggerUI();
+
+        // Redirect root → Swagger UI for convenience in dev/staging
+        app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
     }
 
     app.UseHttpsRedirection();
     app.UseAuthorization();
-    app.MapControllers();
 
     // /health       → liveness  (is the process up?)
     // /health/ready → readiness (are DB + Redis reachable?)
-    app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+    app.MapHealthChecks("/health", new HealthCheckOptions
     {
-        Predicate = check => check.Tags.Contains("live")
+        Predicate      = check => check.Tags.Contains("live"),
+        ResponseWriter = HealthResponseWriter.WriteResponse
     });
-    app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+    app.MapHealthChecks("/health/ready", new HealthCheckOptions
     {
-        Predicate = check => check.Tags.Contains("ready")
+        Predicate      = check => check.Tags.Contains("ready"),
+        ResponseWriter = HealthResponseWriter.WriteResponse
     });
 
     app.Run();
 }
-catch (Exception ex)
+catch (Exception ex) when (ex is not HostAbortedException)
 {
     Log.Fatal(ex, "Application terminated unexpectedly");
 }

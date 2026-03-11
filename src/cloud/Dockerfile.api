@@ -1,0 +1,33 @@
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Copy solution + all project files first so NuGet restore layer is cached
+COPY FccMiddleware.sln .
+COPY FccMiddleware.Api/FccMiddleware.Api.csproj                             FccMiddleware.Api/
+COPY FccMiddleware.Application/FccMiddleware.Application.csproj             FccMiddleware.Application/
+COPY FccMiddleware.Domain/FccMiddleware.Domain.csproj                       FccMiddleware.Domain/
+COPY FccMiddleware.Infrastructure/FccMiddleware.Infrastructure.csproj       FccMiddleware.Infrastructure/
+COPY FccMiddleware.Contracts/FccMiddleware.Contracts.csproj                 FccMiddleware.Contracts/
+COPY FccMiddleware.ServiceDefaults/FccMiddleware.ServiceDefaults.csproj     FccMiddleware.ServiceDefaults/
+COPY FccMiddleware.Adapter.Doms/FccMiddleware.Adapter.Doms.csproj           FccMiddleware.Adapter.Doms/
+
+RUN dotnet restore FccMiddleware.Api/FccMiddleware.Api.csproj
+
+# Copy the rest of the source and publish
+COPY . .
+RUN dotnet publish FccMiddleware.Api/FccMiddleware.Api.csproj \
+    -c Release \
+    --no-restore \
+    -o /app/publish
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+
+EXPOSE 8080
+ENV ASPNETCORE_URLS=http://+:8080
+
+COPY --from=build /app/publish .
+
+ENTRYPOINT ["dotnet", "FccMiddleware.Api.dll"]

@@ -1,0 +1,30 @@
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Copy solution + all project files first so NuGet restore layer is cached
+COPY FccMiddleware.sln .
+COPY FccMiddleware.Worker/FccMiddleware.Worker.csproj                       FccMiddleware.Worker/
+COPY FccMiddleware.Application/FccMiddleware.Application.csproj             FccMiddleware.Application/
+COPY FccMiddleware.Domain/FccMiddleware.Domain.csproj                       FccMiddleware.Domain/
+COPY FccMiddleware.Infrastructure/FccMiddleware.Infrastructure.csproj       FccMiddleware.Infrastructure/
+COPY FccMiddleware.Contracts/FccMiddleware.Contracts.csproj                 FccMiddleware.Contracts/
+COPY FccMiddleware.ServiceDefaults/FccMiddleware.ServiceDefaults.csproj     FccMiddleware.ServiceDefaults/
+COPY FccMiddleware.Adapter.Doms/FccMiddleware.Adapter.Doms.csproj           FccMiddleware.Adapter.Doms/
+
+RUN dotnet restore FccMiddleware.Worker/FccMiddleware.Worker.csproj
+
+# Copy the rest of the source and publish
+COPY . .
+RUN dotnet publish FccMiddleware.Worker/FccMiddleware.Worker.csproj \
+    -c Release \
+    --no-restore \
+    -o /app/publish
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
+WORKDIR /app
+
+COPY --from=build /app/publish .
+
+ENTRYPOINT ["dotnet", "FccMiddleware.Worker.dll"]
