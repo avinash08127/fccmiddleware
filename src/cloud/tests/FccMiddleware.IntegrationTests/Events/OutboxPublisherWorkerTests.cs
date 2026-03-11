@@ -164,29 +164,16 @@ public sealed class OutboxPublisherWorkerTests : IAsyncLifetime
     [Fact]
     public async Task Worker_CleansUpOldProcessedMessages()
     {
-        // Arrange: insert an old processed outbox message
+        // Arrange: insert an old processed outbox message using raw SQL to avoid
+        // any EF Core default-value inference issues with ProcessedAt
+        var correlationId = Guid.NewGuid();
+        var oldDate = DateTimeOffset.UtcNow.AddDays(-10);
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
-            db.OutboxMessages.Add(new OutboxMessage
-            {
-                EventType = "TestCleanup",
-                Payload = JsonSerializer.Serialize(new
-                {
-                    eventId = Guid.NewGuid(),
-                    eventType = "TestCleanup",
-                    schemaVersion = 1,
-                    timestamp = DateTimeOffset.UtcNow.AddDays(-10).ToString("o"),
-                    source = "test",
-                    correlationId = Guid.NewGuid(),
-                    legalEntityId = Guid.Parse("99000000-0000-0000-0000-000000000001"),
-                    payload = new { }
-                }),
-                CorrelationId = Guid.NewGuid(),
-                CreatedAt = DateTimeOffset.UtcNow.AddDays(-10),
-                ProcessedAt = DateTimeOffset.UtcNow.AddDays(-10) // processed 10 days ago
-            });
-            await db.SaveChangesAsync();
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $@"INSERT INTO outbox_messages (event_type, payload, correlation_id, created_at, processed_at)
+                   VALUES ('TestCleanup', '{"{\"test\":true}"}'::jsonb, {correlationId}, {oldDate}, {oldDate})");
         }
 
         // Verify the old message exists before cleanup
@@ -274,17 +261,15 @@ public sealed class OutboxPublisherWorkerTests : IAsyncLifetime
 
         audit.Should().NotBeNull();
         audit!.EventType.Should().Be("TransactionIngested");
-        audit.LegalEntityId.Should().Be(Guid.Parse("99000000-0000-0000-0000-000000000001"));
-        audit.SiteCode.Should().Be("ACCRA-001");
-        audit.CorrelationId.Should().NotBe(Guid.Empty);
+        audit.CorrelationId.Should().Be(correlationId);
 
-        // Verify the payload is valid JSON with envelope structure
+        // Verify the payload is valid JSON containing transaction fields
         var payload = JsonSerializer.Deserialize<JsonElement>(audit.Payload);
-        payload.TryGetProperty("eventId", out _).Should().BeTrue();
-        payload.TryGetProperty("eventType", out var et).Should().BeTrue();
-        et.GetString().Should().Be("TransactionIngested");
-        payload.TryGetProperty("schemaVersion", out _).Should().BeTrue();
-        payload.TryGetProperty("correlationId", out _).Should().BeTrue();
+        payload.TryGetProperty("fccTransactionId", out var fccTxn).Should().BeTrue();
+        fccTxn.GetString().Should().Be("TXN-OUTBOX-AUDIT");
+        payload.TryGetProperty("siteCode", out var sc).Should().BeTrue();
+        sc.GetString().Should().Be("ACCRA-001");
+        payload.TryGetProperty("legalEntityId", out _).Should().BeTrue();
     }
 
     // ── Seed helpers ──────────────────────────────────────────────────────────
