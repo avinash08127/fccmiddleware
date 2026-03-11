@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fccmiddleware/schemas/canonical/pump-status.schema.json",
+  "title": "PumpStatus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "siteCode",
+    "pumpNumber",
+    "nozzleNumber",
+    "state",
+    "currencyCode",
+    "statusSequence",
+    "observedAtUtc",
+    "source"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "siteCode": {
+      "type": "string",
+      "pattern": "^[A-Z0-9_-]{1,32}$"
+    },
+    "pumpNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9999
+    },
+    "nozzleNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "IDLE",
+        "AUTHORIZED",
+        "CALLING",
+        "DISPENSING",
+        "PAUSED",
+        "COMPLETED",
+        "ERROR",
+        "OFFLINE",
+        "UNKNOWN"
+      ]
+    },
+    "productCode": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[A-Z0-9_-]{1,32}$"
+    },
+    "productName": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "currentVolumeLitres": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,3})?$"
+    },
+    "currentAmount": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$"
+    },
+    "unitPrice": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,4})?$"
+    },
+    "currencyCode": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "fccStatusCode": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "statusSequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "observedAtUtc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "lastChangedAtUtc": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "FCC_LIVE",
+        "EDGE_SYNTHESIZED"
+      ]
+    }
+  }
+}

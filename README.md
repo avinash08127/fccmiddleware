@@ -1,245 +1,110 @@
-# Forecourt Middleware Architecture
+# Forecourt Middleware Platform
 
-Version: 3.0 Status: Approved Architecture Decision: Option B + Option C (Selective) + Option D
+A cloud-native middleware platform that integrates **Odoo ERP/POS** with **Forecourt Controllers (FCCs)** across 2,000+ fuel stations in sub-Saharan Africa. The platform handles fuel transaction ingestion, pre-authorization, fiscalization, and offline-resilient operations — ensuring no transaction is ever lost, even when internet connectivity fails.
 
-## Overview
+---
 
-This document defines the architecture for the Forecourt Middleware
-Platform integrating Odoo POS with multiple Forecourt Controllers
-(FCCs).
+## The Problem
 
-Supported countries include: - Malawi - Tanzania - Botswana - Zambia -
-Namibia
+Fuel retail operations in Africa face a unique challenge: stations must keep operating when internet drops — which happens frequently. Fuel pumps are controlled by hardware (FCCs) that sit on a local network. When internet goes down, cloud-based ERP systems like Odoo lose visibility into what's being dispensed. Transactions get lost, reconciliation breaks, and revenue leaks.
 
-Supported FCC vendors: - DOMS - Radix - Advatec - Petronite
+## The Solution
 
-The middleware supports: - Pre-Authorization fuel sales - Post-dispense
-transaction ingestion - Solicited transaction polling - Unsolicited
-transaction push - Fiscalized transaction capture - Multi-country
-configuration - Internet and Local LAN connectivity - Pump / nozzle
-mapping
+This middleware bridges that gap with a three-tier architecture:
 
-------------------------------------------------------------------------
+1. **Cloud Backend (AWS)** — Central transaction store, deduplication, reconciliation, and Odoo integration
+2. **Edge Agent (Android HHT)** — Runs on the same handheld device as Odoo POS; talks to the FCC over LAN; buffers everything locally when internet is down; replays when connectivity returns
+3. **Admin Portal (Angular)** — Operational dashboard for monitoring 2,000 sites, reviewing reconciliation exceptions, and managing configuration
 
-# Final Architecture Decision
+---
 
-Selected Architecture: Option B + Option C (Selective) + Option D
+## Scale
 
-Hybrid Adapter Middleware + Selective Event Streaming + Edge Site Agent
+| Dimension | Scale |
+|-----------|-------|
+| Countries | 5 (Malawi, Tanzania, Botswana, Zambia, Namibia) |
+| Sites | 2,000+ |
+| Pumps per site | 4–5 |
+| Peak transactions/day | ~2,000,000 |
+| Offline buffer per device | 30+ days (30,000 transactions) |
+| FCC vendors | DOMS (MVP), Radix, Advatec, Petronite |
 
-This approach provides:
+---
 
--   Global centralized middleware
--   Vendor-specific FCC adapters
--   Selective event-driven backbone for transaction flows
--   Local site connectivity agents
--   Full configuration-driven controller integration
--   Scalable deployment for new countries
--   Durable audit trail for fiscal compliance
+## Architecture
 
-Event streaming (Option C) is applied selectively — not as a blanket
-pattern — to the following areas:
+**Selected approach:** Adapter-based Middleware + Selective Event Streaming + Edge Site Agent
 
--   Edge-to-cloud transaction flow (store-and-forward)
--   Unsolicited transaction capture from FCCs
--   Transaction reconciliation between Odoo and FCCs
--   Fiscal and audit event logging
+```
+[Forecourt Controller]
+         |
+         +-- Push (primary) -----------------------> [Cloud Middleware (AWS)]
+         |                                                   ^   |
+         |                                          pre-auth |   | SYNCED_TO_ODOO
+         |                                          forward  |   v
+         +-- LAN poll (catch-up) <---- [Edge Agent] <-------+
+                                            |
+                                    localhost:8585
+                                            |
+                                      [Odoo POS]
+```
 
-------------------------------------------------------------------------
+**Key flows:**
+- **Normal Orders** — FCC pushes directly to cloud; Edge Agent polls LAN as safety net; Odoo polls cloud for pending transactions
+- **Pre-Auth Orders** — Odoo POS sends pre-auth to Edge Agent over LAN (works offline); Edge Agent authorizes pump via FCC; cloud reconciles actual vs authorized amount
+- **Offline Mode** — Edge Agent buffers locally; Odoo POS switches to Edge Agent's local API; on reconnect, everything replays to cloud with full deduplication
 
-# Architecture Decision Summary
+---
 
-  Option     Architecture                   Status
-  ---------- ------------------------------ ----------------------
-  Option A   Direct Integration             Archived
-  Option B   Adapter-based Middleware       Selected
-  Option C   Event Streaming Architecture   Selected (Selective)
-  Option D   Edge Site Agent                Selected
+## Technology Stack
 
-------------------------------------------------------------------------
+| Layer | Technology |
+|-------|-----------|
+| Cloud Backend | .NET 10, ASP.NET Core, PostgreSQL (Aurora), Redis, RabbitMQ (Amazon MQ) |
+| Cloud Infra | AWS — ECS Fargate, Aurora, ElastiCache, S3, CloudFront, Cognito |
+| Edge Agent | Native Kotlin/Java Android app (Urovo i9100, Android 12) with SQLite |
+| Admin Portal | Angular 18+, hosted on CloudFront + S3 |
+| Master Data Sync | Odoo → Databricks → Middleware |
+| Device Management | Sure MDM |
 
-# High Level Architecture
+---
 
-Odoo POS -\> Middleware API -\> Orchestration Engine -\> FCC Adapters
--\> Transport Layer -\> Edge Agent -\> Forecourt Controller
+## Key Design Principles
 
-Event Bus (RabbitMQ / Azure Service Bus) underpins:
+- **Offline-first** — The Edge Agent assumes internet will fail. LAN operations (pre-auth, FCC polling) never depend on internet.
+- **No transaction left behind** — Dual-path ingestion (FCC push + Edge Agent poll) with cloud-side deduplication ensures completeness.
+- **Odoo pulls, middleware stores** — The middleware never pushes orders into Odoo. Odoo polls for pending transactions and creates orders on its own terms.
+- **Adapter pattern** — Each FCC vendor is a separate adapter. Adding a new vendor is a code change (new adapter), not a config change.
+- **Multi-tenancy** — All data partitioned by legal entity (country). Row-level isolation.
 
--   Orchestration Engine \<-\> Edge Agent (command/event relay)
--   Edge Agent -\> Event Bus (unsolicited transactions, buffered replay)
--   Event Bus -\> Transaction Store (audit log, reconciliation)
+---
 
-------------------------------------------------------------------------
+## Repository Structure
 
-# Core Components
+| Document | Description |
+|----------|-------------|
+| [Requirements.md](Requirements.md) | Full requirements specification (REQ-1 through REQ-17) with data models, business rules, and acceptance criteria |
+| [HighLevelRequirements.md](HighLevelRequirements.md) | Condensed requirements overview with open questions (all resolved) and MVP scope |
+| [FlowDiagrams.md](FlowDiagrams.md) | 7 scenario flow diagrams covering online, offline, pre-auth, multi-HHT, and cleanup flows |
+| [WIP-HLD-Backend.md](WIP-HLD-Backend.md) | High-level design — Cloud Backend (AWS deployment, components, data architecture) |
+| [WIP-HLD-Edge-Agent.md](WIP-HLD-Edge-Agent.md) | High-level design — Android Edge Agent (Kotlin/Java, SQLite, Ktor, FCC adapters) |
+| [WIP-HLD-Admin-Portal.md](WIP-HLD-Admin-Portal.md) | High-level design — Angular Admin Portal (CloudFront + S3, Cognito auth, feature modules) |
 
-## Middleware API Layer
+---
 
-Provides APIs used by Odoo.
+## Implementation Phases
 
-Example endpoints:
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **Phase 1** | Core cloud middleware + DOMS adapter + transaction ingestion | Planned |
+| **Phase 2** | Edge Agent (Android) + offline buffer + LAN polling + pre-auth | Planned |
+| **Phase 3** | Radix, Advatec, Petronite adapters | Planned |
+| **Phase 4** | Angular Admin Portal + reconciliation dashboards | Planned |
 
-POST /preauth POST /preauth/{id}/cancel GET /preauth/{id} GET
-/transactions/{id} POST /transactions/fetch
+---
 
-Responsibilities: - Validate incoming requests - Resolve site
-configuration - Dispatch to orchestration layer - Provide idempotent
-APIs
+## Operating Modes
 
-------------------------------------------------------------------------
+Sites operate in one of four ownership models — **COCO**, **CODO**, **DODO**, **DOCO** — which determine tax handling and operator identification. Sites can be **connected** (FCC present, automated) or **disconnected** (no FCC, manual operations).
 
-## Forecourt Orchestration Engine
-
-Responsible for:
-
--   Controller resolution
--   Connectivity selection
--   Adapter invocation
--   Transaction correlation
--   Retry logic
--   Timeout management
-
-------------------------------------------------------------------------
-
-## FCC Adapter Layer
-
-Each FCC vendor is implemented as a separate adapter.
-
-Example adapters:
-
-Adapters/ DOMS Radix Advatec Petronite
-
-Example adapter interface:
-
-public interface IForecourtControllerAdapter { Task AuthorizeAsync();
-Task FetchTransactionsAsync(); Task CancelAuthorizationAsync(); Task
-GetPumpStatusAsync(); }
-
-------------------------------------------------------------------------
-
-## Event Bus Layer
-
-Selective event-driven backbone using RabbitMQ / Azure Service Bus.
-
-Applied to:
-
--   Edge-to-cloud transaction relay (store-and-forward pattern)
--   Unsolicited transaction ingestion from FCCs
--   Transaction reconciliation events between Odoo and FCCs
--   Fiscal and audit event logging (immutable event trail)
-
-Not applied to:
-
--   Synchronous pre-auth request/response flows (remain REST-based)
--   Admin portal queries and configuration management
-
-------------------------------------------------------------------------
-
-## Site Edge Agent
-
-A lightweight .NET worker deployed at station network.
-
-Responsibilities:
-
--   Communicate with FCC via LAN
--   Relay commands from cloud middleware
--   Capture unsolicited transactions
--   Buffer transactions if internet fails
--   Replay when connectivity resumes
--   Publish transaction events to the event bus
-
-------------------------------------------------------------------------
-
-# Connectivity Modes
-
-DirectInternet VPNPrivateNetwork EdgeAgentLAN Hybrid
-
-------------------------------------------------------------------------
-
-# Canonical Data Models
-
-## Pre Authorization
-
-{ "orderId": "ODOO-10001", "siteCode": "MW-BT001", "pumpNumber": 4,
-"nozzleNumber": 2, "productCode": "AGO", "requestedAmount": 20000,
-"vehicleNumber": "BW1234", "taxId": "TIN123456" }
-
-------------------------------------------------------------------------
-
-## Dispense Transaction
-
-{ "transactionId": "FCC-999", "siteCode": "TZ-DAR01", "pumpNumber": 3,
-"nozzleNumber": 1, "productCode": "PMS", "volume": 35.6, "amount":
-100000, "fiscalReceipt": "FR-123456" }
-
-------------------------------------------------------------------------
-
-# Architecture Decision Record
-
-## ADR-001 Direct Integration
-
-Description: Odoo integrates directly with FCC.
-
-Reason Rejected: - Tight coupling - Hard to scale across countries -
-Frequent ERP modifications
-
-Decision: Archived
-
-------------------------------------------------------------------------
-
-## ADR-002 Event Streaming Architecture (Selective)
-
-Description: Selective event-driven backbone applied to transaction
-flows, unsolicited capture, reconciliation, and fiscal audit logging.
-
-Originally rejected as "over-engineered" when proposed as a blanket
-pattern. Revisited and adopted selectively because:
-
--   The tech stack already commits to RabbitMQ / Azure Service Bus
--   Edge agent buffer-and-replay is event sourcing by nature
--   Unsolicited FCC transactions are inherently event-driven
--   Fiscal compliance benefits from an immutable event trail
--   Modern tooling (MassTransit, Azure Service Bus) reduces operational burden
-
-Decision: Selected (Selective)
-
-------------------------------------------------------------------------
-
-# Decision Rationale
-
-Option B + C (Selective) + D selected due to:
-
--   Multi-country scalability
--   Vendor abstraction
--   Offline site support
--   Reliable transaction buffering
--   Durable event trail for fiscal compliance and audit
--   Event-driven decoupling for unsolicited transactions and reconciliation
--   Faster rollout across Africa
-
-Modern DevOps, managed messaging services, and AI-assisted development
-significantly reduce the operational complexity that originally led to
-Option C being archived.
-
-------------------------------------------------------------------------
-
-# Technology Stack
-
-Backend: .NET 10 / ASP.NET Core Worker Services PostgreSQL Redis RabbitMQ
-/ Azure Service Bus
-
-Frontend: Angular Admin Portal
-
-Edge Agent: .NET Worker Service SQLite local buffer
-
-------------------------------------------------------------------------
-
-# Implementation Phases
-
-Phase 1: Core Middleware + DOMS adapter
-
-Phase 2: Edge agent + transaction polling
-
-Phase 3: Radix / Advatec adapters
-
-Phase 4: Reconciliation dashboards
+Fiscalization is handled per-country: FCC-direct (Tanzania), external integration (Malawi/MRA), or none — configurable at legal entity and site level.

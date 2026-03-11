@@ -1,0 +1,1924 @@
+openapi: 3.1.0
+
+info:
+  title: FCC Middleware — Cloud Backend API
+  version: 1.0.0
+  description: |
+    Cloud-side API for the Forecourt Control Computer (FCC) Middleware Platform.
+
+    ## Conventions
+
+    - **Dates:** UTC ISO 8601 everywhere (`2026-03-11T14:00:00Z`). Timezone only in the display layer.
+    - **Currency:** Integer minor units (e.g., cents). ISO 4217 `currencyCode` field alongside.
+    - **Volume:** Microlitres (integer). 1 L = 1 000 000 µL.
+    - **IDs:** UUID v4 for middleware-generated IDs. FCC-vendor IDs preserved as opaque strings.
+    - **JSON field names:** camelCase.
+    - **Pagination:** Cursor-based. `cursor` (opaque token from previous `nextCursor`), `pageSize`
+      (default 100, max 500). Results ordered by `ingestedAt` ascending for reliable resumption.
+    - **Filtering:** Query parameters in camelCase.
+    - **Versioning:** URL path prefix (`/api/v1`). Breaking changes increment to `/api/v2`.
+    - **Error envelope:** `{ errorCode, message, details, traceId, timestamp }`.
+
+  contact:
+    name: Platform Team
+
+servers:
+  - url: https://{hostname}
+    variables:
+      hostname:
+        default: api.fccmiddleware.example.com
+        description: Cloud backend hostname
+
+tags:
+  - name: Ingestion
+    description: FCC → Cloud direct transaction ingestion (CLOUD_DIRECT / RELAY modes)
+  - name: Transactions
+    description: Transaction query and acknowledgement (Odoo integration)
+  - name: EdgeSync
+    description: Edge Agent ↔ Cloud synchronisation
+  - name: PreAuth
+    description: Pre-authorisation lifecycle
+  - name: Agent
+    description: Edge Agent registration, config, version check, telemetry
+  - name: MasterData
+    description: Databricks → Cloud master data synchronisation
+  - name: Health
+    description: Infrastructure health check
+
+paths:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # INGESTION — FCC → Cloud
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/transactions/ingest:
+    post:
+      operationId: ingestTransaction
+      tags: [Ingestion]
+      summary: FCC → Cloud — ingest a single transaction
+      description: |
+        Called by the FCC (or its local agent in CLOUD_DIRECT/RELAY mode) to push a raw
+        vendor payload. The cloud adapter normalises the payload to `CanonicalTransaction`,
+        deduplicates by `(fccTransactionId, siteCode)`, and persists.
+
+        Dedup behaviour:
+        - First submission: 202 Accepted, status `PENDING`.
+        - Duplicate (same `fccTransactionId` + `siteCode`): 409 Conflict with `existingId`.
+      security:
+        - FccApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+            example:
+              fccVendor: DOMS
+              siteCode: ACCRA-001
+              capturedAt: "2026-03-11T13:55:00Z"
+              rawPayload:
+                txnId: "TXN-9821"
+                pump: 3
+                nozzle: 1
+                product: "PMS"
+                volumeLitres: 45.230
+                amount: 36870.00
+                startTime: "2026-03-11T13:50:00Z"
+                endTime: "2026-03-11T13:54:50Z"
+      responses:
+        "202":
+          description: Accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          description: Duplicate — transaction already ingested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                errorCode: DUPLICATE_TRANSACTION
+                message: Transaction already ingested
+                details:
+                  fccTransactionId: TXN-9821
+                  existingId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                traceId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                timestamp: "2026-03-11T14:00:00Z"
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/TooManyRequests'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # EDGE SYNC — batch upload
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/transactions/upload:
+    post:
+      operationId: uploadTransactions
+      tags: [EdgeSync]
+      summary: Edge Agent → Cloud — batch upload buffered transactions
+      description: |
+        Called by the Edge Agent to upload a batch of locally buffered canonical
+        transactions. The cloud deduplicates and persists each record independently,
+        returning a per-record result. Records must be uploaded in ascending
+        `completedAt` order to maintain replay ordering. Maximum 500 records per request.
+
+        Per-record outcomes:
+        - `ACCEPTED` — normalised, deduplicated, persisted. `id` is the cloud UUID.
+        - `DUPLICATE` — already exists. `id` is the existing cloud UUID.
+        - `REJECTED` — validation or adapter error. `error` contains details.
+
+        HTTP 200 is always returned if the server processed the batch (even if all records
+        are rejected). HTTP 4xx/5xx indicates a request-level failure.
+      security:
+        - EdgeAgentJwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadRequest'
+      responses:
+        "200":
+          description: Batch processed — check per-record `outcome` for individual results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "413":
+          description: Payload too large — more than 500 records submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          $ref: '#/components/responses/TooManyRequests'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # TRANSACTIONS — Odoo poll
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/transactions:
+    get:
+      operationId: listTransactions
+      tags: [Transactions]
+      summary: Odoo → Cloud — poll transactions
+      description: |
+        Paginated cursor-based query for canonical transactions. Odoo calls this to retrieve
+        transactions ready for processing. Default filter is `status=SYNCED`.
+
+        Results are ordered by `ingestedAt` ascending (oldest first) for reliable cursor
+        resumption. The cursor is opaque — do not parse or construct it.
+
+        `legalEntityId` is required to enforce tenant scoping.
+      security:
+        - OdooApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: legalEntityId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Scope results to this legal entity (required, enforces tenancy).
+        - name: siteCode
+          in: query
+          schema:
+            type: string
+            maxLength: 50
+          description: Filter to a specific site.
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, SYNCED, SYNCED_TO_ODOO, STALE_PENDING, DUPLICATE, ARCHIVED]
+          description: Filter by transaction status. Defaults to `SYNCED`.
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: "Filter: `completedAt >= from` (UTC ISO 8601)."
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: "Filter: `completedAt <= to` (UTC ISO 8601)."
+        - name: productCode
+          in: query
+          schema:
+            type: string
+            maxLength: 20
+          description: Filter by canonical product code (e.g., PMS, AGO, IK).
+        - name: fields
+          in: query
+          schema:
+            type: string
+          description: |
+            Comma-separated list of fields to include in each transaction object.
+            If omitted, all fields are returned.
+            Example: `id,fccTransactionId,amountMinorUnits,status`
+      responses:
+        "200":
+          description: Paginated list of transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionPage'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # TRANSACTIONS — Odoo acknowledge
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/transactions/acknowledge:
+    post:
+      operationId: acknowledgeTransactions
+      tags: [Transactions]
+      summary: Odoo → Cloud — batch acknowledge
+      description: |
+        Called by Odoo to mark one or more transactions as processed, stamping each with its
+        `odooOrderId`. Transitions status to `SYNCED_TO_ODOO`.
+
+        Idempotent: re-acknowledging an already-acknowledged transaction with the same
+        `odooOrderId` returns `ALREADY_ACKNOWLEDGED` without error. Calling with a
+        different `odooOrderId` returns `CONFLICT`.
+      security:
+        - OdooApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcknowledgeRequest'
+            example:
+              acknowledgements:
+                - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  odooOrderId: "POS/2026/00042"
+                - id: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+                  odooOrderId: "POS/2026/00043"
+      responses:
+        "200":
+          description: Acknowledgements processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcknowledgeResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # EDGE SYNC — SYNCED_TO_ODOO status poll
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/transactions/synced-status:
+    get:
+      operationId: getSyncedStatus
+      tags: [EdgeSync]
+      summary: Edge Agent → Cloud — query SYNCED_TO_ODOO status for uploaded records
+      description: |
+        The Edge Agent polls this endpoint to determine which of its locally buffered records
+        have reached `SYNCED_TO_ODOO` status, allowing it to advance those records in its
+        local SQLite buffer (and eventually archive/clean them).
+
+        Maximum 500 IDs per request. IDs not found on the cloud return status `NOT_FOUND`.
+      security:
+        - EdgeAgentJwt: []
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+            minItems: 1
+            maxItems: 500
+          style: form
+          explode: false
+          description: Comma-separated list of middleware-assigned transaction UUIDs to check.
+      responses:
+        "200":
+          description: Status map for requested IDs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncedStatusResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PRE-AUTH — forward to cloud
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/preauth:
+    post:
+      operationId: forwardPreAuth
+      tags: [PreAuth]
+      summary: Edge Agent → Cloud — forward pre-auth record for cloud tracking
+      description: |
+        Called by the Edge Agent to register a pre-authorisation with the cloud for
+        lifecycle tracking, reconciliation, and audit. The Edge Agent handles FCC
+        communication locally; this call notifies the cloud of the pre-auth record and
+        its current status.
+
+        Dedup key: `(odooOrderId, siteCode)`. Re-posting with the same key and an updated
+        status updates the existing record.
+      security:
+        - EdgeAgentJwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreAuthForwardRequest'
+      responses:
+        "201":
+          description: Pre-auth record created on cloud
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreAuthForwardResponse'
+        "200":
+          description: Existing pre-auth record updated (status transition)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreAuthForwardResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          description: Invalid state transition for existing pre-auth record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # AGENT — registration
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/agent/register:
+    post:
+      operationId: registerAgent
+      tags: [Agent]
+      summary: Edge Agent → Cloud — device registration
+      description: |
+        Called once by a newly provisioned Edge Agent using a one-time bootstrap token
+        obtained from a QR code or manual entry. Returns a signed device JWT for all
+        subsequent API calls, the assigned `deviceId`, and the full `SiteConfig`.
+
+        The provisioning token is single-use and expires after a configurable window
+        (default: 24 hours). Use `replacePreviousAgent: true` to decommission an existing
+        active agent for the same site (e.g., device replacement).
+      security:
+        - ProvisioningToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceRegistrationRequest'
+      responses:
+        "201":
+          description: Device registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceRegistrationResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          description: Invalid or expired provisioning token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: Active agent already registered for this site — use `replacePreviousAgent: true`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # AGENT — config
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/agent/config:
+    get:
+      operationId: getAgentConfig
+      tags: [Agent]
+      summary: Edge Agent → Cloud — pull site configuration
+      description: |
+        Returns the current `SiteConfig` for the registered device. The agent passes
+        its current `configVersion` via `If-None-Match` to allow the cloud to return
+        304 when no changes are present, avoiding unnecessary data transfer.
+
+        The ETag format is `"<configVersion>"` (integer, quoted). Example: `"42"`.
+      security:
+        - EdgeAgentJwt: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          schema:
+            type: string
+          description: |
+            ETag from a previous config response. Cloud returns 304 if config version
+            has not changed. Format: `"<configVersion>"` (e.g., `"42"`).
+      responses:
+        "200":
+          description: Current site configuration
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Config version as ETag (e.g., `"42"`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SiteConfig'
+        "304":
+          description: Config not modified since the version in `If-None-Match`
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          description: No config found for this device — re-registration may be required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # AGENT — version check
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/agent/version-check:
+    get:
+      operationId: checkAgentVersion
+      tags: [Agent]
+      summary: Edge Agent → Cloud — check APK version compatibility
+      description: |
+        Returns the version compatibility state for the agent's reported APK version.
+        Called at agent startup and on a configurable interval.
+
+        If `updateRequired: true`, the agent must upgrade before resuming normal operation
+        (cloud APIs may reject requests from incompatible versions).
+        If `updateAvailable: true` (but `updateRequired: false`), the agent may continue
+        but should notify the supervisor.
+      security:
+        - EdgeAgentJwt: []
+      parameters:
+        - name: agentVersion
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^\d+\.\d+\.\d+$'
+          description: Current Edge Agent APK version (SemVer, e.g., `1.4.2`).
+      responses:
+        "200":
+          description: Version compatibility result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionCheckResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # AGENT — telemetry
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/agent/telemetry:
+    post:
+      operationId: submitTelemetry
+      tags: [Agent]
+      summary: Edge Agent → Cloud — submit health telemetry
+      description: |
+        Called by the Edge Agent on each telemetry interval to report device health,
+        FCC connectivity, buffer state, sync status, and rolling error counts.
+
+        Idempotent by `(deviceId, sequenceNumber)` — duplicate submissions are silently
+        discarded. The agent resets `errorCounts` to zero after each successful submission.
+      security:
+        - EdgeAgentJwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelemetryPayload'
+      responses:
+        "204":
+          description: Telemetry accepted
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # MASTER DATA SYNC — Databricks → Cloud
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/master-data/legal-entities:
+    put:
+      operationId: syncLegalEntities
+      tags: [MasterData]
+      summary: Databricks → Cloud — upsert legal entities
+      description: |
+        Upserts a batch of legal entity records. Uses `id` (UUID) as the upsert key.
+        Records present in the cloud but absent from the payload are soft-deactivated
+        (`isActive: false`). Maximum 500 records per request.
+      security:
+        - MasterDataApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LegalEntitySyncRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/MasterDataSyncResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/master-data/sites:
+    put:
+      operationId: syncSites
+      tags: [MasterData]
+      summary: Databricks → Cloud — upsert sites
+      description: |
+        Upserts a batch of site records. Uses `id` as the upsert key.
+        Absent sites are soft-deactivated. Maximum 500 records per request.
+      security:
+        - MasterDataApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SiteSyncRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/MasterDataSyncResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/master-data/pumps:
+    put:
+      operationId: syncPumps
+      tags: [MasterData]
+      summary: Databricks → Cloud — upsert pumps
+      description: |
+        Upserts a batch of pump records. Upsert key: `(siteCode, pumpNumber)`.
+        Absent pumps are soft-deactivated. Maximum 1000 records per request.
+      security:
+        - MasterDataApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PumpSyncRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/MasterDataSyncResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/master-data/products:
+    put:
+      operationId: syncProducts
+      tags: [MasterData]
+      summary: Databricks → Cloud — upsert products
+      description: |
+        Upserts a batch of fuel product records. Uses `id` as the upsert key.
+        Absent products are soft-deactivated. Maximum 200 records per request.
+      security:
+        - MasterDataApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductSyncRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/MasterDataSyncResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/master-data/operators:
+    put:
+      operationId: syncOperators
+      tags: [MasterData]
+      summary: Databricks → Cloud — upsert operators
+      description: |
+        Upserts a batch of operator records. Uses `id` as the upsert key.
+        Absent operators are soft-deactivated. Maximum 500 records per request.
+      security:
+        - MasterDataApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OperatorSyncRequest'
+      responses:
+        "200":
+          $ref: '#/components/responses/MasterDataSyncResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # HEALTH
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      operationId: getHealth
+      tags: [Health]
+      summary: Cloud health check
+      description: |
+        Returns overall service health and per-dependency status.
+        No authentication required. Used by load balancers, monitoring systems,
+        and Edge Agent pre-flight checks.
+
+        Returns HTTP 200 when HEALTHY or DEGRADED, HTTP 503 when UNHEALTHY.
+      security: []
+      responses:
+        "200":
+          description: Service healthy or degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        "503":
+          description: Service unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+components:
+
+  securitySchemes:
+
+    FccApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Per-FCC API key. Generated in portal; rotated per key-rotation policy.
+
+    OdooApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Per-legal-entity API key for Odoo service accounts.
+
+    EdgeAgentJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        ES256-signed JWT issued at device registration. Standard claims plus:
+        - `sub`: deviceId (UUID)
+        - `site`: siteCode
+        - `lei`: legalEntityId (UUID)
+        - `role`: "edge-agent"
+        - `jti`: unique token ID for revocation
+        Default expiry: 24 hours.
+
+    MasterDataApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Service-to-service API key for Databricks sync jobs.
+
+    ProvisioningToken:
+      type: apiKey
+      in: header
+      name: X-Provisioning-Token
+      description: Single-use bootstrap token for initial device registration. Encoded as base64url.
+
+  parameters:
+
+    CursorParam:
+      name: cursor
+      in: query
+      schema:
+        type: string
+      description: Opaque cursor from a previous response's `nextCursor`. Omit to start from the beginning.
+
+    PageSizeParam:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+      description: Number of records to return per page.
+
+  responses:
+
+    BadRequest:
+      description: Invalid request body or query parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            errorCode: VALIDATION_ERROR
+            message: "pumpNumber must be >= 1"
+            details:
+              field: pumpNumber
+              value: 0
+            traceId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            timestamp: "2026-03-11T14:00:00Z"
+
+    Unauthorized:
+      description: Missing or invalid authentication credential
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            errorCode: UNAUTHORIZED
+            message: Missing or invalid API key
+            details: {}
+            traceId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            timestamp: "2026-03-11T14:00:00Z"
+
+    Forbidden:
+      description: Authenticated but not authorised for this resource or legal entity
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    UnprocessableEntity:
+      description: Request is syntactically valid but semantically rejected (e.g., adapter cannot normalise payload)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until the client may retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    InternalServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    MasterDataSyncResult:
+      description: Master data sync operation summary
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MasterDataSyncResponse'
+
+  schemas:
+
+    # ── Error envelope ──────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      description: Standard error envelope returned on all 4xx and 5xx responses.
+      required: [errorCode, message, traceId, timestamp]
+      additionalProperties: false
+      properties:
+        errorCode:
+          type: string
+          description: |
+            Machine-readable error code. Values:
+            - `VALIDATION_ERROR` — missing or invalid fields
+            - `DUPLICATE_TRANSACTION` — dedup conflict
+            - `UNAUTHORIZED` — authentication failure
+            - `FORBIDDEN` — authorisation failure
+            - `NOT_FOUND` — resource not found
+            - `CONFLICT` — state conflict (already acknowledged, invalid transition)
+            - `RATE_LIMITED` — too many requests
+            - `ADAPTER_ERROR` — FCC adapter normalisation failure
+            - `INFRASTRUCTURE_ERROR` — database or queue unavailable
+            - `INTERNAL_ERROR` — unexpected server error
+        message:
+          type: string
+          description: Human-readable error summary.
+        details:
+          type: object
+          description: Optional structured detail (field name, invalid value, existing ID, etc.).
+          additionalProperties: true
+          nullable: true
+        traceId:
+          type: string
+          format: uuid
+          description: Correlation ID propagated from ingestion through to all downstream events.
+        timestamp:
+          type: string
+          format: date-time
+          description: UTC timestamp when the error occurred.
+
+    # ── Pagination ──────────────────────────────────────────────────────────
+
+    PageMeta:
+      type: object
+      description: Pagination metadata included in every paged response.
+      required: [pageSize, hasMore]
+      additionalProperties: false
+      properties:
+        pageSize:
+          type: integer
+          description: Number of records in this page.
+        hasMore:
+          type: boolean
+          description: Whether more records exist beyond this page.
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque cursor to pass as `cursor` for the next page. Null when `hasMore=false`.
+        totalCount:
+          type: integer
+          nullable: true
+          description: Total matching records. May be null for performance reasons on large result sets.
+
+    # ── Ingestion ───────────────────────────────────────────────────────────
+
+    IngestRequest:
+      type: object
+      description: Vendor-agnostic FCC ingestion envelope.
+      required: [fccVendor, siteCode, capturedAt, rawPayload]
+      additionalProperties: false
+      properties:
+        fccVendor:
+          type: string
+          enum: [DOMS, RADIX, ADVATEC, PETRONITE]
+          description: FCC vendor that generated the payload.
+        siteCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Site identifier where the transaction occurred.
+        capturedAt:
+          type: string
+          format: date-time
+          description: UTC timestamp when the FCC captured or transmitted the payload.
+        rawPayload:
+          type: object
+          description: Raw vendor payload as-is. Schema is vendor-specific; the cloud adapter normalises it.
+          additionalProperties: true
+        correlationId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Optional client-supplied correlation ID. If omitted, the cloud generates one.
+
+    IngestResponse:
+      type: object
+      required: [id, fccTransactionId, siteCode, status, correlationId, ingestedAt]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Middleware-assigned UUID for the canonical transaction.
+        fccTransactionId:
+          type: string
+          description: FCC transaction ID extracted by the adapter after normalisation.
+        siteCode:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, DUPLICATE]
+          description: "`PENDING` = accepted for processing. `DUPLICATE` = already ingested."
+        correlationId:
+          type: string
+          format: uuid
+        ingestedAt:
+          type: string
+          format: date-time
+
+    # ── Upload ──────────────────────────────────────────────────────────────
+
+    UploadRequest:
+      type: object
+      required: [transactions]
+      additionalProperties: false
+      properties:
+        transactions:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/CanonicalTransaction'
+          description: Batch of canonical transactions in ascending `completedAt` order.
+
+    UploadResponse:
+      type: object
+      required: [results, acceptedCount, duplicateCount, rejectedCount]
+      additionalProperties: false
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/UploadRecordResult'
+        acceptedCount:
+          type: integer
+          minimum: 0
+        duplicateCount:
+          type: integer
+          minimum: 0
+        rejectedCount:
+          type: integer
+          minimum: 0
+
+    UploadRecordResult:
+      type: object
+      required: [fccTransactionId, siteCode, outcome]
+      additionalProperties: false
+      properties:
+        fccTransactionId:
+          type: string
+          description: FCC transaction ID from the submitted record.
+        siteCode:
+          type: string
+        outcome:
+          type: string
+          enum: [ACCEPTED, DUPLICATE, REJECTED]
+        id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Middleware UUID assigned on `ACCEPTED` or existing UUID on `DUPLICATE`. Null on `REJECTED`.
+        error:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ErrorResponse'
+          description: Populated only on `REJECTED` outcome.
+
+    # ── Transaction page ────────────────────────────────────────────────────
+
+    TransactionPage:
+      type: object
+      required: [data, meta]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CanonicalTransaction'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+
+    # ── Acknowledge ─────────────────────────────────────────────────────────
+
+    AcknowledgeRequest:
+      type: object
+      required: [acknowledgements]
+      additionalProperties: false
+      properties:
+        acknowledgements:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/AcknowledgeItem'
+
+    AcknowledgeItem:
+      type: object
+      required: [id, odooOrderId]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Middleware UUID of the transaction to acknowledge.
+        odooOrderId:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Odoo POS order reference to stamp on the transaction.
+
+    AcknowledgeResponse:
+      type: object
+      required: [results, succeededCount, failedCount]
+      additionalProperties: false
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AcknowledgeResult'
+        succeededCount:
+          type: integer
+          minimum: 0
+        failedCount:
+          type: integer
+          minimum: 0
+
+    AcknowledgeResult:
+      type: object
+      required: [id, outcome]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        outcome:
+          type: string
+          enum: [ACKNOWLEDGED, ALREADY_ACKNOWLEDGED, CONFLICT, NOT_FOUND, FAILED]
+          description: |
+            - `ACKNOWLEDGED` — successfully stamped with `odooOrderId`.
+            - `ALREADY_ACKNOWLEDGED` — already had this exact `odooOrderId`; idempotent success.
+            - `CONFLICT` — already acknowledged with a different `odooOrderId`.
+            - `NOT_FOUND` — transaction ID not found.
+            - `FAILED` — unexpected error; see `error`.
+        error:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ErrorResponse'
+
+    # ── Synced status ───────────────────────────────────────────────────────
+
+    SyncedStatusResponse:
+      type: object
+      required: [statuses]
+      additionalProperties: false
+      properties:
+        statuses:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransactionStatusEntry'
+
+    TransactionStatusEntry:
+      type: object
+      required: [id, status]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Middleware transaction UUID.
+        status:
+          type: string
+          enum: [PENDING, SYNCED, SYNCED_TO_ODOO, STALE_PENDING, DUPLICATE, ARCHIVED, NOT_FOUND]
+          description: Current cloud-side status. `NOT_FOUND` if the ID is unknown to the cloud.
+
+    # ── Pre-Auth forward ────────────────────────────────────────────────────
+
+    PreAuthForwardRequest:
+      type: object
+      description: |
+        Pre-auth details forwarded by the Edge Agent to the cloud for tracking.
+        The Edge Agent is responsible for FCC communication; this records the outcome.
+      required:
+        - siteCode
+        - odooOrderId
+        - pumpNumber
+        - nozzleNumber
+        - productCode
+        - requestedAmount
+        - unitPrice
+        - currency
+        - status
+        - requestedAt
+        - expiresAt
+      additionalProperties: false
+      properties:
+        siteCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+        odooOrderId:
+          type: string
+          minLength: 1
+          maxLength: 100
+        pumpNumber:
+          type: integer
+          minimum: 1
+        nozzleNumber:
+          type: integer
+          minimum: 1
+        productCode:
+          type: string
+          minLength: 1
+          maxLength: 20
+        requestedAmount:
+          type: integer
+          minimum: 1
+          description: Authorised amount in minor currency units.
+        unitPrice:
+          type: integer
+          minimum: 1
+          description: Price per litre in minor currency units at time of authorisation.
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        status:
+          type: string
+          enum: [PENDING, AUTHORIZED, DISPENSING, COMPLETED, CANCELLED, EXPIRED, FAILED]
+        requestedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        fccCorrelationId:
+          type: string
+          nullable: true
+          maxLength: 100
+          description: FCC-assigned correlation reference. Used for dispense matching.
+        fccAuthorizationCode:
+          type: string
+          nullable: true
+          maxLength: 100
+        vehicleNumber:
+          type: string
+          nullable: true
+          maxLength: 50
+        customerName:
+          type: string
+          nullable: true
+          maxLength: 200
+        attendantId:
+          type: string
+          nullable: true
+          maxLength: 100
+
+    PreAuthForwardResponse:
+      type: object
+      required: [id, status, siteCode, odooOrderId]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Middleware-assigned UUID for the pre-auth record.
+        status:
+          type: string
+          enum: [PENDING, AUTHORIZED, DISPENSING, COMPLETED, CANCELLED, EXPIRED, FAILED]
+        siteCode:
+          type: string
+        odooOrderId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ── Device registration ─────────────────────────────────────────────────
+
+    DeviceRegistrationRequest:
+      type: object
+      description: Sent by the Edge Agent on first boot to register with the cloud.
+      required:
+        - provisioningToken
+        - siteCode
+        - deviceSerialNumber
+        - deviceModel
+        - osVersion
+        - agentVersion
+      additionalProperties: false
+      properties:
+        provisioningToken:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Single-use bootstrap token from QR code or manual entry.
+        siteCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+          pattern: '^[A-Za-z0-9-]+$'
+        deviceSerialNumber:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Android device serial number (Build.SERIAL or ANDROID_ID).
+        deviceModel:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Android device model (Build.MODEL).
+        osVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Android OS version (Build.VERSION.RELEASE).
+        agentVersion:
+          type: string
+          pattern: '^\d+\.\d+\.\d+$'
+          description: Edge Agent APK version in SemVer format.
+        replacePreviousAgent:
+          type: boolean
+          default: false
+          description: If true, deactivates any existing active agent for this site with a different serial.
+
+    DeviceRegistrationResponse:
+      type: object
+      required: [deviceId, deviceToken, tokenExpiresAt, siteCode, legalEntityId, siteConfig, registeredAt]
+      additionalProperties: false
+      properties:
+        deviceId:
+          type: string
+          format: uuid
+          description: Unique device identity assigned by the cloud.
+        deviceToken:
+          type: string
+          description: ES256-signed JWT for authenticating all subsequent API calls.
+        tokenExpiresAt:
+          type: string
+          format: date-time
+          description: JWT expiry timestamp. Agent must re-authenticate before this time.
+        siteCode:
+          type: string
+        legalEntityId:
+          type: string
+          format: uuid
+        siteConfig:
+          $ref: '#/components/schemas/SiteConfig'
+        registeredAt:
+          type: string
+          format: date-time
+
+    # ── Version check ───────────────────────────────────────────────────────
+
+    VersionCheckResponse:
+      type: object
+      required: [agentVersion, minSupportedVersion, latestVersion, updateRequired, updateAvailable]
+      additionalProperties: false
+      properties:
+        agentVersion:
+          type: string
+          description: The version reported by the agent in the request.
+        minSupportedVersion:
+          type: string
+          description: Minimum agent version still compatible with cloud APIs.
+        latestVersion:
+          type: string
+          description: Latest published Edge Agent APK version.
+        updateRequired:
+          type: boolean
+          description: "`true` if `agentVersion < minSupportedVersion`. Agent must update before resuming."
+        updateAvailable:
+          type: boolean
+          description: "`true` if `agentVersion < latestVersion` but update is not yet mandatory."
+        releaseNotes:
+          type: string
+          nullable: true
+          description: Human-readable release notes for `latestVersion`.
+        downloadUrl:
+          type: string
+          format: uri
+          nullable: true
+          description: Direct APK download URL. Null when distribution is via MDM only.
+
+    # ── Health ──────────────────────────────────────────────────────────────
+
+    HealthResponse:
+      type: object
+      required: [status, timestamp, version]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [HEALTHY, DEGRADED, UNHEALTHY]
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+          description: Cloud backend deployment version.
+        dependencies:
+          type: object
+          description: Per-dependency health keyed by dependency name.
+          additionalProperties:
+            type: object
+            required: [status]
+            additionalProperties: false
+            properties:
+              status:
+                type: string
+                enum: [HEALTHY, DEGRADED, UNHEALTHY]
+              latencyMs:
+                type: integer
+                nullable: true
+              message:
+                type: string
+                nullable: true
+          example:
+            database:
+              status: HEALTHY
+              latencyMs: 3
+            redis:
+              status: HEALTHY
+              latencyMs: 1
+            eventBus:
+              status: DEGRADED
+              latencyMs: null
+              message: "High queue depth — processing delayed"
+
+    # ── Master data sync ────────────────────────────────────────────────────
+
+    MasterDataSyncResponse:
+      type: object
+      required: [upsertedCount, unchangedCount, deactivatedCount, errorCount]
+      additionalProperties: false
+      properties:
+        upsertedCount:
+          type: integer
+          minimum: 0
+          description: Records inserted or updated.
+        unchangedCount:
+          type: integer
+          minimum: 0
+          description: Records present in both payload and cloud with no changes.
+        deactivatedCount:
+          type: integer
+          minimum: 0
+          description: Records in cloud but absent from payload — soft-deactivated (`isActive: false`).
+        errorCount:
+          type: integer
+          minimum: 0
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorResponse'
+          nullable: true
+          description: Per-record errors. Only populated when `errorCount > 0`.
+
+    LegalEntitySyncRequest:
+      type: object
+      required: [legalEntities]
+      additionalProperties: false
+      properties:
+        legalEntities:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/LegalEntityRecord'
+
+    LegalEntityRecord:
+      type: object
+      required: [id, code, name, currencyCode, isActive]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          minLength: 2
+          maxLength: 32
+          pattern: '^[A-Z0-9-]+$'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        currencyCode:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        country:
+          type: string
+          nullable: true
+          maxLength: 2
+          description: ISO 3166-1 alpha-2 country code.
+        isActive:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    SiteSyncRequest:
+      type: object
+      required: [sites]
+      additionalProperties: false
+      properties:
+        sites:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/SiteRecord'
+
+    SiteRecord:
+      type: object
+      required: [id, siteCode, legalEntityId, siteName, operatingModel, isActive]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        siteCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+        legalEntityId:
+          type: string
+          format: uuid
+        siteName:
+          type: string
+          minLength: 1
+          maxLength: 120
+        operatingModel:
+          type: string
+          enum: [COCO, CODO, DODO, DOCO]
+        timezone:
+          type: string
+          nullable: true
+          maxLength: 64
+          description: IANA timezone name (e.g., `Africa/Lagos`).
+        isActive:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    PumpSyncRequest:
+      type: object
+      required: [pumps]
+      additionalProperties: false
+      properties:
+        pumps:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/PumpRecord'
+
+    PumpRecord:
+      type: object
+      required: [id, siteCode, pumpNumber, nozzles, isActive]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        siteCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+        pumpNumber:
+          type: integer
+          minimum: 1
+        nozzles:
+          type: array
+          items:
+            type: object
+            required: [nozzleNumber, canonicalProductCode]
+            additionalProperties: false
+            properties:
+              nozzleNumber:
+                type: integer
+                minimum: 1
+              canonicalProductCode:
+                type: string
+                minLength: 1
+                maxLength: 32
+              odooPumpId:
+                type: string
+                nullable: true
+                maxLength: 64
+        isActive:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ProductSyncRequest:
+      type: object
+      required: [products]
+      additionalProperties: false
+      properties:
+        products:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/ProductRecord'
+
+    ProductRecord:
+      type: object
+      required: [id, canonicalCode, displayName, isActive]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        canonicalCode:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: Canonical fuel product code (e.g., PMS, AGO, IK, DPK).
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        isActive:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    OperatorSyncRequest:
+      type: object
+      required: [operators]
+      additionalProperties: false
+      properties:
+        operators:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/OperatorRecord'
+
+    OperatorRecord:
+      type: object
+      required: [id, legalEntityId, name, isActive]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        legalEntityId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        taxPayerId:
+          type: string
+          nullable: true
+          maxLength: 64
+        isActive:
+          type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ── Canonical schemas (inline; authoritative spec in schemas/canonical/) ─
+
+    CanonicalTransaction:
+      type: object
+      description: |
+        Vendor-neutral canonical transaction record.
+        Authoritative field spec: `schemas/canonical/canonical-transaction.schema.json`
+      required:
+        - id
+        - fccTransactionId
+        - siteCode
+        - pumpNumber
+        - nozzleNumber
+        - productCode
+        - volumeMicrolitres
+        - amountMinorUnits
+        - unitPriceMinorPerLitre
+        - startedAt
+        - completedAt
+        - fccVendor
+        - legalEntityId
+        - currencyCode
+        - status
+        - ingestionSource
+        - ingestedAt
+        - updatedAt
+        - schemaVersion
+        - isDuplicate
+        - correlationId
+      properties:
+        id:
+          type: string
+          format: uuid
+        fccTransactionId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Opaque FCC transaction ID. Part of dedup key with `siteCode`.
+        siteCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+        pumpNumber:
+          type: integer
+          minimum: 1
+          maximum: 99
+        nozzleNumber:
+          type: integer
+          minimum: 1
+          maximum: 8
+        productCode:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: Canonical product code (e.g., PMS, AGO, IK, UNKNOWN).
+        volumeMicrolitres:
+          type: integer
+          exclusiveMinimum: 0
+          maximum: 50000000000
+          description: Dispensed volume in microlitres. 1 L = 1 000 000 µL.
+        amountMinorUnits:
+          type: integer
+          exclusiveMinimum: 0
+          maximum: 999999999999
+          description: Total transaction amount in minor currency units (e.g., cents).
+        unitPriceMinorPerLitre:
+          type: integer
+          exclusiveMinimum: 0
+          maximum: 9999999999
+          description: Price per litre in minor currency units.
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        fccVendor:
+          type: string
+          enum: [DOMS, RADIX, ADVATEC, PETRONITE]
+        legalEntityId:
+          type: string
+          format: uuid
+        currencyCode:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        status:
+          type: string
+          enum: [PENDING, SYNCED, SYNCED_TO_ODOO, STALE_PENDING, DUPLICATE, ARCHIVED]
+        ingestionSource:
+          type: string
+          enum: [FCC_PUSH, EDGE_UPLOAD, CLOUD_PULL]
+        ingestedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        schemaVersion:
+          type: integer
+          minimum: 1
+        isDuplicate:
+          type: boolean
+          default: false
+        correlationId:
+          type: string
+          format: uuid
+        fiscalReceiptNumber:
+          type: string
+          nullable: true
+          maxLength: 100
+        attendantId:
+          type: string
+          nullable: true
+          maxLength: 100
+        odooOrderId:
+          type: string
+          nullable: true
+          maxLength: 100
+        preAuthId:
+          type: string
+          format: uuid
+          nullable: true
+        reconciliationStatus:
+          type: string
+          nullable: true
+          enum: [MATCHED, VARIANCE_WITHIN_TOLERANCE, VARIANCE_FLAGGED, UNMATCHED, null]
+        duplicateOfId:
+          type: string
+          format: uuid
+          nullable: true
+        rawPayloadRef:
+          type: string
+          nullable: true
+          maxLength: 512
+          description: S3 URI of archived raw FCC payload. Cloud-only; null on Edge Agent.
+        rawPayloadJson:
+          type: string
+          nullable: true
+          maxLength: 65536
+          description: Inline raw payload JSON. Edge Agent only; null on cloud.
+
+    SiteConfig:
+      type: object
+      description: |
+        Full site configuration delivered to Edge Agent on registration and config pulls.
+        Authoritative field spec: `schemas/config/site-config.schema.json`
+      required:
+        - schemaVersion
+        - configVersion
+        - configId
+        - issuedAtUtc
+        - effectiveAtUtc
+        - sourceRevision
+        - identity
+        - site
+        - fcc
+        - sync
+        - buffer
+        - localApi
+        - telemetry
+        - fiscalization
+        - mappings
+        - rollout
+      properties:
+        schemaVersion:
+          type: string
+          const: "1.0"
+        configVersion:
+          type: integer
+          minimum: 1
+        configId:
+          type: string
+          format: uuid
+        issuedAtUtc:
+          type: string
+          format: date-time
+        effectiveAtUtc:
+          type: string
+          format: date-time
+        sourceRevision:
+          type: object
+          description: Traceability references to source data revisions.
+        identity:
+          type: object
+          description: Device and site identity fields.
+        site:
+          type: object
+          description: Site operational configuration (operatingModel, connectivityMode, etc.).
+        fcc:
+          type: object
+          description: FCC connection configuration (vendor, host, port, credentials, modes).
+        sync:
+          type: object
+          description: Cloud sync parameters (batchSize, intervals, cursor strategy).
+        buffer:
+          type: object
+          description: Local SQLite buffer parameters (retention, maxRecords, cleanup).
+        localApi:
+          type: object
+          description: Local REST API parameters (port, LAN API settings, rate limits).
+        telemetry:
+          type: object
+          description: Telemetry reporting parameters (interval, log level).
+        fiscalization:
+          type: object
+          description: Fiscalisation mode and tax authority configuration.
+        mappings:
+          type: object
+          description: Product code and nozzle mappings.
+        rollout:
+          type: object
+          description: Version compatibility bounds and hot-reload/restart requirements.
+
+    TelemetryPayload:
+      type: object
+      description: |
+        Health metrics reported by Edge Agent.
+        Authoritative field spec: `schemas/canonical/telemetry-payload.schema.json`
+      required:
+        - schemaVersion
+        - deviceId
+        - siteCode
+        - legalEntityId
+        - reportedAtUtc
+        - sequenceNumber
+        - connectivityState
+        - device
+        - fccHealth
+        - buffer
+        - sync
+        - errorCounts
+      properties:
+        schemaVersion:
+          type: string
+          const: "1.0"
+        deviceId:
+          type: string
+          format: uuid
+        siteCode:
+          type: string
+        legalEntityId:
+          type: string
+          format: uuid
+        reportedAtUtc:
+          type: string
+          format: date-time
+        sequenceNumber:
+          type: integer
+          minimum: 1
+          description: Monotonically increasing per device, starts at 1 after registration.
+        connectivityState:
+          type: string
+          enum: [FULLY_ONLINE, INTERNET_DOWN, FCC_UNREACHABLE, FULLY_OFFLINE]
+        device:
+          type: object
+          description: Device-level health (battery, storage, memory, appVersion, uptime).
+        fccHealth:
+          type: object
+          description: FCC connectivity (isReachable, heartbeatAge, consecutiveFailures).
+        buffer:
+          type: object
+          description: Local SQLite buffer (totalRecords, pendingCount, oldestPending, sizeMb).
+        sync:
+          type: object
+          description: Cloud sync status (lastSyncAttempt, lastSuccessfulSync, syncLag, configVersion).
+        errorCounts:
+          type: object
+          description: Rolling error counts since last successful telemetry submission.

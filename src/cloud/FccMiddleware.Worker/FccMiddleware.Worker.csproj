@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-FccMiddleware.Worker-89bbc264-2c96-42d0-a905-df70ab00352b</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MediatR" Version="14.1.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FccMiddleware.Application\FccMiddleware.Application.csproj" />
+    <ProjectReference Include="..\FccMiddleware.Infrastructure\FccMiddleware.Infrastructure.csproj" />
+    <ProjectReference Include="..\FccMiddleware.Adapter.Doms\FccMiddleware.Adapter.Doms.csproj" />
+  </ItemGroup>
+</Project>

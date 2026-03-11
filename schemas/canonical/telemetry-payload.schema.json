@@ -1,0 +1,362 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fccmiddleware.com/schemas/canonical/telemetry-payload/1.0",
+  "title": "TelemetryPayload",
+  "description": "Health metrics reported by Edge Agent to Cloud Backend. One payload per reporting interval per device.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "deviceId",
+    "siteCode",
+    "legalEntityId",
+    "reportedAtUtc",
+    "sequenceNumber",
+    "connectivityState",
+    "device",
+    "fccHealth",
+    "buffer",
+    "sync",
+    "errorCounts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version for forward compatibility."
+    },
+    "deviceId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique device identifier assigned during registration."
+    },
+    "siteCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50,
+      "pattern": "^[a-zA-Z0-9-]+$",
+      "description": "Site this agent is registered to."
+    },
+    "legalEntityId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Legal entity this site belongs to."
+    },
+    "reportedAtUtc": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the agent assembled this report."
+    },
+    "sequenceNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonically increasing counter per device, starts at 1 after registration."
+    },
+    "connectivityState": {
+      "$ref": "#/$defs/ConnectivityState"
+    },
+    "device": {
+      "$ref": "#/$defs/DeviceStatus"
+    },
+    "fccHealth": {
+      "$ref": "#/$defs/FccHealthStatus"
+    },
+    "buffer": {
+      "$ref": "#/$defs/BufferStatus"
+    },
+    "sync": {
+      "$ref": "#/$defs/SyncStatus"
+    },
+    "errorCounts": {
+      "$ref": "#/$defs/ErrorCounts"
+    }
+  },
+  "$defs": {
+    "ConnectivityState": {
+      "type": "string",
+      "enum": [
+        "FULLY_ONLINE",
+        "INTERNET_DOWN",
+        "FCC_UNREACHABLE",
+        "FULLY_OFFLINE"
+      ],
+      "description": "Current connectivity state of the Edge Agent."
+    },
+    "DeviceStatus": {
+      "type": "object",
+      "description": "Device-level health metrics from the Android HHT.",
+      "required": [
+        "batteryPercent",
+        "isCharging",
+        "storageFreeMb",
+        "storageTotalMb",
+        "memoryFreeMb",
+        "memoryTotalMb",
+        "appVersion",
+        "appUptimeSeconds",
+        "osVersion",
+        "deviceModel"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "batteryPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Current battery level (0–100)."
+        },
+        "isCharging": {
+          "type": "boolean",
+          "description": "Whether device is connected to power."
+        },
+        "storageFreeMb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Free internal storage in megabytes."
+        },
+        "storageTotalMb": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total internal storage in megabytes."
+        },
+        "memoryFreeMb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Free RAM in megabytes."
+        },
+        "memoryTotalMb": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total RAM in megabytes."
+        },
+        "appVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Edge Agent APK version in SemVer format."
+        },
+        "appUptimeSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds since foreground service started."
+        },
+        "osVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Android OS version string."
+        },
+        "deviceModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Hardware model name."
+        }
+      }
+    },
+    "FccHealthStatus": {
+      "type": "object",
+      "description": "FCC connectivity and health status.",
+      "required": [
+        "isReachable",
+        "lastHeartbeatAtUtc",
+        "heartbeatAgeSeconds",
+        "fccVendor",
+        "fccHost",
+        "fccPort",
+        "consecutiveHeartbeatFailures"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "isReachable": {
+          "type": "boolean",
+          "description": "Whether FCC responded to last heartbeat."
+        },
+        "lastHeartbeatAtUtc": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Timestamp of last successful FCC heartbeat. Null if never connected."
+        },
+        "heartbeatAgeSeconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Seconds since last successful heartbeat. Null if never connected."
+        },
+        "fccVendor": {
+          "type": "string",
+          "enum": ["DOMS", "RADIX", "ADVATEC", "PETRONITE"],
+          "description": "Configured FCC vendor."
+        },
+        "fccHost": {
+          "type": "string",
+          "minLength": 1,
+          "description": "FCC connection IP address or hostname."
+        },
+        "fccPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "FCC connection port."
+        },
+        "consecutiveHeartbeatFailures": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of consecutive failed heartbeat attempts. Resets to 0 on success."
+        }
+      }
+    },
+    "BufferStatus": {
+      "type": "object",
+      "description": "Local SQLite buffer status.",
+      "required": [
+        "totalRecords",
+        "pendingUploadCount",
+        "syncedCount",
+        "syncedToOdooCount",
+        "failedCount",
+        "oldestPendingAtUtc",
+        "bufferSizeMb"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "totalRecords": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total records in buffer across all statuses."
+        },
+        "pendingUploadCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Records in PENDING status awaiting cloud upload."
+        },
+        "syncedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Records in SYNCED status (uploaded, not yet SYNCED_TO_ODOO)."
+        },
+        "syncedToOdooCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Records confirmed SYNCED_TO_ODOO."
+        },
+        "failedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Records in FAILED status."
+        },
+        "oldestPendingAtUtc": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Timestamp of oldest PENDING record. Null if no pending records."
+        },
+        "bufferSizeMb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Approximate SQLite DB file size in megabytes."
+        }
+      }
+    },
+    "SyncStatus": {
+      "type": "object",
+      "description": "Cloud synchronization status.",
+      "required": [
+        "lastSyncAttemptUtc",
+        "lastSuccessfulSyncUtc",
+        "syncLagSeconds",
+        "lastStatusPollUtc",
+        "lastConfigPullUtc",
+        "configVersion",
+        "uploadBatchSize"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "lastSyncAttemptUtc": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Last time agent attempted cloud upload. Null if never attempted."
+        },
+        "lastSuccessfulSyncUtc": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Last time a cloud upload succeeded. Null if never succeeded."
+        },
+        "syncLagSeconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Seconds between now and oldest un-synced transaction. Null if no pending."
+        },
+        "lastStatusPollUtc": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Last time SYNCED_TO_ODOO status was polled. Null if never polled."
+        },
+        "lastConfigPullUtc": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Last time config was pulled from cloud. Null if never pulled."
+        },
+        "configVersion": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 50,
+          "description": "Current active config version. Null if no config loaded."
+        },
+        "uploadBatchSize": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current configured upload batch size."
+        }
+      }
+    },
+    "ErrorCounts": {
+      "type": "object",
+      "description": "Rolling error counts since last successful telemetry submission. All reset to 0 after a successful telemetry send.",
+      "required": [
+        "fccConnectionErrors",
+        "cloudUploadErrors",
+        "cloudAuthErrors",
+        "localApiErrors",
+        "bufferWriteErrors",
+        "adapterNormalizationErrors",
+        "preAuthErrors"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fccConnectionErrors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "FCC heartbeat/poll failures since last successful telemetry."
+        },
+        "cloudUploadErrors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Failed cloud upload attempts."
+        },
+        "cloudAuthErrors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "401/403 cloud responses."
+        },
+        "localApiErrors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Errors serving local REST API requests."
+        },
+        "bufferWriteErrors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "SQLite write failures."
+        },
+        "adapterNormalizationErrors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "FCC payload normalization failures."
+        },
+        "preAuthErrors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Pre-auth FCC command failures."
+        }
+      }
+    }
+  }
+}

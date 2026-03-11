@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forecourt-middleware/schemas/config/edge-agent-config.schema.json",
+  "title": "EdgeAgentConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "configVersion",
+    "configId",
+    "issuedAtUtc",
+    "effectiveAtUtc",
+    "compatibility",
+    "agent",
+    "site",
+    "fccConnection",
+    "polling",
+    "sync",
+    "buffer",
+    "api",
+    "telemetry",
+    "fiscalization"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "default": "2.0"
+    },
+    "configVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "configId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "issuedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "effectiveAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minAgentVersion"
+      ],
+      "properties": {
+        "minAgentVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "maxAgentVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deviceId",
+        "isPrimaryAgent"
+      ],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "isPrimaryAgent": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "siteCode",
+        "legalEntityId",
+        "timezone",
+        "currency",
+        "operatingModel",
+        "connectivityMode"
+      ],
+      "properties": {
+        "siteCode": {
+          "type": "string",
+          "pattern": "^[A-Z0-9-]{3,32}$"
+        },
+        "legalEntityId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "operatingModel": {
+          "type": "string",
+          "enum": [
+            "COCO",
+            "CODO",
+            "DODO",
+            "DOCO"
+          ]
+        },
+        "connectivityMode": {
+          "type": "string",
+          "enum": [
+            "CONNECTED",
+            "DISCONNECTED"
+          ]
+        }
+      }
+    },
+    "fccConnection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vendor",
+        "host",
+        "port",
+        "credentialsRef",
+        "protocolType",
+        "transactionMode",
+        "ingestionMode",
+        "heartbeatIntervalSeconds"
+      ],
+      "properties": {
+        "vendor": {
+          "type": "string",
+          "enum": [
+            "DOMS",
+            "RADIX",
+            "ADVATEC",
+            "PETRONITE"
+          ],
+          "default": "DOMS"
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "credentialsRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:/-]{3,128}$"
+        },
+        "protocolType": {
+          "type": "string",
+          "enum": [
+            "REST",
+            "TCP",
+            "SOAP"
+          ],
+          "default": "REST"
+        },
+        "transactionMode": {
+          "type": "string",
+          "enum": [
+            "PULL",
+            "PUSH",
+            "HYBRID"
+          ],
+          "default": "PULL"
+        },
+        "ingestionMode": {
+          "type": "string",
+          "enum": [
+            "CLOUD_DIRECT",
+            "RELAY",
+            "BUFFER_ALWAYS"
+          ],
+          "default": "CLOUD_DIRECT"
+        },
+        "heartbeatIntervalSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 300,
+          "default": 15
+        }
+      }
+    },
+    "polling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pullIntervalSeconds",
+        "batchSize",
+        "cursorStrategy"
+      ],
+      "properties": {
+        "pullIntervalSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "default": 30
+        },
+        "batchSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        },
+        "cursorStrategy": {
+          "type": "string",
+          "enum": [
+            "LAST_SUCCESSFUL_TIMESTAMP",
+            "LAST_TRANSACTION_ID",
+            "VENDOR_CURSOR_TOKEN"
+          ],
+          "default": "LAST_SUCCESSFUL_TIMESTAMP"
+        }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cloudBaseUrl",
+        "uploadBatchSize",
+        "syncIntervalSeconds",
+        "statusPollIntervalSeconds",
+        "configPollIntervalSeconds"
+      ],
+      "properties": {
+        "cloudBaseUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "uploadBatchSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 50
+        },
+        "syncIntervalSeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 3600,
+          "default": 30
+        },
+        "statusPollIntervalSeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 300,
+          "default": 30
+        },
+        "configPollIntervalSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600,
+          "default": 60
+        }
+      }
+    },
+    "buffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retentionDays",
+        "maxRecords",
+        "cleanupIntervalHours"
+      ],
+      "properties": {
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 90,
+          "default": 30
+        },
+        "maxRecords": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 100000,
+          "default": 50000
+        },
+        "cleanupIntervalHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24,
+          "default": 24
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "localApiPort",
+        "enableLanApi"
+      ],
+      "properties": {
+        "localApiPort": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 8585
+        },
+        "enableLanApi": {
+          "type": "boolean",
+          "default": false
+        },
+        "lanApiKeyRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._:/-]{3,128}$",
+          "default": null
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "telemetryIntervalSeconds",
+        "logLevel"
+      ],
+      "properties": {
+        "telemetryIntervalSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600,
+          "default": 60
+        },
+        "logLevel": {
+          "type": "string",
+          "enum": [
+            "TRACE",
+            "DEBUG",
+            "INFO",
+            "WARN",
+            "ERROR"
+          ],
+          "default": "INFO"
+        }
+      }
+    },
+    "fiscalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "requireCustomerTaxId",
+        "fiscalReceiptRequired"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "FCC_DIRECT",
+            "EXTERNAL_INTEGRATION",
+            "NONE"
+          ]
+        },
+        "requireCustomerTaxId": {
+          "type": "boolean",
+          "default": false
+        },
+        "fiscalReceiptRequired": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "api": {
+            "properties": {
+              "enableLanApi": {
+                "const": true
+              }
+            },
+            "required": [
+              "enableLanApi"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "api": {
+            "required": [
+              "lanApiKeyRef"
+            ],
+            "properties": {
+              "lanApiKeyRef": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:/-]{3,128}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fiscalization": {
+            "properties": {
+              "mode": {
+                "const": "FCC_DIRECT"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fiscalization": {
+            "properties": {
+              "fiscalReceiptRequired": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fccConnection": {
+            "properties": {
+              "ingestionMode": {
+                "const": "CLOUD_DIRECT"
+              }
+            },
+            "required": [
+              "ingestionMode"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "polling": {
+            "required": [
+              "pullIntervalSeconds"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

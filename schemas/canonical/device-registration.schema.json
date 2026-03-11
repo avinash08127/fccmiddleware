@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fccmiddleware.example.com/schemas/canonical/device-registration.schema.json",
+  "title": "Device Registration Schemas",
+  "description": "JSON Schema definitions for device registration request, response, QR code payload, and provisioning token. Source: docs/specs/data-models/tier-1-1-device-registration-spec.md",
+  "$defs": {
+    "ProvisioningTokenStatus": {
+      "type": "string",
+      "enum": ["ACTIVE", "USED", "EXPIRED", "REVOKED"],
+      "description": "Lifecycle state of a provisioning token"
+    },
+    "AgentRegistrationStatus": {
+      "type": "string",
+      "enum": ["ACTIVE", "DEACTIVATED"],
+      "description": "Lifecycle state of an agent registration"
+    },
+    "QrCodePayload": {
+      "type": "object",
+      "title": "QR Code Payload",
+      "description": "JSON payload encoded in the provisioning QR code. Field names are abbreviated to minimize QR code size.",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "const": 1,
+          "description": "QR payload schema version"
+        },
+        "sc": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "pattern": "^[A-Za-z0-9-]+$",
+          "description": "Site code"
+        },
+        "cu": {
+          "type": "string",
+          "format": "uri",
+          "description": "Cloud base URL"
+        },
+        "pt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Provisioning token (base64url-encoded, 32 bytes)"
+        }
+      },
+      "required": ["v", "sc", "cu", "pt"],
+      "additionalProperties": false
+    },
+    "DeviceRegistrationRequest": {
+      "type": "object",
+      "title": "Device Registration Request",
+      "description": "Sent by the Edge Agent to POST /api/v1/agent/register",
+      "properties": {
+        "provisioningToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "One-time bootstrap token from QR code or manual entry"
+        },
+        "siteCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "pattern": "^[A-Za-z0-9-]+$",
+          "description": "Site code from QR code or manual entry"
+        },
+        "deviceSerialNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Android device serial number (Build.SERIAL or ANDROID_ID)"
+        },
+        "deviceModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Android device model (Build.MODEL)"
+        },
+        "osVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Android OS version (Build.VERSION.RELEASE)"
+        },
+        "agentVersion": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Edge Agent app version in semantic version format"
+        },
+        "replacePreviousAgent": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, deactivates any existing active agent for this site with a different serial number"
+        }
+      },
+      "required": [
+        "provisioningToken",
+        "siteCode",
+        "deviceSerialNumber",
+        "deviceModel",
+        "osVersion",
+        "agentVersion"
+      ],
+      "additionalProperties": false
+    },
+    "DeviceRegistrationResponse": {
+      "type": "object",
+      "title": "Device Registration Response",
+      "description": "Returned by the cloud on successful registration (HTTP 201)",
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique device identity assigned by the cloud"
+        },
+        "deviceToken": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Signed JWT for authenticating subsequent API calls"
+        },
+        "tokenExpiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "JWT expiry timestamp (UTC ISO 8601)"
+        },
+        "siteCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "description": "Confirmed site code"
+        },
+        "legalEntityId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Legal entity this device is bound to"
+        },
+        "siteConfig": {
+          "type": "object",
+          "description": "Full site configuration object. Shape defined in SiteConfig spec (tier-1-1-site-config-spec)."
+        },
+        "registeredAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Registration timestamp (UTC ISO 8601)"
+        }
+      },
+      "required": [
+        "deviceId",
+        "deviceToken",
+        "tokenExpiresAt",
+        "siteCode",
+        "legalEntityId",
+        "siteConfig",
+        "registeredAt"
+      ],
+      "additionalProperties": false
+    },
+    "DeviceDecommissionRequest": {
+      "type": "object",
+      "title": "Device Decommission Request",
+      "description": "Sent by an administrator to decommission a registered device",
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "The device to decommission"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Free-text reason for decommission"
+        }
+      },
+      "required": ["deviceId", "reason"],
+      "additionalProperties": false
+    },
+    "DeviceTokenClaims": {
+      "type": "object",
+      "title": "Device Token JWT Claims",
+      "description": "Claims encoded in the signed JWT device token (ES256)",
+      "properties": {
+        "sub": {
+          "type": "string",
+          "format": "uuid",
+          "description": "deviceId"
+        },
+        "site": {
+          "type": "string",
+          "description": "siteCode"
+        },
+        "lei": {
+          "type": "string",
+          "format": "uuid",
+          "description": "legalEntityId"
+        },
+        "role": {
+          "type": "string",
+          "const": "edge-agent",
+          "description": "Always 'edge-agent'"
+        },
+        "iat": {
+          "type": "integer",
+          "description": "Issued-at (Unix epoch seconds)"
+        },
+        "exp": {
+          "type": "integer",
+          "description": "Expiry (Unix epoch seconds). Default: iat + 86400"
+        },
+        "jti": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique token ID for revocation tracking"
+        },
+        "iss": {
+          "type": "string",
+          "const": "fcc-middleware",
+          "description": "Token issuer"
+        }
+      },
+      "required": ["sub", "site", "lei", "role", "iat", "exp", "jti", "iss"]
+    },
+    "AgentRegistrationRecord": {
+      "type": "object",
+      "title": "Agent Registration Record",
+      "description": "Cloud-side persistence model for agent_registrations table",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Primary key (same as deviceId returned to agent)"
+        },
+        "siteCode": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "legalEntityId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "deviceSerialNumber": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "deviceModel": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "osVersion": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "agentVersion": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "lastKnownAgentVersion": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        },
+        "status": {
+          "$ref": "#/$defs/AgentRegistrationStatus"
+        },
+        "registeredAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastSeenAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "deactivatedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "deactivationReason": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        },
+        "currentTokenJti": {
+          "type": ["string", "null"],
+          "maxLength": 36
+        },
+        "replacedById": {
+          "type": ["string", "null"],
+          "format": "uuid"
+        },
+        "provisioningTokenId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "siteCode",
+        "legalEntityId",
+        "deviceSerialNumber",
+        "deviceModel",
+        "osVersion",
+        "agentVersion",
+        "status",
+        "registeredAt",
+        "provisioningTokenId",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  }
+}

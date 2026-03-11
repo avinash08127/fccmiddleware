@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fccmiddleware.internal/schemas/events/event-envelope.schema.json",
+  "title": "FCC Middleware Event Envelope",
+  "description": "Canonical envelope for all domain events in the Forecourt Middleware Platform.",
+  "type": "object",
+  "required": [
+    "eventId",
+    "eventType",
+    "schemaVersion",
+    "timestamp",
+    "source",
+    "correlationId",
+    "legalEntityId",
+    "payload"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this event instance (UUID v4)."
+    },
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "TransactionIngested",
+        "TransactionDeduplicated",
+        "TransactionSyncedToOdoo",
+        "PreAuthCreated",
+        "PreAuthAuthorized",
+        "PreAuthCompleted",
+        "PreAuthCancelled",
+        "PreAuthExpired",
+        "ReconciliationMatched",
+        "ReconciliationVarianceFlagged",
+        "ReconciliationApproved",
+        "AgentRegistered",
+        "AgentConfigUpdated",
+        "AgentHealthReported",
+        "ConnectivityChanged",
+        "BufferThresholdExceeded",
+        "MasterDataSynced",
+        "ConfigChanged"
+      ],
+      "description": "PascalCase event type name."
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Payload schema version for this event type. Starts at 1."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC ISO 8601 timestamp of when the domain event occurred."
+    },
+    "source": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Producing system identifier (e.g., cloud-ingestion, edge-agent:{siteCode})."
+    },
+    "correlationId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Links related events across the processing chain."
+    },
+    "legalEntityId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Tenant scope — must reference an existing legal entity."
+    },
+    "siteCode": {
+      "type": ["string", "null"],
+      "maxLength": 50,
+      "description": "Site identifier. Null only for legal-entity-scoped events (MasterDataSynced, ConfigChanged with scope legal_entity)."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-specific data. Schema determined by eventType + schemaVersion."
+    }
+  },
+  "additionalProperties": false
+}

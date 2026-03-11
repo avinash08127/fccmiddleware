@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fccmiddleware/schemas/canonical/pre-auth-record.schema.json",
+  "title": "PreAuthRecord",
+  "description": "Canonical pre-authorization record. Represents the full lifecycle of a pre-authorization from Odoo POS request through FCC authorization to dispense completion. Spec: docs/specs/data-models/tier-1-1-pre-auth-record-spec.md",
+  "type": "object",
+  "required": [
+    "id",
+    "siteCode",
+    "odooOrderId",
+    "pumpNumber",
+    "nozzleNumber",
+    "productCode",
+    "requestedAmount",
+    "unitPrice",
+    "currency",
+    "status",
+    "requestedAt",
+    "expiresAt",
+    "createdAt",
+    "updatedAt",
+    "schemaVersion"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Middleware-generated UUID v4. Primary key."
+    },
+    "siteCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50,
+      "description": "Site identifier. Part of dedup key with odooOrderId."
+    },
+    "odooOrderId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Odoo POS order reference. Part of dedup key with siteCode."
+    },
+    "pumpNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Target pump number."
+    },
+    "nozzleNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Target nozzle number."
+    },
+    "productCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "description": "Canonical fuel product code (e.g., PMS, AGO, IK, DPK)."
+    },
+    "requestedAmount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Authorized amount in integer minor units (cents). Always > 0. Pre-auth is always by amount, never by volume."
+    },
+    "unitPrice": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Price per litre at time of authorization, in minor units per litre. Informational only; FCC authorizes by amount."
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$",
+      "description": "ISO 4217 currency code (e.g., ZAR, KES, TZS)."
+    },
+    "vehicleNumber": {
+      "type": ["string", "null"],
+      "maxLength": 50,
+      "description": "Vehicle registration plate, if captured. Optional."
+    },
+    "customerName": {
+      "type": ["string", "null"],
+      "maxLength": 200,
+      "description": "Customer name. Required when requireCustomerTaxId=true."
+    },
+    "customerTaxId": {
+      "type": ["string", "null"],
+      "maxLength": 50,
+      "description": "Customer Tax Identification Number (TIN). PII — NEVER log. Required when requireCustomerTaxId=true."
+    },
+    "customerBusinessName": {
+      "type": ["string", "null"],
+      "maxLength": 200,
+      "description": "B2B business name. Required for B2B fiscalized transactions."
+    },
+    "attendantId": {
+      "type": ["string", "null"],
+      "maxLength": 100,
+      "description": "Odoo user ID of the fuel attendant. Optional."
+    },
+    "fccCorrelationId": {
+      "type": ["string", "null"],
+      "maxLength": 100,
+      "description": "FCC-assigned correlation reference returned at authorization time. Used as primary key for dispense-to-preauth matching. Null if vendor does not provide."
+    },
+    "fccAuthorizationCode": {
+      "type": ["string", "null"],
+      "maxLength": 100,
+      "description": "FCC authorization confirmation code. Vendor-specific. Null until AUTHORIZED state."
+    },
+    "matchedFccTransactionId": {
+      "type": ["string", "null"],
+      "maxLength": 100,
+      "description": "fccTransactionId of the final dispense transaction matched by the reconciliation engine. Null until COMPLETED state."
+    },
+    "actualAmount": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Actual dispensed amount in integer minor units. Populated at COMPLETED. Null until then."
+    },
+    "actualVolume": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Actual dispensed volume in integer millilitres (1 litre = 1000). Populated at COMPLETED. Null until then. Divide by 1000 for litres display."
+    },
+    "amountVariance": {
+      "type": ["integer", "null"],
+      "description": "actualAmount - requestedAmount in minor units. Negative = under-dispense. Populated at COMPLETED (cloud only). Null on Edge Agent."
+    },
+    "varianceBps": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "ABS(amountVariance) / requestedAmount * 10000, rounded. Units: basis points (1 bps = 0.01%). Populated at COMPLETED (cloud only). Compare against site tolerance."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "AUTHORIZED",
+        "DISPENSING",
+        "COMPLETED",
+        "CANCELLED",
+        "EXPIRED",
+        "FAILED"
+      ],
+      "description": "Current pre-authorization lifecycle state. Terminal states: COMPLETED, CANCELLED, EXPIRED, FAILED."
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Record creation timestamp in UTC ISO 8601."
+    },
+    "requestedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When Odoo POS submitted the pre-auth request to the Edge Agent. UTC ISO 8601."
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "requestedAt + preAuthTimeoutMinutes. Stored at creation. Used by expiry worker. UTC ISO 8601."
+    },
+    "authorizedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "When FCC returned authorization confirmation. Null until AUTHORIZED state. UTC ISO 8601."
+    },
+    "dispensingAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "When FCC signalled dispense started. Null if vendor does not report DISPENSING state. UTC ISO 8601."
+    },
+    "completedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "When reconciliation engine matched the final dispense. Null until COMPLETED state. UTC ISO 8601."
+    },
+    "cancelledAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "When cancellation was processed. Null unless CANCELLED. UTC ISO 8601."
+    },
+    "expiredAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "When expiry worker transitioned the record. Null unless EXPIRED. UTC ISO 8601."
+    },
+    "failedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "When FCC rejection was processed. Null unless FAILED. UTC ISO 8601."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Last modification timestamp. Updated on every state transition. UTC ISO 8601."
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema version for forward compatibility. Current value: 1."
+    }
+  },
+  "$defs": {
+    "preAuthStatusEnum": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "AUTHORIZED",
+        "DISPENSING",
+        "COMPLETED",
+        "CANCELLED",
+        "EXPIRED",
+        "FAILED"
+      ],
+      "description": "PreAuthStatus: COMPLETED, CANCELLED, EXPIRED, FAILED are terminal states."
+    }
+  }
+}

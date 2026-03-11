@@ -1,0 +1,961 @@
+openapi: 3.1.0
+
+info:
+  title: FCC Middleware — Edge Agent Local API
+  version: 1.0.0
+  description: |
+    Local REST API served by the Edge Agent (Ktor embedded server) on the HHT device.
+    Consumed by Odoo POS running on the same device (localhost) and optionally
+    by secondary HHTs on the same WiFi LAN.
+
+    ## Conventions
+
+    - **Dates:** UTC ISO 8601 everywhere (`2026-03-11T14:00:00Z`). Timezone only in the display layer.
+    - **Currency:** Integer minor units (e.g., cents). ISO 4217 `currencyCode` alongside.
+    - **Volume:** Microlitres (integer). 1 L = 1 000 000 µL.
+    - **IDs:** UUID v4 for middleware-generated IDs. FCC-vendor IDs preserved as opaque strings.
+    - **JSON field names:** camelCase.
+    - **Pagination:** Cursor-based (`cursor` + `pageSize`). Default 50, max 200.
+    - **Error envelope:** `{ errorCode, message, details, traceId, timestamp }`.
+
+    ## Authentication
+
+    - **Localhost (127.0.0.1):** No API key required. All requests from the loopback address
+      are trusted. This covers Odoo POS running on the same HHT.
+    - **LAN (other HHTs):** `X-Api-Key` header with the site LAN API key. Required when
+      `localApi.enableLanApi = true` in `SiteConfig`. The LAN API key is provisioned
+      via `localApi.lanApiKeyRef`.
+
+  contact:
+    name: Platform Team
+
+servers:
+  - url: http://127.0.0.1:{port}
+    description: Localhost — Odoo POS on the same HHT (no auth required)
+    variables:
+      port:
+        default: "8080"
+        description: Configurable via `localApi.localhostPort` in SiteConfig.
+  - url: http://{lanBindAddress}:{port}
+    description: LAN — secondary HHTs on the same WiFi (X-Api-Key required)
+    variables:
+      lanBindAddress:
+        default: "0.0.0.0"
+        description: Configurable via `localApi.lanBindAddress` in SiteConfig.
+      port:
+        default: "8080"
+
+tags:
+  - name: Transactions
+    description: Locally buffered transaction access
+  - name: PumpStatus
+    description: Live or synthesised pump state from the FCC adapter
+  - name: PreAuth
+    description: Pre-authorisation lifecycle (Odoo POS → FCC via Edge Agent)
+  - name: Status
+    description: Edge Agent operational health and state
+
+paths:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # TRANSACTIONS
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/transactions:
+    get:
+      operationId: listLocalTransactions
+      tags: [Transactions]
+      summary: List buffered transactions
+      description: |
+        Returns locally buffered canonical transactions with optional filtering.
+        Useful for Odoo POS to reconcile local state or display recent activity.
+
+        Results are ordered by `completedAt` descending (most recent first).
+      security:
+        - LanApiKey: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, SYNCED, SYNCED_TO_ODOO, STALE_PENDING, DUPLICATE, ARCHIVED]
+          description: Filter by local sync status.
+        - name: pumpNumber
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+          description: Filter to a specific pump.
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: "Filter: `completedAt >= from` (UTC ISO 8601)."
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: "Filter: `completedAt <= to` (UTC ISO 8601)."
+      responses:
+        "200":
+          description: Paginated list of buffered transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalTransactionPage'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/transactions/{id}:
+    get:
+      operationId: getLocalTransactionById
+      tags: [Transactions]
+      summary: Get transaction by ID
+      description: Returns a single locally buffered transaction by its middleware UUID.
+      security:
+        - LanApiKey: []
+        - {}
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Middleware UUID of the transaction.
+      responses:
+        "200":
+          description: Transaction found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalTransaction'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/transactions/{id}/acknowledge:
+    post:
+      operationId: acknowledgeLocalTransaction
+      tags: [Transactions]
+      summary: Acknowledge a transaction — stamp odooOrderId
+      description: |
+        Called by Odoo POS to stamp a locally buffered transaction with its Odoo order
+        reference. This does not immediately change cloud sync status; the `odooOrderId`
+        will be included in the next cloud upload batch or reported on the next cloud
+        status poll.
+
+        Idempotent: re-acknowledging with the same `odooOrderId` returns the transaction
+        unchanged. Acknowledging with a different `odooOrderId` returns 409 Conflict.
+      security:
+        - LanApiKey: []
+        - {}
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [odooOrderId]
+              additionalProperties: false
+              properties:
+                odooOrderId:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                  description: Odoo POS order reference to stamp on the transaction.
+      responses:
+        "200":
+          description: Transaction acknowledged (or already acknowledged with same odooOrderId)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalTransaction'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Transaction already acknowledged with a different odooOrderId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PUMP STATUS
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/pump-status:
+    get:
+      operationId: getPumpStatus
+      tags: [PumpStatus]
+      summary: Get all pump statuses
+      description: |
+        Returns the most recent status for all pumps at this site as reported by the
+        FCC adapter. Data is sourced from the FCC directly (`FCC_LIVE`) or synthesised
+        from recent buffered transactions (`EDGE_SYNTHESIZED`) when the FCC is
+        temporarily unreachable.
+
+        The `fccReachable` field in the response indicates whether the FCC was reachable
+        at the time of the response. When `fccReachable: false`, treat states as stale.
+      security:
+        - LanApiKey: []
+        - {}
+      parameters:
+        - name: pumpNumber
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+          description: Filter to a specific pump. Returns all pumps if omitted.
+      responses:
+        "200":
+          description: Pump status list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PumpStatusResponse'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "503":
+          description: FCC unreachable and no cached status available for the requested pump
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PRE-AUTH
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/preauth:
+    post:
+      operationId: submitPreAuth
+      tags: [PreAuth]
+      summary: Submit pre-auth request
+      description: |
+        Called by Odoo POS to request a pre-authorisation on a specific pump/nozzle.
+        The Edge Agent:
+        1. Validates the request against current site config (pump active, product match).
+        2. Sends the pre-auth command to the FCC.
+        3. Persists a `PreAuthRecord` locally and uploads to cloud.
+        4. Returns the FCC authorisation result.
+
+        This call **blocks** until the FCC responds or the timeout expires
+        (`preAuthTimeoutSeconds` from SiteConfig; typically 10–30 s).
+
+        `customerTaxId` is PII — it is never logged and is omitted from cloud telemetry.
+      security:
+        - LanApiKey: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreAuthRequest'
+            example:
+              odooOrderId: "POS/2026/00099"
+              pumpNumber: 3
+              nozzleNumber: 1
+              productCode: PMS
+              requestedAmount: 50000
+              unitPrice: 1100
+              currency: NGN
+              requestedAt: "2026-03-11T13:55:00Z"
+      responses:
+        "200":
+          description: FCC authorisation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreAuthResult'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "409":
+          description: A pre-auth for this `odooOrderId` is already active on this site
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: FCC unreachable — pre-auth cannot proceed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "504":
+          description: FCC did not respond within the timeout window
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/preauth/{id}:
+    delete:
+      operationId: cancelPreAuth
+      tags: [PreAuth]
+      summary: Cancel pre-auth
+      description: |
+        Cancels an active pre-authorisation. The Edge Agent sends a cancellation command
+        to the FCC and transitions the local `PreAuthRecord` to `CANCELLED`.
+
+        Idempotent: cancelling an already-`CANCELLED` record returns success.
+        Returns 409 if the record is in a non-cancellable terminal state
+        (`COMPLETED`, `EXPIRED`, `FAILED`).
+      security:
+        - LanApiKey: []
+        - {}
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Middleware UUID of the pre-auth record to cancel.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason:
+                  type: string
+                  maxLength: 256
+                  description: Optional cancellation reason for audit trail.
+      responses:
+        "200":
+          description: Pre-auth cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreAuthCancelResponse'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Pre-auth is in a terminal state and cannot be cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                errorCode: CONFLICT
+                message: "Pre-auth is in terminal state COMPLETED and cannot be cancelled"
+                details:
+                  id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  currentStatus: COMPLETED
+                traceId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                timestamp: "2026-03-11T14:00:00Z"
+        "503":
+          description: FCC unreachable — cancellation command could not be sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # STATUS
+  # ───────────────────────────────────────────────────────────────────────────
+
+  /api/v1/status:
+    get:
+      operationId: getAgentStatus
+      tags: [Status]
+      summary: Agent operational status
+      description: |
+        Returns a concise summary of Edge Agent operational state including connectivity,
+        FCC health, buffer depth, sync lag, and agent version.
+
+        Used by the Odoo POS diagnostics screen and the supervisor/manager UI on
+        secondary HHTs to monitor site health without accessing the cloud portal.
+      security:
+        - LanApiKey: []
+        - {}
+      responses:
+        "200":
+          description: Agent status summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentStatusResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+components:
+
+  securitySchemes:
+    LanApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        LAN API key required for requests from non-primary HHTs on the same WiFi network.
+        Not required for localhost (127.0.0.1) requests from Odoo POS on the same device.
+        The key is provisioned via `localApi.lanApiKeyRef` in SiteConfig and stored in
+        Android Keystore on the primary HHT.
+
+  parameters:
+
+    CursorParam:
+      name: cursor
+      in: query
+      schema:
+        type: string
+      description: Opaque cursor from a previous response's `nextCursor`. Omit for first page.
+
+    PageSizeParam:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      description: Number of records per page. Max 200 for the local API.
+
+  responses:
+
+    BadRequest:
+      description: Invalid request body or query parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            errorCode: VALIDATION_ERROR
+            message: "requestedAmount must be >= 1"
+            details:
+              field: requestedAmount
+              value: 0
+            traceId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            timestamp: "2026-03-11T14:00:00Z"
+
+    Unauthorized:
+      description: Missing or invalid LAN API key (LAN access only; not applicable on localhost)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    NotFound:
+      description: Resource not found in local buffer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    InternalServerError:
+      description: Unexpected agent error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+
+    # ── Error envelope ──────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      description: Standard error envelope. Consistent with Cloud API error format.
+      required: [errorCode, message, traceId, timestamp]
+      additionalProperties: false
+      properties:
+        errorCode:
+          type: string
+          description: |
+            Machine-readable error code. Values:
+            - `VALIDATION_ERROR` — invalid or missing fields
+            - `NOT_FOUND` — resource not in local buffer
+            - `CONFLICT` — state conflict (duplicate pre-auth, wrong odooOrderId, terminal state)
+            - `UNAUTHORIZED` — invalid LAN API key
+            - `FCC_UNREACHABLE` — FCC not responding
+            - `FCC_TIMEOUT` — FCC response timeout
+            - `INTERNAL_ERROR` — unexpected agent error
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+        traceId:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+
+    # ── Pagination ──────────────────────────────────────────────────────────
+
+    PageMeta:
+      type: object
+      required: [pageSize, hasMore]
+      additionalProperties: false
+      properties:
+        pageSize:
+          type: integer
+        hasMore:
+          type: boolean
+        nextCursor:
+          type: string
+          nullable: true
+
+    # ── Local transaction ───────────────────────────────────────────────────
+
+    LocalTransaction:
+      type: object
+      description: |
+        Locally buffered canonical transaction (subset of cloud CanonicalTransaction).
+        `rawPayloadJson` and cloud-only fields are excluded.
+      required:
+        - id
+        - fccTransactionId
+        - siteCode
+        - pumpNumber
+        - nozzleNumber
+        - productCode
+        - volumeMicrolitres
+        - amountMinorUnits
+        - unitPriceMinorPerLitre
+        - startedAt
+        - completedAt
+        - fccVendor
+        - currencyCode
+        - status
+        - ingestedAt
+        - updatedAt
+        - isDuplicate
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        fccTransactionId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        siteCode:
+          type: string
+        pumpNumber:
+          type: integer
+          minimum: 1
+        nozzleNumber:
+          type: integer
+          minimum: 1
+        productCode:
+          type: string
+        volumeMicrolitres:
+          type: integer
+          exclusiveMinimum: 0
+        amountMinorUnits:
+          type: integer
+          exclusiveMinimum: 0
+        unitPriceMinorPerLitre:
+          type: integer
+          exclusiveMinimum: 0
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        fccVendor:
+          type: string
+          enum: [DOMS, RADIX, ADVATEC, PETRONITE]
+        currencyCode:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        status:
+          type: string
+          enum: [PENDING, SYNCED, SYNCED_TO_ODOO, STALE_PENDING, DUPLICATE, ARCHIVED]
+        ingestedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        isDuplicate:
+          type: boolean
+        odooOrderId:
+          type: string
+          nullable: true
+          maxLength: 100
+        attendantId:
+          type: string
+          nullable: true
+          maxLength: 100
+        fiscalReceiptNumber:
+          type: string
+          nullable: true
+          maxLength: 100
+
+    LocalTransactionPage:
+      type: object
+      required: [data, meta]
+      additionalProperties: false
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/LocalTransaction'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+
+    # ── Pump status ─────────────────────────────────────────────────────────
+
+    PumpStatus:
+      type: object
+      description: |
+        Live or synthesised pump/nozzle state.
+        Authoritative spec: `schemas/canonical/pump-status.schema.json`
+      required:
+        - schemaVersion
+        - siteCode
+        - pumpNumber
+        - nozzleNumber
+        - state
+        - currencyCode
+        - statusSequence
+        - observedAtUtc
+        - source
+      additionalProperties: false
+      properties:
+        schemaVersion:
+          type: string
+          const: "1.0"
+        siteCode:
+          type: string
+        pumpNumber:
+          type: integer
+          minimum: 1
+        nozzleNumber:
+          type: integer
+          minimum: 1
+        state:
+          type: string
+          enum: [IDLE, AUTHORIZED, CALLING, DISPENSING, PAUSED, COMPLETED, ERROR, OFFLINE, UNKNOWN]
+          description: |
+            - `IDLE` — pump ready, not dispensing
+            - `AUTHORIZED` — pre-auth accepted, awaiting nozzle lift
+            - `CALLING` — nozzle lifted, awaiting dispense start
+            - `DISPENSING` — actively dispensing
+            - `PAUSED` — dispense paused
+            - `COMPLETED` — dispense complete, awaiting nozzle return
+            - `ERROR` — FCC-reported error condition
+            - `OFFLINE` — pump not communicating with FCC
+            - `UNKNOWN` — status cannot be determined
+        productCode:
+          type: string
+          nullable: true
+        productName:
+          type: string
+          nullable: true
+          maxLength: 64
+        currentVolumeLitres:
+          type: string
+          nullable: true
+          description: Current dispensed volume as decimal string (e.g., `"12.500"`).
+        currentAmount:
+          type: string
+          nullable: true
+          description: Current dispensed amount as decimal string in major currency units.
+        unitPrice:
+          type: string
+          nullable: true
+          description: Price per litre as decimal string in major currency units.
+        currencyCode:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        fccStatusCode:
+          type: string
+          nullable: true
+          maxLength: 64
+          description: Raw vendor-specific status code before mapping, for diagnostics.
+        statusSequence:
+          type: integer
+          minimum: 0
+          description: Monotonically increasing sequence number from FCC. Used to detect stale data.
+        observedAtUtc:
+          type: string
+          format: date-time
+        lastChangedAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+        source:
+          type: string
+          enum: [FCC_LIVE, EDGE_SYNTHESIZED]
+          description: "`FCC_LIVE` = real-time from FCC adapter. `EDGE_SYNTHESIZED` = inferred from buffered transactions."
+
+    PumpStatusResponse:
+      type: object
+      required: [pumps, observedAtUtc, fccReachable]
+      additionalProperties: false
+      properties:
+        pumps:
+          type: array
+          items:
+            $ref: '#/components/schemas/PumpStatus'
+        observedAtUtc:
+          type: string
+          format: date-time
+          description: UTC timestamp when this response was assembled.
+        fccReachable:
+          type: boolean
+          description: Whether the FCC was reachable at time of this response. When false, data may be stale.
+
+    # ── Pre-auth ────────────────────────────────────────────────────────────
+
+    PreAuthRequest:
+      type: object
+      description: Pre-authorisation request from Odoo POS.
+      required:
+        - odooOrderId
+        - pumpNumber
+        - nozzleNumber
+        - productCode
+        - requestedAmount
+        - unitPrice
+        - currency
+        - requestedAt
+      additionalProperties: false
+      properties:
+        odooOrderId:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Odoo POS order reference. Dedup key with `siteCode`.
+        pumpNumber:
+          type: integer
+          minimum: 1
+        nozzleNumber:
+          type: integer
+          minimum: 1
+        productCode:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: Canonical fuel product code (e.g., PMS, AGO, IK).
+        requestedAmount:
+          type: integer
+          minimum: 1
+          description: Amount to authorise in minor currency units (e.g., cents). Pre-auth is always by amount.
+        unitPrice:
+          type: integer
+          minimum: 1
+          description: Price per litre at time of request, in minor currency units.
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        requestedAt:
+          type: string
+          format: date-time
+          description: UTC timestamp when Odoo POS submitted this request.
+        vehicleNumber:
+          type: string
+          nullable: true
+          maxLength: 50
+        customerName:
+          type: string
+          nullable: true
+          maxLength: 200
+          description: Required when `fiscalization.requireCustomerTaxId = true`.
+        customerTaxId:
+          type: string
+          nullable: true
+          maxLength: 50
+          description: |
+            Customer Tax Identification Number (TIN). PII — NEVER log.
+            Required when `fiscalization.requireCustomerTaxId = true`.
+        customerBusinessName:
+          type: string
+          nullable: true
+          maxLength: 200
+          description: B2B business name. Required for B2B fiscalised transactions.
+        attendantId:
+          type: string
+          nullable: true
+          maxLength: 100
+          description: Odoo user ID of the fuel attendant.
+
+    PreAuthResult:
+      type: object
+      description: Result of the pre-auth command sent to the FCC.
+      required:
+        - id
+        - odooOrderId
+        - pumpNumber
+        - nozzleNumber
+        - status
+        - requestedAmount
+        - currency
+        - expiresAt
+        - createdAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Middleware UUID for this pre-auth record. Use this ID to cancel.
+        odooOrderId:
+          type: string
+        pumpNumber:
+          type: integer
+        nozzleNumber:
+          type: integer
+        status:
+          type: string
+          enum: [AUTHORIZED, FAILED]
+          description: FCC authorisation outcome. Only `AUTHORIZED` or `FAILED` are returned synchronously.
+        requestedAmount:
+          type: integer
+          description: Authorised amount in minor currency units.
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        fccCorrelationId:
+          type: string
+          nullable: true
+          maxLength: 100
+          description: FCC-assigned correlation reference. Used by the reconciliation engine to match the final dispense transaction.
+        fccAuthorizationCode:
+          type: string
+          nullable: true
+          maxLength: 100
+          description: FCC authorisation confirmation code.
+        expiresAt:
+          type: string
+          format: date-time
+          description: Pre-auth expiry time. `requestedAt + preAuthTimeoutSeconds`. FCC will release the pump after this time.
+        createdAt:
+          type: string
+          format: date-time
+        failureReason:
+          type: string
+          nullable: true
+          description: Human-readable failure reason when `status = FAILED`. Null on `AUTHORIZED`.
+
+    PreAuthCancelResponse:
+      type: object
+      required: [id, status, cancelledAt, fccCancellationConfirmed]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [CANCELLED]
+        cancelledAt:
+          type: string
+          format: date-time
+        fccCancellationConfirmed:
+          type: boolean
+          description: |
+            Whether the FCC acknowledged the cancellation command.
+            `false` means the cancel command was not sent (FCC unreachable) or was rejected;
+            the pre-auth will expire naturally at `expiresAt`. The local record is still
+            marked `CANCELLED`.
+
+    # ── Agent status ────────────────────────────────────────────────────────
+
+    AgentStatusResponse:
+      type: object
+      required:
+        - deviceId
+        - siteCode
+        - connectivityState
+        - fccReachable
+        - bufferDepth
+        - agentVersion
+        - uptimeSeconds
+        - reportedAtUtc
+      additionalProperties: false
+      properties:
+        deviceId:
+          type: string
+          format: uuid
+        siteCode:
+          type: string
+        connectivityState:
+          type: string
+          enum: [FULLY_ONLINE, INTERNET_DOWN, FCC_UNREACHABLE, FULLY_OFFLINE]
+          description: |
+            - `FULLY_ONLINE` — both internet and FCC reachable
+            - `INTERNET_DOWN` — FCC reachable, internet unreachable
+            - `FCC_UNREACHABLE` — internet reachable, FCC unreachable
+            - `FULLY_OFFLINE` — both internet and FCC unreachable
+        fccReachable:
+          type: boolean
+        fccHeartbeatAgeSeconds:
+          type: integer
+          nullable: true
+          description: Seconds since last successful FCC heartbeat. Null if never connected.
+        bufferDepth:
+          type: integer
+          minimum: 0
+          description: Count of PENDING records in local buffer awaiting cloud upload.
+        syncLagSeconds:
+          type: integer
+          nullable: true
+          description: Seconds between now and the `completedAt` of the oldest PENDING transaction. Null if no pending records.
+        lastSuccessfulSyncUtc:
+          type: string
+          format: date-time
+          nullable: true
+          description: UTC timestamp of the last successful cloud upload. Null if never synced.
+        configVersion:
+          type: integer
+          nullable: true
+          description: Current active config version number. Null if no config loaded.
+        agentVersion:
+          type: string
+          description: Current Edge Agent APK version (SemVer).
+        uptimeSeconds:
+          type: integer
+          minimum: 0
+          description: Seconds since the foreground service started.
+        reportedAtUtc:
+          type: string
+          format: date-time

@@ -1,0 +1,122 @@
+# =========================
+# .NET / C#
+# =========================
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.VC.opendb
+*.vspscc
+*.vssscc
+.vs/
+*.ncrunchproject
+*.ncrunchsolution
+*.DotSettings.user
+packages/
+*.nupkg
+project.lock.json
+*.nuget.props
+*.nuget.targets
+PublishOutput/
+launchSettings.json
+
+# =========================
+# Angular / Node.js
+# =========================
+node_modules/
+dist/
+tmp/
+.angular/
+.sass-cache/
+*.css.map
+*.js.map
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+yarn.lock
+.env
+.env.*
+!.env.example
+coverage/
+e2e/reports/
+.nyc_output/
+testem.log
+typings/
+
+# =========================
+# Android (Java / Kotlin)
+# =========================
+*.iml
+*.class
+*.log
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+*.apk
+*.aab
+*.ap_
+*.dex
+.gradle/
+build/
+local.properties
+*.jks
+*.keystore
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+google-services.json
+
+# =========================
+# IDE / Editors
+# =========================
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# =========================
+# Misc
+# =========================
+*.tmp
+*.temp
+*.bak
+*.orig
+*.log

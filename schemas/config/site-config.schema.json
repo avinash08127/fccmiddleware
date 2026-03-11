@@ -1,0 +1,1079 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forecourt-middleware/schemas/config/site-config.schema.json",
+  "title": "SiteConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "configVersion",
+    "configId",
+    "issuedAtUtc",
+    "effectiveAtUtc",
+    "sourceRevision",
+    "identity",
+    "site",
+    "fcc",
+    "sync",
+    "buffer",
+    "localApi",
+    "telemetry",
+    "fiscalization",
+    "mappings",
+    "rollout"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "configVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "configId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "issuedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "effectiveAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sourceRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "databricksSyncAtUtc",
+        "siteMasterRevision",
+        "fccConfigRevision",
+        "portalChangeId"
+      ],
+      "properties": {
+        "databricksSyncAtUtc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "siteMasterRevision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "fccConfigRevision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "portalChangeId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "identity": {
+      "$ref": "#/$defs/identity"
+    },
+    "site": {
+      "$ref": "#/$defs/site"
+    },
+    "fcc": {
+      "$ref": "#/$defs/fcc"
+    },
+    "sync": {
+      "$ref": "#/$defs/sync"
+    },
+    "buffer": {
+      "$ref": "#/$defs/buffer"
+    },
+    "localApi": {
+      "$ref": "#/$defs/localApi"
+    },
+    "telemetry": {
+      "$ref": "#/$defs/telemetry"
+    },
+    "fiscalization": {
+      "$ref": "#/$defs/fiscalization"
+    },
+    "mappings": {
+      "$ref": "#/$defs/mappings"
+    },
+    "rollout": {
+      "$ref": "#/$defs/rollout"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "site": {
+            "properties": {
+              "operatingModel": {
+                "enum": [
+                  "CODO",
+                  "DODO"
+                ]
+              }
+            },
+            "required": [
+              "operatingModel"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "site": {
+            "required": [
+              "operatorName",
+              "operatorTaxPayerId"
+            ],
+            "properties": {
+              "operatorName": {
+                "type": "string",
+                "minLength": 1
+              },
+              "operatorTaxPayerId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "site": {
+            "properties": {
+              "connectivityMode": {
+                "const": "DISCONNECTED"
+              }
+            },
+            "required": [
+              "connectivityMode"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fcc": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fcc": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fcc": {
+            "required": [
+              "fccId",
+              "vendor",
+              "connectionProtocol",
+              "hostAddress",
+              "port",
+              "transactionMode",
+              "ingestionMode"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fcc": {
+            "properties": {
+              "transactionMode": {
+                "enum": [
+                  "PULL",
+                  "HYBRID"
+                ]
+              }
+            },
+            "required": [
+              "transactionMode"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fcc": {
+            "required": [
+              "pullIntervalSeconds"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fcc": {
+            "properties": {
+              "ingestionMode": {
+                "const": "CLOUD_DIRECT"
+              }
+            },
+            "required": [
+              "ingestionMode"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fcc": {
+            "required": [
+              "catchUpPullIntervalSeconds"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fcc": {
+            "properties": {
+              "transactionMode": {
+                "const": "HYBRID"
+              }
+            },
+            "required": [
+              "transactionMode"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fcc": {
+            "required": [
+              "hybridCatchUpIntervalSeconds"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "localApi": {
+            "properties": {
+              "enableLanApi": {
+                "const": true
+              }
+            },
+            "required": [
+              "enableLanApi"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "identity": {
+            "properties": {
+              "isPrimaryAgent": {
+                "const": true
+              }
+            },
+            "required": [
+              "isPrimaryAgent"
+            ]
+          },
+          "localApi": {
+            "required": [
+              "lanBindAddress",
+              "lanApiKeyRef"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fiscalization": {
+            "properties": {
+              "requireCustomerTaxId": {
+                "const": true
+              }
+            },
+            "required": [
+              "requireCustomerTaxId"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fiscalization": {
+            "properties": {
+              "mode": {
+                "const": "FCC_DIRECT"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "fiscalization": {
+            "properties": {
+              "mode": {
+                "enum": [
+                  "EXTERNAL_INTEGRATION",
+                  "NONE"
+                ]
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fiscalization": {
+            "properties": {
+              "fiscalReceiptRequired": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "legalEntityId",
+        "legalEntityCode",
+        "siteId",
+        "siteCode",
+        "siteName",
+        "timezone",
+        "currencyCode",
+        "deviceId",
+        "isPrimaryAgent"
+      ],
+      "properties": {
+        "legalEntityId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "legalEntityCode": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9-]+$"
+        },
+        "siteId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "siteCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "siteName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "currencyCode": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "isPrimaryAgent": {
+          "type": "boolean"
+        }
+      }
+    },
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "isActive",
+        "operatingModel",
+        "connectivityMode",
+        "odooSiteId",
+        "companyTaxPayerId",
+        "operatorName",
+        "operatorTaxPayerId"
+      ],
+      "properties": {
+        "isActive": {
+          "type": "boolean"
+        },
+        "operatingModel": {
+          "enum": [
+            "COCO",
+            "CODO",
+            "DODO",
+            "DOCO"
+          ]
+        },
+        "connectivityMode": {
+          "enum": [
+            "CONNECTED",
+            "DISCONNECTED"
+          ]
+        },
+        "odooSiteId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "companyTaxPayerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "operatorName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 120
+        },
+        "operatorTaxPayerId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        }
+      }
+    },
+    "fcc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "fccId",
+        "vendor",
+        "model",
+        "version",
+        "connectionProtocol",
+        "hostAddress",
+        "port",
+        "credentialRef",
+        "credentialRevision",
+        "secretEnvelope",
+        "transactionMode",
+        "ingestionMode",
+        "pullIntervalSeconds",
+        "catchUpPullIntervalSeconds",
+        "hybridCatchUpIntervalSeconds",
+        "heartbeatIntervalSeconds",
+        "heartbeatTimeoutSeconds",
+        "pushSourceIpAllowList"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "fccId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "vendor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "DOMS",
+            "RADIX",
+            "ADVATEC",
+            "PETRONITE",
+            null
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 80
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 80
+        },
+        "connectionProtocol": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "REST",
+            "TCP",
+            "SOAP",
+            null
+          ]
+        },
+        "hostAddress": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "credentialRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "credentialRevision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "secretEnvelope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "format",
+            "payload"
+          ],
+          "properties": {
+            "format": {
+              "enum": [
+                "NONE",
+                "JWE_BASE64"
+              ]
+            },
+            "payload": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          }
+        },
+        "transactionMode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "PULL",
+            "PUSH",
+            "HYBRID",
+            null
+          ]
+        },
+        "ingestionMode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "CLOUD_DIRECT",
+            "RELAY",
+            "BUFFER_ALWAYS",
+            null
+          ]
+        },
+        "pullIntervalSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 5,
+          "maximum": 3600
+        },
+        "catchUpPullIntervalSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 5,
+          "maximum": 3600
+        },
+        "hybridCatchUpIntervalSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "heartbeatIntervalSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 300
+        },
+        "heartbeatTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 900
+        },
+        "pushSourceIpAllowList": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cloudBaseUrl",
+        "uploadBatchSize",
+        "uploadIntervalSeconds",
+        "syncedStatusPollIntervalSeconds",
+        "configPollIntervalSeconds",
+        "cursorStrategy",
+        "maxReplayBackoffSeconds",
+        "initialReplayBackoffSeconds",
+        "maxRecordsPerUploadWindow"
+      ],
+      "properties": {
+        "cloudBaseUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "uploadBatchSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "uploadIntervalSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600
+        },
+        "syncedStatusPollIntervalSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600
+        },
+        "configPollIntervalSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 86400
+        },
+        "cursorStrategy": {
+          "enum": [
+            "FCC_TRANSACTION_ID",
+            "END_TIMESTAMP",
+            "VENDOR_OFFSET"
+          ]
+        },
+        "maxReplayBackoffSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "initialReplayBackoffSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "maxRecordsPerUploadWindow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      }
+    },
+    "buffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retentionDays",
+        "stalePendingDays",
+        "maxRecords",
+        "cleanupIntervalHours",
+        "persistRawPayloads"
+      ],
+      "properties": {
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 7,
+          "maximum": 90
+        },
+        "stalePendingDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "maxRecords": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 200000
+        },
+        "cleanupIntervalHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168
+        },
+        "persistRawPayloads": {
+          "type": "boolean"
+        }
+      }
+    },
+    "localApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "localhostPort",
+        "enableLanApi",
+        "lanBindAddress",
+        "lanAllowCidrs",
+        "lanApiKeyRef",
+        "rateLimitPerMinute"
+      ],
+      "properties": {
+        "localhostPort": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "enableLanApi": {
+          "type": "boolean"
+        },
+        "lanBindAddress": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "lanAllowCidrs": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "lanApiKeyRef": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "rateLimitPerMinute": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 6000
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "telemetryIntervalSeconds",
+        "logLevel",
+        "includeDiagnosticsLogs",
+        "metricsWindowSeconds"
+      ],
+      "properties": {
+        "telemetryIntervalSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "logLevel": {
+          "enum": [
+            "TRACE",
+            "DEBUG",
+            "INFO",
+            "WARN",
+            "ERROR"
+          ]
+        },
+        "includeDiagnosticsLogs": {
+          "type": "boolean"
+        },
+        "metricsWindowSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        }
+      }
+    },
+    "fiscalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "taxAuthorityEndpoint",
+        "requireCustomerTaxId",
+        "fiscalReceiptRequired"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "FCC_DIRECT",
+            "EXTERNAL_INTEGRATION",
+            "NONE"
+          ]
+        },
+        "taxAuthorityEndpoint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "requireCustomerTaxId": {
+          "type": "boolean"
+        },
+        "fiscalReceiptRequired": {
+          "type": "boolean"
+        }
+      }
+    },
+    "mappings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pumpNumberOffset",
+        "priceDecimalPlaces",
+        "volumeUnit",
+        "products",
+        "nozzles"
+      ],
+      "properties": {
+        "pumpNumberOffset": {
+          "type": "integer",
+          "minimum": -20,
+          "maximum": 20
+        },
+        "priceDecimalPlaces": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "volumeUnit": {
+          "enum": [
+            "LITRES",
+            "MILLILITRES"
+          ]
+        },
+        "products": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/productMapping"
+          }
+        },
+        "nozzles": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/nozzleMapping"
+          }
+        }
+      }
+    },
+    "productMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fccProductCode",
+        "canonicalProductCode",
+        "displayName",
+        "active"
+      ],
+      "properties": {
+        "fccProductCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "canonicalProductCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "active": {
+          "type": "boolean"
+        }
+      }
+    },
+    "nozzleMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pumpNozzleId",
+        "pumpNumber",
+        "nozzleNumber",
+        "canonicalProductCode",
+        "odooPumpId",
+        "active"
+      ],
+      "properties": {
+        "pumpNozzleId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "pumpNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 999
+        },
+        "nozzleNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "canonicalProductCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "odooPumpId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "active": {
+          "type": "boolean"
+        }
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minAgentVersion",
+        "maxAgentVersion",
+        "requiresRestartSections",
+        "configTtlHours"
+      ],
+      "properties": {
+        "minAgentVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "maxAgentVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "requiresRestartSections": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "identity",
+              "site",
+              "fcc",
+              "sync",
+              "buffer",
+              "localApi",
+              "telemetry",
+              "fiscalization",
+              "mappings",
+              "rollout"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "configTtlHours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fccmiddleware.com/schemas/canonical/canonical-transaction.schema.json",
+  "title": "CanonicalTransaction",
+  "description": "The canonical, vendor-neutral representation of a fuel dispensing transaction. Version 1.",
+  "type": "object",
+  "required": [
+    "id",
+    "fccTransactionId",
+    "siteCode",
+    "pumpNumber",
+    "nozzleNumber",
+    "productCode",
+    "volumeMicrolitres",
+    "amountMinorUnits",
+    "unitPriceMinorPerLitre",
+    "startedAt",
+    "completedAt",
+    "fccVendor",
+    "legalEntityId",
+    "currencyCode",
+    "status",
+    "ingestionSource",
+    "ingestedAt",
+    "updatedAt",
+    "schemaVersion",
+    "isDuplicate",
+    "correlationId"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Middleware-generated primary key (UUID v4)."
+    },
+    "fccTransactionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Opaque transaction ID from the FCC. Dedup key with siteCode."
+    },
+    "siteCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50,
+      "description": "Site where dispense occurred. Dedup key with fccTransactionId."
+    },
+    "pumpNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99,
+      "description": "Physical pump number (after pumpNumberOffset applied)."
+    },
+    "nozzleNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "description": "Physical nozzle number on the pump."
+    },
+    "productCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "description": "Canonical product code after mapping (e.g., PMS, AGO, IK, UNKNOWN)."
+    },
+    "volumeMicrolitres": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 50000000000,
+      "description": "Dispensed volume in microlitres (1 L = 1,000,000 uL). Max 50,000 L."
+    },
+    "amountMinorUnits": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 999999999999,
+      "description": "Total transaction amount in minor currency units (e.g., cents)."
+    },
+    "unitPriceMinorPerLitre": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9999999999,
+      "description": "Price per litre in minor currency units."
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Dispense start time in UTC (ISO 8601)."
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Dispense completion time in UTC (ISO 8601). Must be >= startedAt."
+    },
+    "fiscalReceiptNumber": {
+      "type": ["string", "null"],
+      "maxLength": 100,
+      "description": "Fiscal receipt reference if FCC fiscalizes directly. Null otherwise."
+    },
+    "fccVendor": {
+      "type": "string",
+      "enum": ["DOMS", "RADIX", "ADVATEC", "PETRONITE"],
+      "description": "FCC vendor that produced this transaction."
+    },
+    "attendantId": {
+      "type": ["string", "null"],
+      "maxLength": 100,
+      "description": "Attendant/operator identifier from FCC. Null if not captured."
+    },
+    "legalEntityId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Legal entity owning the site. Denormalized for row-level scoping."
+    },
+    "currencyCode": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$",
+      "description": "ISO 4217 currency code for monetary fields on this transaction."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["PENDING", "SYNCED", "SYNCED_TO_ODOO", "STALE_PENDING", "DUPLICATE", "ARCHIVED"],
+      "description": "Current lifecycle status of the transaction."
+    },
+    "ingestionSource": {
+      "type": "string",
+      "enum": ["FCC_PUSH", "EDGE_UPLOAD", "CLOUD_PULL"],
+      "description": "Which ingestion path delivered this transaction."
+    },
+    "rawPayloadRef": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "description": "S3 URI referencing the archived raw FCC payload. Null on Edge Agent."
+    },
+    "rawPayloadJson": {
+      "type": ["string", "null"],
+      "maxLength": 65536,
+      "description": "Inline raw FCC payload JSON. Used on Edge Agent. Null on Cloud."
+    },
+    "ingestedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when middleware first received and persisted this transaction."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp of last status change. Must be >= ingestedAt."
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version of the canonical model schema used."
+    },
+    "odooOrderId": {
+      "type": ["string", "null"],
+      "maxLength": 100,
+      "description": "Odoo order reference stamped when Odoo acknowledges. Null until acknowledged."
+    },
+    "preAuthId": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "FK to PreAuthRecord when matched via reconciliation. Null for normal orders."
+    },
+    "reconciliationStatus": {
+      "type": ["string", "null"],
+      "enum": ["MATCHED", "VARIANCE_WITHIN_TOLERANCE", "VARIANCE_FLAGGED", "UNMATCHED", null],
+      "description": "Reconciliation outcome. Null for normal orders at non-pre-auth sites."
+    },
+    "isDuplicate": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether flagged as potential duplicate by secondary dedup check."
+    },
+    "duplicateOfId": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "If isDuplicate=true, references the original transaction's id."
+    },
+    "correlationId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Trace correlation ID for observability."
+    }
+  },
+  "if": {
+    "properties": { "isDuplicate": { "const": true } }
+  },
+  "then": {
+    "required": ["duplicateOfId"],
+    "properties": {
+      "duplicateOfId": { "type": "string", "format": "uuid" }
+    }
+  },
+  "else": {
+    "properties": {
+      "duplicateOfId": { "const": null }
+    }
+  }
+}
