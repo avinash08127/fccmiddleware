@@ -200,7 +200,7 @@ Create the CI pipeline configuration (GitHub Actions or equivalent).
 - `schemas/openapi/cloud-api.yaml` — target API spec to eventually match
 
 **Task:**
-Configure Swashbuckle to generate OpenAPI docs from controllers.
+Configure Swashbuckle to generate OpenAPI docs from Endpoints.
 
 **Detailed instructions:**
 1. Add Swashbuckle.AspNetCore to the Api project
