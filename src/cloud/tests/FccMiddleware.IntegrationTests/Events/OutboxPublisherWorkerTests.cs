@@ -164,16 +164,26 @@ public sealed class OutboxPublisherWorkerTests : IAsyncLifetime
     [Fact]
     public async Task Worker_CleansUpOldProcessedMessages()
     {
-        // Arrange: insert an old processed outbox message using raw SQL to avoid
-        // any EF Core default-value inference issues with ProcessedAt
+        // Arrange: insert an old processed outbox message via EF Core, then update
+        // ProcessedAt with raw SQL to guarantee it is persisted.
         var correlationId = Guid.NewGuid();
         var oldDate = DateTimeOffset.UtcNow.AddDays(-10);
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            var msg = new OutboxMessage
+            {
+                EventType = "TestCleanup",
+                Payload = "{\"test\":true}",
+                CorrelationId = correlationId,
+                CreatedAt = oldDate
+            };
+            db.OutboxMessages.Add(msg);
+            await db.SaveChangesAsync();
+
+            // Update ProcessedAt via raw SQL to bypass any EF Core quirks
             await db.Database.ExecuteSqlInterpolatedAsync(
-                $@"INSERT INTO outbox_messages (event_type, payload, correlation_id, created_at, processed_at)
-                   VALUES ('TestCleanup', '{"{\"test\":true}"}'::jsonb, {correlationId}, {oldDate}, {oldDate})");
+                $"UPDATE outbox_messages SET processed_at = {oldDate} WHERE correlation_id = {correlationId}");
         }
 
         // Verify the old message exists before cleanup
