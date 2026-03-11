@@ -4,9 +4,56 @@
 
 **Sprint Cadence:** 2-week sprints
 
+## Performance Guardrails
+
+These budgets are design constraints for the Edge Agent on the Urovo i9100 and should be validated throughout development, not only during hardening.
+
+- `POST /api/preauth` p95 local API overhead on-device: <= 150 ms before FCC call time; cloud queueing must not be on the request path
+- `POST /api/preauth` p95 end-to-end on healthy FCC LAN: <= 1.5 s; p99 <= 3 s
+- `GET /api/transactions` p95 for first page (`limit <= 50`) with 30,000 buffered records: <= 150 ms
+- `GET /api/status` p95: <= 100 ms
+- `GET /api/pump-status` live-response target on healthy LAN: <= 1 s; stale fallback response when FCC is slow/unreachable: <= 150 ms
+- Steady-state Edge Agent RSS target: <= 180 MB during normal operation
+- No more than one active periodic cadence controller inside the foreground service; all recurring network work should be coalesced under it
+- 30,000-record local buffer target must be supported without ANRs, OOMs, or sustained query degradation
+- Replay throughput target on stable internet: >= 600 transactions/minute while preserving chronological ordering
+- Battery drain target attributable to Edge Agent over an 8-hour shift in `CLOUD_DIRECT`: <= 8%
+- Battery drain target attributable to Edge Agent over an 8-hour shift in `RELAY` / `BUFFER_ALWAYS`: <= 12%
+
 ---
 
 ## Phase 0 — Foundations (Sprints 1–2)
+
+### EA-0.0: Performance Budgets & Benchmark Harness
+
+**Sprint:** 1
+**Prereqs:** None
+**Estimated effort:** 1 day
+
+**Read these artifacts before starting:**
+- `Requirements.md` — REQ-15 (Edge Agent), Non-Functional Requirements
+- `HighLevelRequirements.md` — §15 (Edge Android Agent)
+- `WIP-HLD-Edge-Agent.md` — performance, reliability, and deployment sections
+
+**Task:**
+Define and automate the core performance guardrails for the Edge Agent before feature development expands.
+
+**Detailed instructions:**
+1. Convert the guardrails above into measurable benchmark and test cases
+2. Add lightweight benchmark harnesses for:
+    - local API latency
+    - Room query latency on 30,000 buffered transactions
+    - replay throughput against mock cloud responses
+    - memory footprint during steady-state polling and sync
+3. Add synthetic seed generation for representative 30,000-transaction datasets
+4. Establish a profiling checklist for Urovo i9100 validation runs
+5. Document pass/fail thresholds so later tasks can reference them explicitly
+
+**Acceptance criteria:**
+- Guardrail thresholds are documented in the repo and referenced by later Edge Agent tasks
+- Benchmark harness can exercise a 30,000-record local dataset
+- Pre-auth, local API, replay, and memory test paths are measurable before Phase 2 work begins
+- At least one automated benchmark check is ready to run in CI or locally during development
 
 ### EA-0.1: Android Project Scaffold
 
@@ -36,6 +83,8 @@ Create the complete Android project for the Edge Agent from scratch.
    - kotlinx-coroutines-android
    - kotlinx-serialization-json
    - androidx.security:security-crypto (EncryptedSharedPreferences)
+   - Test stack: JUnit 5, MockK, Room testing, Ktor server test host, Ktor client mock, Robolectric
+   - Do not scaffold WorkManager for the resident runtime path; keep periodic resident work under the foreground service cadence controller
 5. Create the package tree per Edge Agent HLD §5.3:
    - `api/` — Ktor route files (stubs)
    - `adapter/common/` — IFccAdapter interface stub
@@ -80,6 +129,7 @@ Implement the foreground service that keeps the Edge Agent running persistently.
    - Create persistent notification channel: `fcc_edge_agent_channel`
    - Show persistent notification: "FCC Edge Agent Running" with status info
    - `foregroundServiceType = "dataSync"` in manifest
+   - Keep the resident scope intentionally thin: local API server, pre-auth path, connectivity/cadence controller, FCC polling orchestration, and replay triggers only
 2. Create `BootReceiver` extending `BroadcastReceiver`:
    - Register for `RECEIVE_BOOT_COMPLETED` intent
    - Start the foreground service on boot
@@ -87,13 +137,14 @@ Implement the foreground service that keeps the Edge Agent running persistently.
    - Service declaration: `<service android:foregroundServiceType="dataSync">`
    - Receiver declaration with boot intent filter
    - Permissions: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `RECEIVE_BOOT_COMPLETED`, `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`
-4. The service is the central lifecycle owner — all workers (FCC poller, upload, etc.) will be started from here in later tasks
+4. The service is the central lifecycle owner for the thin always-on core, while non-critical jobs (telemetry, cleanup, config refresh, heavy diagnostics refresh) must be coalesced and scheduled opportunistically rather than left permanently hot
 
 **Acceptance criteria:**
 - Service starts and shows persistent notification on emulator (API 31+)
 - Service survives app backgrounding
 - Boot receiver starts service after device reboot
 - Service returns START_STICKY for restart after kill
+- The always-on component list is explicitly limited and documented in code comments or developer documentation
 
 ---
 
@@ -113,11 +164,12 @@ Implement the complete Room database with all entities, DAOs, and configuration.
 **Detailed instructions:**
 1. Create `BufferDatabase` extending `RoomDatabase` in `buffer/`:
    - Annotate with `@Database(entities = [...], version = 1, exportSchema = true)`
-   - Include all 5 entities
+   - Include all 6 entities
    - Enable schema export for migration testing
 2. Create Room entities per §5.5.1 of DB schema spec:
-   - `BufferedTransaction` — all columns from spec (id, fccTransactionId, siteCode, pumpNumber, nozzleNumber, productCode, volumeMicrolitres, amountMinorUnits, unitPriceMinorPerLitre, currencyCode, startedAt, completedAt, fiscalReceiptNumber, fccVendor, attendantId, status, syncStatus, ingestionSource, rawPayloadJson, correlationId, uploadAttempts, lastUploadAttemptAt, lastUploadError, schemaVersion, createdAt, updatedAt)
+   - `BufferedTransaction` — all columns from spec (id, fccTransactionId, siteCode, pumpNumber, nozzleNumber, productCode, volumeMicrolitres, amountMinorUnits, unitPriceMinorPerLitre, currencyCode, startedAt, completedAt, fiscalReceiptNumber, fccVendor, attendantId, status, syncStatus, ingestionSource, rawPayloadJson, correlationId, uploadAttempts, lastUploadAttemptAt, lastUploadError, schemaVersion, createdAt, updatedAt) — `pumpNumber`/`nozzleNumber` here are **FCC numbers** as received from the FCC
    - `PreAuthRecord` (edge) — all columns from spec
+   - `Nozzle` — id, siteCode, odooPumpNumber, fccPumpNumber, odooNozzleNumber, fccNozzleNumber, productCode, isActive, syncedAt, createdAt, updatedAt
    - `SyncState` — single-row table (id=1)
    - `AgentConfig` — single-row table (id=1)
    - `AuditLog` — local audit trail
@@ -128,6 +180,8 @@ Implement the complete Room database with all entities, DAOs, and configuration.
    - `ix_bt_sync_status`: `(sync_status, created_at)`
    - `ix_bt_local_api`: `(sync_status, pump_number, completed_at DESC)`
    - `ix_bt_cleanup`: `(sync_status, updated_at)`
+   - `ix_nozzles_odoo_lookup`: `(site_code, odoo_pump_number, odoo_nozzle_number)` UNIQUE — pre-auth translation
+   - `ix_nozzles_fcc_lookup`: `(site_code, fcc_pump_number, fcc_nozzle_number)` UNIQUE — reverse lookup
    - `ix_par_idemp`: `(odoo_order_id, site_code)` UNIQUE
    - `ix_par_unsent`: `(is_cloud_synced, created_at)`
    - `ix_par_expiry`: `(status, expires_at)`
@@ -140,6 +194,10 @@ Implement the complete Room database with all entities, DAOs, and configuration.
    - `AuditLogDao` — insert, getRecent
 7. Enable WAL mode via database builder: `.setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)`
 8. Set `OnConflictStrategy.IGNORE` on dedup-key inserts per spec
+9. Validate storage layout against hot-path performance:
+   - keep local API query columns on the hot table/index path
+   - evaluate whether raw payload storage should be isolated from the hottest query path
+   - benchmark query latency on a representative 30,000-record dataset
 
 **Acceptance criteria:**
 - Room schema export generates valid JSON in `app/schemas/`
@@ -148,6 +206,7 @@ Implement the complete Room database with all entities, DAOs, and configuration.
 - Unique indexes prevent duplicate inserts (Room in-memory DB test)
 - `getPendingForUpload` returns records in `createdAt ASC` order
 - `getForLocalApi` excludes SYNCED_TO_ODOO records
+- Local API query benchmarks remain within the documented guardrails on a representative backlog dataset
 
 ---
 
@@ -209,6 +268,8 @@ Scaffold the Ktor embedded HTTP server with stub routes.
    - Configure Ktor CIO engine on port 8585 (localhost)
    - Install `ContentNegotiation` with `kotlinx.serialization` JSON
    - Install `StatusPages` for error handling
+   - Structure binding so localhost is the default, with a later configuration path to expose the API on LAN for primary-HHT mode
+   - Add an explicit host binding (`127.0.0.1` by default) so LAN exposure never happens implicitly
 2. Create 4 route files with placeholder 501 responses:
    - `TransactionRoutes.kt`:
      - `GET /api/transactions` — list buffered transactions
@@ -228,6 +289,7 @@ Scaffold the Ktor embedded HTTP server with stub routes.
 - All 7 endpoints return 501 (Not Implemented) with structured JSON
 - `GET /api/status` returns 200 with placeholder status (this one should work)
 - ContentNegotiation serializes/deserializes JSON correctly
+- Server bootstrap is compatible with both same-device localhost mode and later primary-HHT LAN exposure
 
 ---
 
@@ -387,7 +449,7 @@ Implement the buffer management logic on top of Room DAOs.
 
 ---
 
-### EA-2.3: Connectivity Manager
+### EA-2.3: Connectivity Manager & Runtime Cadence Controller
 
 **Sprint:** 5
 **Prereqs:** EA-0.4, EA-2.1
@@ -398,28 +460,33 @@ Implement the buffer management logic on top of Room DAOs.
 - `WIP-HLD-Edge-Agent.md` — §3.2 (operating modes), §4.2 (connectivity manager design)
 
 **Task:**
-Implement the dual-probe connectivity state machine.
+Implement the dual-probe connectivity state machine and the single cadence controller that coordinates recurring runtime work.
 
 **Detailed instructions:**
 1. Create `ConnectivityManager` in `connectivity/`:
-2. Implement two independent probes:
+2. Create a cadence controller inside the foreground service runtime:
+   - one orchestrator loop owns periodic background work
+   - FCC heartbeat, cloud health check, and `SYNCED_TO_ODOO` polling are coalesced under this controller
+   - add jitter to recurring schedules to avoid synchronized bursts across devices
+   - allow cadence to adapt by ingestion mode, connectivity state, and backlog depth
+3. Implement two independent probes:
    - **Internet probe**: HTTP GET to cloud `GET /health`, 5s timeout, every 30s (configurable)
    - **FCC probe**: Call adapter `heartbeat()`, 5s timeout, every 30s (configurable)
-3. State derivation from probe results:
+4. State derivation from probe results:
    - Both UP → `FULLY_ONLINE`
    - Internet DOWN + FCC UP → `INTERNET_DOWN`
    - Internet UP + FCC DOWN → `FCC_UNREACHABLE`
    - Both DOWN → `FULLY_OFFLINE`
-4. DOWN detection: **3 consecutive failures** required before transitioning to DOWN
-5. UP recovery: **1 success** immediately transitions back to UP
-6. Initialize in `FULLY_OFFLINE` on app start, run both probes immediately
-7. Expose `StateFlow<ConnectivityState>` for other components to observe
-8. Log audit events on every state transition
-9. Side effects on transition (per §5.4 transition table):
+5. DOWN detection: **3 consecutive failures** required before transitioning to DOWN
+6. UP recovery: **1 success** immediately transitions back to UP
+7. Initialize in `FULLY_OFFLINE` on app start, run both probes immediately
+8. Expose `StateFlow<ConnectivityState>` for other components to observe
+9. Log audit events on every state transition
+10. Side effects on transition (per §5.4 transition table):
    - Any → INTERNET_DOWN: log, increment telemetry counter, stop upload worker
    - Any → FCC_UNREACHABLE: log, alert diagnostics screen, stop FCC poller
    - Any → FULLY_OFFLINE: log, stop all cloud+FCC workers, local API continues
-   - Any → FULLY_ONLINE: log, trigger immediate buffer replay + status poll + telemetry send
+   - Any → FULLY_ONLINE: log, trigger immediate buffer replay and `SYNCED_TO_ODOO` status sync; telemetry/config fetch should piggyback on an existing successful cloud cycle where possible
    - INTERNET_DOWN → FULLY_ONLINE: activate replay worker
    - FCC_UNREACHABLE → FULLY_ONLINE: resume FCC poller from last cursor
 
@@ -431,6 +498,8 @@ Implement the dual-probe connectivity state machine.
 - Transition side effects trigger (mock workers to verify)
 - Unit tests for all state transitions
 - Test: rapid probe alternation doesn't cause flapping
+- Only one periodic cadence controller is active in the resident runtime
+- `SYNCED_TO_ODOO` polling shares the cadence loop with cloud health checks
 
 ---
 
@@ -454,6 +523,7 @@ Implement all 7 local REST API endpoints served by Ktor.
    - Query params: `pumpNumber`, `since`, `limit`, `offset`
    - Exclude SYNCED_TO_ODOO records (per §5.3 of state machines spec)
    - Return paginated response with transaction list
+   - Optimize for offline Odoo polling: page-bounded queries only, no live FCC dependency, and stable response time with a 30,000-record backlog
 2. **`GET /api/transactions/{id}`** — get single transaction by ID
    - Return full transaction detail including raw payload
 3. **`POST /api/transactions/acknowledge`** — Odoo POS marks transactions as consumed
@@ -461,7 +531,8 @@ Implement all 7 local REST API endpoints served by Ktor.
    - This is a local-only operation — marks records for Odoo POS tracking
 4. **`GET /api/pump-status`** — live pump statuses
    - Call adapter `getPumpStatus()` in real-time
-   - If FCC_UNREACHABLE: return last-known status with `stale: true` flag
+   - Use short timeout and single-flight protection so concurrent callers do not fan out to FCC
+   - If FCC_UNREACHABLE or live fetch exceeds timeout budget: return last-known status with `stale: true` flag and freshness metadata
 5. **`POST /api/preauth`** — submit pre-authorization (delegates to PreAuthHandler — EA-2.5)
    - Accept `PreAuthCommand` JSON
    - Return `PreAuthResult` JSON
@@ -473,6 +544,9 @@ Implement all 7 local REST API endpoints served by Ktor.
    - Requests from localhost (127.0.0.1) bypass auth
    - Requests from LAN IPs require `X-Api-Key` header
    - Validate against stored LAN API key (constant-time comparison)
+9. Support both local API access modes:
+   - localhost by default for same-device Odoo POS
+   - optional LAN binding for primary-HHT mode so secondary HHTs can query the same buffer
 
 **Acceptance criteria:**
 - All 7 endpoints match `edge-agent-local-api.yaml` spec
@@ -482,6 +556,9 @@ Implement all 7 local REST API endpoints served by Ktor.
 - Pump status returns stale data when FCC unreachable
 - Status endpoint returns correct connectivity state and buffer stats
 - Ktor test application tests for each endpoint
+- Transaction list hot-path queries meet the documented guardrail targets on representative local backlog data
+- Pump status protects local API latency under concurrent access or slow FCC responses
+- Primary-HHT LAN mode works without regressing localhost mode
 
 ---
 
@@ -507,21 +584,26 @@ Implement the pre-auth handler — relays pre-auth commands from Odoo POS to FCC
    a. **Local dedup check**: Query `PreAuthDao.getByOdooOrderId(odooOrderId, siteCode)`
       - If exists with non-terminal status (PENDING, AUTHORIZED, DISPENSING): return existing record
       - If exists with terminal status (COMPLETED, CANCELLED, EXPIRED, FAILED): allow new request
-   b. **Check connectivity**: If `FCC_UNREACHABLE` or `FULLY_OFFLINE`, reject with `FCC_UNREACHABLE` error
-   c. Create local `PreAuthRecord` with `status = PENDING`
-   d. Call adapter `sendPreAuth(command)` — sends to FCC over LAN
-   e. Update local record based on FCC response:
+   b. **Resolve FCC pump/nozzle numbers**: Query `NozzleDao.resolveForPreAuth(siteCode, odooPumpNumber, odooNozzleNumber)`
+      - If no match found: reject with `NOZZLE_MAPPING_NOT_FOUND` error — do NOT send to FCC
+      - If inactive nozzle: reject with `NOZZLE_INACTIVE` error
+      - On success: extract `fccPumpNumber`, `fccNozzleNumber`, `productCode` from the result
+   c. **Check connectivity**: If `FCC_UNREACHABLE` or `FULLY_OFFLINE`, reject with `FCC_UNREACHABLE` error
+   d. Create local `PreAuthRecord` with `status = PENDING`
+   e. Call adapter `sendPreAuth(command)` with **FCC numbers** (`fccPumpNumber`, `fccNozzleNumber`) — sends to FCC over LAN
+   f. Update local record based on FCC response:
       - AUTHORIZED → set status, authorizationCode, expiresAtUtc
       - DECLINED/TIMEOUT/ERROR → set status FAILED with failure reason
-   f. Mark `isCloudSynced = false` — queued for cloud forwarding
-   g. Return result to Odoo POS immediately
+   g. Mark `isCloudSynced = false` — queued for cloud forwarding
+   h. Return result to Odoo POS immediately
 3. Pre-auth is ALWAYS via LAN, regardless of internet state
 4. Handle FCC timeouts (configurable, default 30s)
-5. Implement pre-auth cancellation:
+5. Cloud forwarding must be fully asynchronous and must never block the local request-response path
+6. Implement pre-auth cancellation:
    - Find record by `odooOrderId`
    - If PENDING or AUTHORIZED: attempt FCC deauthorization, set status CANCELLED
    - If DISPENSING: cannot cancel (pump is active)
-6. Implement pre-auth expiry checker (periodic):
+7. Implement pre-auth expiry checker (periodic):
    - Query pre-auths past `expiresAt` that are still PENDING/AUTHORIZED/DISPENSING
    - Transition to EXPIRED, attempt FCC deauthorization (best-effort)
 
@@ -534,6 +616,7 @@ Implement the pre-auth handler — relays pre-auth commands from Odoo POS to FCC
 - Expiry checker cleans up old pre-auths
 - Record marked for cloud sync
 - Unit tests for all dedup/connectivity/status scenarios
+- Cloud unavailability does not materially degrade pre-auth response time on a healthy FCC LAN
 
 ---
 
@@ -558,6 +641,7 @@ Implement the ingestion orchestrator that routes transactions based on ingestion
    - Runs on a configurable interval (`pullIntervalSeconds` from config)
    - Advances cursor using `SyncState.lastFccCursor`
    - For each transaction returned: pass to buffer manager
+   - Uses cadence supplied by the runtime cadence controller rather than a second independent timer loop
 3. Implement ingestion mode routing:
    - **CLOUD_DIRECT**: FCC pushes to cloud directly. Agent runs safety-net LAN poller that:
      - Polls FCC on a longer interval (e.g., 5 minutes)
@@ -583,6 +667,36 @@ Implement the ingestion orchestrator that routes transactions based on ingestion
 - Connectivity state properly stops/resumes polling
 - Recovery triggers immediate upload
 - Unit tests for each mode + connectivity combination
+- Poll scheduling is driven by the shared cadence controller rather than multiple competing timers
+
+---
+
+### EA-2.7: Manual FCC Pull API
+
+**Sprint:** 6
+**Prereqs:** EA-2.1, EA-2.2, EA-2.4
+**Estimated effort:** 1 day
+
+**Read these artifacts before starting:**
+- `Requirements.md` — REQ-15.7 Attendant-Triggered Manual Pull
+- `HighLevelRequirements.md` — §15.7
+- `schemas/openapi/edge-agent-local-api.yaml` — update if endpoint is not yet represented
+
+**Task:**
+Implement an on-demand FCC pull endpoint so Odoo POS can surface a just-completed dispense without waiting for the next scheduled poll.
+
+**Detailed instructions:**
+1. Add a local API endpoint for manual FCC pull
+2. Trigger an immediate adapter fetch using the current cursor and buffer any newly discovered transactions
+3. Return a structured response summarizing newly buffered transactions and cursor movement
+4. Ensure the operation is serialized with the scheduled poller so manual pull and background polling do not race
+5. Apply the same deduplication and normalization rules as scheduled ingestion
+
+**Acceptance criteria:**
+- Odoo POS can trigger manual FCC pull through the local API
+- Newly discovered transactions are buffered and immediately available to offline transaction reads
+- Manual pull does not corrupt cursor state or race with scheduled polling
+- Unit tests cover no-op pull, new-transaction pull, and concurrent manual/scheduled pull scenarios
 
 ---
 
@@ -836,6 +950,7 @@ Design and execute offline scenario tests.
 2. Use emulator with network controls or Urovo hardware with airplane mode
 3. Verify: zero transaction loss in all scenarios
 4. Measure: battery consumption, memory usage, SQLite performance at 30K records
+5. Validate results against the performance guardrails defined at the top of this document
 
 **Acceptance criteria:**
 - Zero transactions lost in any scenario
@@ -843,6 +958,7 @@ Design and execute offline scenario tests.
 - WAL mode recovers from simulated power loss
 - Upload replay maintains chronological order after recovery
 - Battery consumption acceptable for 8-hour shift
+- Measured latency, memory, and replay results are compared against the documented guardrail thresholds
 
 ---
 
@@ -904,3 +1020,156 @@ Implement the diagnostics screen for site supervisors.
 - Color-coded connectivity indicator
 - QR code for LAN API key displays correctly
 - Manual sync/poll triggers work
+
+---
+
+## Review Addendum — Requirements-Aligned Recommendations
+
+This addendum captures a follow-up review of the Edge Agent plan against `Requirements.md` and `HighLevelRequirements.md`, with particular focus on runtime performance, response time, memory footprint, and battery usage on the Urovo i9100.
+
+### Confirmed Architectural Position of Edge Agent
+
+- The Edge Agent is a required on-device runtime, not an optional helper.
+- It must poll the FCC over LAN for catch-up ingestion in `CLOUD_DIRECT` mode and act as the primary FCC-side runtime in `RELAY` and `BUFFER_ALWAYS` modes.
+- It must expose a local API for Odoo POS offline transaction access.
+- It must handle pre-auth locally and call the FCC immediately over LAN, regardless of internet availability.
+- It must support local buffering, replay to cloud, and `SYNCED_TO_ODOO` status sync.
+
+### Updated Recommendations
+
+#### 1. Keep the foreground service, but keep it thin
+
+The earlier concern about avoiding a foreground service is superseded by the requirements. A foreground service is justified because the Edge Agent is in the critical runtime path for FCC polling, offline local API access, and always-available pre-auth.
+
+However, the foreground service should host only the minimum always-on responsibilities:
+
+- Local API listener for Odoo POS and secondary HHT access
+- Pre-auth handler path
+- FCC poll scheduler / ingest orchestrator
+- Connectivity state tracking
+- Buffered replay trigger and upload coordination
+
+These should not run continuously at full cadence unless needed:
+
+- Telemetry collection
+- Config polling
+- Cleanup and retention jobs
+- Diagnostics refresh jobs
+- Expensive integrity or maintenance tasks outside startup or scheduled windows
+
+#### 2. Coalesce periodic work into a single cadence controller
+
+The requirements explicitly call for periodic FCC heartbeat, internet health checks, replay on recovery, and `SYNCED_TO_ODOO` polling. That makes periodic work valid, but it should be consolidated.
+
+Recommended runtime policy:
+
+- One orchestrator loop owns periodic cadence inside the service
+- FCC heartbeat and catch-up polling share the same scheduler
+- Cloud health check and `SYNCED_TO_ODOO` polling run on the same cycle
+- Replay is triggered on connectivity recovery and while backlog exists, not by a separate always-on timer if avoidable
+- Telemetry and config fetch piggyback on an already successful cloud communication cycle where possible
+- Add jitter to polling intervals to avoid synchronized bursts across devices
+
+This keeps the design aligned with the requirements while reducing CPU wakeups, radio usage, and contention.
+
+#### 3. Treat pre-auth as the highest-priority low-latency path
+
+Pre-auth is always local and always LAN-based. The Edge Agent response path for `POST /api/preauth` should therefore be optimized above all other operations.
+
+Design constraint:
+
+- Odoo local API call -> Edge Agent -> FCC LAN call -> Edge Agent response -> Odoo
+
+Anything cloud-related must stay fully asynchronous:
+
+- Cloud reconciliation queueing must never sit on the request-response path
+- Cloud unavailability must not degrade local pre-auth authorization latency
+- FCC timeout handling should be strict and configurable
+
+#### 4. Optimize local offline reads for predictable response time
+
+Offline Odoo transaction access is a hard requirement. `GET /api/transactions` and related local endpoints should read directly from the local buffer with proper pagination and indexes.
+
+Guidance:
+
+- No live FCC dependency on transaction-list reads
+- Default queries should be page-bounded
+- Indexes should be tuned for `syncStatus`, `completedAt`, `pumpNumber`, and recent-time filtering
+- Responses should remain stable under a 30,000-record local backlog
+
+#### 5. Keep live pump status, but bound it tightly
+
+The requirements expect pump status to be read live from FCC over LAN. That is valid, but the implementation should guard Odoo responsiveness.
+
+Recommended behaviour:
+
+- Use short timeouts for live status calls
+- Use single-flight protection so concurrent requests do not fan out to FCC
+- Return last-known status with freshness metadata when live fetch is slow or FCC is unavailable
+- Keep a lightweight in-memory snapshot for fast fallback
+
+This preserves the live-status requirement while reducing tail latency.
+
+#### 6. Pull the manual FCC poll capability into the core roadmap
+
+The requirements explicitly call for attendant-triggered manual pull so an immediately completed transaction can be surfaced without waiting for the next scheduled poll.
+
+Recommendation:
+
+- Add a dedicated local API endpoint and implementation task for manual pull earlier than diagnostics polish
+- Treat manual pull as part of core transaction responsiveness, not as a convenience feature
+
+#### 7. Design local API for both localhost and LAN-primary modes
+
+The requirements support single-HHT localhost access and multi-HHT primary-agent access over LAN. The local API should therefore be designed from the start for both modes.
+
+Requirements-driven implementation guidance:
+
+- Localhost remains the default path for same-device Odoo POS
+- Primary HHT may expose the API on LAN for secondary HHTs
+- Non-localhost requests require API key authentication
+- The server must remain performant under concurrent read traffic from multiple HHTs
+
+#### 8. Tighten storage efficiency for the 30,000-transaction buffer target
+
+The requirements demand survival of long offline windows with at least 30,000 locally buffered transactions while preserving raw FCC payloads. That raises storage and I/O risk on-device.
+
+Recommendations:
+
+- Keep hot query columns compact and indexed
+- Consider separating raw payload storage from the hottest transaction query path
+- Validate the schema against realistic backlog size early, not only in hardening
+- Add explicit memory, DB-size, and query-latency benchmarks for the Urovo device profile
+
+### Concrete Plan Adjustments Recommended
+
+1. Keep `EA-0.2` foreground service, but revise its scope to define a thin resident core rather than a home for all always-on work.
+2. Add a runtime cadence policy task before or alongside `EA-2.3 Connectivity Manager`.
+3. Add a dedicated manual pull implementation task early in Phase 2, driven by the requirements for immediate transaction visibility.
+4. Add explicit non-functional budgets in Phase 0 for pre-auth latency, offline local API latency, memory ceiling, battery drain, and replay throughput.
+5. Add storage-efficiency and backlog-scale validation before Phase 6 so the 30,000-transaction requirement is tested earlier.
+
+---
+
+## Changelog
+
+### 2026-03-11
+
+- Added a requirements-aligned review addendum at the bottom of this plan.
+- Revised the earlier review stance to explicitly retain the Edge Agent foreground service as a valid architectural requirement.
+- Clarified that the recommended change is to keep the foreground service thin, not remove it.
+- Added guidance to coalesce periodic work into a single cadence controller to reduce battery and CPU overhead.
+- Elevated pre-auth latency and offline local API responsiveness as primary performance goals.
+- Added recommendation to implement manual FCC pull earlier because it is a stated requirement for transaction visibility.
+- Added guidance for multi-HHT LAN API operation and API key enforcement.
+- Added storage-efficiency guidance tied to the 30,000-transaction offline buffering requirement.
+- Added a concrete `Performance Guardrails` section with latency, memory, battery, and replay targets.
+- Added `EA-0.0 Performance Budgets & Benchmark Harness` to make non-functional targets measurable early.
+- Updated `EA-0.2` to define the foreground service as a thin always-on core rather than a home for all permanently hot work.
+- Updated `EA-0.3` to require storage-layout validation and backlog-scale query benchmarking.
+- Updated `EA-0.5` and `EA-2.4` to account for localhost default mode and primary-HHT LAN access mode.
+- Updated `EA-2.3` to own the runtime cadence controller and coalesce recurring connectivity and status-sync work.
+- Updated `EA-2.5` to make cloud forwarding explicitly asynchronous relative to the pre-auth response path.
+- Updated `EA-2.6` to use the shared cadence controller for FCC polling.
+- Added `EA-2.7 Manual FCC Pull API` as a core feature rather than leaving it implicit.
+- Updated `EA-6.1` so hardening validates against the defined performance guardrails, not only qualitative outcomes.

@@ -87,14 +87,36 @@ All tables live in the `public` schema. `legal_entity_id` is present on every te
 | `id` | `uuid` | NO | `gen_random_uuid()` | PK | |
 | `site_id` | `uuid` | NO | | FK → `sites.id` | |
 | `legal_entity_id` | `uuid` | NO | | FK → `legal_entities.id` | Denormalized for query filters |
-| `pump_number` | `int` | NO | | | UNIQUE with `site_id` |
-| `nozzle_count` | `int` | NO | `1` | CHECK > 0 | |
+| `pump_number` | `int` | NO | | UNIQUE with `site_id` | Odoo pump number — what Odoo POS sends on pre-auth |
+| `fcc_pump_number` | `int` | NO | | UNIQUE with `site_id` | FCC pump number — forwarded to the Forecourt Controller |
 | `is_active` | `boolean` | NO | `true` | | |
 | `synced_at` | `timestamptz` | NO | | | |
 | `created_at` | `timestamptz` | NO | `now()` | | |
 | `updated_at` | `timestamptz` | NO | `now()` | | |
 
-Unique constraint: `(site_id, pump_number)`.
+Unique constraints: `(site_id, pump_number)` and `(site_id, fcc_pump_number)`.
+
+> **Why two pump numbers?** Odoo numbers pumps independently of the FCC vendor. At most sites they match (1:1), but a site may have a replaced or re-numbered FCC where the numbering diverged. The mapping is set during site provisioning and synced from Odoo via Databricks.
+
+**`nozzles`**
+
+| Column | Type | Nullable | Default | Constraints | Notes |
+|--------|------|----------|---------|-------------|-------|
+| `id` | `uuid` | NO | `gen_random_uuid()` | PK | |
+| `pump_id` | `uuid` | NO | | FK → `pumps.id` | |
+| `site_id` | `uuid` | NO | | FK → `sites.id` | Denormalized for query filters |
+| `legal_entity_id` | `uuid` | NO | | FK → `legal_entities.id` | Denormalized for query filters |
+| `odoo_nozzle_number` | `int` | NO | | UNIQUE with `pump_id` | Nozzle number as Odoo POS knows it |
+| `fcc_nozzle_number` | `int` | NO | | UNIQUE with `pump_id` | Nozzle number sent to the FCC |
+| `product_id` | `uuid` | NO | | FK → `products.id` | Product (fuel grade) dispensed by this nozzle |
+| `is_active` | `boolean` | NO | `true` | | |
+| `synced_at` | `timestamptz` | NO | | | |
+| `created_at` | `timestamptz` | NO | `now()` | | |
+| `updated_at` | `timestamptz` | NO | `now()` | | |
+
+Unique constraints: `(pump_id, odoo_nozzle_number)` and `(pump_id, fcc_nozzle_number)`.
+
+> **Pre-auth mapping flow**: Odoo POS sends `odoo_pump_number` + `odoo_nozzle_number` to the Edge Agent. The Edge Agent resolves `pumps WHERE pump_number = odoo_pump_number` → gets `fcc_pump_number`. Then resolves `nozzles WHERE pump_id = ? AND odoo_nozzle_number = ?` → gets `fcc_nozzle_number` and `product_code`. These FCC values are forwarded in the pre-auth command to the FCC.
 
 **`products`**
 
@@ -293,6 +315,8 @@ No `updated_at` — events are immutable.
 | `audit_events` | `ix_audit_correlation` | `(correlation_id)` | Trace lookup |
 | `audit_events` | `ix_audit_type_time` | `(legal_entity_id, event_type, created_at DESC)` | Portal audit viewer |
 | `sites` | `ix_sites_legal_entity` | `(legal_entity_id)` | Tenant-scoped site listing |
+| `nozzles` | `ix_nozzles_pump` | `(pump_id, is_active)` | Active nozzles for a pump |
+| `nozzles` | `ix_nozzles_site_lookup` | `(site_id, is_active)` | Pre-auth mapping lookup by site |
 | `agent_registrations` | `ix_agent_site` | `(site_id, is_active)` | Active agent lookup per site |
 | `outbox_messages` | `ix_outbox_unprocessed` | `(id)` WHERE `processed_at IS NULL` | Outbox publisher scan |
 
@@ -319,6 +343,7 @@ PK for partitioned tables must include the partition key: `(id, created_at)`.
 | `legal_entities` | Soft delete | `is_active = false`, `deactivated_at` set |
 | `sites` | Soft delete | `is_active = false`, `deactivated_at` set |
 | `pumps` | Soft delete | `is_active = false` |
+| `nozzles` | Soft delete | `is_active = false` |
 | `products` | Soft delete | `is_active = false` |
 | `operators` | Soft delete | `is_active = false` |
 | `fcc_configs` | Soft delete | `is_active = false` |
@@ -364,6 +389,26 @@ PK for partitioned tables must include the partition key: `(id, created_at)`.
 | `schema_version` | `INTEGER` | NO | `1` | |
 | `created_at` | `TEXT` | NO | | |
 | `updated_at` | `TEXT` | NO | | |
+
+**`nozzles`** (edge)
+
+| Column | Type | Nullable | Default | Notes |
+|--------|------|----------|---------|-------|
+| `id` | `TEXT` (UUID) | NO | | PK |
+| `site_code` | `TEXT` | NO | | Single site per agent |
+| `odoo_pump_number` | `INTEGER` | NO | | Pump number Odoo POS sends |
+| `fcc_pump_number` | `INTEGER` | NO | | Pump number forwarded to FCC |
+| `odoo_nozzle_number` | `INTEGER` | NO | | Nozzle number Odoo POS sends |
+| `fcc_nozzle_number` | `INTEGER` | NO | | Nozzle number forwarded to FCC |
+| `product_code` | `TEXT` | NO | | Product dispensed (for pre-auth payload) |
+| `is_active` | `INTEGER` | NO | `1` | Boolean: 0/1 |
+| `synced_at` | `TEXT` | NO | | |
+| `created_at` | `TEXT` | NO | | |
+| `updated_at` | `TEXT` | NO | | |
+
+Indexes: `ix_nozzles_odoo_lookup` `(site_code, odoo_pump_number, odoo_nozzle_number)` UNIQUE — the primary pre-auth lookup path. `ix_nozzles_fcc_lookup` `(site_code, fcc_pump_number, fcc_nozzle_number)` UNIQUE — reverse lookup for incoming FCC transactions.
+
+This table is populated (and refreshed) from the cloud config push. The `CleanupWorker` replaces the full set on each config update.
 
 **`pre_auth_records`** (edge)
 
@@ -436,6 +481,8 @@ PK for partitioned tables must include the partition key: `(id, created_at)`.
 | `buffered_transactions` | `ix_bt_sync_status` | `(sync_status, created_at)` | Upload worker: find PENDING records ordered by time |
 | `buffered_transactions` | `ix_bt_local_api` | `(sync_status, pump_number, completed_at DESC)` | Local API: transaction queries by pump, excluding SYNCED_TO_ODOO |
 | `buffered_transactions` | `ix_bt_cleanup` | `(sync_status, updated_at)` | Retention cleanup |
+| `nozzles` | `ix_nozzles_odoo_lookup` | `(site_code, odoo_pump_number, odoo_nozzle_number)` UNIQUE | Pre-auth translation: Odoo → FCC numbers |
+| `nozzles` | `ix_nozzles_fcc_lookup` | `(site_code, fcc_pump_number, fcc_nozzle_number)` UNIQUE | Reverse lookup: FCC → product code for incoming transactions |
 | `pre_auth_records` | `ix_par_idemp` | `(odoo_order_id, site_code)` UNIQUE | Idempotency |
 | `pre_auth_records` | `ix_par_unsent` | `(is_cloud_synced, created_at)` | Cloud forward worker |
 | `pre_auth_records` | `ix_par_expiry` | `(status, expires_at)` | Expiry check |
@@ -455,6 +502,15 @@ PK for partitioned tables must include the partition key: `(id, created_at)`.
 | `markSyncedToOdoo(fccTransactionIds)` | `UPDATE buffered_transactions SET sync_status = 'SYNCED_TO_ODOO', updated_at = :now WHERE fcc_transaction_id IN (:ids)` | Status poll response |
 | `deleteOldSynced(cutoffDate)` | `DELETE FROM buffered_transactions WHERE sync_status = 'SYNCED_TO_ODOO' AND updated_at < :cutoffDate` | Retention cleanup |
 | `countByStatus()` | `SELECT sync_status, COUNT(*) FROM buffered_transactions GROUP BY sync_status` | Telemetry / diagnostics |
+
+**NozzleDao**
+
+| Method | Query | Notes |
+|--------|-------|-------|
+| `resolveForPreAuth(siteCode, odooPumpNumber, odooNozzleNumber)` | `SELECT * FROM nozzles WHERE site_code = :siteCode AND odoo_pump_number = :odooPumpNumber AND odoo_nozzle_number = :odooNozzleNumber AND is_active = 1` | Called on every pre-auth to translate Odoo → FCC numbers |
+| `resolveByFcc(siteCode, fccPumpNumber, fccNozzleNumber)` | `SELECT * FROM nozzles WHERE site_code = :siteCode AND fcc_pump_number = :fccPumpNumber AND fcc_nozzle_number = :fccNozzleNumber AND is_active = 1` | Reverse lookup when normalising incoming FCC transactions |
+| `replaceAll(nozzles)` | `DELETE FROM nozzles WHERE site_code = :siteCode` + bulk insert | Called on config push; replaces the full nozzle set for the site |
+| `getAll(siteCode)` | `SELECT * FROM nozzles WHERE site_code = :siteCode AND is_active = 1` | Diagnostics / health screen |
 
 **PreAuthDao**
 
@@ -541,7 +597,7 @@ On every app startup, before any DAO call:
 | Component | Impact |
 |-----------|--------|
 | **Cloud Backend** | EF Core `DbContext` with entity configurations for all cloud tables. Global query filter on `legal_entity_id`. `pg_partman` setup in deployment scripts. |
-| **Edge Agent** | Room `@Database` with 5 entities, 4 DAOs. WAL callback. Auto-migration annotations. `CleanupWorker` and `IntegrityChecker` classes. |
+| **Edge Agent** | Room `@Database` with 6 entities, 5 DAOs. WAL callback. Auto-migration annotations. `CleanupWorker` and `IntegrityChecker` classes. |
 | **Angular Portal** | Reads from cloud tables via API — no direct DB access. Affected by index strategy (portal search index supports filtered queries). |
 | **CI/CD** | Cloud: EF Core migration step in deployment pipeline. Edge: Room schema export verification in build. |
 
@@ -564,8 +620,8 @@ None. All decisions are closable from existing context.
 
 ## 10. Acceptance Checklist
 
-- [ ] All 10 cloud tables defined with columns, types, nullability, defaults, and constraints
-- [ ] All 5 edge Room entities defined with columns and types
+- [ ] All 11 cloud tables defined with columns, types, nullability, defaults, and constraints
+- [ ] All 6 edge Room entities defined with columns and types
 - [ ] Dedup key (`fcc_transaction_id + site_code`) enforced at both cloud and edge
 - [ ] Pre-auth idempotency key (`odoo_order_id + site_code`) enforced at both cloud and edge
 - [ ] Cloud index strategy covers Odoo poll, portal search, reconciliation matching, stale detection, and outbox publishing

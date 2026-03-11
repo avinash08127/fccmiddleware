@@ -27,9 +27,9 @@ Attendant lifts nozzle, dispenses fuel
          ▼
     [FCC records transaction]
          │
-         ├─── Push (primary) ──────────────────────────────────► [Cloud Middleware]
+         ├─── Push (primary) ──────────────────────────────────► [Lambda]
          │                                                              │
-         │                                                    deduplicate + normalize
+         │                                                    deduplicate(Merge data in Dynamo)
          │                                                              │
          │                                                    store transaction
          │                                                    status: PENDING

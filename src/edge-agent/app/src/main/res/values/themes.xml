@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.FccAgent" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.FccEdgeAgent" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:colorPrimary">#1976D2</item>
         <item name="android:colorPrimaryDark">#1565C0</item>
         <item name="android:colorAccent">#FF6F00</item>

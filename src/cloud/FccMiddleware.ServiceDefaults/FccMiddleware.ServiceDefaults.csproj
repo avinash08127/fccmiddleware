@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Framework reference gives access to ASP.NET Core APIs (IHealthChecksBuilder, etc.)
+       without pulling in the full Web host; both Api and Worker carry the runtime. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+    <PackageReference Include="Serilog.Formatting.Compact" Version="3.0.0" />
+    <!-- TODO CB-ServiceDefaults: Add OpenTelemetry packages once connectivity confirmed:
+         OpenTelemetry.Extensions.Hosting, Instrumentation.AspNetCore, Instrumentation.Http, Instrumentation.Runtime -->
+  </ItemGroup>
+
+</Project>

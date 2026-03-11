@@ -47,6 +47,32 @@ CREATE INDEX ix_bt_local_api ON buffered_transactions (sync_status, pump_number,
 CREATE INDEX ix_bt_cleanup ON buffered_transactions (sync_status, updated_at);
 
 -- =============================================================================
+-- NOZZLE MAPPING (EDGE)
+-- Cached from cloud config push. Used by the pre-auth handler to translate
+-- the Odoo pump/nozzle numbers received from Odoo POS into FCC pump/nozzle
+-- numbers before sending the pre-auth command to the FCC over LAN.
+-- =============================================================================
+
+CREATE TABLE nozzles (
+    id                  TEXT        NOT NULL PRIMARY KEY,
+    site_code           TEXT        NOT NULL,
+    odoo_pump_number    INTEGER     NOT NULL,  -- Pump number as Odoo knows it
+    fcc_pump_number     INTEGER     NOT NULL,  -- Pump number to send to FCC
+    odoo_nozzle_number  INTEGER     NOT NULL,  -- Nozzle number as Odoo knows it
+    fcc_nozzle_number   INTEGER     NOT NULL,  -- Nozzle number to send to FCC
+    product_code        TEXT        NOT NULL,  -- Product dispensed by this nozzle
+    is_active           INTEGER     NOT NULL DEFAULT 1,
+    synced_at           TEXT        NOT NULL,
+    created_at          TEXT        NOT NULL,
+    updated_at          TEXT        NOT NULL
+);
+
+-- Pre-auth translation lookup: given Odoo pump + nozzle → FCC pump + nozzle + product
+CREATE UNIQUE INDEX ix_nozzles_odoo_lookup ON nozzles (site_code, odoo_pump_number, odoo_nozzle_number);
+-- Reverse lookup: given FCC pump + nozzle → normalise incoming transaction product code
+CREATE UNIQUE INDEX ix_nozzles_fcc_lookup ON nozzles (site_code, fcc_pump_number, fcc_nozzle_number);
+
+-- =============================================================================
 -- PRE-AUTH RECORDS (EDGE)
 -- =============================================================================
 

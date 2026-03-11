@@ -35,7 +35,7 @@ The business problem is not just transaction capture. It is controlled, auditabl
 | Reconciliation | Match final dispense to pre-auth; calculate amount variance; flag exceptions |
 | Odoo Integration | Expose poll + acknowledge endpoints for Odoo to consume PENDING transactions |
 | Edge Agent Coordination | Config sync, status sync (SYNCED_TO_ODOO), version checks, telemetry, agent registration |
-| Master Data Sync | Ingest legal entity, site, pump, product, and operator reference data from Databricks/Odoo |
+| Master Data Sync | Ingest legal entity, site, pump (with FCC pump number), nozzle (with Odoo↔FCC number mapping and product assignment), product, and operator reference data from Databricks/Odoo |
 | Configuration Runtime | Resolve legal-entity, site, FCC, fiscalization, tolerance, and routing settings |
 | Event Publishing & Audit | Publish audit and operational events for monitoring and downstream use; immutable event history |
 | Operational Transparency | Health, metrics, tracing, diagnostics APIs, and operational dashboards |
@@ -259,7 +259,7 @@ Additionally, a **Background Worker Host** runs alongside the API:
 - **Legal Entity Config**: Country, currency, timezone, fiscalization defaults. Read-only (synced from Databricks).
 - **Site Config**: Operating mode, connectivity mode, operator details. Read-only (synced from Databricks).
 - **FCC Config**: Vendor, connection details, transaction mode, ingestion mode, pull interval. Partially synced, partially admin-configured.
-- **Pump/Nozzle Mapping**: Physical-to-logical pump and product mappings per FCC.
+- **Pump/Nozzle Mapping**: Two separate master data tables synced from Odoo via Databricks. The `pumps` table stores both `pump_number` (Odoo) and `fcc_pump_number` (FCC). The `nozzles` table stores `odoo_nozzle_number` → `fcc_nozzle_number` and the product (`productId`) dispensed by each nozzle. This mapping is included in the SiteConfig pushed to Edge Agents so they can translate Odoo pump/nozzle numbers to FCC numbers at pre-auth time.
 - **Fiscalization Overrides**: Site-level overrides of legal entity defaults.
 - **Tolerance Settings**: Reconciliation variance tolerance per legal entity or site.
 - **Product Code Mappings**: FCC vendor product codes to canonical codes per FCC.
@@ -369,7 +369,7 @@ fcc-middleware-cloud/
 │   │   ├── Transactions/                          # Transaction aggregate, canonical model, states
 │   │   ├── PreAuth/                               # Pre-auth aggregate, state machine
 │   │   ├── Reconciliation/                        # Reconciliation records, variance logic
-│   │   ├── Configuration/                         # Legal entity, site, FCC, pump/nozzle entities
+│   │   ├── Configuration/                         # Legal entity, site, FCC, pump/nozzle, nozzle mapping entities
 │   │   ├── Adapters/                              # IFccAdapter interface, adapter registry
 │   │   ├── Events/                                # Domain event definitions
 │   │   └── Common/                                # Value objects (SiteCode, FccTransactionId, Money, Volume)

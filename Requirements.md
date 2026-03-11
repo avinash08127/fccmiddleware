@@ -242,15 +242,31 @@ Each site may have zero or one FCC assigned. The middleware must know which FCC 
 
 ## Pump and Nozzle Mapping
 
+Odoo numbers pumps and nozzles independently of the FCC vendor. The middleware stores explicit mapping tables so that Odoo POS pump/nozzle numbers can be translated to FCC pump/nozzle numbers before a pre-auth command is sent to the FCC.
+
+**`pumps`**
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `pumpNozzleId` | UUID | Internal unique identifier |
-| `fccId` | UUID (FK) | Associated FCC |
-| `pumpNumber` | Integer | Physical pump number as known to FCC |
-| `nozzleNumber` | Integer | Physical nozzle number |
-| `productCode` | String | Fuel product (e.g., PMS, AGO, IK) |
-| `odooPumpId` | String (nullable) | Mapping to Odoo pump reference |
-| `isActive` | Boolean | Whether this nozzle is active |
+| `pumpId` | UUID | Internal unique identifier |
+| `siteId` | UUID (FK) | Owning site |
+| `pump_number` | Integer | Pump number as Odoo POS knows it (synced from Odoo via Databricks) |
+| `fcc_pump_number` | Integer | Pump number sent to the FCC — may differ from `pump_number` |
+| `isActive` | Boolean | Soft-delete flag |
+
+**`nozzles`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `nozzleId` | UUID | Internal unique identifier |
+| `pumpId` | UUID (FK) | Parent pump |
+| `siteId` | UUID (FK) | Owning site (denormalized) |
+| `odoo_nozzle_number` | Integer | Nozzle number as Odoo POS knows it |
+| `fcc_nozzle_number` | Integer | Nozzle number sent to the FCC |
+| `productId` | UUID (FK) | Product (fuel grade) dispensed by this nozzle |
+| `isActive` | Boolean | Soft-delete flag |
+
+Both tables are synced from Odoo via Databricks. Numbers match 1:1 at most sites, but may diverge after an FCC replacement or renumbering.
 
 ## Business Rules
 
@@ -258,6 +274,8 @@ Each site may have zero or one FCC assigned. The middleware must know which FCC 
 - BR-3.2: If no FCC is assigned or active, the site operates in disconnected mode.
 - BR-3.3: The `fccVendor` determines which adapter is used for communication.
 - BR-3.4: Pump/nozzle mappings must match the physical FCC configuration. Mismatches must raise alerts.
+- BR-3.5a: The `pumps` table must store both `pump_number` (Odoo) and `fcc_pump_number` (FCC). The `nozzles` table must store `odoo_nozzle_number` and `fcc_nozzle_number` along with the `productId`. These are synced from Odoo via Databricks.
+- BR-3.5b: On every pre-auth, the Edge Agent MUST translate the Odoo pump/nozzle numbers received from Odoo POS into FCC pump/nozzle numbers by looking up the `nozzles` table before sending the pre-auth command to the FCC.
 - BR-3.5: `authCredentials` must be stored encrypted at rest.
 - BR-3.6: `lastHeartbeatAt` is updated on every successful communication. If stale beyond a configurable threshold, the system raises a connectivity alert.
 
@@ -376,8 +394,8 @@ Pre-auth always routes via the **Edge Agent** — never directly from Odoo to th
 |-------|------|----------|-------------|
 | `odooOrderId` | String | Yes | Odoo POS order reference |
 | `siteCode` | String | Yes | Site identifier |
-| `pumpNumber` | Integer | Yes | Target pump |
-| `nozzleNumber` | Integer | Yes | Target nozzle |
+| `pumpNumber` | Integer | Yes | Target pump — **Odoo pump number** (as displayed in Odoo POS) |
+| `nozzleNumber` | Integer | Yes | Target nozzle — **Odoo nozzle number** (as displayed in Odoo POS) |
 | `productCode` | String | Yes | Fuel product (PMS, AGO, IK) |
 | `requestedAmount` | Decimal | Yes | Authorized amount in local currency. **Pre-auth is always by amount — volume authorization is not used.** |
 | `unitPrice` | Decimal | Yes | Price per litre at time of auth. Used by Odoo to display the estimated volume (`requestedAmount / unitPrice`) before dispense, but the FCC authorizes by amount only. |
@@ -446,8 +464,8 @@ Normal Orders and Pre-Auth orders can coexist at the same site (mixed mode). Nor
 |-------|------|-------------|
 | `fccTransactionId` | String | Unique transaction ID from the FCC |
 | `siteCode` | String | Site where dispense occurred |
-| `pumpNumber` | Integer | Pump used |
-| `nozzleNumber` | Integer | Nozzle used |
+| `pumpNumber` | Integer | FCC pump number (as used by the FCC; stored in `pumps.fcc_pump_number`) |
+| `nozzleNumber` | Integer | FCC nozzle number (as used by the FCC; stored in `nozzles.fcc_nozzle_number`) |
 | `productCode` | String | Fuel product dispensed |
 | `volume` | Decimal | Litres dispensed |
 | `amount` | Decimal | Total amount in local currency |
@@ -632,7 +650,7 @@ Field mapping is **primarily hardcoded within each adapter**, as each vendor's p
 | `volumeUnit` | Volume unit used by this FCC | LITRES, MILLILITRES |
 | `priceDecimalPlaces` | Decimal precision for prices | 2 |
 | `productCodeMapping` | Map FCC product codes to canonical codes | {"01": "PMS", "02": "AGO"} |
-| `pumpNumberOffset` | If FCC numbering differs from physical | 0 |
+| `pumpNumberOffset` | **Deprecated** — replaced by explicit `pumps.fcc_pump_number` and `nozzles.fcc_nozzle_number` per-record mappings. Adapters must not use a simple offset. See REQ-3 (Pump and Nozzle Mapping). | — |
 
 ## Business Rules
 
@@ -774,7 +792,7 @@ Transactions may arrive multiple times due to retries, Pull/Push overlap, Edge A
 
 If `fccTransactionId` is not available or not trustworthy:
 
-- `siteCode` + `pumpNumber` + `nozzleNumber` + `endDateTime` + `amount` (within a configurable time tolerance, e.g., ±5 seconds)
+- `siteCode` + `pumpNumber` + `nozzleNumber` + `endDateTime` + `amount` (within a configurable time tolerance, e.g., ±5 seconds) — these are **FCC pump/nozzle numbers** (`fcc_pump_number`, `fcc_nozzle_number`), i.e., as received from the FCC in the transaction payload
 
 ## Business Rules
 

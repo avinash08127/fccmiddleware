@@ -57,17 +57,17 @@ CREATE TABLE pumps (
     id                  uuid            NOT NULL DEFAULT gen_random_uuid(),
     site_id             uuid            NOT NULL,
     legal_entity_id     uuid            NOT NULL,
-    pump_number         int             NOT NULL,
-    nozzle_count        int             NOT NULL DEFAULT 1,
+    pump_number         int             NOT NULL,  -- Odoo pump number (source of truth from Databricks)
+    fcc_pump_number     int             NOT NULL,  -- FCC pump number sent to the Forecourt Controller
     is_active           boolean         NOT NULL DEFAULT true,
     synced_at           timestamptz     NOT NULL,
     created_at          timestamptz     NOT NULL DEFAULT now(),
     updated_at          timestamptz     NOT NULL DEFAULT now(),
     CONSTRAINT pk_pumps PRIMARY KEY (id),
-    CONSTRAINT uq_pumps_site_pump UNIQUE (site_id, pump_number),
+    CONSTRAINT uq_pumps_site_odoo_pump UNIQUE (site_id, pump_number),
+    CONSTRAINT uq_pumps_site_fcc_pump UNIQUE (site_id, fcc_pump_number),
     CONSTRAINT fk_pumps_site FOREIGN KEY (site_id) REFERENCES sites (id),
-    CONSTRAINT fk_pumps_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
-    CONSTRAINT chk_pumps_nozzle_count CHECK (nozzle_count > 0)
+    CONSTRAINT fk_pumps_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id)
 );
 
 CREATE TABLE products (
@@ -84,6 +84,36 @@ CREATE TABLE products (
     CONSTRAINT uq_products_entity_code UNIQUE (legal_entity_id, product_code),
     CONSTRAINT fk_products_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id)
 );
+
+-- Nozzle records with Odoo↔FCC number mapping and product assignment.
+-- Each nozzle belongs to a pump and dispenses one product (fuel grade).
+-- odoo_nozzle_number is what Odoo POS sends on pre-auth.
+-- fcc_nozzle_number is what the Edge Agent forwards to the FCC.
+CREATE TABLE nozzles (
+    id                  uuid            NOT NULL DEFAULT gen_random_uuid(),
+    pump_id             uuid            NOT NULL,
+    site_id             uuid            NOT NULL,
+    legal_entity_id     uuid            NOT NULL,
+    odoo_nozzle_number  int             NOT NULL,  -- Nozzle number as known to Odoo POS
+    fcc_nozzle_number   int             NOT NULL,  -- Nozzle number sent to the FCC
+    product_id          uuid            NOT NULL,  -- Product (fuel grade) dispensed by this nozzle
+    is_active           boolean         NOT NULL DEFAULT true,
+    synced_at           timestamptz     NOT NULL,
+    created_at          timestamptz     NOT NULL DEFAULT now(),
+    updated_at          timestamptz     NOT NULL DEFAULT now(),
+    CONSTRAINT pk_nozzles PRIMARY KEY (id),
+    CONSTRAINT uq_nozzles_pump_odoo UNIQUE (pump_id, odoo_nozzle_number),
+    CONSTRAINT uq_nozzles_pump_fcc UNIQUE (pump_id, fcc_nozzle_number),
+    CONSTRAINT fk_nozzles_pump FOREIGN KEY (pump_id) REFERENCES pumps (id),
+    CONSTRAINT fk_nozzles_site FOREIGN KEY (site_id) REFERENCES sites (id),
+    CONSTRAINT fk_nozzles_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
+    CONSTRAINT fk_nozzles_product FOREIGN KEY (product_id) REFERENCES products (id)
+);
+
+-- Nozzle lookup by pump (active nozzles for a given pump)
+CREATE INDEX ix_nozzles_pump ON nozzles (pump_id, is_active);
+-- Nozzle lookup during pre-auth: Odoo pump → FCC pump, Odoo nozzle → FCC nozzle
+CREATE INDEX ix_nozzles_site_lookup ON nozzles (site_id, is_active);
 
 CREATE TABLE operators (
     id                  uuid            NOT NULL DEFAULT gen_random_uuid(),

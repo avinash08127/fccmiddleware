@@ -113,7 +113,7 @@ Create all domain models and enums in the `FccMiddleware.Domain` project.
    - `PumpStatus` — from `pump-status.schema.json`
    - `DeviceRegistration` — from `device-registration.schema.json`
    - `TelemetryPayload` — from `telemetry-payload.schema.json`
-3. Create domain entity classes for master data: `LegalEntity`, `Site`, `Pump`, `Product`, `Operator`, `FccConfig`, `AgentRegistration`
+3. Create domain entity classes for master data: `LegalEntity`, `Site`, `Pump` (with `PumpNumber` = Odoo, `FccPumpNumber`), `Nozzle` (with `OdooNozzleNumber`, `FccNozzleNumber`, FK to `Pump` and `Product`), `Product`, `Operator`, `FccConfig`, `AgentRegistration`
 4. Implement the `Transaction` state machine enforcement in the domain entity — `Transition(newStatus)` method with guard checks per §5.1 of state machines spec
 5. Implement the `PreAuthRecord` state machine enforcement per §5.2
 6. All money fields must be `long` (minor units). All timestamps `DateTimeOffset`.
@@ -434,7 +434,8 @@ Implement master data sync endpoints for Databricks to push reference data.
 1. Create endpoints for each master data type:
    - `POST /api/v1/master-data/legal-entities` — upsert legal entities
    - `POST /api/v1/master-data/sites` — upsert sites
-   - `POST /api/v1/master-data/pumps` — upsert pumps
+   - `POST /api/v1/master-data/pumps` — upsert pumps; payload must include both `pumpNumber` (Odoo) and `fccPumpNumber`
+   - `POST /api/v1/master-data/nozzles` — upsert nozzles; payload: `{ siteId, pumpId, odooNozzleNumber, fccNozzleNumber, productId }` — maps Odoo nozzle numbers to FCC nozzle numbers with product assignment
    - `POST /api/v1/master-data/products` — upsert products
    - `POST /api/v1/master-data/operators` — upsert operators
 2. Each endpoint accepts a batch of records and performs upsert (insert or update)
@@ -588,7 +589,7 @@ Implement the config pull endpoint for Edge Agents.
 **Detailed instructions:**
 1. Create `GET /api/v1/agent/config` endpoint
 2. Accept `If-None-Match` header with config version — return 304 if unchanged
-3. Build SiteConfig from: `fcc_configs` + `sites` + `legal_entities` + `pumps` + `products` tables
+3. Build SiteConfig from: `fcc_configs` + `sites` + `legal_entities` + `pumps` + `nozzles` + `products` tables — the `mappings.nozzles` array in SiteConfig must include `{ odooPumpNumber, fccPumpNumber, odooNozzleNumber, fccNozzleNumber, productCode }` for every active nozzle at the site, so the Edge Agent can resolve Odoo pump/nozzle numbers to FCC numbers at pre-auth time
 4. Include config version (monotonic integer from `fcc_configs.config_version`)
 5. Return full SiteConfig JSON matching `site-config.schema.json`
 6. Auth: device JWT

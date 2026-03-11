@@ -60,7 +60,7 @@
 | `localApi` | `localhostPort`, `enableLanApi`, `lanBindAddress`, `lanAllowCidrs`, `lanApiKeyRef`, `rateLimitPerMinute` | Local and LAN API listener configuration. |
 | `telemetry` | `telemetryIntervalSeconds`, `logLevel`, `includeDiagnosticsLogs`, `metricsWindowSeconds` | Edge telemetry cadence and diagnostics verbosity. |
 | `fiscalization` | `mode`, `taxAuthorityEndpoint`, `requireCustomerTaxId`, `fiscalReceiptRequired` | Fiscalization and tax data collection settings. |
-| `mappings` | `pumpNumberOffset`, `priceDecimalPlaces`, `volumeUnit`, `products`, `nozzles` | Canonical mapping data needed for normalization and local operations. |
+| `mappings` | `priceDecimalPlaces`, `volumeUnit`, `products`, `nozzles` | Canonical mapping data needed for normalization and local operations. `nozzles` is an array of `{ odooPumpNumber, fccPumpNumber, odooNozzleNumber, fccNozzleNumber, productCode }` — one entry per active nozzle at the site. The Edge Agent caches this array in its local `nozzles` Room table and uses it to translate Odoo POS pump/nozzle numbers into FCC pump/nozzle numbers before sending every pre-auth command to the FCC. |
 | `rollout` | `minAgentVersion`, `maxAgentVersion`, `requiresRestartSections`, `configTtlHours` | Version gating and operational rollout controls. |
 
 ## 6. Validation and Edge Cases
@@ -69,6 +69,8 @@
 - `fcc` settings may remain populated when the site is disconnected, but the agent must not use them while `connectivityMode = DISCONNECTED`.
 - `credentialRef` and `lanApiKeyRef` are opaque references; secrets should not be logged.
 - Restart-required sections must not be partially applied.
+- `mappings.nozzles` must not be empty for connected sites. If a nozzle entry is missing, pre-auth for that pump/nozzle combination will fail with `NOZZLE_MAPPING_NOT_FOUND`. This is a config error — raise an alert and investigate master data sync.
+- `mappings.nozzles` entries must be unique by `(odooPumpNumber, odooNozzleNumber)` within the site. Duplicate entries must be rejected during config validation on the Edge Agent.
 
 ## 7. Cross-Component Impact
 - Cloud Backend: resolves and serves the effective snapshot.
@@ -76,7 +78,7 @@
 - Angular Portal: edits the source values that roll into the resolved config.
 
 ## 8. Dependencies
-- Prerequisites: shared enums, device registration, master data sync decisions
+- Prerequisites: shared enums, device registration, **pumps and nozzles master data sync** (each pump must have `fcc_pump_number`; each nozzle must have `odoo_nozzle_number`, `fcc_nozzle_number`, and `product_id` before a valid config snapshot can be built)
 - Downstream TODOs affected: config API spec, security implementation, FCC adapter registration, rollout behavior
 - Recommended next implementation step: define the config API contract and version-compatibility rules against this schema
 

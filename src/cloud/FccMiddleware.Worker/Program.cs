@@ -1,5 +1,7 @@
+using FccMiddleware.ServiceDefaults;
 using Serilog;
 
+// Bootstrap logger — active only until DI container is built.
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .CreateBootstrapLogger();
@@ -8,16 +10,14 @@ try
 {
     var builder = Host.CreateApplicationBuilder(args);
 
-    builder.Services.AddSerilog((services, configuration) => configuration
-        .ReadFrom.Configuration(builder.Configuration)
-        .ReadFrom.Services(services)
-        .Enrich.FromLogContext()
-        .Enrich.WithProperty("Application", "FccMiddleware.Worker")
-        .WriteTo.Console(outputTemplate:
-            "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}"));
+    // Registers: Serilog (structured JSON → console), OpenTelemetry, base health check
+    builder.AddServiceDefaults();
 
     builder.Services.AddMediatR(cfg =>
         cfg.RegisterServicesFromAssembly(typeof(FccMiddleware.Application.Common.Result<>).Assembly));
+
+    // TODO CB-1.x: Register background IHostedService workers here, e.g.:
+    // builder.Services.AddHostedService<ReconciliationWorker>();
 
     var host = builder.Build();
     host.Run();

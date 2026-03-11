@@ -1,5 +1,8 @@
+using FccMiddleware.ServiceDefaults;
 using Serilog;
 
+// Bootstrap logger — active only until DI container is built.
+// ServiceDefaults replaces this with the full structured-JSON logger.
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
     .CreateBootstrapLogger();
@@ -8,13 +11,8 @@ try
 {
     var builder = WebApplication.CreateBuilder(args);
 
-    builder.Host.UseSerilog((context, services, configuration) => configuration
-        .ReadFrom.Configuration(context.Configuration)
-        .ReadFrom.Services(services)
-        .Enrich.FromLogContext()
-        .Enrich.WithProperty("Application", "FccMiddleware.Api")
-        .WriteTo.Console(outputTemplate:
-            "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}"));
+    // Registers: Serilog (structured JSON → console), OpenTelemetry, base health check
+    builder.AddServiceDefaults();
 
     builder.Services.AddControllers()
         .AddJsonOptions(options =>
@@ -24,7 +22,21 @@ try
         });
 
     builder.Services.AddEndpointsApiExplorer();
-    builder.Services.AddSwaggerGen();
+    builder.Services.AddSwaggerGen(c =>
+    {
+        c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+        {
+            Title = "FCC Middleware API",
+            Version = "v1"
+        });
+        c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+        {
+            Type = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT",
+            Description = "Azure Entra JWT bearer token"
+        });
+    });
 
     builder.Services.AddMediatR(cfg =>
     {
@@ -32,13 +44,21 @@ try
         cfg.RegisterServicesFromAssembly(typeof(FccMiddleware.Application.Common.Result<>).Assembly);
     });
 
-    builder.Services.AddHealthChecks();
+    // Health checks: PostgreSQL + Redis (registered here; liveness stub registered in ServiceDefaults)
+    builder.Services.AddHealthChecks()
+        .AddNpgSql(builder.Configuration.GetConnectionString("FccMiddleware")!,
+            name: "postgres", tags: ["ready"])
+        .AddRedis(builder.Configuration.GetConnectionString("Redis")!,
+            name: "redis", tags: ["ready"]);
 
     var app = builder.Build();
 
+    // Emit one structured-JSON log line per HTTP request
     app.UseSerilogRequestLogging();
 
-    if (app.Environment.IsDevelopment())
+    var swaggerEnabled = builder.Configuration.GetValue<bool?>("Swagger:Enabled")
+                         ?? app.Environment.IsDevelopment();
+    if (swaggerEnabled)
     {
         app.UseSwagger();
         app.UseSwaggerUI();
@@ -47,11 +67,17 @@ try
     app.UseHttpsRedirection();
     app.UseAuthorization();
     app.MapControllers();
-    app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+
+    // /health       → liveness  (is the process up?)
+    // /health/ready → readiness (are DB + Redis reachable?)
+    app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
     {
-        Predicate = _ => false // liveness: just checks process is alive
+        Predicate = check => check.Tags.Contains("live")
     });
-    app.MapHealthChecks("/health/ready");
+    app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+    {
+        Predicate = check => check.Tags.Contains("ready")
+    });
 
     app.Run();
 }
@@ -64,4 +90,4 @@ finally
     Log.CloseAndFlush();
 }
 
-public partial class Program { } // for WebApplicationFactory in tests
+public partial class Program { } // exposed for WebApplicationFactory in integration tests

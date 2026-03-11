@@ -28,7 +28,7 @@ Last Updated: 2026-03-10
 
 - Each site may have zero or one active FCC.
 - Store: vendor (DOMS/Radix/Advatec/Petronite), connection details, transaction mode (Pull/Push/Hybrid).
-- Pump and nozzle mapping per FCC.
+- **Pump and nozzle mapping per site**: Odoo numbers pumps and nozzles independently of the FCC vendor. Each pump record stores both an `odoo_pump_number` (what Odoo POS sends) and an `fcc_pump_number` (what is forwarded to the FCC). Each nozzle record stores `odoo_nozzle_number` → `fcc_nozzle_number` and the product (fuel grade) dispensed by that nozzle.
 - If no FCC → site is disconnected.
 
 ------------------------------------------------------------------------
@@ -54,7 +54,7 @@ Last Updated: 2026-03-10
 # 6. Pre-Authorization Orders
 
 - Pre-auth is used when a customer requests a **fiscalized invoice with their Tax ID**. It is not the default flow — most transactions are Normal Orders (see section 7).
-- Attendant creates order in Odoo POS (captures product, **amount**, pump, nozzle, customer TIN) → Odoo sends pre-auth to the **Edge Agent** (via localhost API, over the station LAN) → Edge Agent sends pre-auth to FCC over LAN → pump authorized.
+- Attendant creates order in Odoo POS (captures product, **amount**, pump, nozzle, customer TIN) → Odoo sends pre-auth to the **Edge Agent** (via localhost API, over the station LAN) → Edge Agent **translates the Odoo pump/nozzle numbers to FCC pump/nozzle numbers** using its local nozzle mapping table → Edge Agent sends pre-auth to FCC over LAN → pump authorized.
 - **Pre-auth is always authorized by amount** (local currency). The FCC authorizes the pump to dispense up to the requested monetary value. Volume is not sent to the FCC for authorization.
 - This flow works in **both online and offline modes** because it operates entirely over LAN — no internet is required for the authorization itself.
 - The Edge Agent **queues the pre-auth record to the Cloud Middleware** for reconciliation tracking. This ensures the cloud can match the final dispense transaction when it arrives via the FCC's direct push. The queue-and-forward happens asynchronously and retries when internet is available.
@@ -112,7 +112,7 @@ Last Updated: 2026-03-10
 
 - All master data synced from Odoo via Databricks pipelines.
 - No CRUD screens in middleware for master data.
-- Entities: legal entities, sites, pumps/nozzles, products, operators.
+- Entities: legal entities, sites, pumps, nozzles (with Odoo↔FCC number mappings and product assignments), products, operators.
 - Sync API is idempotent. Validates required fields. Tracks freshness.
 
 ------------------------------------------------------------------------

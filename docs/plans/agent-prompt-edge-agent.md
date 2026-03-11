@@ -19,6 +19,7 @@ The **Forecourt Middleware Edge Agent** — a native Android application (Kotlin
 7. **Reports telemetry** to cloud — battery, storage, buffer depth, FCC heartbeat, sync status
 8. **Self-registers** with cloud via QR code bootstrap token scanned during provisioning
 9. **Receives configuration** from cloud and applies it at runtime (hot-reload where possible)
+10. **Supports manual FCC pull** so Odoo POS or supervisor workflows can surface a just-completed dispense without waiting for the next scheduled poll
 
 ## Technology Stack
 
@@ -32,7 +33,7 @@ The **Forecourt Middleware Edge Agent** — a native Android application (Kotlin
 | DI | Koin |
 | Coroutines | kotlinx.coroutines (Dispatchers.IO for network/DB) |
 | Security | Android Keystore, EncryptedSharedPreferences, OkHttp CertificatePinner |
-| Testing | JUnit 5, MockK, Room in-memory DB, Robolectric |
+| Testing | JUnit 5, MockK, Room in-memory DB, Ktor test host, Ktor client mock, Robolectric |
 
 ## Project Structure (Single :app module)
 
@@ -57,6 +58,8 @@ com.fccmiddleware.edge/
 │   └── TelemetryReporter.kt
 ├── connectivity/           # Connectivity state machine
 │   └── ConnectivityManager.kt
+├── runtime/                # Thin always-on runtime coordination
+│   └── CadenceController.kt
 ├── preauth/                # Pre-auth handler
 │   └── PreAuthHandler.kt
 ├── ingestion/              # Ingestion orchestrator
@@ -74,13 +77,31 @@ com.fccmiddleware.edge/
 1. **Offline-first**: The agent MUST function when internet is down. LAN operations (FCC poll, pre-auth, local API) never depend on cloud.
 2. **No transaction left behind**: Every transaction polled from FCC is buffered locally. Upload failures are retried. Replay is in chronological order (oldest first).
 3. **SQLite WAL mode**: Always enabled. Required for crash resilience on Android.
-4. **Foreground service**: The agent runs as a `START_STICKY` foreground service with persistent notification. It must survive Doze mode and battery optimization.
+4. **Thin foreground service**: The agent runs as a `START_STICKY` foreground service with persistent notification, but the always-on scope stays narrow: local API server, pre-auth path, connectivity/cadence control, FCC polling orchestration, and replay triggers.
 5. **Coroutine scoping**: Use structured concurrency. Workers use `SupervisorJob` scopes. Never use `GlobalScope`.
 6. **Currency**: `Long` minor units (cents). NEVER floating point for money.
 7. **Dates**: UTC ISO 8601 strings in SQLite (`TEXT` columns). `Instant` or `OffsetDateTime` in Kotlin.
 8. **IDs**: UUID v4 strings for middleware-generated IDs. Preserve FCC IDs as opaque strings.
 9. **Logging**: NEVER log sensitive fields (FCC credentials, tokens, customer TIN). Use `@Sensitive` annotation.
 10. **Room entities**: All timestamps as `TEXT` (ISO 8601 UTC). Booleans as `INTEGER` (0/1). UUIDs as `TEXT`.
+11. **One cadence controller**: Recurring runtime work is coalesced under a single cadence controller. Do not introduce independent always-on timer loops for heartbeat, status sync, config polling, telemetry, and replay.
+12. **Pre-auth is the top latency path**: `POST /api/preauth` must respond based on LAN-only work. Cloud forwarding is always asynchronous and never on the request path.
+13. **Offline reads are buffer-backed**: `GET /api/transactions` must never depend on live FCC access and must remain performant with a 30,000-record backlog.
+14. **Pump status is live but bounded**: `GET /api/pump-status` should use short timeouts, single-flight protection, and last-known stale fallback metadata when FCC is slow or unreachable.
+15. **Local API defaults to localhost**: LAN exposure is enabled only for primary-HHT multi-device scenarios and requires API key authentication.
+16. **Resident runtime owns cadence**: Do not scaffold WorkManager jobs for the always-on core; recurring resident work stays under the foreground service cadence controller.
+
+## Performance Guardrails
+
+- `POST /api/preauth` p95 local API overhead on-device: <= 150 ms before FCC call time
+- `POST /api/preauth` p95 end-to-end on healthy FCC LAN: <= 1.5 s; p99 <= 3 s
+- `GET /api/transactions` p95 for first page (`limit <= 50`) with 30,000 buffered records: <= 150 ms
+- `GET /api/status` p95: <= 100 ms
+- `GET /api/pump-status` live-response target on healthy LAN: <= 1 s; stale fallback: <= 150 ms
+- Steady-state Edge Agent RSS target: <= 180 MB during normal operation
+- Replay throughput target on stable internet: >= 600 transactions/minute while preserving chronological ordering
+- Battery drain target attributable to Edge Agent over an 8-hour shift in `CLOUD_DIRECT`: <= 8%
+- Battery drain target attributable to Edge Agent over an 8-hour shift in `RELAY` / `BUFFER_ALWAYS`: <= 12%
 
 ## Must-Read Artifacts (Before ANY Task)
 
@@ -100,6 +121,7 @@ com.fccmiddleware.edge/
 | Database Schema Design | `docs/specs/data-models/tier-1-4-database-schema-design.md` | Edge Room entities, DAOs, indexes |
 | Security Plan | `docs/specs/security/tier-2-5-security-implementation-plan.md` | Android Keystore, EncryptedSharedPreferences, LAN API key |
 | Device Registration Spec | `docs/specs/data-models/tier-1-1-device-registration-spec.md` | QR bootstrap, registration flow |
+| Edge Agent Development Plan | `docs/plans/dev-plan-edge-agent.md` | Task sequencing, performance guardrails, and implementation priorities |
 
 ## Connectivity States
 
@@ -135,3 +157,11 @@ Upload is in `created_at ASC` order. Never skip past a failed record.
 - Ktor routes: Ktor test application
 - Connectivity manager: Unit tests with mocked probes
 - Integration: Robolectric for Android framework tests
+- Performance benchmarks: measure local API latency, replay throughput, and backlog query performance against a representative 30,000-record dataset
+
+## Implementation Priorities
+
+- Keep the always-on runtime minimal; defer non-critical work unless it is piggybacked on an existing successful cycle
+- Prefer one coalesced cadence loop over multiple recurring timers
+- Optimize first for Odoo-visible latency: pre-auth, offline transaction reads, status endpoint, then pump-status fallback behavior
+- Treat manual FCC pull as a core requirement, not an optional convenience feature

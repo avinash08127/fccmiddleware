@@ -9,7 +9,12 @@
       "Bash(dotnet sln:*)",
       "Bash(dotnet add:*)",
       "Bash(rm:*)",
-      "Bash(dotnet build:*)"
+      "Bash(dotnet build:*)",
+      "Bash(grep -n \"nozzle_count\\\\|pump_number\\\\|nozzle_number\\\\|odoo_pump_number\\\\|odoo_nozzle_number\" Requirements.md WIP-HLD-*.md docs/plans/*.md docs/specs/config/*.md)",
+      "Bash(grep -n \"pre-auth routing\\\\|fcc_pump_number\\\\|fcc_nozzle_number\\\\|odoo_pump_number\\\\|odoo_nozzle_number\\\\|master data sync\\\\|Room entity\\\\|nozzles table\" Requirements.md WIP-HLD-*.md docs/plans/*.md)",
+      "Bash(cat EOF ANALYSIS SUMMARY - Pump/Nozzle Schema Updates Required The following files contain stale or incomplete references to pump/nozzle data structures: EOF grep -n \"pumpNumber\\\\|nozzleNumber\" Requirements.md)",
+      "Read(//tmp/**)",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data[0][''''text'''']\\)\")"
     ]
   }
 }
