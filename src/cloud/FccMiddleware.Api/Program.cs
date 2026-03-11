@@ -1,7 +1,23 @@
+using System.Text;
+using FccMiddleware.Adapter.Doms;
+using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
+using FccMiddleware.Application.Ingestion;
+using FccMiddleware.Application.Transactions;
+using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Interfaces;
+using FccMiddleware.Infrastructure.Adapters;
+using FccMiddleware.Infrastructure.Deduplication;
+using FccMiddleware.Infrastructure.Persistence;
+using FccMiddleware.Infrastructure.Repositories;
+using FccMiddleware.Infrastructure.Storage;
 using FccMiddleware.ServiceDefaults;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using Serilog;
+using StackExchange.Redis;
 
 // Bootstrap logger — active only until DI container is built.
 // ServiceDefaults replaces this with the full structured-JSON logger.
@@ -16,7 +32,65 @@ try
     // Registers: Serilog (structured JSON → console), OpenTelemetry, base health check
     builder.AddServiceDefaults();
 
-    builder.Services.AddAuthorization();
+    // ── Authentication ─────────────────────────────────────────────────────────
+    // Two schemes are registered:
+    //   1. JwtBearer  — Edge Agent device JWT (scheme: "Bearer")
+    //   2. OdooApiKey — Odoo service-to-service API key (scheme: "OdooApiKey")
+    //
+    // JWT bearer options are configured lazily via AddOptions<JwtBearerOptions>.Configure<IConfiguration>
+    // so that IConfiguration is resolved from the DI container at option-creation time, which
+    // picks up WebApplicationFactory config overrides in integration tests rather than the
+    // eagerly captured builder.Configuration.
+    builder.Services.AddAuthentication()
+        .AddJwtBearer(JwtBearerDefaults.AuthenticationScheme)
+        .AddScheme<OdooApiKeyAuthOptions, OdooApiKeyAuthHandler>(
+            OdooApiKeyAuthOptions.SchemeName, _ => { });
+
+    builder.Services
+        .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+        .Configure<IConfiguration>((options, config) =>
+        {
+            var jwtSection = config.GetSection(DeviceJwtOptions.SectionName);
+            var signingKey = jwtSection["SigningKey"] ?? string.Empty;
+            var issuer     = jwtSection["Issuer"]     ?? DeviceJwtOptions.DefaultIssuer;
+            var audience   = jwtSection["Audience"]   ?? DeviceJwtOptions.DefaultAudience;
+
+            if (string.IsNullOrEmpty(signingKey))
+            {
+                // No key configured: JWT bearer is registered but tokens cannot be validated.
+                // The upload endpoint will return 401 for all requests.
+                return;
+            }
+
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer           = true,
+                ValidIssuer              = issuer,
+                ValidateAudience         = true,
+                ValidAudience            = audience,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey         = new SymmetricSecurityKey(
+                    Encoding.UTF8.GetBytes(signingKey)),
+                ValidateLifetime         = true,
+                ClockSkew                = TimeSpan.FromSeconds(30)
+            };
+        });
+
+    builder.Services.AddAuthorization(opts =>
+    {
+        opts.AddPolicy("EdgeAgentDevice", policy =>
+            policy
+                .RequireAuthenticatedUser()
+                .RequireClaim("site")
+                .RequireClaim("lei"));
+
+        opts.AddPolicy(OdooApiKeyAuthOptions.PolicyName, policy =>
+            policy
+                .AddAuthenticationSchemes(OdooApiKeyAuthOptions.SchemeName)
+                .RequireAuthenticatedUser()
+                .RequireClaim("lei"));
+    });
+
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen(c =>
     {
@@ -48,6 +122,54 @@ try
         cfg.RegisterServicesFromAssembly(typeof(FccMiddleware.Application.Common.Result<>).Assembly);
     });
 
+    builder.Services.AddControllers();
+
+    // ── Infrastructure: Tenant context (populated per-request by auth middleware) ─
+    builder.Services.AddScoped<FccMiddleware.Infrastructure.Persistence.TenantContext>();
+    builder.Services.AddScoped<FccMiddleware.Domain.Interfaces.ICurrentTenantProvider>(
+        sp => sp.GetRequiredService<FccMiddleware.Infrastructure.Persistence.TenantContext>());
+
+    // ── Infrastructure: PostgreSQL (EF Core) ──────────────────────────────────
+    builder.Services.AddDbContext<FccMiddlewareDbContext>((sp, opts) =>
+        opts.UseNpgsql(
+            sp.GetRequiredService<IConfiguration>().GetConnectionString("FccMiddleware")
+            ?? string.Empty));
+
+    // Register DbContext as application + dedup + poll interfaces
+    builder.Services.AddScoped<IIngestDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IDeduplicationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IPollTransactionsDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+
+    // ── Infrastructure: Redis (StackExchange.Redis) ───────────────────────────
+    builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+    {
+        var connStr = sp.GetRequiredService<IConfiguration>().GetConnectionString("Redis") ?? string.Empty;
+        return ConnectionMultiplexer.Connect(connStr);
+    });
+
+    // ── Infrastructure: Ingestion services ───────────────────────────────────
+    builder.Services.AddScoped<IDeduplicationService, RedisDeduplicationService>();
+    builder.Services.AddScoped<ISiteFccConfigProvider, SiteFccConfigProvider>();
+    builder.Services.AddSingleton<IRawPayloadArchiver, S3RawPayloadArchiver>();
+
+    // ── Infrastructure: FCC Adapter Factory ──────────────────────────────────
+    builder.Services.AddHttpClient();
+    builder.Services.AddSingleton<IFccAdapterFactory>(sp =>
+        FccAdapterFactory.Create(registry =>
+        {
+            var hcf = sp.GetRequiredService<IHttpClientFactory>();
+            registry[FccVendor.DOMS] = cfg =>
+            {
+                var client = hcf.CreateClient();
+                if (!string.IsNullOrEmpty(cfg.HostAddress))
+                {
+                    client.BaseAddress = new Uri($"http://{cfg.HostAddress}:{cfg.Port}/api/v1/");
+                    client.DefaultRequestHeaders.Add("X-API-Key", cfg.ApiKey);
+                }
+                return new DomsCloudAdapter(client, cfg);
+            };
+        }));
+
     // Health checks: PostgreSQL + Redis (registered here; liveness stub registered in ServiceDefaults)
     // Use factory overloads so connection strings are resolved lazily at health-check execution
     // time — this is necessary for WebApplicationFactory overrides to take effect in tests.
@@ -76,6 +198,7 @@ try
     }
 
     app.UseHttpsRedirection();
+    app.UseAuthentication();
     app.UseAuthorization();
 
     // /health       → liveness  (is the process up?)
@@ -90,6 +213,8 @@ try
         Predicate      = check => check.Tags.Contains("ready"),
         ResponseWriter = HealthResponseWriter.WriteResponse
     });
+
+    app.MapControllers();
 
     app.Run();
 }

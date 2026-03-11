@@ -1,5 +1,9 @@
+using FccMiddleware.Application.Ingestion;
+using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
+using FccMiddleware.Infrastructure.Deduplication;
 using Microsoft.EntityFrameworkCore;
 
 namespace FccMiddleware.Infrastructure.Persistence;
@@ -17,7 +21,7 @@ namespace FccMiddleware.Infrastructure.Persistence;
 ///
 /// Outbox: <see cref="OutboxMessage"/> uses a bigint GENERATED ALWAYS AS IDENTITY column.
 /// </summary>
-public class FccMiddlewareDbContext : DbContext
+public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext
 {
     private readonly ICurrentTenantProvider _tenantProvider;
 
@@ -57,6 +61,11 @@ public class FccMiddlewareDbContext : DbContext
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
+    // -------------------------------------------------------------------------
+    // API key management
+    // -------------------------------------------------------------------------
+    public DbSet<OdooApiKey> OdooApiKeys => Set<OdooApiKey>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -72,6 +81,131 @@ public class FccMiddlewareDbContext : DbContext
         // -------------------------------------------------------------------------
         ApplyTenantFilters(modelBuilder);
     }
+
+    // -------------------------------------------------------------------------
+    // IIngestDbContext implementation
+    // -------------------------------------------------------------------------
+
+    void IIngestDbContext.AddTransaction(Transaction transaction) => Transactions.Add(transaction);
+
+    void IIngestDbContext.AddOutboxMessage(OutboxMessage message) => OutboxMessages.Add(message);
+
+    void IIngestDbContext.ClearTracked() => ChangeTracker.Clear();
+
+    async Task<Guid?> IIngestDbContext.FindTransactionByDedupKeyAsync(
+        string fccTransactionId, string siteCode, CancellationToken ct) =>
+        await Transactions
+            .IgnoreQueryFilters()
+            .Where(t => t.FccTransactionId == fccTransactionId && t.SiteCode == siteCode)
+            .Select(t => (Guid?)t.Id)
+            .FirstOrDefaultAsync(ct);
+
+    async Task<bool> IIngestDbContext.HasFuzzyMatchAsync(
+        Guid legalEntityId, string siteCode,
+        int pumpNumber, int nozzleNumber,
+        long amountMinorUnits,
+        DateTimeOffset windowStart, DateTimeOffset windowEnd,
+        CancellationToken ct) =>
+        await Transactions
+            .IgnoreQueryFilters()
+            .AnyAsync(t =>
+                t.LegalEntityId == legalEntityId
+             && t.SiteCode == siteCode
+             && t.PumpNumber == pumpNumber
+             && t.NozzleNumber == nozzleNumber
+             && t.AmountMinorUnits == amountMinorUnits
+             && t.CompletedAt >= windowStart
+             && t.CompletedAt <= windowEnd
+             && t.Status == TransactionStatus.PENDING,
+                ct);
+
+    // -------------------------------------------------------------------------
+    // IPollTransactionsDbContext implementation
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Executes the Odoo poll query against the transactions table.
+    /// Uses ix_transactions_odoo_poll partial index (status = 'PENDING').
+    /// Keyset cursor: WHERE (created_at > cursorCreatedAt) OR
+    ///                      (created_at = cursorCreatedAt AND id > cursorId)
+    /// </summary>
+    async Task<List<Application.Transactions.PollTransactionRecord>>
+        IPollTransactionsDbContext.FetchPendingPageAsync(
+            Guid legalEntityId,
+            string? siteCode,
+            int? pumpNumber,
+            DateTimeOffset? from,
+            DateTimeOffset? cursorCreatedAt,
+            Guid? cursorId,
+            int take,
+            CancellationToken ct)
+    {
+        var query = Set<Transaction>()
+            .IgnoreQueryFilters()
+            .Where(t => t.LegalEntityId == legalEntityId
+                     && t.Status == TransactionStatus.PENDING);
+
+        if (!string.IsNullOrEmpty(siteCode))
+            query = query.Where(t => t.SiteCode == siteCode);
+
+        if (pumpNumber.HasValue)
+            query = query.Where(t => t.PumpNumber == pumpNumber.Value);
+
+        if (from.HasValue)
+            query = query.Where(t => t.CreatedAt >= from.Value);
+
+        if (cursorCreatedAt.HasValue && cursorId.HasValue)
+        {
+            var cCAt = cursorCreatedAt.Value;
+            var cId  = cursorId.Value;
+            query = query.Where(t =>
+                t.CreatedAt > cCAt
+                || (t.CreatedAt == cCAt && t.Id.CompareTo(cId) > 0));
+        }
+
+        return await query
+            .OrderBy(t => t.CreatedAt)
+            .ThenBy(t => t.Id)
+            .Take(take)
+            .Select(t => new Application.Transactions.PollTransactionRecord
+            {
+                Id                     = t.Id,
+                FccTransactionId       = t.FccTransactionId,
+                SiteCode               = t.SiteCode,
+                PumpNumber             = t.PumpNumber,
+                NozzleNumber           = t.NozzleNumber,
+                ProductCode            = t.ProductCode,
+                VolumeMicrolitres      = t.VolumeMicrolitres,
+                AmountMinorUnits       = t.AmountMinorUnits,
+                UnitPriceMinorPerLitre = t.UnitPriceMinorPerLitre,
+                CurrencyCode           = t.CurrencyCode,
+                StartedAt              = t.StartedAt,
+                CompletedAt            = t.CompletedAt,
+                CreatedAt              = t.CreatedAt,
+                Status                 = t.Status.ToString(),
+                CorrelationId          = t.CorrelationId,
+                FiscalReceiptNumber    = t.FiscalReceiptNumber,
+                AttendantId            = t.AttendantId,
+                IsStale                = t.IsStale,
+                FccVendor              = t.FccVendor.ToString(),
+                IngestionSource        = t.IngestionSource.ToString()
+            })
+            .ToListAsync(ct);
+    }
+
+    // -------------------------------------------------------------------------
+    // IDeduplicationDbContext implementation
+    // -------------------------------------------------------------------------
+
+    async Task<Guid?> IDeduplicationDbContext.FindTransactionIdByDedupKeyAsync(
+        string fccTransactionId, string siteCode, CancellationToken ct) =>
+        await Transactions
+            .IgnoreQueryFilters()
+            .Where(t => t.FccTransactionId == fccTransactionId && t.SiteCode == siteCode)
+            .Select(t => (Guid?)t.Id)
+            .FirstOrDefaultAsync(ct);
+
+    // -------------------------------------------------------------------------
 
     private void ApplyTenantFilters(ModelBuilder modelBuilder)
     {

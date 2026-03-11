@@ -1,0 +1,163 @@
+package com.fccmiddleware.edge.adapter.common
+
+import kotlinx.serialization.Serializable
+
+// ---------------------------------------------------------------------------
+// Adapter input/output supporting types — per tier-1-5-fcc-adapter-interface-contracts.md §5.2
+// ---------------------------------------------------------------------------
+
+/**
+ * Wraps a raw FCC payload with vendor/context metadata for adapter processing.
+ *
+ * vendor must match the resolved site/FCC config; mismatch is a non-recoverable
+ * validation error.
+ */
+@Serializable
+data class RawPayloadEnvelope(
+    /** Must match resolved site/FCC config vendor. */
+    val vendor: FccVendor,
+
+    /** Adapter context key for mappings and validation. */
+    val siteCode: String,
+
+    /** Time payload reached the Edge boundary. UTC ISO 8601. */
+    val receivedAtUtc: String,
+
+    /**
+     * MIME content type. MVP values: "application/json", "text/xml",
+     * "application/octet-stream". DOMS uses "application/json".
+     */
+    val contentType: String,
+
+    /** Exact raw payload, unchanged. */
+    val payload: String,
+)
+
+/**
+ * Cursor input for fetchTransactions.
+ *
+ * Provide cursorToken when the vendor returned one on the previous call,
+ * otherwise provide sinceUtc as inclusive lower bound.
+ */
+@Serializable
+data class FetchCursor(
+    /** Vendor opaque continuation token. */
+    val cursorToken: String? = null,
+
+    /** Inclusive lower bound when vendor token is unavailable. UTC ISO 8601. */
+    val sinceUtc: String? = null,
+
+    /** Caller hint for page size; adapter may reduce but must not exceed max. */
+    val limit: Int = 50,
+)
+
+/**
+ * Batch of canonical transactions returned by fetchTransactions.
+ *
+ * transactions may be empty with hasMore=false — valid no-data poll result.
+ */
+@Serializable
+data class TransactionBatch(
+    /** Normalised transactions. May be empty. */
+    val transactions: List<CanonicalTransaction>,
+
+    /** hasMore=true when an immediate follow-up fetch should continue. */
+    val hasMore: Boolean,
+
+    /** Vendor opaque token for the next fetch call. Null when unavailable. */
+    val nextCursorToken: String? = null,
+
+    /** Returned when cursor progression is time-based. UTC ISO 8601. */
+    val highWatermarkUtc: String? = null,
+
+    /** Vendor batch/message identifier for diagnostics. */
+    val sourceBatchId: String? = null,
+)
+
+/**
+ * Pre-auth command sent to the FCC over LAN.
+ *
+ * customerTaxId is PII — NEVER log this field.
+ * Cloud forwarding from the result is always asynchronous; never on the request path.
+ */
+@Serializable
+data class PreAuthCommand(
+    /** Used to resolve FCC config and mappings. */
+    val siteCode: String,
+
+    /** Physical pump number. */
+    val pumpNumber: Int,
+
+    /** Authorized amount in minor currency units. */
+    val amountMinorUnits: Long,
+
+    /** Must match site config. */
+    val currencyCode: String,
+
+    /** Required when FCC needs explicit nozzle selection. */
+    val nozzleNumber: Int? = null,
+
+    /** Echo field for later correlation when vendor supports it. */
+    val odooOrderId: String? = null,
+
+    /** Required when site fiscalization config requires it. PII — NEVER log. */
+    val customerTaxId: String? = null,
+)
+
+/**
+ * Canonical outcome of a pre-auth command.
+ *
+ * status=AUTHORIZED is the only success state; all others require caller handling.
+ */
+@Serializable
+data class PreAuthResult(
+    /** AUTHORIZED, DECLINED, TIMEOUT, or ERROR. */
+    val status: PreAuthResultStatus,
+
+    /** Vendor reference when status=AUTHORIZED. */
+    val authorizationCode: String? = null,
+
+    /** FCC-provided authorization expiry. UTC ISO 8601. */
+    val expiresAtUtc: String? = null,
+
+    /** Operator-safe outcome detail; never contains PII. */
+    val message: String? = null,
+)
+
+// ---------------------------------------------------------------------------
+// Factory configuration input
+// ---------------------------------------------------------------------------
+
+/**
+ * Runtime configuration supplied to FccAdapterFactory.resolve().
+ *
+ * Minimum required fields per §5.4 of adapter interface contracts spec.
+ * productCodeMapping: maps raw FCC product codes to canonical codes (e.g. "001" → "PMS").
+ */
+@Serializable
+data class AgentFccConfig(
+    val fccVendor: FccVendor,
+    val connectionProtocol: String,
+    val hostAddress: String,
+    val port: Int,
+
+    /** API key or other auth credential. Stored in EncryptedSharedPreferences — NEVER log. */
+    val authCredential: String,
+
+    val ingestionMode: IngestionMode,
+    val pullIntervalSeconds: Int,
+
+    /** Maps raw FCC product codes → canonical product codes. */
+    val productCodeMapping: Map<String, String>,
+
+    /** IANA timezone identifier for the site (e.g. "Africa/Johannesburg"). */
+    val timezone: String,
+
+    val currencyCode: String,
+
+    /**
+     * Offset added to raw FCC pump numbers to produce canonical pump numbers.
+     * Allows normalising FCC-internal numbering to Odoo POS numbering.
+     */
+    val pumpNumberOffset: Int = 0,
+)

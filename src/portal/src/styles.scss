@@ -1,1 +1,36 @@
-/* You can add global styles to this file, and also import other style files */
+@use 'styles/variables' as *;
+
+// PrimeIcons
+@import 'primeicons/primeicons.css';
+
+// Global resets & base styles
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: $font-family-base;
+  font-size: $font-size-base;
+  line-height: $line-height-base;
+  background: $surface-50;
+  color: $surface-800;
+}
+
+// Utility — visually hidden (accessibility)
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

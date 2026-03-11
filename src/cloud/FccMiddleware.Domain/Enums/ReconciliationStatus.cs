@@ -11,5 +11,6 @@ public enum ReconciliationStatus
     VARIANCE_WITHIN_TOLERANCE,
     VARIANCE_FLAGGED,
     APPROVED,
-    REJECTED
+    REJECTED,
+    REVIEW_FUZZY_MATCH
 }

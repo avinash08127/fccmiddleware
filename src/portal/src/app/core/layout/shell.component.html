@@ -1,0 +1,57 @@
+<p-toast />
+
+<div class="shell-layout">
+  <!-- Sidebar -->
+  <nav class="shell-sidebar">
+    <div class="shell-sidebar__logo">
+      <span class="shell-sidebar__logo-text">FCC Portal</span>
+    </div>
+
+    <ul class="shell-sidebar__nav">
+      @for (item of navItems; track item.route) {
+        <li>
+          <a
+            [routerLink]="item.route"
+            routerLinkActive="shell-sidebar__nav-item--active"
+            class="shell-sidebar__nav-item"
+          >
+            <i [class]="item.icon"></i>
+            <span>{{ item.label }}</span>
+          </a>
+        </li>
+      }
+    </ul>
+  </nav>
+
+  <!-- Main area -->
+  <div class="shell-main">
+    <!-- Header -->
+    <header class="shell-header">
+      <div class="shell-header__spacer"></div>
+      <div class="shell-header__user">
+        <span class="shell-header__legal-entity">{{ activeLegalEntity() }}</span>
+        <p-avatar
+          [label]="userName().charAt(0).toUpperCase()"
+          shape="circle"
+          styleClass="shell-header__avatar"
+        />
+        <div class="shell-header__user-info">
+          <span class="shell-header__user-name">{{ userName() }}</span>
+          <span class="shell-header__user-role">{{ userRole() }}</span>
+        </div>
+        <p-button
+          icon="pi pi-sign-out"
+          severity="secondary"
+          [text]="true"
+          (onClick)="logout()"
+          pTooltip="Sign out"
+        />
+      </div>
+    </header>
+
+    <!-- Feature content -->
+    <main class="shell-content">
+      <router-outlet />
+    </main>
+  </div>
+</div>

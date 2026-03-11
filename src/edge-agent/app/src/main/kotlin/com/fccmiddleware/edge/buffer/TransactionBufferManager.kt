@@ -1,0 +1,144 @@
+package com.fccmiddleware.edge.buffer
+
+import com.fccmiddleware.edge.adapter.common.CanonicalTransaction
+import com.fccmiddleware.edge.adapter.common.SyncStatus
+import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
+import java.time.Instant
+
+/**
+ * Buffer management layer on top of [TransactionBufferDao].
+ *
+ * Handles the full transaction buffer lifecycle:
+ *   - Buffering FCC transactions with local dedup (fccTransactionId + siteCode)
+ *   - Providing upload batches in chronological order (oldest first)
+ *   - Marking upload outcomes (uploaded, duplicate confirmed, synced to Odoo)
+ *   - Querying for the local API with SYNCED_TO_ODOO excluded
+ *   - Providing per-status buffer statistics for telemetry
+ *
+ * All timestamps are ISO 8601 UTC strings. Money is Long minor units.
+ */
+class TransactionBufferManager(private val dao: TransactionBufferDao) {
+
+    /**
+     * Buffer a canonical transaction from the FCC adapter.
+     *
+     * Silently deduplicates by fccTransactionId + siteCode (Room IGNORE strategy).
+     *
+     * @return true if the transaction was newly inserted; false if it was a duplicate.
+     */
+    suspend fun bufferTransaction(tx: CanonicalTransaction): Boolean {
+        val entity = tx.toEntity()
+        val rowId = dao.insert(entity)
+        return rowId != -1L
+    }
+
+    /**
+     * Return the next batch of PENDING records for cloud upload.
+     *
+     * Records are ordered oldest-first (createdAt ASC) to preserve chronological replay.
+     * The upload worker must not skip past a failed record.
+     */
+    suspend fun getPendingBatch(batchSize: Int): List<BufferedTransaction> =
+        dao.getPendingForUpload(batchSize)
+
+    /**
+     * Mark records as UPLOADED after the cloud upload API accepts them.
+     */
+    suspend fun markUploaded(ids: List<String>) {
+        if (ids.isEmpty()) return
+        val now = Instant.now().toString()
+        dao.markBatchUploaded(ids, now)
+    }
+
+    /**
+     * Mark records as UPLOADED when the cloud confirmed them as duplicates.
+     *
+     * Per §5.3 Edge Sync State Machine: if cloud returned dedup-skipped, still mark UPLOADED.
+     * These records will not appear in the next getPendingBatch and will eventually be
+     * transitioned to SYNCED_TO_ODOO via the status poll.
+     */
+    suspend fun markDuplicateConfirmed(ids: List<String>) {
+        if (ids.isEmpty()) return
+        val now = Instant.now().toString()
+        dao.markBatchUploaded(ids, now)
+    }
+
+    /**
+     * Mark records as SYNCED_TO_ODOO when the status poll confirms Odoo has ingested them.
+     *
+     * Keyed by FCC transaction ID (the canonical dedup key).
+     * After this transition, records are excluded from local API responses to prevent
+     * double-consumption by Odoo POS.
+     */
+    suspend fun markSyncedToOdoo(fccTransactionIds: List<String>) {
+        if (fccTransactionIds.isEmpty()) return
+        val now = Instant.now().toString()
+        dao.markSyncedToOdoo(fccTransactionIds, now)
+    }
+
+    /**
+     * Buffer-backed query for GET /api/transactions.
+     *
+     * Excludes SYNCED_TO_ODOO records per §5.3 to prevent double-consumption.
+     * Must remain <= 150 ms p95 with 30,000 buffered records.
+     *
+     * @param pumpNumber FCC pump number filter; null returns all pumps.
+     */
+    suspend fun getForLocalApi(pumpNumber: Int?, limit: Int, offset: Int): List<BufferedTransaction> =
+        if (pumpNumber != null) {
+            dao.getForLocalApiByPump(pumpNumber, limit, offset)
+        } else {
+            dao.getForLocalApi(limit, offset)
+        }
+
+    /**
+     * Per-status record counts for telemetry reporting.
+     *
+     * Statuses not present in the DB are omitted from the returned map.
+     */
+    suspend fun getBufferStats(): Map<SyncStatus, Int> {
+        val counts = dao.countByStatus()
+        return counts.associate { row ->
+            val status = SyncStatus.entries.firstOrNull { it.name == row.syncStatus }
+                ?: SyncStatus.PENDING
+            status to row.count
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Mapping
+    // -------------------------------------------------------------------------
+
+    private fun CanonicalTransaction.toEntity(): BufferedTransaction {
+        val now = Instant.now().toString()
+        return BufferedTransaction(
+            id = id,
+            fccTransactionId = fccTransactionId,
+            siteCode = siteCode,
+            pumpNumber = pumpNumber,
+            nozzleNumber = nozzleNumber,
+            productCode = productCode,
+            volumeMicrolitres = volumeMicrolitres,
+            amountMinorUnits = amountMinorUnits,
+            unitPriceMinorPerLitre = unitPriceMinorPerLitre,
+            currencyCode = currencyCode,
+            startedAt = startedAt,
+            completedAt = completedAt,
+            fiscalReceiptNumber = fiscalReceiptNumber,
+            fccVendor = fccVendor.name,
+            attendantId = attendantId,
+            status = status.name,
+            syncStatus = SyncStatus.PENDING.name,
+            ingestionSource = ingestionSource.name,
+            rawPayloadJson = rawPayloadJson,
+            correlationId = correlationId,
+            uploadAttempts = 0,
+            lastUploadAttemptAt = null,
+            lastUploadError = null,
+            schemaVersion = schemaVersion,
+            createdAt = ingestedAt,
+            updatedAt = now,
+        )
+    }
+}

@@ -1,0 +1,149 @@
+package com.fccmiddleware.edge.api
+
+import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
+import kotlinx.serialization.Serializable
+
+/**
+ * Standard error envelope — consistent with the Cloud API and edge-agent-local-api.yaml ErrorResponse.
+ */
+@Serializable
+data class ErrorResponse(
+    val errorCode: String,
+    val message: String,
+    val traceId: String,
+    val timestamp: String,
+)
+
+/**
+ * Agent operational status snapshot — matches AgentStatusResponse in edge-agent-local-api.yaml.
+ */
+@Serializable
+data class AgentStatusResponse(
+    val deviceId: String,
+    val siteCode: String,
+    val connectivityState: String,
+    val fccReachable: Boolean,
+    val fccHeartbeatAgeSeconds: Int? = null,
+    val bufferDepth: Int,
+    val syncLagSeconds: Int? = null,
+    val lastSuccessfulSyncUtc: String? = null,
+    val configVersion: Int? = null,
+    val agentVersion: String,
+    val uptimeSeconds: Int,
+    val reportedAtUtc: String,
+)
+
+/**
+ * A buffered transaction as exposed through the local REST API.
+ * Excludes internal sync metadata that Odoo POS doesn't need.
+ * Matches LocalTransaction in edge-agent-local-api.yaml.
+ */
+@Serializable
+data class LocalTransaction(
+    val id: String,
+    val fccTransactionId: String,
+    val siteCode: String,
+    val pumpNumber: Int,
+    val nozzleNumber: Int,
+    val productCode: String,
+    /** Microlitres */
+    val volumeMicrolitres: Long,
+    /** Minor currency units (cents). NEVER floating point. */
+    val amountMinorUnits: Long,
+    /** Minor units per litre. NEVER floating point. */
+    val unitPriceMinorPerLitre: Long,
+    val currencyCode: String,
+    /** ISO 8601 UTC */
+    val startedAt: String,
+    /** ISO 8601 UTC */
+    val completedAt: String,
+    val fiscalReceiptNumber: String? = null,
+    val fccVendor: String,
+    val attendantId: String? = null,
+    /** SyncStatus: PENDING | UPLOADED */
+    val syncStatus: String,
+    val correlationId: String,
+) {
+    companion object {
+        fun from(entity: BufferedTransaction) = LocalTransaction(
+            id = entity.id,
+            fccTransactionId = entity.fccTransactionId,
+            siteCode = entity.siteCode,
+            pumpNumber = entity.pumpNumber,
+            nozzleNumber = entity.nozzleNumber,
+            productCode = entity.productCode,
+            volumeMicrolitres = entity.volumeMicrolitres,
+            amountMinorUnits = entity.amountMinorUnits,
+            unitPriceMinorPerLitre = entity.unitPriceMinorPerLitre,
+            currencyCode = entity.currencyCode,
+            startedAt = entity.startedAt,
+            completedAt = entity.completedAt,
+            fiscalReceiptNumber = entity.fiscalReceiptNumber,
+            fccVendor = entity.fccVendor,
+            attendantId = entity.attendantId,
+            syncStatus = entity.syncStatus,
+            correlationId = entity.correlationId,
+        )
+    }
+}
+
+/**
+ * Paginated list response for GET /api/v1/transactions.
+ */
+@Serializable
+data class TransactionListResponse(
+    val transactions: List<LocalTransaction>,
+    /** Total records matching the filter (excludes SYNCED_TO_ODOO). */
+    val total: Int,
+    val limit: Int,
+    val offset: Int,
+)
+
+/**
+ * Batch acknowledge request for POST /api/v1/transactions/acknowledge.
+ * Odoo POS marks a list of transactions as locally consumed.
+ */
+@Serializable
+data class BatchAcknowledgeRequest(
+    val transactionIds: List<String>,
+)
+
+/**
+ * Response for POST /api/v1/transactions/acknowledge.
+ */
+@Serializable
+data class BatchAcknowledgeResponse(
+    val acknowledged: Int,
+)
+
+/**
+ * Wrapper for GET /api/v1/pump-status response with stale metadata.
+ */
+@Serializable
+data class PumpStatusResponse(
+    val pumps: List<com.fccmiddleware.edge.adapter.common.PumpStatus>,
+    /** true when FCC was unreachable and data is from the last-known cache. */
+    val stale: Boolean = false,
+    /** Age of the cached data in seconds; null when live. */
+    val dataAgeSeconds: Int? = null,
+    /** ISO 8601 UTC timestamp when data was fetched; null if not yet available. */
+    val fetchedAtUtc: String? = null,
+)
+
+/**
+ * Cancel pre-auth request body for POST /api/v1/preauth/cancel.
+ */
+@Serializable
+data class CancelPreAuthRequest(
+    val odooOrderId: String,
+    val siteCode: String,
+)
+
+/**
+ * Response for POST /api/v1/preauth/cancel.
+ */
+@Serializable
+data class CancelPreAuthResponse(
+    val success: Boolean,
+    val message: String? = null,
+)

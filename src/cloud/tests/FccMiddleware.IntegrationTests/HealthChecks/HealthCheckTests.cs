@@ -12,6 +12,7 @@ namespace FccMiddleware.IntegrationTests.HealthChecks;
 /// Integration tests for /health (liveness) and /health/ready (readiness) endpoints.
 /// Uses Testcontainers to spin up real PostgreSQL and Redis containers.
 /// </summary>
+[Collection("Integration")]
 public sealed class HealthCheckTests : IAsyncLifetime
 {
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()

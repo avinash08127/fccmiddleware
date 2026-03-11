@@ -1,0 +1,13 @@
+{
+  "transactionId": "DOMS-TX-20240115-001",
+  "pumpNumber": 2,
+  "nozzleNumber": 1,
+  "productCode": "01",
+  "volumeMicrolitres": 25500000,
+  "amountMinorUnits": 38250,
+  "unitPriceMinorPerLitre": 1500,
+  "startTime": "2024-01-15T08:00:00+00:00",
+  "endTime": "2024-01-15T08:03:47+00:00",
+  "attendantId": "ATT-007",
+  "receiptNumber": "R-2024-001"
+}
