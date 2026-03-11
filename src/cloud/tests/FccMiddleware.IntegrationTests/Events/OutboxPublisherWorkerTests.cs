@@ -189,8 +189,18 @@ public sealed class OutboxPublisherWorkerTests : IAsyncLifetime
             await db.SaveChangesAsync();
         }
 
-        // Act: run worker with 7-day retention
-        var options = Options.Create(new OutboxWorkerOptions { BatchSize = 50, RetentionDays = 7 });
+        // Verify the old message exists before cleanup
+        using (var checkScope = _factory.Services.CreateScope())
+        {
+            var checkDb = checkScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            var exists = await checkDb.OutboxMessages
+                .Where(m => m.EventType == "TestCleanup" && m.ProcessedAt != null)
+                .AnyAsync();
+            exists.Should().BeTrue("the old processed message should exist before cleanup");
+        }
+
+        // Act: run worker with 0-day retention so any processed message gets cleaned up
+        var options = Options.Create(new OutboxWorkerOptions { BatchSize = 50, RetentionDays = 0 });
         var worker = new OutboxPublisherWorker(
             _factory.Services.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<OutboxPublisherWorker>.Instance,
