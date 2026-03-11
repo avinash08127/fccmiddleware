@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.sync
 
+import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
@@ -17,6 +18,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
+import okhttp3.CertificatePinner
 
 // ---------------------------------------------------------------------------
 // Status poll result type
@@ -109,6 +111,60 @@ interface CloudApiClient {
         currentConfigVersion: Int?,
         bearerToken: String,
     ): CloudConfigPollResult
+
+    /**
+     * Submit telemetry payload to POST /api/v1/agent/telemetry.
+     *
+     * Returns [CloudTelemetryResult.Success] on HTTP 204.
+     * Idempotent by (deviceId, sequenceNumber) — duplicates silently discarded.
+     *
+     * @param payload Full telemetry snapshot.
+     * @param bearerToken Device JWT from [DeviceTokenProvider.getAccessToken].
+     */
+    suspend fun submitTelemetry(
+        payload: TelemetryPayload,
+        bearerToken: String,
+    ): CloudTelemetryResult
+
+    /**
+     * Forward a pre-auth record to the cloud for tracking.
+     *
+     * Calls `POST /api/v1/preauth` with the pre-auth details.
+     * Dedup key: (odooOrderId, siteCode). Re-posting with the same key and
+     * an updated status triggers a status transition on the cloud record.
+     *
+     * @param request Pre-auth forward request.
+     * @param bearerToken Device JWT from [DeviceTokenProvider.getAccessToken].
+     */
+    suspend fun forwardPreAuth(
+        request: PreAuthForwardRequest,
+        bearerToken: String,
+    ): CloudPreAuthForwardResult
+
+    /**
+     * Register the device with the cloud.
+     *
+     * Calls `POST /api/v1/agent/register` with bootstrap token and device fingerprint.
+     * No bearer token required — authentication is via the one-time provisioning token.
+     *
+     * @param cloudBaseUrl Cloud API base URL from QR code (may differ from the
+     *   configured base URL since the client may not yet be configured).
+     * @param request Registration request with bootstrap data.
+     */
+    suspend fun registerDevice(
+        cloudBaseUrl: String,
+        request: DeviceRegistrationRequest,
+    ): CloudRegistrationResult
+
+    /**
+     * Refresh the device access token.
+     *
+     * Calls `POST /api/v1/agent/token/refresh` with the current refresh token.
+     * On success, returns new access + refresh tokens (rotation).
+     *
+     * @param refreshToken Current opaque refresh token.
+     */
+    suspend fun refreshToken(refreshToken: String): CloudTokenRefreshResult
 }
 
 // ---------------------------------------------------------------------------
@@ -231,16 +287,178 @@ class HttpCloudApiClient(
         }
     }
 
+    override suspend fun submitTelemetry(
+        payload: TelemetryPayload,
+        bearerToken: String,
+    ): CloudTelemetryResult {
+        return try {
+            val response = httpClient.post("$cloudBaseUrl/api/v1/agent/telemetry") {
+                contentType(ContentType.Application.Json)
+                bearerAuth(bearerToken)
+                setBody(payload)
+            }
+            when (response.status) {
+                HttpStatusCode.NoContent -> CloudTelemetryResult.Success
+                HttpStatusCode.Unauthorized -> CloudTelemetryResult.Unauthorized
+                HttpStatusCode.Forbidden -> {
+                    val errorCode = try {
+                        response.body<CloudErrorResponse>().errorCode
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudTelemetryResult.Forbidden(errorCode)
+                }
+                else -> {
+                    CloudTelemetryResult.TransportError(
+                        "HTTP ${response.status.value}: ${response.status.description}",
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            CloudTelemetryResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
+
+    override suspend fun forwardPreAuth(
+        request: PreAuthForwardRequest,
+        bearerToken: String,
+    ): CloudPreAuthForwardResult {
+        return try {
+            val response = httpClient.post("$cloudBaseUrl/api/v1/preauth") {
+                contentType(ContentType.Application.Json)
+                bearerAuth(bearerToken)
+                setBody(request)
+            }
+            when (response.status) {
+                HttpStatusCode.Created,
+                HttpStatusCode.OK -> CloudPreAuthForwardResult.Success(response.body())
+                HttpStatusCode.Unauthorized -> CloudPreAuthForwardResult.Unauthorized
+                HttpStatusCode.Forbidden -> {
+                    val errorCode = try {
+                        response.body<CloudErrorResponse>().errorCode
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudPreAuthForwardResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.Conflict -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudPreAuthForwardResult.Conflict(error?.errorCode, error?.message)
+                }
+                else -> {
+                    CloudPreAuthForwardResult.TransportError(
+                        "HTTP ${response.status.value}: ${response.status.description}",
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            CloudPreAuthForwardResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
+
+    override suspend fun registerDevice(
+        cloudBaseUrl: String,
+        request: DeviceRegistrationRequest,
+    ): CloudRegistrationResult {
+        return try {
+            val response = httpClient.post("$cloudBaseUrl/api/v1/agent/register") {
+                contentType(ContentType.Application.Json)
+                setBody(request)
+            }
+            when (response.status) {
+                HttpStatusCode.Created -> CloudRegistrationResult.Success(response.body())
+                HttpStatusCode.BadRequest, HttpStatusCode.Conflict -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        CloudErrorResponse("UNKNOWN", response.bodyAsText())
+                    }
+                    CloudRegistrationResult.Rejected(error.errorCode, error.message)
+                }
+                else -> {
+                    CloudRegistrationResult.TransportError(
+                        "HTTP ${response.status.value}: ${response.status.description}",
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            CloudRegistrationResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
+
+    override suspend fun refreshToken(refreshToken: String): CloudTokenRefreshResult {
+        return try {
+            val response = httpClient.post("$cloudBaseUrl/api/v1/agent/token/refresh") {
+                contentType(ContentType.Application.Json)
+                setBody(TokenRefreshRequest(refreshToken))
+            }
+            when (response.status) {
+                HttpStatusCode.OK -> CloudTokenRefreshResult.Success(response.body())
+                HttpStatusCode.Unauthorized -> CloudTokenRefreshResult.Unauthorized
+                HttpStatusCode.Forbidden -> {
+                    val errorCode = try {
+                        response.body<CloudErrorResponse>().errorCode
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudTokenRefreshResult.Forbidden(errorCode)
+                }
+                else -> {
+                    CloudTokenRefreshResult.TransportError(
+                        "HTTP ${response.status.value}: ${response.status.description}",
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            CloudTokenRefreshResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
+
     companion object {
+        private const val TAG = "HttpCloudApiClient"
+
         /**
          * Factory for the production Ktor client.
          *
          * Uses OkHttp engine (matches the rest of the Edge Agent) with
          * kotlinx-serialization-based JSON negotiation and lenient parsing
          * so unknown fields from future cloud API versions are ignored.
+         *
+         * @param cloudBaseUrl Base URL of the cloud API.
+         * @param certificatePins Optional SHA-256 public key hashes for certificate pinning.
+         *   Format: list of "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" strings.
+         *   When non-empty, OkHttp will pin to these intermediate CA public keys.
+         *   Per security spec §5.3, pins are delivered via SiteConfig from cloud,
+         *   enabling rotation without APK update. On pin mismatch, the connection
+         *   is refused (no fallback to unpinned).
          */
-        fun create(cloudBaseUrl: String): HttpCloudApiClient {
+        fun create(
+            cloudBaseUrl: String,
+            certificatePins: List<String> = emptyList(),
+        ): HttpCloudApiClient {
             val client = HttpClient(OkHttp) {
+                engine {
+                    if (certificatePins.isNotEmpty()) {
+                        val hostname = extractHostname(cloudBaseUrl)
+                        if (hostname != null) {
+                            val pinnerBuilder = CertificatePinner.Builder()
+                            for (pin in certificatePins) {
+                                pinnerBuilder.add(hostname, pin)
+                            }
+                            val pinner = pinnerBuilder.build()
+                            config {
+                                certificatePinner(pinner)
+                            }
+                            Log.i(TAG, "Certificate pinning enabled for $hostname with ${certificatePins.size} pin(s)")
+                        } else {
+                            Log.w(TAG, "Could not extract hostname from $cloudBaseUrl — certificate pinning disabled")
+                        }
+                    }
+                }
                 install(ContentNegotiation) {
                     json(
                         Json {
@@ -251,6 +469,20 @@ class HttpCloudApiClient(
                 }
             }
             return HttpCloudApiClient(cloudBaseUrl, client)
+        }
+
+        /**
+         * Extract the hostname from a URL for certificate pinning.
+         * Supports wildcard matching: "api.fcc-middleware.prod.example.com" → "*.fcc-middleware.prod.example.com"
+         */
+        internal fun extractHostname(url: String): String? {
+            return try {
+                val withoutScheme = url.removePrefix("https://").removePrefix("http://")
+                val host = withoutScheme.split("/").firstOrNull()?.split(":")?.firstOrNull()
+                host?.takeIf { it.isNotBlank() }
+            } catch (_: Exception) {
+                null
+            }
         }
     }
 }

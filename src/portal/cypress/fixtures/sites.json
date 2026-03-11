@@ -1,0 +1,7 @@
+{
+  "data": [
+    { "id": "site-001", "siteCode": "MW-001", "siteName": "Lilongwe Main", "legalEntityId": "10000000-0000-0000-0000-000000000001" },
+    { "id": "site-002", "siteCode": "MW-002", "siteName": "Blantyre Central", "legalEntityId": "10000000-0000-0000-0000-000000000001" }
+  ],
+  "meta": { "pageSize": 500, "hasMore": false, "nextCursor": null, "totalCount": 2 }
+}

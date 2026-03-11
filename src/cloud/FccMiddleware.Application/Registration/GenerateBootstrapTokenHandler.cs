@@ -1,0 +1,80 @@
+using System.Security.Cryptography;
+using FccMiddleware.Application.Common;
+using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
+using MediatR;
+using Microsoft.Extensions.Logging;
+
+namespace FccMiddleware.Application.Registration;
+
+public sealed class GenerateBootstrapTokenHandler
+    : IRequestHandler<GenerateBootstrapTokenCommand, Result<GenerateBootstrapTokenResult>>
+{
+    private readonly IRegistrationDbContext _db;
+    private readonly ILogger<GenerateBootstrapTokenHandler> _logger;
+
+    public GenerateBootstrapTokenHandler(IRegistrationDbContext db, ILogger<GenerateBootstrapTokenHandler> logger)
+    {
+        _db = db;
+        _logger = logger;
+    }
+
+    public async Task<Result<GenerateBootstrapTokenResult>> Handle(
+        GenerateBootstrapTokenCommand request, CancellationToken cancellationToken)
+    {
+        // Validate site exists
+        var site = await _db.FindSiteBySiteCodeAsync(request.SiteCode, cancellationToken);
+        if (site is null)
+            return Result<GenerateBootstrapTokenResult>.Failure("SITE_NOT_FOUND",
+                $"Site '{request.SiteCode}' not found.");
+
+        if (site.LegalEntityId != request.LegalEntityId)
+            return Result<GenerateBootstrapTokenResult>.Failure("SITE_ENTITY_MISMATCH",
+                "Site does not belong to the specified legal entity.");
+
+        // Generate 32-byte random token, Base64URL-encoded
+        var rawBytes = RandomNumberGenerator.GetBytes(32);
+        var rawToken = Base64UrlEncode(rawBytes);
+        var tokenHash = ComputeSha256Hex(rawToken);
+
+        var expiresAt = DateTimeOffset.UtcNow.AddHours(72);
+        var now = DateTimeOffset.UtcNow;
+
+        var token = new BootstrapToken
+        {
+            Id = Guid.NewGuid(),
+            LegalEntityId = request.LegalEntityId,
+            SiteCode = request.SiteCode,
+            TokenHash = tokenHash,
+            Status = ProvisioningTokenStatus.ACTIVE,
+            CreatedBy = request.CreatedBy,
+            ExpiresAt = expiresAt,
+            CreatedAt = now
+        };
+
+        _db.AddBootstrapToken(token);
+        await _db.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation("Bootstrap token generated for site {SiteCode}, expires at {ExpiresAt}",
+            request.SiteCode, expiresAt);
+
+        return Result<GenerateBootstrapTokenResult>.Success(new GenerateBootstrapTokenResult
+        {
+            TokenId = token.Id,
+            RawToken = rawToken,
+            ExpiresAt = expiresAt
+        });
+    }
+
+    internal static string Base64UrlEncode(byte[] bytes) =>
+        Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+    internal static string ComputeSha256Hex(string input)
+    {
+        var hash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+}

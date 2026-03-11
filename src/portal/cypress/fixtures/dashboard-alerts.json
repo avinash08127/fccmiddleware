@@ -1,0 +1,18 @@
+{
+  "alerts": [
+    {
+      "id": "alert-001",
+      "severity": "HIGH",
+      "title": "3 stale transactions pending > 24h",
+      "description": "Transactions at site MW-001 have not progressed past PENDING status.",
+      "createdAt": "2026-03-11T06:00:00Z"
+    },
+    {
+      "id": "alert-002",
+      "severity": "MEDIUM",
+      "title": "Agent MW-015 offline for 2 hours",
+      "description": "Edge agent at site MW-015 has not sent a heartbeat since 08:00 UTC.",
+      "createdAt": "2026-03-11T10:05:00Z"
+    }
+  ]
+}

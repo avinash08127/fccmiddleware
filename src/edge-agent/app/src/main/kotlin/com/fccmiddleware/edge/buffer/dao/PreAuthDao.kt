@@ -73,6 +73,19 @@ interface PreAuthDao {
     suspend fun markCloudSynced(id: String, now: String)
 
     /**
+     * Cloud forward worker: record a failed sync attempt.
+     * Increments cloud_sync_attempts and updates last_cloud_sync_attempt_at
+     * but does NOT set is_cloud_synced = 1 (record stays eligible for retry).
+     */
+    @Query(
+        "UPDATE pre_auth_records SET " +
+        "cloud_sync_attempts = cloud_sync_attempts + 1, " +
+        "last_cloud_sync_attempt_at = :now " +
+        "WHERE id = :id"
+    )
+    suspend fun recordCloudSyncFailure(id: String, now: String)
+
+    /**
      * Expiry worker: find active pre-auths at or past their expiry time.
      */
     @Query(

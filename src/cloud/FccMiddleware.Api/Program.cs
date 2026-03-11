@@ -2,13 +2,16 @@ using System.Text;
 using FccMiddleware.Adapter.Doms;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
+using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
+using FccMiddleware.Application.Registration;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Infrastructure.Adapters;
 using FccMiddleware.Infrastructure.Deduplication;
+using FccMiddleware.Infrastructure.Events;
 using FccMiddleware.Infrastructure.Persistence;
 using FccMiddleware.Infrastructure.Repositories;
 using FccMiddleware.Infrastructure.Storage;
@@ -152,6 +155,14 @@ try
     builder.Services.AddScoped<IPollTransactionsDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IAcknowledgeTransactionsDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IMasterDataSyncDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IRegistrationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IAgentConfigDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+
+    // ── Infrastructure: Device token service ────────────────────────────────
+    builder.Services.AddSingleton<IDeviceTokenService, DeviceTokenService>();
+
+    // ── Infrastructure: Event publisher ───────────────────────────────────────
+    builder.Services.AddScoped<IEventPublisher, OutboxEventPublisher>();
 
     // ── Infrastructure: Redis (StackExchange.Redis) ───────────────────────────
     builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>

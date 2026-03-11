@@ -65,6 +65,7 @@ class CloudUploadWorker(
     private val cloudApiClient: CloudApiClient? = null,
     private val tokenProvider: DeviceTokenProvider? = null,
     val config: CloudUploadWorkerConfig = CloudUploadWorkerConfig(),
+    private val telemetryReporter: TelemetryReporter? = null,
 ) {
 
     companion object {
@@ -222,19 +223,84 @@ class CloudUploadWorker(
     /**
      * Send accumulated telemetry metrics to cloud.
      * Piggybacks on an existing successful cloud cycle (never permanently hot).
-     * TODO (EA-3.3): implement telemetry reporting
+     *
+     * Fire-and-forget: if submission fails, the payload is discarded.
+     * Error counters are reset only on a successful HTTP 204.
      */
     suspend fun reportTelemetry() {
-        Log.d(TAG, "reportTelemetry() — stub (EA-3.3)")
-    }
+        val reporter = telemetryReporter ?: run {
+            Log.d(TAG, "reportTelemetry() skipped — telemetryReporter not wired")
+            return
+        }
+        val client = cloudApiClient ?: run {
+            Log.d(TAG, "reportTelemetry() skipped — cloudApiClient not wired")
+            return
+        }
+        val provider = tokenProvider ?: run {
+            Log.d(TAG, "reportTelemetry() skipped — tokenProvider not wired")
+            return
+        }
 
-    /**
-     * Poll cloud for configuration updates.
-     * Suspended when internet is DOWN; uses last-known config in that case.
-     * TODO (EA-3.4): implement config poll and hot-reload
-     */
-    suspend fun pollConfig() {
-        Log.d(TAG, "pollConfig() — stub (EA-3.4)")
+        if (provider.isDecommissioned()) {
+            Log.w(TAG, "reportTelemetry() skipped — device decommissioned")
+            return
+        }
+
+        val payload = reporter.buildPayload() ?: run {
+            Log.d(TAG, "reportTelemetry() skipped — payload could not be assembled")
+            return
+        }
+
+        val token = provider.getAccessToken() ?: run {
+            Log.w(TAG, "reportTelemetry() skipped — no access token available")
+            return
+        }
+
+        Log.d(TAG, "Submitting telemetry (seq=${payload.sequenceNumber})")
+
+        try {
+            when (val result = client.submitTelemetry(payload, token)) {
+                is CloudTelemetryResult.Success -> {
+                    reporter.resetErrorCounts()
+                    Log.i(TAG, "Telemetry submitted (seq=${payload.sequenceNumber})")
+                }
+
+                is CloudTelemetryResult.Unauthorized -> {
+                    // Attempt one token refresh and retry
+                    Log.i(TAG, "Telemetry returned 401 — attempting token refresh")
+                    val refreshed = provider.refreshAccessToken()
+                    if (refreshed) {
+                        val freshToken = provider.getAccessToken()
+                        if (freshToken != null) {
+                            when (client.submitTelemetry(payload, freshToken)) {
+                                is CloudTelemetryResult.Success -> {
+                                    reporter.resetErrorCounts()
+                                    Log.i(TAG, "Telemetry submitted after token refresh (seq=${payload.sequenceNumber})")
+                                }
+                                else -> {
+                                    reporter.cloudAuthErrors.incrementAndGet()
+                                    Log.w(TAG, "Telemetry retry failed after token refresh")
+                                }
+                            }
+                        }
+                    } else {
+                        reporter.cloudAuthErrors.incrementAndGet()
+                        Log.w(TAG, "Telemetry token refresh failed")
+                    }
+                }
+
+                is CloudTelemetryResult.Forbidden -> {
+                    reporter.cloudAuthErrors.incrementAndGet()
+                    Log.w(TAG, "Telemetry forbidden: ${result.errorCode}")
+                }
+
+                is CloudTelemetryResult.TransportError -> {
+                    Log.w(TAG, "Telemetry submission failed: ${result.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Telemetry submission exception", e)
+        }
     }
 
     // -------------------------------------------------------------------------

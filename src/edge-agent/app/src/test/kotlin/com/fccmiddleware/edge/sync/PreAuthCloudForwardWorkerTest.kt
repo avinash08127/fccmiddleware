@@ -1,0 +1,415 @@
+package com.fccmiddleware.edge.sync
+
+import com.fccmiddleware.edge.buffer.dao.PreAuthDao
+import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.slot
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.time.Instant
+import java.util.UUID
+
+/**
+ * PreAuthCloudForwardWorkerTest — unit tests for EA-3.6 Pre-Auth Cloud Forwarding.
+ *
+ * Validates:
+ *   - No-ops when any required dependency is null
+ *   - No-ops when device is decommissioned
+ *   - No-ops when backoff is active
+ *   - No-ops when no unsynced records
+ *   - No-ops when access token is unavailable
+ *   - Success (201) → markCloudSynced(), failure count reset
+ *   - Conflict (409) → markCloudSynced() (cloud already has it)
+ *   - 401 → token refresh → retry succeeds → markCloudSynced()
+ *   - 401 → token refresh fails → recordCloudSyncFailure(), backoff applied
+ *   - 403 DEVICE_DECOMMISSIONED → markDecommissioned(), stops processing
+ *   - 403 non-decommission → recordCloudSyncFailure(), backoff applied
+ *   - Transport error → recordCloudSyncFailure(), backoff, stops remaining batch
+ *   - Multiple records: stops on first transport failure
+ *   - Multiple records: all forwarded on success
+ *   - Backoff calculation: exponential with cap
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [31])
+class PreAuthCloudForwardWorkerTest {
+
+    private val preAuthDao: PreAuthDao = mockk(relaxed = true)
+    private val cloudApiClient: CloudApiClient = mockk()
+    private val tokenProvider: DeviceTokenProvider = mockk()
+
+    private val config = PreAuthCloudForwardWorkerConfig(
+        batchSize = 10,
+        baseBackoffMs = 1_000L,
+        maxBackoffMs = 60_000L,
+    )
+
+    private lateinit var worker: PreAuthCloudForwardWorker
+
+    @Before
+    fun setUp() {
+        worker = PreAuthCloudForwardWorker(
+            preAuthDao = preAuthDao,
+            cloudApiClient = cloudApiClient,
+            tokenProvider = tokenProvider,
+            config = config,
+        )
+        every { tokenProvider.isDecommissioned() } returns false
+        every { tokenProvider.getAccessToken() } returns "valid-jwt-token"
+    }
+
+    // -------------------------------------------------------------------------
+    // No-op guards
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `returns early when preAuthDao is null`() = runTest {
+        val w = PreAuthCloudForwardWorker(
+            preAuthDao = null,
+            cloudApiClient = cloudApiClient,
+            tokenProvider = tokenProvider,
+        )
+        w.forwardUnsyncedPreAuths()
+        coVerify(exactly = 0) { cloudApiClient.forwardPreAuth(any(), any()) }
+    }
+
+    @Test
+    fun `returns early when cloudApiClient is null`() = runTest {
+        val w = PreAuthCloudForwardWorker(
+            preAuthDao = preAuthDao,
+            cloudApiClient = null,
+            tokenProvider = tokenProvider,
+        )
+        w.forwardUnsyncedPreAuths()
+        coVerify(exactly = 0) { preAuthDao.getUnsynced(any()) }
+    }
+
+    @Test
+    fun `returns early when tokenProvider is null`() = runTest {
+        val w = PreAuthCloudForwardWorker(
+            preAuthDao = preAuthDao,
+            cloudApiClient = cloudApiClient,
+            tokenProvider = null,
+        )
+        w.forwardUnsyncedPreAuths()
+        coVerify(exactly = 0) { preAuthDao.getUnsynced(any()) }
+    }
+
+    @Test
+    fun `returns early when device is decommissioned`() = runTest {
+        every { tokenProvider.isDecommissioned() } returns true
+        worker.forwardUnsyncedPreAuths()
+        coVerify(exactly = 0) { preAuthDao.getUnsynced(any()) }
+    }
+
+    @Test
+    fun `returns early when backoff is active`() = runTest {
+        worker.nextRetryAt = Instant.now().plusSeconds(60)
+        worker.forwardUnsyncedPreAuths()
+        coVerify(exactly = 0) { preAuthDao.getUnsynced(any()) }
+    }
+
+    @Test
+    fun `returns early when no unsynced records`() = runTest {
+        coEvery { preAuthDao.getUnsynced(any()) } returns emptyList()
+        worker.forwardUnsyncedPreAuths()
+        coVerify(exactly = 0) { cloudApiClient.forwardPreAuth(any(), any()) }
+    }
+
+    @Test
+    fun `returns early when access token is null`() = runTest {
+        every { tokenProvider.getAccessToken() } returns null
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(makePreAuth())
+        worker.forwardUnsyncedPreAuths()
+        coVerify(exactly = 0) { cloudApiClient.forwardPreAuth(any(), any()) }
+    }
+
+    // -------------------------------------------------------------------------
+    // Successful forwarding
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `success marks record as cloud synced and resets failure count`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Success(makeForwardResponse(record))
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify { preAuthDao.markCloudSynced(record.id, any()) }
+        assertEquals(0, worker.consecutiveFailureCount)
+        assertEquals(Instant.EPOCH, worker.nextRetryAt)
+    }
+
+    @Test
+    fun `conflict 409 marks record as cloud synced`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Conflict("INVALID_TRANSITION", "Already in terminal state")
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify { preAuthDao.markCloudSynced(record.id, any()) }
+        assertEquals(0, worker.consecutiveFailureCount)
+    }
+
+    @Test
+    fun `multiple records all forwarded on success`() = runTest {
+        val r1 = makePreAuth()
+        val r2 = makePreAuth()
+        val r3 = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(r1, r2, r3)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Success(makeForwardResponse(r1))
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify(exactly = 3) { cloudApiClient.forwardPreAuth(any(), any()) }
+        coVerify { preAuthDao.markCloudSynced(r1.id, any()) }
+        coVerify { preAuthDao.markCloudSynced(r2.id, any()) }
+        coVerify { preAuthDao.markCloudSynced(r3.id, any()) }
+    }
+
+    @Test
+    fun `forward request maps PreAuthRecord fields correctly`() = runTest {
+        val record = makePreAuth(
+            siteCode = "SITE-42",
+            odooOrderId = "ORD-999",
+            pumpNumber = 3,
+            nozzleNumber = 2,
+            productCode = "AGO",
+            requestedAmount = 50_000L,
+            currencyCode = "TZS",
+            status = "AUTHORIZED",
+            fccCorrelationId = "FCC-CORR-123",
+            fccAuthorizationCode = "AUTH-456",
+            customerName = "Test Customer",
+        )
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+
+        val requestSlot = slot<PreAuthForwardRequest>()
+        coEvery { cloudApiClient.forwardPreAuth(capture(requestSlot), any()) } returns
+            CloudPreAuthForwardResult.Success(makeForwardResponse(record))
+
+        worker.forwardUnsyncedPreAuths()
+
+        val req = requestSlot.captured
+        assertEquals("SITE-42", req.siteCode)
+        assertEquals("ORD-999", req.odooOrderId)
+        assertEquals(3, req.pumpNumber)
+        assertEquals(2, req.nozzleNumber)
+        assertEquals("AGO", req.productCode)
+        assertEquals(50_000L, req.requestedAmount)
+        assertEquals("TZS", req.currency)
+        assertEquals("AUTHORIZED", req.status)
+        assertEquals("FCC-CORR-123", req.fccCorrelationId)
+        assertEquals("AUTH-456", req.fccAuthorizationCode)
+        assertEquals("Test Customer", req.customerName)
+    }
+
+    // -------------------------------------------------------------------------
+    // 401 — token refresh
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `401 triggers token refresh and retry, marks synced on success`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { tokenProvider.refreshAccessToken() } returns true
+        every { tokenProvider.getAccessToken() } returnsMany listOf("old-token", "new-token")
+
+        coEvery { cloudApiClient.forwardPreAuth(any(), "old-token") } returns
+            CloudPreAuthForwardResult.Unauthorized
+        coEvery { cloudApiClient.forwardPreAuth(any(), "new-token") } returns
+            CloudPreAuthForwardResult.Success(makeForwardResponse(record))
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify { tokenProvider.refreshAccessToken() }
+        coVerify { preAuthDao.markCloudSynced(record.id, any()) }
+        assertEquals(0, worker.consecutiveFailureCount)
+    }
+
+    @Test
+    fun `401 records failure when token refresh fails`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Unauthorized
+        coEvery { tokenProvider.refreshAccessToken() } returns false
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify { preAuthDao.recordCloudSyncFailure(record.id, any()) }
+        assertEquals(1, worker.consecutiveFailureCount)
+        assertTrue(worker.nextRetryAt.isAfter(Instant.EPOCH))
+    }
+
+    // -------------------------------------------------------------------------
+    // 403 — decommission and other forbidden
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `403 DEVICE_DECOMMISSIONED calls markDecommissioned and stops`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Forbidden("DEVICE_DECOMMISSIONED")
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify { tokenProvider.markDecommissioned() }
+        coVerify(exactly = 0) { preAuthDao.markCloudSynced(any(), any()) }
+        assertEquals(0, worker.consecutiveFailureCount)
+    }
+
+    @Test
+    fun `403 non-decommission records failure with backoff`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Forbidden("SITE_MISMATCH")
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify { preAuthDao.recordCloudSyncFailure(record.id, any()) }
+        assertEquals(1, worker.consecutiveFailureCount)
+        assertTrue(worker.nextRetryAt.isAfter(Instant.EPOCH))
+    }
+
+    // -------------------------------------------------------------------------
+    // Transport errors and backoff
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `transport error records failure and applies backoff`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.TransportError("Connection refused")
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify { preAuthDao.recordCloudSyncFailure(record.id, any()) }
+        assertEquals(1, worker.consecutiveFailureCount)
+        assertTrue(worker.nextRetryAt.isAfter(Instant.EPOCH))
+    }
+
+    @Test
+    fun `transport error stops processing remaining batch`() = runTest {
+        val r1 = makePreAuth()
+        val r2 = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(r1, r2)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.TransportError("Timeout")
+
+        worker.forwardUnsyncedPreAuths()
+
+        // Only one record attempted — worker stops on first failure
+        coVerify(exactly = 1) { cloudApiClient.forwardPreAuth(any(), any()) }
+        coVerify { preAuthDao.recordCloudSyncFailure(r1.id, any()) }
+        coVerify(exactly = 0) { preAuthDao.recordCloudSyncFailure(r2.id, any()) }
+    }
+
+    @Test
+    fun `successful forward after failures resets backoff`() = runTest {
+        worker.consecutiveFailureCount = 3
+        worker.nextRetryAt = Instant.EPOCH
+
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Success(makeForwardResponse(record))
+
+        worker.forwardUnsyncedPreAuths()
+
+        assertEquals(0, worker.consecutiveFailureCount)
+        assertEquals(Instant.EPOCH, worker.nextRetryAt)
+    }
+
+    // -------------------------------------------------------------------------
+    // Backoff calculation
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `calculateBackoffMs returns 0 for zero failures`() {
+        assertEquals(0L, worker.calculateBackoffMs(0))
+    }
+
+    @Test
+    fun `calculateBackoffMs doubles with each failure up to max`() {
+        assertEquals(1_000L, worker.calculateBackoffMs(1))
+        assertEquals(2_000L, worker.calculateBackoffMs(2))
+        assertEquals(4_000L, worker.calculateBackoffMs(3))
+        assertEquals(8_000L, worker.calculateBackoffMs(4))
+    }
+
+    @Test
+    fun `calculateBackoffMs caps at maxBackoffMs`() {
+        assertEquals(60_000L, worker.calculateBackoffMs(7))
+        assertEquals(60_000L, worker.calculateBackoffMs(20))
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    private fun makePreAuth(
+        id: String = UUID.randomUUID().toString(),
+        siteCode: String = "SITE-001",
+        odooOrderId: String = "ORD-${UUID.randomUUID().toString().take(8)}",
+        pumpNumber: Int = 1,
+        nozzleNumber: Int = 1,
+        productCode: String = "PMS",
+        requestedAmount: Long = 10_000L,
+        currencyCode: String = "NGN",
+        status: String = "AUTHORIZED",
+        fccCorrelationId: String? = null,
+        fccAuthorizationCode: String? = null,
+        customerName: String? = null,
+    ): PreAuthRecord = PreAuthRecord(
+        id = id,
+        siteCode = siteCode,
+        odooOrderId = odooOrderId,
+        pumpNumber = pumpNumber,
+        nozzleNumber = nozzleNumber,
+        productCode = productCode,
+        currencyCode = currencyCode,
+        requestedAmountMinorUnits = requestedAmount,
+        authorizedAmountMinorUnits = null,
+        status = status,
+        fccCorrelationId = fccCorrelationId,
+        fccAuthorizationCode = fccAuthorizationCode,
+        failureReason = null,
+        customerName = customerName,
+        customerTaxId = null,
+        rawFccResponse = null,
+        requestedAt = "2024-01-01T10:00:00Z",
+        authorizedAt = "2024-01-01T10:00:01Z",
+        completedAt = null,
+        expiresAt = "2024-01-01T10:05:00Z",
+        isCloudSynced = 0,
+        cloudSyncAttempts = 0,
+        lastCloudSyncAttemptAt = null,
+        schemaVersion = 1,
+        createdAt = "2024-01-01T10:00:00Z",
+    )
+
+    private fun makeForwardResponse(record: PreAuthRecord): PreAuthForwardResponse =
+        PreAuthForwardResponse(
+            id = UUID.randomUUID().toString(),
+            status = record.status,
+            siteCode = record.siteCode,
+            odooOrderId = record.odooOrderId,
+        )
+}

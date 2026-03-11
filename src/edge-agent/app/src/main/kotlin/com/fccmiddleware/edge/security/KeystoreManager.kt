@@ -1,17 +1,141 @@
 package com.fccmiddleware.edge.security
 
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Log
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
 /**
- * KeystoreManager — wraps Android Keystore for secure key storage.
+ * KeystoreManager — wraps Android Keystore for secure token storage.
  *
- * Used for:
- *   - Agent registration token (bootstrap secret)
- *   - LAN API key (for multi-device scenarios)
- *   - FCC credential encryption key
+ * Stores opaque secrets (device JWT, refresh token, FCC credentials, LAN API key)
+ * encrypted with AES-256-GCM keys backed by hardware TEE where available (Urovo i9100).
  *
- * NEVER log sensitive fields (tokens, credentials, TINs).
+ * Key aliases per the security spec:
+ *   - fcc-middleware-device-jwt     — current device access token
+ *   - fcc-middleware-refresh-token  — current refresh token (90-day opaque)
+ *   - fcc-middleware-fcc-cred       — FCC credential encryption
+ *   - fcc-middleware-lan-key        — LAN API key for multi-HHT
  *
- * Stub — implementation follows EA-2.x security tasks.
+ * All keys are non-exportable and do not require user authentication.
+ * NEVER log token values or credential content.
  */
 class KeystoreManager {
-    // TODO (EA-2.x): implement Android Keystore key generation and retrieval
+
+    companion object {
+        private const val TAG = "KeystoreManager"
+        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+        private const val GCM_TAG_LENGTH = 128
+
+        const val ALIAS_DEVICE_JWT = "fcc-middleware-device-jwt"
+        const val ALIAS_REFRESH_TOKEN = "fcc-middleware-refresh-token"
+        const val ALIAS_FCC_CRED = "fcc-middleware-fcc-cred"
+        const val ALIAS_LAN_KEY = "fcc-middleware-lan-key"
+    }
+
+    private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+
+    /**
+     * Store a secret string under the given alias.
+     * Creates a new AES-256-GCM key if one doesn't exist for the alias.
+     * The IV is prepended to the ciphertext for self-contained decryption.
+     *
+     * @return Encrypted bytes (IV + ciphertext) or null on failure.
+     */
+    fun storeSecret(alias: String, plaintext: String): ByteArray? {
+        return try {
+            val key = getOrCreateKey(alias)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val iv = cipher.iv
+            val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+            // Prepend IV length (1 byte) + IV + ciphertext
+            byteArrayOf(iv.size.toByte()) + iv + ciphertext
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to store secret for alias=$alias", e)
+            null
+        }
+    }
+
+    /**
+     * Retrieve a secret string stored under the given alias.
+     *
+     * @param alias Keystore alias used during [storeSecret].
+     * @param encrypted The encrypted bytes returned by [storeSecret].
+     * @return Decrypted plaintext or null on failure.
+     */
+    fun retrieveSecret(alias: String, encrypted: ByteArray): String? {
+        return try {
+            val key = keyStore.getKey(alias, null) as? SecretKey ?: run {
+                Log.w(TAG, "No key found for alias=$alias")
+                return null
+            }
+            val ivLength = encrypted[0].toInt() and 0xFF
+            val iv = encrypted.sliceArray(1..ivLength)
+            val ciphertext = encrypted.sliceArray((1 + ivLength) until encrypted.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
+            String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to retrieve secret for alias=$alias", e)
+            null
+        }
+    }
+
+    /**
+     * Delete a key and its associated encrypted data from the Keystore.
+     */
+    fun deleteKey(alias: String) {
+        try {
+            if (keyStore.containsAlias(alias)) {
+                keyStore.deleteEntry(alias)
+                Log.d(TAG, "Deleted key alias=$alias")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to delete key alias=$alias", e)
+        }
+    }
+
+    /** True if a key exists for the given alias. */
+    fun hasKey(alias: String): Boolean {
+        return try {
+            keyStore.containsAlias(alias)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Delete all FCC middleware keys from the Keystore.
+     * Used during re-provisioning or factory reset.
+     */
+    fun clearAll() {
+        listOf(ALIAS_DEVICE_JWT, ALIAS_REFRESH_TOKEN, ALIAS_FCC_CRED, ALIAS_LAN_KEY).forEach {
+            deleteKey(it)
+        }
+        Log.i(TAG, "All keystore keys cleared")
+    }
+
+    private fun getOrCreateKey(alias: String): SecretKey {
+        val existing = keyStore.getKey(alias, null) as? SecretKey
+        if (existing != null) return existing
+
+        val spec = KeyGenParameterSpec.Builder(
+            alias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setUserAuthenticationRequired(false)
+            .build()
+
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+        generator.init(spec)
+        return generator.generateKey()
+    }
 }

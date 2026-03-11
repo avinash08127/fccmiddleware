@@ -131,6 +131,17 @@ interface TransactionBufferDao {
     suspend fun countByStatus(): List<StatusCount>
 
     /**
+     * Timestamp of the oldest PENDING record. Returns null if no PENDING records exist.
+     * Used by telemetry to compute sync lag.
+     */
+    @Query(
+        "SELECT created_at FROM buffered_transactions " +
+        "WHERE sync_status = 'PENDING' " +
+        "ORDER BY created_at ASC LIMIT 1"
+    )
+    suspend fun oldestPendingCreatedAt(): String?
+
+    /**
      * Return FCC transaction IDs for records at UPLOADED status.
      * Used by the SYNCED_TO_ODOO status poller to query cloud for confirmed statuses.
      * Limited to [limit] to respect the cloud API's 500-ID-per-call constraint.

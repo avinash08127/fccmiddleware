@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
 
     <application
         android:name=".FccEdgeApplication"
@@ -29,13 +32,30 @@
             </intent-filter>
         </receiver>
 
+        <!-- Launcher activity — routes to Provisioning or Diagnostics based on registration state -->
         <activity
-            android:name=".ui.DiagnosticsActivity"
-            android:exported="true">
+            android:name=".ui.LauncherActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FccEdgeAgent">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- QR code provisioning screen — shown on first launch -->
+        <activity
+            android:name=".ui.ProvisioningActivity"
+            android:exported="false" />
+
+        <!-- Diagnostics screen — shown after successful registration -->
+        <activity
+            android:name=".ui.DiagnosticsActivity"
+            android:exported="false" />
+
+        <!-- Device decommissioned screen — dead-end after 403 DEVICE_DECOMMISSIONED -->
+        <activity
+            android:name=".ui.DecommissionedActivity"
+            android:exported="false" />
     </application>
 </manifest>

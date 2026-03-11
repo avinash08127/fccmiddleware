@@ -1,0 +1,35 @@
+{
+  "id": "recon-001",
+  "siteCode": "MW-001",
+  "pumpNumber": 1,
+  "nozzleNumber": 1,
+  "odooOrderId": "ORD-2026-0001",
+  "productCode": "PMS",
+  "requestedAmount": 125000,
+  "actualAmount": 130500,
+  "amountVariance": 5500,
+  "varianceBps": 440,
+  "currencyCode": "MWK",
+  "reconciliationStatus": "APPROVED",
+  "preAuthStatus": "DISPENSING_COMPLETED",
+  "matchMethod": "PUMP_NOZZLE_TIME_WINDOW",
+  "ambiguityFlag": false,
+  "transactionId": "tx-001",
+  "transactionSummary": {
+    "volumeMicrolitres": 25000000,
+    "startedAt": "2026-03-11T09:15:00Z",
+    "completedAt": "2026-03-11T09:17:30Z"
+  },
+  "preAuthSummary": {
+    "vehicleNumber": "MW-1234-AB",
+    "customerBusinessName": "Fuel Corp Ltd",
+    "attendantId": "ATT-001",
+    "fccCorrelationId": "FCC-CORR-001",
+    "requestedAt": "2026-03-11T09:14:00Z"
+  },
+  "createdAt": "2026-03-11T09:20:00Z",
+  "updatedAt": "2026-03-11T11:00:00Z",
+  "decidedAt": "2026-03-11T11:00:00Z",
+  "decidedBy": "ops.manager@fccmiddleware.com",
+  "decisionReason": "Variance is within acceptable range for this site and pump configuration."
+}

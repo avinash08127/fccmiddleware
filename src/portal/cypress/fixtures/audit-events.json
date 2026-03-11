@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": "ae-001",
+      "eventType": "TRANSACTION_INGESTED",
+      "timestamp": "2026-03-11T09:18:00Z",
+      "source": "CloudIngest",
+      "correlationId": "corr-001"
+    },
+    {
+      "id": "ae-002",
+      "eventType": "TRANSACTION_STATUS_CHANGED",
+      "timestamp": "2026-03-11T09:20:00Z",
+      "source": "OdooPoll",
+      "correlationId": "corr-001"
+    }
+  ],
+  "meta": { "pageSize": 50, "hasMore": false, "nextCursor": null, "totalCount": 2 }
+}

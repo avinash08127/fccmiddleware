@@ -1,5 +1,7 @@
+using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
+using FccMiddleware.Application.Registration;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
@@ -22,7 +24,7 @@ namespace FccMiddleware.Infrastructure.Persistence;
 ///
 /// Outbox: <see cref="OutboxMessage"/> uses a bigint GENERATED ALWAYS AS IDENTITY column.
 /// </summary>
-public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext
+public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext, IRegistrationDbContext, IAgentConfigDbContext
 {
     private readonly ICurrentTenantProvider _tenantProvider;
 
@@ -67,6 +69,12 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     // -------------------------------------------------------------------------
     public DbSet<OdooApiKey>         OdooApiKeys         => Set<OdooApiKey>();
     public DbSet<DatabricksApiKey>   DatabricksApiKeys   => Set<DatabricksApiKey>();
+
+    // -------------------------------------------------------------------------
+    // Device registration & provisioning
+    // -------------------------------------------------------------------------
+    public DbSet<BootstrapToken>     BootstrapTokens     => Set<BootstrapToken>();
+    public DbSet<DeviceRefreshToken> DeviceRefreshTokens => Set<DeviceRefreshToken>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -271,7 +279,11 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
 
-        // LegalEntity and OutboxMessage have no LegalEntityId — no filter applied.
+        modelBuilder.Entity<BootstrapToken>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
+        // LegalEntity, OutboxMessage, DeviceRefreshToken have no LegalEntityId — no filter applied.
     }
 
     // -------------------------------------------------------------------------
@@ -338,4 +350,68 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     void IMasterDataSyncDbContext.AddProduct(Product entity)         => Products.Add(entity);
     void IMasterDataSyncDbContext.AddOperator(Operator entity)       => Operators.Add(entity);
     void IMasterDataSyncDbContext.AddOutboxMessage(OutboxMessage msg) => OutboxMessages.Add(msg);
+
+    // -------------------------------------------------------------------------
+    // IRegistrationDbContext implementation
+    // All reads use IgnoreQueryFilters() so registration logic works without
+    // tenant context (bootstrap token is unauthenticated).
+    // -------------------------------------------------------------------------
+
+    async Task<BootstrapToken?> IRegistrationDbContext.FindBootstrapTokenByHashAsync(string tokenHash, CancellationToken ct) =>
+        await Set<BootstrapToken>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.TokenHash == tokenHash, ct);
+
+    async Task<Site?> IRegistrationDbContext.FindSiteBySiteCodeAsync(string siteCode, CancellationToken ct) =>
+        await Set<Site>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.SiteCode == siteCode, ct);
+
+    async Task<AgentRegistration?> IRegistrationDbContext.FindActiveAgentForSiteAsync(Guid siteId, CancellationToken ct) =>
+        await Set<AgentRegistration>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(a => a.SiteId == siteId && a.IsActive, ct);
+
+    async Task<AgentRegistration?> IRegistrationDbContext.FindAgentByIdAsync(Guid deviceId, CancellationToken ct) =>
+        await Set<AgentRegistration>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(a => a.Id == deviceId, ct);
+
+    async Task<DeviceRefreshToken?> IRegistrationDbContext.FindRefreshTokenByHashAsync(string tokenHash, CancellationToken ct) =>
+        await Set<DeviceRefreshToken>()
+            .FirstOrDefaultAsync(t => t.TokenHash == tokenHash, ct);
+
+    async Task<List<DeviceRefreshToken>> IRegistrationDbContext.GetActiveRefreshTokensForDeviceAsync(Guid deviceId, CancellationToken ct) =>
+        await Set<DeviceRefreshToken>()
+            .Where(t => t.DeviceId == deviceId && t.RevokedAt == null)
+            .ToListAsync(ct);
+
+    void IRegistrationDbContext.AddAgentRegistration(AgentRegistration registration) =>
+        AgentRegistrations.Add(registration);
+
+    void IRegistrationDbContext.AddBootstrapToken(BootstrapToken token) =>
+        BootstrapTokens.Add(token);
+
+    void IRegistrationDbContext.AddDeviceRefreshToken(DeviceRefreshToken token) =>
+        DeviceRefreshTokens.Add(token);
+
+    // -------------------------------------------------------------------------
+    // IAgentConfigDbContext implementation
+    // Eager-loads Site → Pumps → Nozzles → Products and LegalEntity so the
+    // handler can build a complete SiteConfig without additional queries.
+    // -------------------------------------------------------------------------
+
+    async Task<FccConfig?> IAgentConfigDbContext.GetFccConfigWithSiteDataAsync(
+        string siteCode, Guid legalEntityId, CancellationToken ct) =>
+        await Set<FccConfig>().IgnoreQueryFilters()
+            .Include(fc => fc.LegalEntity)
+            .Include(fc => fc.Site)
+                .ThenInclude(s => s.Pumps.Where(p => p.IsActive))
+                    .ThenInclude(p => p.Nozzles.Where(n => n.IsActive))
+                        .ThenInclude(n => n.Product)
+            .Where(fc => fc.LegalEntityId == legalEntityId
+                      && fc.Site.SiteCode == siteCode
+                      && fc.IsActive)
+            .FirstOrDefaultAsync(ct);
+
+    async Task<AgentRegistration?> IAgentConfigDbContext.FindAgentByDeviceIdAsync(
+        Guid deviceId, CancellationToken ct) =>
+        await Set<AgentRegistration>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(a => a.Id == deviceId, ct);
 }

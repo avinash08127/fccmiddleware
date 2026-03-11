@@ -1,0 +1,28 @@
+{
+  "transactionVolume": {
+    "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "datasets": [{ "label": "Transactions", "data": [120, 150, 180, 200, 170, 90, 60] }]
+  },
+  "ingestionHealth": {
+    "totalIngested": 970,
+    "failedIngestions": 5,
+    "avgLatencyMs": 230,
+    "lastIngestedAt": "2026-03-11T10:00:00Z"
+  },
+  "agentStatus": {
+    "totalAgents": 45,
+    "onlineAgents": 40,
+    "offlineAgents": 3,
+    "degradedAgents": 2
+  },
+  "reconciliation": {
+    "totalMatched": 850,
+    "varianceFlagged": 12,
+    "unmatched": 8,
+    "pendingReview": 20
+  },
+  "staleTransactions": {
+    "count": 3,
+    "oldestStaleAt": "2026-03-10T08:00:00Z"
+  }
+}

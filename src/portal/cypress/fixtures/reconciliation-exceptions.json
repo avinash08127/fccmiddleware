@@ -1,0 +1,43 @@
+{
+  "data": [
+    {
+      "id": "recon-001",
+      "siteCode": "MW-001",
+      "pumpNumber": 1,
+      "nozzleNumber": 1,
+      "requestedAmount": 125000,
+      "actualAmount": 130500,
+      "amountVariance": 5500,
+      "varianceBps": 440,
+      "currencyCode": "MWK",
+      "reconciliationStatus": "VARIANCE_FLAGGED",
+      "matchMethod": "PUMP_NOZZLE_TIME_WINDOW",
+      "ambiguityFlag": false,
+      "createdAt": "2026-03-11T09:20:00Z",
+      "updatedAt": "2026-03-11T09:20:00Z",
+      "decidedAt": null,
+      "decidedBy": null,
+      "decisionReason": null
+    },
+    {
+      "id": "recon-002",
+      "siteCode": "MW-002",
+      "pumpNumber": 2,
+      "nozzleNumber": 1,
+      "requestedAmount": 200000,
+      "actualAmount": 212000,
+      "amountVariance": 12000,
+      "varianceBps": 600,
+      "currencyCode": "MWK",
+      "reconciliationStatus": "VARIANCE_FLAGGED",
+      "matchMethod": "EXACT_CORRELATION_ID",
+      "ambiguityFlag": true,
+      "createdAt": "2026-03-11T10:05:00Z",
+      "updatedAt": "2026-03-11T10:05:00Z",
+      "decidedAt": null,
+      "decidedBy": null,
+      "decisionReason": null
+    }
+  ],
+  "meta": { "pageSize": 20, "hasMore": false, "nextCursor": null, "totalCount": 2 }
+}

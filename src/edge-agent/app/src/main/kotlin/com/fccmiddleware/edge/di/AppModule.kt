@@ -7,9 +7,19 @@ import com.fccmiddleware.edge.buffer.IntegrityChecker
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
+import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.runtime.CadenceController
+import com.fccmiddleware.edge.security.EncryptedPrefsManager
+import com.fccmiddleware.edge.security.KeystoreManager
+import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudUploadWorker
+import com.fccmiddleware.edge.sync.ConfigPollWorker
+import com.fccmiddleware.edge.sync.DeviceTokenProvider
+import com.fccmiddleware.edge.sync.HttpCloudApiClient
+import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
+import com.fccmiddleware.edge.sync.KeystoreDeviceTokenProvider
+import com.fccmiddleware.edge.sync.TelemetryReporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,6 +43,41 @@ val appModule = module {
     single { get<BufferDatabase>().syncStateDao() }
     single { get<BufferDatabase>().agentConfigDao() }
     single { get<BufferDatabase>().auditLogDao() }
+
+    // -------------------------------------------------------------------------
+    // Security — Keystore and EncryptedSharedPreferences
+    // -------------------------------------------------------------------------
+    single { KeystoreManager() }
+    single { EncryptedPrefsManager(androidContext()) }
+
+    // -------------------------------------------------------------------------
+    // Cloud API Client
+    //
+    // Created with the cloud base URL from EncryptedPrefs (set at registration).
+    // Before registration, a default stub URL is used — the client is only called
+    // after the device is provisioned. Registration calls pass the URL explicitly.
+    // -------------------------------------------------------------------------
+    single<CloudApiClient> {
+        val encryptedPrefs = get<EncryptedPrefsManager>()
+        val baseUrl = encryptedPrefs.cloudBaseUrl ?: "https://not-yet-provisioned"
+        // Certificate pins are delivered via SiteConfig from cloud (EA-2.x).
+        // When available, they are passed here to enable OkHttp cert pinning
+        // against intermediate CA public keys. On pin mismatch, the connection
+        // is refused — no fallback to unpinned.
+        val certificatePins = emptyList<String>() // TODO (EA-2.x): load from ConfigManager
+        HttpCloudApiClient.create(baseUrl, certificatePins)
+    }
+
+    // -------------------------------------------------------------------------
+    // Device Token Provider — Keystore-backed JWT + refresh token management
+    // -------------------------------------------------------------------------
+    single<DeviceTokenProvider> {
+        KeystoreDeviceTokenProvider(
+            keystoreManager = get(),
+            encryptedPrefs = get(),
+            cloudApiClient = get(),
+        )
+    }
 
     // -------------------------------------------------------------------------
     // Buffer management
@@ -70,17 +115,28 @@ val appModule = module {
     }
 
     // -------------------------------------------------------------------------
-    // Workers
+    // Telemetry
+    // -------------------------------------------------------------------------
+    single {
+        TelemetryReporter(
+            context = androidContext(),
+            transactionDao = get(),
+            syncStateDao = get(),
+            connectivityManager = get(),
+            configManager = get(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Workers — now wired with real CloudApiClient and DeviceTokenProvider
     // -------------------------------------------------------------------------
     single {
         CloudUploadWorker(
             bufferManager = get(),
             syncStateDao = get(),
-            // cloudApiClient and tokenProvider require cloud URL and device JWT from the
-            // security / config modules (EA-2.x). Injected as null stubs until then;
-            // CloudUploadWorker safely no-ops when these are absent.
-            cloudApiClient = null,   // TODO (EA-2.x): HttpCloudApiClient.create(cloudBaseUrl)
-            tokenProvider = null,    // TODO (EA-2.x): inject EncryptedPrefsTokenProvider
+            cloudApiClient = get(),
+            tokenProvider = get(),
+            telemetryReporter = get(),
         )
     }
     single {
@@ -103,6 +159,30 @@ val appModule = module {
     }
 
     // -------------------------------------------------------------------------
+    // Pre-Auth Cloud Forward Worker
+    // -------------------------------------------------------------------------
+    single {
+        PreAuthCloudForwardWorker(
+            preAuthDao = get(),
+            cloudApiClient = get(),
+            tokenProvider = get(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Configuration
+    // -------------------------------------------------------------------------
+    single { ConfigManager(agentConfigDao = get()) }
+    single {
+        ConfigPollWorker(
+            configManager = get(),
+            syncStateDao = get(),
+            cloudApiClient = get(),
+            tokenProvider = get(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
     // Cadence Controller — single coalesced loop for all periodic resident work
     // -------------------------------------------------------------------------
     single {
@@ -113,6 +193,8 @@ val appModule = module {
             transactionDao = get(),
             scope = get<CoroutineScope>(),
             preAuthHandler = get(),
+            configPollWorker = get(),
+            preAuthCloudForwardWorker = get(),
         )
     }
 
@@ -137,5 +219,4 @@ val appModule = module {
     }
 
     // TODO (EA-2.x): adapter factory
-    // TODO (EA-2.x): config manager
 }

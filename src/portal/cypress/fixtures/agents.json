@@ -1,0 +1,41 @@
+{
+  "data": [
+    {
+      "deviceId": "agent-001",
+      "siteCode": "MW-001",
+      "siteName": "Lilongwe Main",
+      "connectivityState": "FULLY_ONLINE",
+      "bufferDepth": 5,
+      "lastSeenAt": "2026-03-11T10:29:00Z",
+      "batteryPercent": 85,
+      "isCharging": false,
+      "agentVersion": "2.1.0",
+      "syncLagSeconds": 30
+    },
+    {
+      "deviceId": "agent-002",
+      "siteCode": "MW-002",
+      "siteName": "Blantyre Central",
+      "connectivityState": "FULLY_ONLINE",
+      "bufferDepth": 0,
+      "lastSeenAt": "2026-03-11T10:28:00Z",
+      "batteryPercent": 92,
+      "isCharging": true,
+      "agentVersion": "2.1.0",
+      "syncLagSeconds": 15
+    },
+    {
+      "deviceId": "agent-003",
+      "siteCode": "MW-015",
+      "siteName": "Mzuzu Station",
+      "connectivityState": "FULLY_OFFLINE",
+      "bufferDepth": 42,
+      "lastSeenAt": "2026-03-11T08:00:00Z",
+      "batteryPercent": 12,
+      "isCharging": false,
+      "agentVersion": "2.0.5",
+      "syncLagSeconds": 9000
+    }
+  ],
+  "meta": { "pageSize": 500, "hasMore": false, "nextCursor": null, "totalCount": 3 }
+}

@@ -5,10 +5,15 @@
     "ng": "ng",
     "start": "ng serve",
     "build": "ng build",
+    "build:analyze": "ng build --source-map --named-chunks && source-map-explorer dist/portal/browser/*.js --html dist/portal/bundle-report.html",
     "watch": "ng build --watch --configuration development",
     "test": "ng test",
     "lint": "ng lint",
-    "format:check": "prettier --check \"src/**/*.{ts,html,scss}\""
+    "format:check": "prettier --check \"src/**/*.{ts,html,scss}\"",
+    "cy:open": "cypress open",
+    "cy:run": "cypress run",
+    "e2e": "cypress run --browser chrome",
+    "e2e:ci": "cypress run --browser chrome --headless"
   },
   "prettier": {
     "printWidth": 100,
@@ -47,6 +52,7 @@
     "@angular/compiler-cli": "^20.3.0",
     "@types/jasmine": "~5.1.0",
     "angular-eslint": "^20.0.0",
+    "cypress": "^15.11.0",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^10.0.0",
     "jasmine-core": "~5.9.0",
@@ -56,6 +62,7 @@
     "karma-jasmine": "~5.1.0",
     "karma-jasmine-html-reporter": "~2.1.0",
     "prettier": "^3.0.0",
+    "source-map-explorer": "^2.5.3",
     "typescript": "~5.9.2",
     "typescript-eslint": "^8.0.0"
   }

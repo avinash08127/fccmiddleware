@@ -9,6 +9,7 @@ import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.sync.CloudUploadWorker
 import com.fccmiddleware.edge.sync.ConfigPollWorker
+import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -47,6 +48,8 @@ class CadenceController(
     private val preAuthHandler: PreAuthHandler? = null,
     /** Config poll worker — polls cloud for config updates. Nullable until EA-3.3 wired. */
     private val configPollWorker: ConfigPollWorker? = null,
+    /** Pre-auth cloud forward worker — forwards unsynced pre-auth records to cloud. */
+    private val preAuthCloudForwardWorker: PreAuthCloudForwardWorker? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) : ConnectivityTransitionListener {
 
@@ -133,11 +136,12 @@ class CadenceController(
     override fun onTransition(from: ConnectivityState, to: ConnectivityState) {
         when (to) {
             ConnectivityState.FULLY_ONLINE -> {
-                Log.i(TAG, "→ FULLY_ONLINE: triggering immediate replay + SYNCED_TO_ODOO sync")
+                Log.i(TAG, "→ FULLY_ONLINE: triggering immediate replay + SYNCED_TO_ODOO sync + pre-auth forward")
                 scope.launch {
                     // Per spec: "Cloud Upload Worker triggers immediate replay of PENDING buffer;
                     // SYNCED_TO_ODOO Poller triggers immediate poll"
                     cloudUploadWorker.uploadPendingBatch()
+                    preAuthCloudForwardWorker?.forwardUnsyncedPreAuths()
                     cloudUploadWorker.pollSyncedToOdooStatus()
                     // Telemetry piggybacks on this recovery cycle
                     cloudUploadWorker.reportTelemetry()
@@ -193,6 +197,7 @@ class CadenceController(
             ConnectivityState.FULLY_ONLINE -> {
                 ingestionOrchestrator.poll()
                 cloudUploadWorker.uploadPendingBatch()
+                preAuthCloudForwardWorker?.forwardUnsyncedPreAuths()
                 if (tickCount % config.syncedToOdooTickFrequency == 0L) {
                     // SYNCED_TO_ODOO polling shares the cadence loop with cloud health checks
                     cloudUploadWorker.pollSyncedToOdooStatus()
@@ -202,7 +207,7 @@ class CadenceController(
                     cloudUploadWorker.reportTelemetry()
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
-                    cloudUploadWorker.pollConfig()
+                    configPollWorker?.pollConfig()
                 }
             }
             ConnectivityState.INTERNET_DOWN -> {
@@ -212,11 +217,12 @@ class CadenceController(
             ConnectivityState.FCC_UNREACHABLE -> {
                 // FCC unreachable: internet up — upload existing buffer, sync status from cloud
                 cloudUploadWorker.uploadPendingBatch()
+                preAuthCloudForwardWorker?.forwardUnsyncedPreAuths()
                 if (tickCount % config.syncedToOdooTickFrequency == 0L) {
                     cloudUploadWorker.pollSyncedToOdooStatus()
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
-                    cloudUploadWorker.pollConfig()
+                    configPollWorker?.pollConfig()
                 }
             }
             ConnectivityState.FULLY_OFFLINE -> {

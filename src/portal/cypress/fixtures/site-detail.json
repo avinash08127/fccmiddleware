@@ -1,0 +1,53 @@
+{
+  "id": "site-001",
+  "siteCode": "MW-001",
+  "siteName": "Lilongwe Main",
+  "legalEntityId": "10000000-0000-0000-0000-000000000001",
+  "operatingModel": "COCO",
+  "connectivityMode": "CONNECTED",
+  "isActive": true,
+  "timezone": "Africa/Blantyre",
+  "operatorName": "Fuel Corp Ltd",
+  "updatedAt": "2026-03-10T14:00:00Z",
+  "fcc": {
+    "fccId": "fcc-001",
+    "vendor": "DOMS",
+    "connectionProtocol": "HTTP",
+    "hostAddress": "192.168.1.100",
+    "port": 8080,
+    "transactionMode": "PUSH",
+    "ingestionMode": "PUSH",
+    "pullIntervalSeconds": 60,
+    "heartbeatIntervalSeconds": 30,
+    "heartbeatTimeoutSeconds": 90,
+    "enabled": true
+  },
+  "tolerance": {
+    "amountTolerancePct": 2.5,
+    "amountToleranceAbsoluteMinorUnits": 500,
+    "timeWindowMinutes": 60
+  },
+  "fiscalization": {
+    "mode": "FCC_DIRECT",
+    "taxAuthorityEndpoint": "https://tax.gov.mw/api",
+    "requireCustomerTaxId": false,
+    "fiscalReceiptRequired": true
+  },
+  "pumps": [
+    {
+      "id": "pump-001",
+      "pumpNumber": 1,
+      "nozzles": [
+        { "nozzleNumber": 1, "canonicalProductCode": "PMS" },
+        { "nozzleNumber": 2, "canonicalProductCode": "AGO" }
+      ]
+    },
+    {
+      "id": "pump-002",
+      "pumpNumber": 2,
+      "nozzles": [
+        { "nozzleNumber": 1, "canonicalProductCode": "AGO" }
+      ]
+    }
+  ]
+}

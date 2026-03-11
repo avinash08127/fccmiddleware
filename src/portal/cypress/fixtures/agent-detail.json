@@ -1,0 +1,72 @@
+{
+  "registration": {
+    "deviceId": "agent-001",
+    "siteCode": "MW-001",
+    "siteName": "Lilongwe Main",
+    "legalEntityId": "10000000-0000-0000-0000-000000000001",
+    "registeredAt": "2025-06-15T08:00:00Z",
+    "status": "ACTIVE"
+  },
+  "telemetry": {
+    "connectivityState": "FULLY_ONLINE",
+    "reportedAtUtc": "2026-03-11T10:29:00Z",
+    "device": {
+      "batteryPercent": 85,
+      "isCharging": false,
+      "osVersion": "Android 14",
+      "deviceModel": "Samsung Galaxy Tab A8",
+      "appUptimeSeconds": 345600,
+      "storageFreeMb": 2048,
+      "storageTotalMb": 8192
+    },
+    "fccHealth": {
+      "fccVendor": "DOMS",
+      "fccHost": "192.168.1.100",
+      "fccPort": 8080,
+      "isReachable": true,
+      "lastHeartbeatAtUtc": "2026-03-11T10:28:30Z",
+      "heartbeatAgeSeconds": 30,
+      "consecutiveHeartbeatFailures": 0
+    },
+    "buffer": {
+      "pendingUploadCount": 3,
+      "syncedCount": 120,
+      "syncedToOdooCount": 115,
+      "failedCount": 2,
+      "totalRecords": 240,
+      "oldestPendingAtUtc": "2026-03-11T10:25:00Z"
+    },
+    "sync": {
+      "syncLagSeconds": 30,
+      "lastSuccessfulSyncUtc": "2026-03-11T10:28:00Z",
+      "lastSyncAttemptUtc": "2026-03-11T10:28:00Z",
+      "configVersion": 5,
+      "lastConfigPullUtc": "2026-03-11T06:00:00Z",
+      "uploadBatchSize": 50
+    },
+    "errorCounts": {
+      "fccConnectionErrors": 0,
+      "cloudUploadErrors": 1,
+      "cloudAuthErrors": 0,
+      "bufferWriteErrors": 0
+    }
+  },
+  "events": [
+    {
+      "id": "evt-001",
+      "eventType": "CONNECTIVITY_STATE_CHANGED",
+      "occurredAtUtc": "2026-03-11T06:00:00Z",
+      "description": "Agent came online after restart",
+      "previousState": "FULLY_OFFLINE",
+      "newState": "FULLY_ONLINE"
+    },
+    {
+      "id": "evt-002",
+      "eventType": "TELEMETRY_REPORTED",
+      "occurredAtUtc": "2026-03-11T10:29:00Z",
+      "description": "Periodic telemetry report",
+      "previousState": null,
+      "newState": null
+    }
+  ]
+}

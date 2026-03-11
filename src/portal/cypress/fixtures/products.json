@@ -1,0 +1,5 @@
+[
+  { "code": "PMS", "name": "Premium Motor Spirit", "productType": "FUEL" },
+  { "code": "AGO", "name": "Automotive Gas Oil (Diesel)", "productType": "FUEL" },
+  { "code": "IK", "name": "Illuminating Kerosene", "productType": "FUEL" }
+]

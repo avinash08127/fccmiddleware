@@ -47,7 +47,9 @@
                   "maximumError": "8kB"
                 }
               ],
-              "outputHashing": "all"
+              "outputHashing": "all",
+              "namedChunks": true,
+              "subresourceIntegrity": true
             },
             "development": {
               "optimization": false,
