@@ -230,7 +230,20 @@ public sealed class OutboxPublisherWorkerTests : IAsyncLifetime
             }
         };
 
-        await _client.PostAsJsonAsync("/api/v1/transactions/ingest", request);
+        var ingestResponse = await _client.PostAsJsonAsync("/api/v1/transactions/ingest", request);
+        var ingestBody = await ingestResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var correlationId = Guid.Empty;
+
+        // Get the outbox message correlation ID for this specific ingest
+        using (var preScope = _factory.Services.CreateScope())
+        {
+            var preDb = preScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            var outboxMsg = await preDb.OutboxMessages
+                .Where(m => m.EventType == "TransactionIngested" && m.ProcessedAt == null)
+                .OrderByDescending(m => m.Id)
+                .FirstAsync();
+            correlationId = outboxMsg.CorrelationId;
+        }
 
         // Act: process outbox
         var options = Options.Create(new OutboxWorkerOptions { BatchSize = 50, RetentionDays = 7 });
@@ -246,7 +259,7 @@ public sealed class OutboxPublisherWorkerTests : IAsyncLifetime
         var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
         var audit = await db.AuditEvents
             .IgnoreQueryFilters()
-            .Where(a => a.Payload.Contains("TXN-OUTBOX-AUDIT"))
+            .Where(a => a.CorrelationId == correlationId && a.EventType == "TransactionIngested")
             .FirstOrDefaultAsync();
 
         audit.Should().NotBeNull();
