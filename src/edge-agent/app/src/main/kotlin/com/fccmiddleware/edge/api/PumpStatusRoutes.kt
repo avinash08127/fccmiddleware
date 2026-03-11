@@ -9,8 +9,6 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.Routing
 import io.ktor.server.routing.get
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -55,8 +53,8 @@ fun Routing.pumpStatusRoutes(cache: PumpStatusCache) {
 /**
  * Manages pump status retrieval with single-flight protection and stale fallback.
  *
- * Single-flight: if a live FCC fetch is already in progress, concurrent calls
- * wait for the same [Deferred] rather than issuing additional FCC requests.
+ * Single-flight: concurrent callers are serialized behind a mutex so only one
+ * live FCC fetch is in progress at a time.
  *
  * Stale fallback: when FCC is unreachable or the live fetch exceeds [liveTimeoutMs],
  * returns last-known data with [PumpStatusResponse.stale] = true.
@@ -75,7 +73,6 @@ class PumpStatusCache(
     )
 
     private val mutex = Mutex()
-    private var inflight: Deferred<List<PumpStatus>>? = null
     private var cached: List<PumpStatus> = emptyList()
     private var cachedAtMs: Long = 0L
 
@@ -92,22 +89,15 @@ class PumpStatusCache(
             return staleFallback()
         }
 
-        // Ensure only one live FCC call is in flight at a time (single-flight)
-        val deferred = mutex.withLock {
-            val existing = inflight
-            if (existing != null && existing.isActive) {
-                existing
-            } else {
-                val new = scope.async {
-                    fccAdapter.getPumpStatus()
-                }
-                inflight = new
-                new
+        // Ensure only one live FCC call is in flight at a time (single-flight).
+        // Concurrent callers queue behind the mutex instead of fanning out to the FCC.
+        return mutex.withLock {
+            val result = try {
+                withTimeoutOrNull(liveTimeoutMs) { fccAdapter.getPumpStatus() }
+            } catch (_: Exception) {
+                null
             }
-        }
 
-        return try {
-            val result = withTimeoutOrNull(liveTimeoutMs) { deferred.await() }
             if (result != null) {
                 cached = result
                 cachedAtMs = System.currentTimeMillis()
@@ -116,8 +106,6 @@ class PumpStatusCache(
             } else {
                 staleFallback()
             }
-        } catch (_: Exception) {
-            staleFallback()
         }
     }
 

@@ -18,7 +18,10 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -57,6 +60,7 @@ class PreAuthHandlerTest {
     private lateinit var auditLogDao: AuditLogDao
     private lateinit var fccAdapter: IFccAdapter
     private val connectivityState = MutableStateFlow(ConnectivityState.FULLY_ONLINE)
+    private val handlerScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
     // Fast timeout so tests don't wait 30 s
     private val testConfig = PreAuthHandler.PreAuthHandlerConfig(
@@ -294,7 +298,7 @@ class PreAuthHandlerTest {
         )
 
         val statusSlot = slot<String>()
-        val authCodeSlot = slot<String?>()
+        val authCodeSlot = slot<String>()
         coEvery {
             preAuthDao.updateStatus(any(), capture(statusSlot), any(), capture(authCodeSlot), any(), any(), any())
         } returns Unit
@@ -563,7 +567,7 @@ class PreAuthHandlerTest {
         nozzleDao = nozzleDao,
         connectivityManager = connectivityManager,
         auditLogDao = auditLogDao,
-        scope = this, // TestScope — captures launched coroutines
+        scope = handlerScope,
         fccAdapter = adapter,
         config = testConfig,
     )

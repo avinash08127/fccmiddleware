@@ -2,12 +2,18 @@ using System.Diagnostics;
 using System.Globalization;
 using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Registration;
+using FccMiddleware.Application.Telemetry;
+using FccMiddleware.Contracts.Agent;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Config;
 using FccMiddleware.Contracts.Registration;
+using FccMiddleware.Contracts.Telemetry;
+using FccMiddleware.Domain.Models;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using System.Security.Claims;
 
 namespace FccMiddleware.Api.Controllers;
 
@@ -24,11 +30,13 @@ public sealed class AgentController : ControllerBase
 {
     private readonly IMediator _mediator;
     private readonly ILogger<AgentController> _logger;
+    private readonly IConfiguration _configuration;
 
-    public AgentController(IMediator mediator, ILogger<AgentController> logger)
+    public AgentController(IMediator mediator, ILogger<AgentController> logger, IConfiguration configuration)
     {
         _mediator = mediator;
         _logger = logger;
+        _configuration = configuration;
     }
 
     /// <summary>
@@ -281,7 +289,214 @@ public sealed class AgentController : ControllerBase
         return Ok(value.Config);
     }
 
+    /// <summary>
+    /// Returns Edge Agent version compatibility state for the reported APK version.
+    /// </summary>
+    [HttpGet("api/v1/agent/version-check")]
+    [Authorize(Policy = "EdgeAgentDevice")]
+    [ProducesResponseType(typeof(VersionCheckResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CheckVersion(
+        [FromQuery] VersionCheckRequest request,
+        CancellationToken cancellationToken)
+    {
+        var appVersion = request.AppVersion;
+        var agentVersion = request.AgentVersion;
+
+        if (string.IsNullOrWhiteSpace(appVersion) && string.IsNullOrWhiteSpace(agentVersion))
+        {
+            return BadRequest(BuildError("INVALID_AGENT_VERSION",
+                "Query parameter appVersion is required."));
+        }
+
+        if (!string.IsNullOrWhiteSpace(appVersion)
+            && !string.IsNullOrWhiteSpace(agentVersion)
+            && !string.Equals(appVersion, agentVersion, StringComparison.Ordinal))
+        {
+            return BadRequest(BuildError("INVALID_AGENT_VERSION",
+                "appVersion and agentVersion must match when both are provided."));
+        }
+
+        var result = await _mediator.Send(new CheckAgentVersionQuery
+        {
+            AgentVersion = appVersion ?? agentVersion!
+        }, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error!.Code switch
+            {
+                "INVALID_AGENT_VERSION" => BadRequest(BuildError(result.Error.Code, result.Error.Message)),
+                "VERSION_CONFIG_INVALID" => StatusCode(StatusCodes.Status500InternalServerError,
+                    BuildError(result.Error.Code, result.Error.Message, retryable: true)),
+                _ => StatusCode(StatusCodes.Status500InternalServerError,
+                    BuildError("INTERNAL.UNEXPECTED", result.Error.Message, retryable: true))
+            };
+        }
+
+        var value = result.Value!;
+        return Ok(new VersionCheckResponse
+        {
+            Compatible = value.Compatible,
+            MinimumVersion = value.MinimumVersion,
+            LatestVersion = value.LatestVersion,
+            UpdateRequired = value.UpdateRequired,
+            UpdateUrl = value.UpdateUrl,
+            AgentVersion = value.AgentVersion,
+            MinSupportedVersion = value.MinimumVersion,
+            UpdateAvailable = value.UpdateAvailable,
+            ReleaseNotes = value.ReleaseNotes,
+            DownloadUrl = value.UpdateUrl
+        });
+    }
+
+    /// <summary>
+    /// Accepts a telemetry snapshot from a registered Edge Agent.
+    /// </summary>
+    [HttpPost("api/v1/agent/telemetry")]
+    [Authorize(Policy = "EdgeAgentDevice")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SubmitTelemetry(
+        [FromBody] SubmitTelemetryRequest request,
+        CancellationToken cancellationToken)
+    {
+        var deviceIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                         ?? User.FindFirstValue("sub");
+        var siteCodeClaim = User.FindFirstValue("site");
+        var leiClaim = User.FindFirstValue("lei");
+
+        if (deviceIdClaim is null || siteCodeClaim is null || leiClaim is null
+            || !Guid.TryParse(deviceIdClaim, out var deviceId)
+            || !Guid.TryParse(leiClaim, out var legalEntityId))
+        {
+            return Unauthorized(BuildError("INVALID_TOKEN_CLAIMS",
+                "Device JWT is missing required claims (sub, site, lei)."));
+        }
+
+        if (request.DeviceId != deviceId
+            || !string.Equals(request.SiteCode, siteCodeClaim, StringComparison.Ordinal)
+            || request.LegalEntityId != legalEntityId)
+        {
+            return Unauthorized(BuildError("SITE_MISMATCH",
+                "Telemetry payload identity does not match the authenticated device token."));
+        }
+
+        var result = await _mediator.Send(new SubmitTelemetryCommand
+        {
+            DeviceId = deviceId,
+            SiteCode = siteCodeClaim,
+            LegalEntityId = legalEntityId,
+            Payload = MapToTelemetryPayload(request)
+        }, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error!.Code switch
+            {
+                "DEVICE_NOT_FOUND" => NotFound(BuildError(result.Error.Code, result.Error.Message)),
+                "SITE_MISMATCH" => Unauthorized(BuildError(result.Error.Code, result.Error.Message)),
+                _ => StatusCode(StatusCodes.Status500InternalServerError,
+                    BuildError("INTERNAL.UNEXPECTED", result.Error.Message, retryable: true))
+            };
+        }
+
+        LogTelemetryWarnings(request);
+
+        return NoContent();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private TelemetryPayload MapToTelemetryPayload(SubmitTelemetryRequest request) =>
+        new()
+        {
+            SchemaVersion = request.SchemaVersion,
+            DeviceId = request.DeviceId,
+            SiteCode = request.SiteCode,
+            LegalEntityId = request.LegalEntityId,
+            ReportedAtUtc = request.ReportedAtUtc,
+            SequenceNumber = request.SequenceNumber,
+            ConnectivityState = request.ConnectivityState,
+            Device = new DeviceStatus
+            {
+                BatteryPercent = request.Device.BatteryPercent,
+                IsCharging = request.Device.IsCharging,
+                StorageFreeMb = request.Device.StorageFreeMb,
+                StorageTotalMb = request.Device.StorageTotalMb,
+                MemoryFreeMb = request.Device.MemoryFreeMb,
+                MemoryTotalMb = request.Device.MemoryTotalMb,
+                AppVersion = request.Device.AppVersion,
+                AppUptimeSeconds = request.Device.AppUptimeSeconds,
+                OsVersion = request.Device.OsVersion,
+                DeviceModel = request.Device.DeviceModel
+            },
+            FccHealth = new FccHealthStatus
+            {
+                IsReachable = request.FccHealth.IsReachable,
+                LastHeartbeatAtUtc = request.FccHealth.LastHeartbeatAtUtc,
+                HeartbeatAgeSeconds = request.FccHealth.HeartbeatAgeSeconds,
+                FccVendor = request.FccHealth.FccVendor,
+                FccHost = request.FccHealth.FccHost,
+                FccPort = request.FccHealth.FccPort,
+                ConsecutiveHeartbeatFailures = request.FccHealth.ConsecutiveHeartbeatFailures
+            },
+            Buffer = new BufferStatus
+            {
+                TotalRecords = request.Buffer.TotalRecords,
+                PendingUploadCount = request.Buffer.PendingUploadCount,
+                SyncedCount = request.Buffer.SyncedCount,
+                SyncedToOdooCount = request.Buffer.SyncedToOdooCount,
+                FailedCount = request.Buffer.FailedCount,
+                OldestPendingAtUtc = request.Buffer.OldestPendingAtUtc,
+                BufferSizeMb = request.Buffer.BufferSizeMb
+            },
+            Sync = new SyncStatus
+            {
+                LastSyncAttemptUtc = request.Sync.LastSyncAttemptUtc,
+                LastSuccessfulSyncUtc = request.Sync.LastSuccessfulSyncUtc,
+                SyncLagSeconds = request.Sync.SyncLagSeconds,
+                LastStatusPollUtc = request.Sync.LastStatusPollUtc,
+                LastConfigPullUtc = request.Sync.LastConfigPullUtc,
+                ConfigVersion = request.Sync.ConfigVersion,
+                UploadBatchSize = request.Sync.UploadBatchSize
+            },
+            ErrorCounts = new ErrorCounts
+            {
+                FccConnectionErrors = request.ErrorCounts.FccConnectionErrors,
+                CloudUploadErrors = request.ErrorCounts.CloudUploadErrors,
+                CloudAuthErrors = request.ErrorCounts.CloudAuthErrors,
+                LocalApiErrors = request.ErrorCounts.LocalApiErrors,
+                BufferWriteErrors = request.ErrorCounts.BufferWriteErrors,
+                AdapterNormalizationErrors = request.ErrorCounts.AdapterNormalizationErrors,
+                PreAuthErrors = request.ErrorCounts.PreAuthErrors
+            }
+        };
+
+    private void LogTelemetryWarnings(SubmitTelemetryRequest request)
+    {
+        var telemetryConfig = _configuration.GetSection("EdgeAgentDefaults:Telemetry");
+        var bufferDepthThreshold = telemetryConfig.GetValue("BufferDepthWarningThreshold", 5000);
+        var syncLagThresholdSeconds = telemetryConfig.GetValue("SyncLagWarningThresholdSeconds", 7200);
+
+        if (request.Buffer.PendingUploadCount > bufferDepthThreshold)
+        {
+            _logger.LogWarning(
+                "Edge Agent buffer depth threshold exceeded. DeviceId={DeviceId} SiteCode={SiteCode} PendingUploadCount={PendingUploadCount} Threshold={Threshold}",
+                request.DeviceId, request.SiteCode, request.Buffer.PendingUploadCount, bufferDepthThreshold);
+        }
+
+        if (request.Sync.SyncLagSeconds is int syncLagSeconds && syncLagSeconds > syncLagThresholdSeconds)
+        {
+            _logger.LogWarning(
+                "Edge Agent sync lag threshold exceeded. DeviceId={DeviceId} SiteCode={SiteCode} SyncLagSeconds={SyncLagSeconds} Threshold={Threshold}",
+                request.DeviceId, request.SiteCode, syncLagSeconds, syncLagThresholdSeconds);
+        }
+    }
 
     private ErrorResponse BuildError(
         string errorCode,

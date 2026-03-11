@@ -6,6 +6,7 @@ import com.fccmiddleware.edge.buffer.dao.AuditLogDao
 import com.fccmiddleware.edge.buffer.entity.AuditLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -95,7 +96,7 @@ class ConnectivityManager(
     // -------------------------------------------------------------------------
 
     private suspend fun runInternetProbeLoop() {
-        while (coroutineContext.isActive) {
+        while (currentCoroutineContext().isActive) {
             val success = runProbeWithTimeout { internetProbe() }
             lastInternetProbeMs = System.currentTimeMillis()
             processProbeResult(isInternet = true, success = success)
@@ -108,7 +109,7 @@ class ConnectivityManager(
     // -------------------------------------------------------------------------
 
     private suspend fun runFccProbeLoop() {
-        while (coroutineContext.isActive) {
+        while (currentCoroutineContext().isActive) {
             val success = runProbeWithTimeout { fccProbe() }
             lastFccProbeMs = System.currentTimeMillis()
             if (success) lastFccSuccessMs = System.currentTimeMillis()
@@ -217,7 +218,7 @@ class ConnectivityManager(
         }
     }
 
-    private fun jitter(): Long = Random.nextLong(0, config.jitterRangeMs)
+    private fun jitter(): Long = if (config.jitterRangeMs <= 0L) 0L else Random.nextLong(0L, config.jitterRangeMs)
 }
 
 /**

@@ -19,8 +19,8 @@ import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.plugins.origin
 import io.ktor.server.plugins.statuspages.StatusPages
-import io.ktor.server.request.local
 import io.ktor.server.response.respond
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.CoroutineScope
@@ -161,7 +161,7 @@ class LocalApiServer(
 private fun LanApiKeyAuthPlugin(storedKey: String): ApplicationPlugin<Unit> =
     createApplicationPlugin("LanApiKeyAuth") {
         onCall { call ->
-            val remoteAddress = call.request.local.remoteAddress
+            val remoteAddress = call.request.origin.remoteHost
             val isLocalhost = remoteAddress == "127.0.0.1" ||
                 remoteAddress == "::1" ||
                 remoteAddress == "0:0:0:0:0:0:0:1"

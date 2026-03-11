@@ -12,6 +12,7 @@ import com.fccmiddleware.edge.sync.ConfigPollWorker
 import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
@@ -179,7 +180,7 @@ class CadenceController(
     // -------------------------------------------------------------------------
 
     private suspend fun runCadenceLoop() {
-        while (coroutineContext.isActive) {
+        while (currentCoroutineContext().isActive) {
             val state = connectivityManager.state.value
             val backlogDepth = safeGetBacklogDepth()
 
@@ -245,7 +246,8 @@ class CadenceController(
             backlogDepth > config.highBacklogThreshold -> config.highBacklogIntervalMs
             else -> config.baseIntervalMs
         }
-        return base + Random.nextLong(0, config.jitterRangeMs)
+        val jitter = if (config.jitterRangeMs <= 0L) 0L else Random.nextLong(0L, config.jitterRangeMs)
+        return base + jitter
     }
 
     // -------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.response.respond
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
 import io.mockk.coEvery
@@ -224,24 +225,25 @@ class ManualPullRoutesTest {
 
     @Test
     fun `POST pull returns 503 when orchestrator is null (adapter not wired)`() = testApplication {
-        // Route registered without orchestrator
-        install(ContentNegotiation) {
-            json(Json { ignoreUnknownKeys = true; isLenient = false })
-        }
-        install(StatusPages) {
-            exception<Throwable> { call, _ ->
-                call.respond(
-                    io.ktor.http.HttpStatusCode.InternalServerError,
-                    ErrorResponse("INTERNAL_ERROR", "error", "trace", Instant.now().toString())
+        application {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true; isLenient = false })
+            }
+            install(StatusPages) {
+                exception<Throwable> { call, _ ->
+                    call.respond(
+                        io.ktor.http.HttpStatusCode.InternalServerError,
+                        ErrorResponse("INTERNAL_ERROR", "error", "trace", Instant.now().toString())
+                    )
+                }
+            }
+            routing {
+                transactionRoutes(
+                    dao = mockDao,
+                    ingestionOrchestrator = null,
+                    connectivityManager = mockConnectivity,
                 )
             }
-        }
-        routing {
-            transactionRoutes(
-                dao = mockDao,
-                ingestionOrchestrator = null,
-                connectivityManager = mockConnectivity,
-            )
         }
 
         val response = client.post("/api/v1/transactions/pull") {
@@ -258,23 +260,25 @@ class ManualPullRoutesTest {
     // -------------------------------------------------------------------------
 
     private fun io.ktor.server.testing.ApplicationTestBuilder.setupRouting() {
-        install(ContentNegotiation) {
-            json(Json { ignoreUnknownKeys = true; isLenient = false })
-        }
-        install(StatusPages) {
-            exception<Throwable> { call, _ ->
-                call.respond(
-                    io.ktor.http.HttpStatusCode.InternalServerError,
-                    ErrorResponse("INTERNAL_ERROR", "error", "trace", Instant.now().toString())
+        application {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true; isLenient = false })
+            }
+            install(StatusPages) {
+                exception<Throwable> { call, _ ->
+                    call.respond(
+                        io.ktor.http.HttpStatusCode.InternalServerError,
+                        ErrorResponse("INTERNAL_ERROR", "error", "trace", Instant.now().toString())
+                    )
+                }
+            }
+            routing {
+                transactionRoutes(
+                    dao = mockDao,
+                    ingestionOrchestrator = mockOrchestrator,
+                    connectivityManager = mockConnectivity,
                 )
             }
-        }
-        routing {
-            transactionRoutes(
-                dao = mockDao,
-                ingestionOrchestrator = mockOrchestrator,
-                connectivityManager = mockConnectivity,
-            )
         }
     }
 }

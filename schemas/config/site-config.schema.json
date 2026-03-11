@@ -990,42 +990,37 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "pumpNozzleId",
-        "pumpNumber",
-        "nozzleNumber",
-        "canonicalProductCode",
-        "odooPumpId",
-        "active"
+        "odooPumpNumber",
+        "fccPumpNumber",
+        "odooNozzleNumber",
+        "fccNozzleNumber",
+        "productCode"
       ],
       "properties": {
-        "pumpNozzleId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "pumpNumber": {
+        "odooPumpNumber": {
           "type": "integer",
           "minimum": 1,
           "maximum": 999
         },
-        "nozzleNumber": {
+        "fccPumpNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 999
+        },
+        "odooNozzleNumber": {
           "type": "integer",
           "minimum": 1,
           "maximum": 32
         },
-        "canonicalProductCode": {
+        "fccNozzleNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "productCode": {
           "type": "string",
           "minLength": 1,
           "maxLength": 32
-        },
-        "odooPumpId": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "maxLength": 64
-        },
-        "active": {
-          "type": "boolean"
         }
       }
     },

@@ -1,7 +1,9 @@
 using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
+using FccMiddleware.Application.PreAuth;
 using FccMiddleware.Application.Registration;
+using FccMiddleware.Application.Telemetry;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
@@ -24,7 +26,7 @@ namespace FccMiddleware.Infrastructure.Persistence;
 ///
 /// Outbox: <see cref="OutboxMessage"/> uses a bigint GENERATED ALWAYS AS IDENTITY column.
 /// </summary>
-public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext, IRegistrationDbContext, IAgentConfigDbContext
+public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext, IRegistrationDbContext, IAgentConfigDbContext, ITelemetryDbContext, IPreAuthDbContext
 {
     private readonly ICurrentTenantProvider _tenantProvider;
 
@@ -202,6 +204,23 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             })
             .ToListAsync(ct);
     }
+
+    async Task<List<string>> IPollTransactionsDbContext.FetchSyncedTransactionIdsAsync(
+        Guid legalEntityId,
+        string siteCode,
+        DateTimeOffset since,
+        CancellationToken ct) =>
+        await Set<Transaction>()
+            .IgnoreQueryFilters()
+            .Where(t => t.LegalEntityId == legalEntityId
+                     && t.SiteCode == siteCode
+                     && t.Status == TransactionStatus.SYNCED_TO_ODOO
+                     && t.SyncedToOdooAt.HasValue
+                     && t.SyncedToOdooAt.Value >= since)
+            .OrderBy(t => t.SyncedToOdooAt)
+            .ThenBy(t => t.Id)
+            .Select(t => t.FccTransactionId)
+            .ToListAsync(ct);
 
     // -------------------------------------------------------------------------
     // IAcknowledgeTransactionsDbContext implementation
@@ -414,4 +433,50 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         Guid deviceId, CancellationToken ct) =>
         await Set<AgentRegistration>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(a => a.Id == deviceId, ct);
+
+    // -------------------------------------------------------------------------
+    // ITelemetryDbContext implementation
+    // -------------------------------------------------------------------------
+
+    async Task<AgentRegistration?> ITelemetryDbContext.FindAgentByDeviceIdAsync(
+        Guid deviceId, CancellationToken ct) =>
+        await Set<AgentRegistration>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(a => a.Id == deviceId, ct);
+
+    Task<bool> ITelemetryDbContext.HasAuditEventAsync(Guid correlationId, string eventType, CancellationToken ct) =>
+        Set<AuditEvent>().IgnoreQueryFilters()
+            .AnyAsync(a => a.CorrelationId == correlationId && a.EventType == eventType, ct);
+
+    void ITelemetryDbContext.AddAuditEvent(AuditEvent auditEvent) =>
+        AuditEvents.Add(auditEvent);
+
+    // -------------------------------------------------------------------------
+    // IPreAuthDbContext implementation
+    // -------------------------------------------------------------------------
+
+    async Task<PreAuthRecord?> IPreAuthDbContext.FindByDedupKeyAsync(
+        string odooOrderId, string siteCode, CancellationToken ct) =>
+        await Set<PreAuthRecord>()
+            .IgnoreQueryFilters()
+            .Where(p => p.OdooOrderId == odooOrderId && p.SiteCode == siteCode)
+            .OrderByDescending(p => p.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+
+    async Task<PreAuthRecord?> IPreAuthDbContext.FindByIdAsync(
+        Guid preAuthId,
+        Guid legalEntityId,
+        CancellationToken ct) =>
+        await Set<PreAuthRecord>()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(
+                p => p.Id == preAuthId && p.LegalEntityId == legalEntityId,
+                ct);
+
+    void IPreAuthDbContext.AddPreAuthRecord(PreAuthRecord record) =>
+        PreAuthRecords.Add(record);
+
+    void IPreAuthDbContext.AddOutboxMessage(OutboxMessage message) =>
+        OutboxMessages.Add(message);
+
+    void IPreAuthDbContext.ClearTracked() => ChangeTracker.Clear();
 }

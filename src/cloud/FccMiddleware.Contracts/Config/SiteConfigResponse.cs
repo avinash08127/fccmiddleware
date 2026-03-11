@@ -1,5 +1,3 @@
-using System.Text.Json.Serialization;
-
 namespace FccMiddleware.Contracts.Config;
 
 /// <summary>
@@ -154,12 +152,11 @@ public sealed record ProductMappingDto
 
 public sealed record NozzleMappingDto
 {
-    public required Guid PumpNozzleId { get; init; }
-    public required int PumpNumber { get; init; }
-    public required int NozzleNumber { get; init; }
-    public required string CanonicalProductCode { get; init; }
-    public string? OdooPumpId { get; init; }
-    public required bool Active { get; init; }
+    public required int OdooPumpNumber { get; init; }
+    public required int FccPumpNumber { get; init; }
+    public required int OdooNozzleNumber { get; init; }
+    public required int FccNozzleNumber { get; init; }
+    public required string ProductCode { get; init; }
 }
 
 public sealed record RolloutDto

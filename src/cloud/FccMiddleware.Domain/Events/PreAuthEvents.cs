@@ -20,6 +20,16 @@ public sealed class PreAuthAuthorized : DomainEvent
     public string? FccAuthCode { get; init; }
 }
 
+/// <summary>Dispensing has started on the FCC.</summary>
+public sealed class PreAuthDispensing : DomainEvent
+{
+    public override string EventType => "PreAuthDispensing";
+    public Guid PreAuthId { get; init; }
+    public int PumpNumber { get; init; }
+    public int NozzleNumber { get; init; }
+    public string? FccCorrelationId { get; init; }
+}
+
 /// <summary>Dispensing finished; matched to transaction.</summary>
 public sealed class PreAuthCompleted : DomainEvent
 {
@@ -44,4 +54,12 @@ public sealed class PreAuthExpired : DomainEvent
     public override string EventType => "PreAuthExpired";
     public Guid PreAuthId { get; init; }
     public int ExpiredAfterSeconds { get; init; }
+}
+
+/// <summary>Pre-auth failed before dispense completion.</summary>
+public sealed class PreAuthFailed : DomainEvent
+{
+    public override string EventType => "PreAuthFailed";
+    public Guid PreAuthId { get; init; }
+    public string? Reason { get; init; }
 }

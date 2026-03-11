@@ -21,23 +21,23 @@ data class SyncState(
 
     /** Last successfully acknowledged FCC cursor/offset; null = full catch-up required */
     @ColumnInfo(name = "last_fcc_cursor")
-    val lastFccCursor: String?,
+    val lastFccCursor: String? = null,
 
     /** ISO 8601 UTC; null until first successful upload */
     @ColumnInfo(name = "last_upload_at")
-    val lastUploadAt: String?,
+    val lastUploadAt: String? = null,
 
     /** ISO 8601 UTC; null until first status poll */
     @ColumnInfo(name = "last_status_poll_at")
-    val lastStatusPollAt: String?,
+    val lastStatusPollAt: String? = null,
 
     /** ISO 8601 UTC; null until first config pull */
     @ColumnInfo(name = "last_config_pull_at")
-    val lastConfigPullAt: String?,
+    val lastConfigPullAt: String? = null,
 
     /** Config version last applied; null until first config pull */
     @ColumnInfo(name = "last_config_version")
-    val lastConfigVersion: Int?,
+    val lastConfigVersion: Int? = null,
 
     /** Monotonic counter incremented on each telemetry report */
     @ColumnInfo(name = "telemetry_sequence")

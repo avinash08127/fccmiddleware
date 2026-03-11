@@ -105,27 +105,31 @@ open class IntegrityChecker(
         }
     }
 
-    private fun backupAndDelete(): String? = try {
-        val dbFile = context.getDatabasePath(DB_NAME)
-        if (!dbFile.exists()) return null
+    private fun backupAndDelete(): String? {
+        return try {
+            val dbFile = context.getDatabasePath(DB_NAME)
+            if (!dbFile.exists()) {
+                null
+            } else {
+                val timestamp = Instant.now().toString().replace(":", "-")
+                val backupFile = File(context.cacheDir, "fcc_buffer_corrupt_$timestamp.db")
+                dbFile.copyTo(backupFile, overwrite = true)
 
-        val timestamp = Instant.now().toString().replace(":", "-")
-        val backupFile = File(context.cacheDir, "fcc_buffer_corrupt_$timestamp.db")
-        dbFile.copyTo(backupFile, overwrite = true)
+                // Close the Room connection before deleting (Room holds file locks)
+                db.close()
+                dbFile.delete()
+                File("${dbFile.path}-wal").delete()
+                File("${dbFile.path}-shm").delete()
 
-        // Close the Room connection before deleting (Room holds file locks)
-        db.close()
-        dbFile.delete()
-        File("${dbFile.path}-wal").delete()
-        File("${dbFile.path}-shm").delete()
-
-        Log.w(
-            TAG,
-            "Corrupt database backed up to ${backupFile.absolutePath} and deleted for recreation"
-        )
-        backupFile.absolutePath
-    } catch (e: Exception) {
-        Log.e(TAG, "Failed to back up corrupt database", e)
-        null
+                Log.w(
+                    TAG,
+                    "Corrupt database backed up to ${backupFile.absolutePath} and deleted for recreation"
+                )
+                backupFile.absolutePath
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to back up corrupt database", e)
+            null
+        }
     }
 }

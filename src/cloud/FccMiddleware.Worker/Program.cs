@@ -1,7 +1,11 @@
 using FccMiddleware.Domain.Interfaces;
+using FccMiddleware.Domain.Enums;
+using FccMiddleware.Infrastructure.Adapters;
 using FccMiddleware.Infrastructure.Events;
 using FccMiddleware.Infrastructure.Persistence;
+using FccMiddleware.Infrastructure.Repositories;
 using FccMiddleware.Infrastructure.Workers;
+using FccMiddleware.Adapter.Doms;
 using FccMiddleware.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -38,6 +42,26 @@ try
     // ── Infrastructure: Event publisher ───────────────────────────────────────
     builder.Services.AddScoped<IEventPublisher, OutboxEventPublisher>();
 
+    builder.Services.AddScoped<ISiteFccConfigProvider, SiteFccConfigProvider>();
+    builder.Services.AddHttpClient();
+    builder.Services.AddSingleton<IFccAdapterFactory>(sp =>
+        FccAdapterFactory.Create(registry =>
+        {
+            var hcf = sp.GetRequiredService<IHttpClientFactory>();
+            registry[FccVendor.DOMS] = cfg =>
+            {
+                var client = hcf.CreateClient();
+                if (!string.IsNullOrEmpty(cfg.HostAddress))
+                {
+                    client.BaseAddress = new Uri($"http://{cfg.HostAddress}:{cfg.Port}/api/v1/");
+                    if (!string.IsNullOrEmpty(cfg.ApiKey))
+                        client.DefaultRequestHeaders.Add("X-API-Key", cfg.ApiKey);
+                }
+
+                return new DomsCloudAdapter(client, cfg);
+            };
+        }));
+
     // ── Outbox Publisher Worker ───────────────────────────────────────────────
     builder.Services.Configure<OutboxWorkerOptions>(
         builder.Configuration.GetSection(OutboxWorkerOptions.SectionName));
@@ -47,6 +71,10 @@ try
     builder.Services.Configure<StaleTransactionWorkerOptions>(
         builder.Configuration.GetSection(StaleTransactionWorkerOptions.SectionName));
     builder.Services.AddHostedService<StaleTransactionWorker>();
+
+    builder.Services.Configure<PreAuthExpiryWorkerOptions>(
+        builder.Configuration.GetSection(PreAuthExpiryWorkerOptions.SectionName));
+    builder.Services.AddHostedService<PreAuthExpiryWorker>();
 
     var host = builder.Build();
     host.Run();

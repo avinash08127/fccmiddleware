@@ -164,11 +164,13 @@ class PumpStatusRoutesTest {
             scope = testScope,
             liveTimeoutMs = 500L,
         )
-        install(ContentNegotiation) {
-            json(Json { ignoreUnknownKeys = true })
-        }
-        routing {
-            pumpStatusRoutes(cache)
+        application {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true })
+            }
+            routing {
+                pumpStatusRoutes(cache)
+            }
         }
     }
 

@@ -201,6 +201,48 @@ public sealed class TransactionsController : ControllerBase
     }
 
     /// <summary>
+    /// Returns FCC transaction IDs for the authenticated device site that have been acknowledged by Odoo.
+    /// </summary>
+    /// <remarks>
+    /// Authenticated via device JWT bearer token.
+    /// Only records at the JWT site claim are considered, and only when status=SYNCED_TO_ODOO.
+    /// The since filter is inclusive against SyncedToOdooAt.
+    /// </remarks>
+    /// <param name="since">Inclusive UTC lower bound for SyncedToOdooAt.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    [HttpGet("synced-status")]
+    [Authorize(Policy = "EdgeAgentDevice")]
+    [ProducesResponseType(typeof(SyncedStatusResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GetSyncedStatus(
+        [FromQuery] DateTimeOffset? since,
+        CancellationToken cancellationToken = default)
+    {
+        if (!since.HasValue)
+            return BadRequest(BuildError("VALIDATION.REQUIRED_SINCE",
+                "Query parameter 'since' is required and must be a valid ISO 8601 UTC timestamp."));
+
+        var siteCode = User.FindFirstValue("site");
+        var leiStr   = User.FindFirstValue("lei");
+
+        if (string.IsNullOrWhiteSpace(siteCode) || !Guid.TryParse(leiStr, out var legalEntityId))
+            return Unauthorized(BuildError("UNAUTHORIZED", "Device JWT is missing required claims (site, lei)."));
+
+        var result = await _mediator.Send(new GetSyncedTransactionIdsQuery
+        {
+            LegalEntityId = legalEntityId,
+            SiteCode = siteCode,
+            Since = since.Value
+        }, cancellationToken);
+
+        return Ok(new SyncedStatusResponse
+        {
+            FccTransactionIds = result.FccTransactionIds
+        });
+    }
+
+    /// <summary>
     /// Returns a cursor-paginated page of PENDING transactions for Odoo to process.
     /// </summary>
     /// <remarks>

@@ -39,7 +39,11 @@ class ReplayThroughputBenchmarkTest {
         }
 
         val elapsedMs = System.currentTimeMillis() - startMs
-        val txPerMinute = (uploadedCount.get().toLong() * 60_000L) / elapsedMs
+        val txPerMinute = if (elapsedMs <= 0L) {
+            Long.MAX_VALUE
+        } else {
+            (uploadedCount.get().toLong() * 60_000L) / elapsedMs
+        }
 
         assertTrue(
             "Replay local processing: ${txPerMinute} tx/min; must be >= 600 tx/min",

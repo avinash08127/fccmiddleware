@@ -1,10 +1,15 @@
 package com.fccmiddleware.edge.security
 
+import com.fccmiddleware.edge.adapter.common.AgentFccConfig
+import com.fccmiddleware.edge.adapter.common.FccVendor
+import com.fccmiddleware.edge.adapter.common.IngestionMode
+import com.fccmiddleware.edge.adapter.common.PreAuthCommand
 import com.fccmiddleware.edge.sync.DeviceRegistrationRequest
 import com.fccmiddleware.edge.sync.DeviceRegistrationResponse
 import com.fccmiddleware.edge.sync.HttpCloudApiClient
 import com.fccmiddleware.edge.sync.TokenRefreshRequest
 import com.fccmiddleware.edge.sync.TokenRefreshResponse
+import okhttp3.CertificatePinner
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -13,17 +18,33 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
+
+private data class SensitiveFilterTestModel(
+    @Sensitive val secretToken: String,
+    val publicField: String,
+)
+
+private data class SensitiveFilterJwtModel(
+    @Sensitive val deviceToken: String,
+)
+
+private data class SensitiveFilterPlainModel(
+    val name: String,
+    val value: Int,
+)
 
 /**
  * EA-6.2 Security Hardening Tests.
  *
  * Verifies:
  * 1. KeystoreManager: AES-256-GCM, non-exportable keys, all aliases
- * 2. @Sensitive annotation: present on sensitive model fields
+ * 2. @Sensitive annotation: present on ALL sensitive model fields (tokens, credentials, PII)
  * 3. SensitiveFieldFilter: redacts annotated fields, preserves JWT suffix
- * 4. EncryptedPrefsManager: no fallback to regular prefs
- * 5. Certificate pinning: hostname extraction for CertificatePinner
- * 6. LAN API key: constant-time comparison (tested in LocalApiServer route tests)
+ * 4. EncryptedPrefsManager: no fallback to regular prefs, all keys defined
+ * 5. Certificate pinning: hostname extraction, pin mismatch rejection
+ * 6. LAN API key: constant-time comparison (tested in LanApiKeyAuthTest)
+ * 7. Log safety: no sensitive data leaks through toString() or redactToString()
  */
 class SecurityHardeningTest {
 
@@ -130,11 +151,38 @@ class SecurityHardeningTest {
         }
 
         @Test
+        fun `AgentFccConfig authCredential is @Sensitive`() {
+            val field = AgentFccConfig::class.java.getDeclaredField("authCredential")
+            assertTrue(
+                field.isAnnotationPresent(Sensitive::class.java),
+                "authCredential (FCC API key) must be annotated with @Sensitive",
+            )
+        }
+
+        @Test
+        fun `PreAuthCommand customerTaxId is @Sensitive`() {
+            val field = PreAuthCommand::class.java.getDeclaredField("customerTaxId")
+            assertTrue(
+                field.isAnnotationPresent(Sensitive::class.java),
+                "customerTaxId (PII) must be annotated with @Sensitive",
+            )
+        }
+
+        @Test
         fun `DeviceRegistrationRequest siteCode is NOT @Sensitive`() {
             val field = DeviceRegistrationRequest::class.java.getDeclaredField("siteCode")
             assertFalse(
                 field.isAnnotationPresent(Sensitive::class.java),
                 "siteCode is not sensitive and should not be annotated",
+            )
+        }
+
+        @Test
+        fun `AgentFccConfig hostAddress is NOT @Sensitive`() {
+            val field = AgentFccConfig::class.java.getDeclaredField("hostAddress")
+            assertFalse(
+                field.isAnnotationPresent(Sensitive::class.java),
+                "hostAddress is not sensitive",
             )
         }
     }
@@ -147,23 +195,9 @@ class SecurityHardeningTest {
     @DisplayName("SensitiveFieldFilter")
     inner class SensitiveFieldFilterTest {
 
-        data class TestModel(
-            @Sensitive val secretToken: String,
-            val publicField: String,
-        )
-
-        data class JwtModel(
-            @Sensitive val deviceToken: String,
-        )
-
-        data class NonSensitiveModel(
-            val name: String,
-            val value: Int,
-        )
-
         @Test
         fun `redacts @Sensitive fields with REDACTED`() {
-            val model = TestModel(secretToken = "super-secret-value", publicField = "visible")
+            val model = SensitiveFilterTestModel(secretToken = "super-secret-value", publicField = "visible")
             val redacted = SensitiveFieldFilter.redact(model)
 
             assertEquals("[REDACTED]", redacted["secretToken"])
@@ -172,7 +206,7 @@ class SecurityHardeningTest {
 
         @Test
         fun `preserves last 8 chars for token fields`() {
-            val model = JwtModel(deviceToken = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.longpayload.signature12345678")
+            val model = SensitiveFilterJwtModel(deviceToken = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.longpayload.signature12345678")
             val redacted = SensitiveFieldFilter.redact(model)
             val value = redacted["deviceToken"] as String
 
@@ -183,7 +217,7 @@ class SecurityHardeningTest {
 
         @Test
         fun `short token fields are fully redacted`() {
-            val model = JwtModel(deviceToken = "short")
+            val model = SensitiveFilterJwtModel(deviceToken = "short")
             val redacted = SensitiveFieldFilter.redact(model)
 
             assertEquals("[REDACTED]", redacted["deviceToken"])
@@ -191,7 +225,6 @@ class SecurityHardeningTest {
 
         @Test
         fun `null sensitive field is redacted`() {
-            // Use reflection test — create object with null-like behavior
             data class NullableModel(@Sensitive val apiKey: String?)
             val model = NullableModel(apiKey = null)
             val redacted = SensitiveFieldFilter.redact(model)
@@ -201,7 +234,7 @@ class SecurityHardeningTest {
 
         @Test
         fun `non-sensitive model passes through unchanged`() {
-            val model = NonSensitiveModel(name = "test", value = 42)
+            val model = SensitiveFilterPlainModel(name = "test", value = 42)
             val redacted = SensitiveFieldFilter.redact(model)
 
             assertEquals("test", redacted["name"])
@@ -210,7 +243,7 @@ class SecurityHardeningTest {
 
         @Test
         fun `redactToString produces readable output`() {
-            val model = TestModel(secretToken = "secret123456789", publicField = "visible")
+            val model = SensitiveFilterTestModel(secretToken = "secret123456789", publicField = "visible")
             val output = SensitiveFieldFilter.redactToString(model)
 
             assertTrue(output.contains("publicField=visible"))
@@ -242,6 +275,48 @@ class SecurityHardeningTest {
             val redacted = SensitiveFieldFilter.redact(request)
 
             assertEquals("[REDACTED]", redacted["provisioningToken"])
+            assertEquals("ZM-LUSAKA-01", redacted["siteCode"])
+        }
+
+        @Test
+        fun `real model — AgentFccConfig redacts authCredential`() {
+            val config = AgentFccConfig(
+                fccVendor = FccVendor.DOMS,
+                connectionProtocol = "REST",
+                hostAddress = "192.168.1.100",
+                port = 8080,
+                authCredential = "super-secret-fcc-api-key-never-log",
+                ingestionMode = IngestionMode.RELAY,
+                pullIntervalSeconds = 30,
+                productCodeMapping = mapOf("001" to "PMS"),
+                timezone = "Africa/Johannesburg",
+                currencyCode = "ZAR",
+            )
+            val redacted = SensitiveFieldFilter.redact(config)
+
+            assertEquals("[REDACTED]", redacted["authCredential"],
+                "FCC auth credential must be fully redacted")
+            assertEquals("192.168.1.100", redacted["hostAddress"],
+                "hostAddress is non-sensitive and should pass through")
+            assertFalse(
+                redacted.values.any { it?.toString()?.contains("super-secret-fcc") == true },
+                "FCC credential plaintext must not appear anywhere in redacted output",
+            )
+        }
+
+        @Test
+        fun `real model — PreAuthCommand redacts customerTaxId`() {
+            val command = PreAuthCommand(
+                siteCode = "ZM-LUSAKA-01",
+                pumpNumber = 3,
+                amountMinorUnits = 50000,
+                currencyCode = "ZAR",
+                customerTaxId = "1234567890",
+            )
+            val redacted = SensitiveFieldFilter.redact(command)
+
+            assertEquals("[REDACTED]", redacted["customerTaxId"],
+                "Customer TIN must be fully redacted (PII)")
             assertEquals("ZM-LUSAKA-01", redacted["siteCode"])
         }
     }
@@ -298,6 +373,54 @@ class SecurityHardeningTest {
     }
 
     // -------------------------------------------------------------------------
+    // 4b. Certificate pinning — pin mismatch rejection
+    // -------------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("Certificate pinning — pin mismatch rejection")
+    inner class CertPinMismatch {
+
+        @Test
+        fun `CertificatePinner rejects mismatched pin for hostname`() {
+            // Build a CertificatePinner with a known-wrong pin (self-signed cert scenario).
+            // OkHttp will throw SSLPeerUnverifiedException on handshake when the
+            // server cert's public key doesn't match the pinned hash.
+            val pinner = CertificatePinner.Builder()
+                .add(
+                    "api.fcc-middleware.prod.example.com",
+                    "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                )
+                .build()
+
+            // Verifying that check() throws when presented with zero matching certificates.
+            // This simulates a self-signed or mismatched cert scenario.
+            assertThrows<IllegalArgumentException> {
+                // check() with empty cert list throws — proves pinner will not accept
+                // connections without a matching pin
+                pinner.check(
+                    "api.fcc-middleware.prod.example.com",
+                    emptyList(),
+                )
+            }
+        }
+
+        @Test
+        fun `CertificatePinner allows unpinned hostname`() {
+            // Pins only apply to the specified hostname.
+            // A different hostname should not be rejected by the pinner.
+            val pinner = CertificatePinner.Builder()
+                .add(
+                    "api.fcc-middleware.prod.example.com",
+                    "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                )
+                .build()
+
+            // check() for a hostname that has no pins configured should not throw
+            pinner.check("other.example.com", emptyList())
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // 5. EncryptedPrefsManager keys
     // -------------------------------------------------------------------------
 
@@ -307,7 +430,7 @@ class SecurityHardeningTest {
 
         @Test
         fun `all sensitive identity keys are defined`() {
-            // Per security spec §5.3 — all sensitive fields stored in EncryptedSharedPreferences
+            // Per security spec 5.3 - all sensitive fields stored in EncryptedSharedPreferences
             assertNotNull(EncryptedPrefsManager.KEY_DEVICE_ID)
             assertNotNull(EncryptedPrefsManager.KEY_SITE_CODE)
             assertNotNull(EncryptedPrefsManager.KEY_LEGAL_ENTITY_ID)
@@ -327,10 +450,67 @@ class SecurityHardeningTest {
             assertNotNull(EncryptedPrefsManager.KEY_IS_REGISTERED)
             assertNotNull(EncryptedPrefsManager.KEY_IS_DECOMMISSIONED)
         }
+
+        @Test
+        fun `all key constants have distinct values`() {
+            val keys = listOf(
+                EncryptedPrefsManager.KEY_DEVICE_ID,
+                EncryptedPrefsManager.KEY_SITE_CODE,
+                EncryptedPrefsManager.KEY_LEGAL_ENTITY_ID,
+                EncryptedPrefsManager.KEY_CLOUD_BASE_URL,
+                EncryptedPrefsManager.KEY_FCC_HOST,
+                EncryptedPrefsManager.KEY_FCC_PORT,
+                EncryptedPrefsManager.KEY_IS_REGISTERED,
+                EncryptedPrefsManager.KEY_IS_DECOMMISSIONED,
+                EncryptedPrefsManager.KEY_DEVICE_TOKEN_ENCRYPTED,
+                EncryptedPrefsManager.KEY_REFRESH_TOKEN_ENCRYPTED,
+            )
+            assertEquals(keys.size, keys.toSet().size, "All pref keys must be distinct")
+        }
     }
 
     // -------------------------------------------------------------------------
-    // 6. Log redaction — verify no sensitive data in toString()
+    // 6. @Sensitive annotation metadata
+    // -------------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("@Sensitive annotation metadata")
+    inner class SensitiveAnnotationMetadata {
+
+        @Test
+        fun `@Sensitive is retained at runtime`() {
+            assertEquals(
+                AnnotationRetention.RUNTIME,
+                Sensitive::class.annotations
+                    .filterIsInstance<Retention>()
+                    .first().value,
+                "@Sensitive must be RUNTIME retention for reflection-based redaction",
+            )
+        }
+
+        @Test
+        fun `@Sensitive targets properties, fields, and value parameters`() {
+            val targets = Sensitive::class.annotations
+                .filterIsInstance<Target>()
+                .first().allowedTargets.toSet()
+
+            assertTrue(
+                targets.contains(AnnotationTarget.PROPERTY),
+                "@Sensitive must target PROPERTY",
+            )
+            assertTrue(
+                targets.contains(AnnotationTarget.FIELD),
+                "@Sensitive must target FIELD",
+            )
+            assertTrue(
+                targets.contains(AnnotationTarget.VALUE_PARAMETER),
+                "@Sensitive must target VALUE_PARAMETER",
+            )
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 7. Log redaction — verify no sensitive data in toString()
     // -------------------------------------------------------------------------
 
     @Nested
@@ -368,6 +548,64 @@ class SecurityHardeningTest {
             assertFalse(safe.contains("opaque-refresh"))
             assertTrue(safe.contains("ZM-LUSAKA-01"), "siteCode should be visible")
             assertTrue(safe.contains("d1234567"), "deviceId should be visible")
+        }
+
+        @Test
+        fun `AgentFccConfig authCredential never appears in redacted output`() {
+            val config = AgentFccConfig(
+                fccVendor = FccVendor.DOMS,
+                connectionProtocol = "REST",
+                hostAddress = "192.168.1.100",
+                port = 8080,
+                authCredential = "fcc-secret-api-key-abc123def456",
+                ingestionMode = IngestionMode.RELAY,
+                pullIntervalSeconds = 30,
+                productCodeMapping = mapOf("001" to "PMS"),
+                timezone = "Africa/Johannesburg",
+                currencyCode = "ZAR",
+            )
+            val safe = SensitiveFieldFilter.redactToString(config)
+
+            assertFalse(
+                safe.contains("fcc-secret-api-key"),
+                "FCC credential must never appear in log-safe output",
+            )
+            assertTrue(safe.contains("DOMS"), "Non-sensitive vendor should be visible")
+        }
+
+        @Test
+        fun `PreAuthCommand customerTaxId never appears in redacted output`() {
+            val command = PreAuthCommand(
+                siteCode = "ZM-LUSAKA-01",
+                pumpNumber = 3,
+                amountMinorUnits = 50000,
+                currencyCode = "ZAR",
+                customerTaxId = "9876543210",
+            )
+            val safe = SensitiveFieldFilter.redactToString(command)
+
+            assertFalse(
+                safe.contains("9876543210"),
+                "Customer TIN (PII) must never appear in log-safe output",
+            )
+            assertTrue(safe.contains("ZM-LUSAKA-01"), "Non-sensitive siteCode should be visible")
+        }
+
+        @Test
+        fun `data class toString includes sensitive values — proving SensitiveFieldFilter is needed`() {
+            // This test proves that Kotlin data class toString() DOES leak sensitive data,
+            // confirming that SensitiveFieldFilter must always be used for logging.
+            val request = TokenRefreshRequest(refreshToken = "opaque-secret-refresh-token")
+            val rawToString = request.toString()
+
+            assertTrue(
+                rawToString.contains("opaque-secret-refresh-token"),
+                "Raw toString() leaks sensitive data — use SensitiveFieldFilter.redactToString() instead",
+            )
+
+            // But SensitiveFieldFilter protects it
+            val safe = SensitiveFieldFilter.redactToString(request)
+            assertFalse(safe.contains("opaque-secret"))
         }
     }
 }

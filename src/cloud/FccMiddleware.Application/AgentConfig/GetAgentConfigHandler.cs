@@ -41,6 +41,12 @@ public sealed class GetAgentConfigHandler
                 "Device is not registered at the claimed site.");
         }
 
+        if (agent.LegalEntityId != request.LegalEntityId)
+        {
+            return Result<GetAgentConfigResult>.Failure("SITE_MISMATCH",
+                "Device is not registered under the claimed legal entity.");
+        }
+
         // Load FccConfig with all related site data
         var fccConfig = await _db.GetFccConfigWithSiteDataAsync(
             request.SiteCode, request.LegalEntityId, cancellationToken);
@@ -65,15 +71,15 @@ public sealed class GetAgentConfigHandler
         // Build the full SiteConfig
         var site = fccConfig.Site;
         var legalEntity = fccConfig.LegalEntity;
-        var now = DateTimeOffset.UtcNow;
+        var issuedAt = fccConfig.UpdatedAt;
 
         var config = new SiteConfigResponse
         {
             SchemaVersion = "1.0",
             ConfigVersion = fccConfig.ConfigVersion,
-            ConfigId = Guid.NewGuid(),
-            IssuedAtUtc = now,
-            EffectiveAtUtc = now,
+            ConfigId = fccConfig.Id,
+            IssuedAtUtc = issuedAt,
+            EffectiveAtUtc = issuedAt,
             SourceRevision = new SourceRevisionDto
             {
                 DatabricksSyncAtUtc = site.SyncedAt,
@@ -109,7 +115,7 @@ public sealed class GetAgentConfigHandler
             LocalApi = BuildLocalApiDto(),
             Telemetry = BuildTelemetryDto(),
             Fiscalization = BuildFiscalizationDto(legalEntity),
-            Mappings = BuildMappingsDto(fccConfig, site),
+            Mappings = BuildMappingsDto(site),
             Rollout = BuildRolloutDto()
         };
 
@@ -124,6 +130,14 @@ public sealed class GetAgentConfigHandler
     private static FccDto BuildFccDto(Domain.Entities.FccConfig fccConfig)
     {
         var enabled = fccConfig.IsActive;
+        var pullIntervalSeconds = enabled ? fccConfig.PullIntervalSeconds : null;
+        int? catchUpPullIntervalSeconds = enabled && fccConfig.IngestionMode == Domain.Enums.IngestionMode.CLOUD_DIRECT
+            ? fccConfig.PullIntervalSeconds ?? 30
+            : null;
+        int? hybridCatchUpIntervalSeconds = enabled && fccConfig.IngestionMethod == Domain.Enums.IngestionMethod.HYBRID
+            ? Math.Max(fccConfig.PullIntervalSeconds ?? 30, 30)
+            : null;
+
         return new FccDto
         {
             Enabled = enabled,
@@ -139,9 +153,9 @@ public sealed class GetAgentConfigHandler
             SecretEnvelope = new SecretEnvelopeDto { Format = "NONE", Payload = null },
             TransactionMode = enabled ? fccConfig.IngestionMethod.ToString() : null,
             IngestionMode = enabled ? fccConfig.IngestionMode.ToString() : null,
-            PullIntervalSeconds = fccConfig.PullIntervalSeconds,
-            CatchUpPullIntervalSeconds = null,
-            HybridCatchUpIntervalSeconds = null,
+            PullIntervalSeconds = pullIntervalSeconds,
+            CatchUpPullIntervalSeconds = catchUpPullIntervalSeconds,
+            HybridCatchUpIntervalSeconds = hybridCatchUpIntervalSeconds,
             HeartbeatIntervalSeconds = fccConfig.HeartbeatIntervalSeconds,
             HeartbeatTimeoutSeconds = fccConfig.HeartbeatIntervalSeconds * 3,
             PushSourceIpAllowList = []
@@ -216,9 +230,7 @@ public sealed class GetAgentConfigHandler
         };
     }
 
-    private static MappingsDto BuildMappingsDto(
-        Domain.Entities.FccConfig fccConfig,
-        Domain.Entities.Site site)
+    private static MappingsDto BuildMappingsDto(Domain.Entities.Site site)
     {
         var products = new List<ProductMappingDto>();
         var nozzles = new List<NozzleMappingDto>();
@@ -244,12 +256,11 @@ public sealed class GetAgentConfigHandler
                 // Add nozzle mapping with Odoo ↔ FCC number mapping
                 nozzles.Add(new NozzleMappingDto
                 {
-                    PumpNozzleId = nozzle.Id,
-                    PumpNumber = pump.FccPumpNumber,
-                    NozzleNumber = nozzle.FccNozzleNumber,
-                    CanonicalProductCode = product.ProductCode,
-                    OdooPumpId = pump.PumpNumber.ToString(),
-                    Active = nozzle.IsActive
+                    OdooPumpNumber = pump.PumpNumber,
+                    FccPumpNumber = pump.FccPumpNumber,
+                    OdooNozzleNumber = nozzle.OdooNozzleNumber,
+                    FccNozzleNumber = nozzle.FccNozzleNumber,
+                    ProductCode = product.ProductCode
                 });
             }
         }

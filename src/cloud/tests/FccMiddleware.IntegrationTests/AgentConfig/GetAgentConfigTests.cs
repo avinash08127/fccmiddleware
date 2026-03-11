@@ -101,7 +101,7 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
         // Verify top-level required fields
         body.GetProperty("schemaVersion").GetString().Should().Be("1.0");
         body.GetProperty("configVersion").GetInt32().Should().Be(5);
-        body.GetProperty("configId").GetString().Should().NotBeNullOrEmpty();
+        body.GetProperty("configId").GetString().Should().Be(TestFccConfigId.ToString());
         body.GetProperty("issuedAtUtc").GetString().Should().NotBeNullOrEmpty();
 
         // Verify identity section
@@ -118,13 +118,17 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
         fcc.GetProperty("vendor").GetString().Should().Be("DOMS");
         fcc.GetProperty("hostAddress").GetString().Should().Be("192.168.1.100");
         fcc.GetProperty("port").GetInt32().Should().Be(9090);
+        fcc.GetProperty("catchUpPullIntervalSeconds").GetInt32().Should().Be(30);
 
         // Verify mappings section has nozzle data
         var mappings = body.GetProperty("mappings");
         var nozzles = mappings.GetProperty("nozzles").EnumerateArray().ToList();
         nozzles.Should().HaveCount(1);
-        nozzles[0].GetProperty("canonicalProductCode").GetString().Should().Be("PMS");
-        nozzles[0].GetProperty("pumpNozzleId").GetString().Should().Be(TestNozzleId.ToString());
+        nozzles[0].GetProperty("odooPumpNumber").GetInt32().Should().Be(1);
+        nozzles[0].GetProperty("fccPumpNumber").GetInt32().Should().Be(1);
+        nozzles[0].GetProperty("odooNozzleNumber").GetInt32().Should().Be(1);
+        nozzles[0].GetProperty("fccNozzleNumber").GetInt32().Should().Be(1);
+        nozzles[0].GetProperty("productCode").GetString().Should().Be("PMS");
 
         var products = mappings.GetProperty("products").EnumerateArray().ToList();
         products.Should().HaveCount(1);
@@ -204,6 +208,20 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
     {
         // JWT claims site "WRONG-SITE" but device is registered at CFG-SITE-001
         var token = CreateDeviceJwt(TestDeviceId.ToString(), "WRONG-SITE", TestLegalEntityId);
+        _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await _client.GetAsync("/api/v1/agent/config");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("SITE_MISMATCH");
+    }
+
+    [Fact]
+    public async Task GetConfig_DeviceRegisteredUnderDifferentLegalEntity_Returns401()
+    {
+        var wrongLegalEntityId = Guid.Parse("99000000-0000-0000-0000-000000000099");
+        var token = CreateDeviceJwt(TestDeviceId.ToString(), TestSiteCode, wrongLegalEntityId);
         _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
         var response = await _client.GetAsync("/api/v1/agent/config");

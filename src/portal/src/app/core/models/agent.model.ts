@@ -156,6 +156,9 @@ export interface AgentAuditEvent {
 // ── Version check ─────────────────────────────────────────────────────────────
 
 export interface VersionCheckResponse {
+  compatible: boolean;
+  minimumVersion: string;
+  updateUrl: string | null;
   agentVersion: string;
   minSupportedVersion: string;
   latestVersion: string;

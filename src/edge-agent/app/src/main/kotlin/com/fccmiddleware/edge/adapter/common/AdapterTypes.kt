@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.adapter.common
 
+import com.fccmiddleware.edge.security.Sensitive
 import kotlinx.serialization.Serializable
 
 // ---------------------------------------------------------------------------
@@ -101,7 +102,7 @@ data class PreAuthCommand(
     val odooOrderId: String? = null,
 
     /** Required when site fiscalization config requires it. PII — NEVER log. */
-    val customerTaxId: String? = null,
+    @Sensitive val customerTaxId: String? = null,
 )
 
 /**
@@ -142,7 +143,7 @@ data class AgentFccConfig(
     val port: Int,
 
     /** API key or other auth credential. Stored in EncryptedSharedPreferences — NEVER log. */
-    val authCredential: String,
+    @Sensitive val authCredential: String,
 
     val ingestionMode: IngestionMode,
     val pullIntervalSeconds: Int,

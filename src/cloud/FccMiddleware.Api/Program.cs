@@ -5,7 +5,9 @@ using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
+using FccMiddleware.Application.PreAuth;
 using FccMiddleware.Application.Registration;
+using FccMiddleware.Application.Telemetry;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
@@ -17,11 +19,15 @@ using FccMiddleware.Infrastructure.Repositories;
 using FccMiddleware.Infrastructure.Storage;
 using FccMiddleware.ServiceDefaults;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
 using StackExchange.Redis;
+using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 // Bootstrap logger — active only until DI container is built.
 // ServiceDefaults replaces this with the full structured-JSON logger.
@@ -136,7 +142,34 @@ try
         cfg.RegisterServicesFromAssembly(typeof(FccMiddleware.Application.Common.Result<>).Assembly);
     });
 
-    builder.Services.AddControllers();
+    builder.Services.AddControllers()
+        .AddJsonOptions(options =>
+        {
+            options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+        });
+
+    builder.Services.Configure<ApiBehaviorOptions>(options =>
+    {
+        options.InvalidModelStateResponseFactory = context =>
+        {
+            var details = context.ModelState
+                .Where(entry => entry.Value?.Errors.Count > 0)
+                .ToDictionary(
+                    entry => entry.Key,
+                    entry => entry.Value!.Errors.Select(error =>
+                        string.IsNullOrWhiteSpace(error.ErrorMessage) ? "The input was not valid." : error.ErrorMessage).ToArray());
+
+            return new BadRequestObjectResult(new FccMiddleware.Contracts.Common.ErrorResponse
+            {
+                ErrorCode = "VALIDATION.INVALID_PAYLOAD",
+                Message = "Request payload failed validation.",
+                Details = details,
+                TraceId = Activity.Current?.TraceId.ToString() ?? context.HttpContext.TraceIdentifier,
+                Timestamp = DateTimeOffset.UtcNow.ToString("O"),
+                Retryable = false
+            });
+        };
+    });
 
     // ── Infrastructure: Tenant context (populated per-request by auth middleware) ─
     builder.Services.AddScoped<FccMiddleware.Infrastructure.Persistence.TenantContext>();
@@ -157,6 +190,8 @@ try
     builder.Services.AddScoped<IMasterDataSyncDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IRegistrationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IAgentConfigDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<ITelemetryDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IPreAuthDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
 
     // ── Infrastructure: Device token service ────────────────────────────────
     builder.Services.AddSingleton<IDeviceTokenService, DeviceTokenService>();

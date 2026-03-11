@@ -14,7 +14,12 @@
       "Bash(grep -n \"pre-auth routing\\\\|fcc_pump_number\\\\|fcc_nozzle_number\\\\|odoo_pump_number\\\\|odoo_nozzle_number\\\\|master data sync\\\\|Room entity\\\\|nozzles table\" Requirements.md WIP-HLD-*.md docs/plans/*.md)",
       "Bash(cat EOF ANALYSIS SUMMARY - Pump/Nozzle Schema Updates Required The following files contain stale or incomplete references to pump/nozzle data structures: EOF grep -n \"pumpNumber\\\\|nozzleNumber\" Requirements.md)",
       "Read(//tmp/**)",
-      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data[0][''''text'''']\\)\")"
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data[0][''''text'''']\\)\")",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -type f -name \"*.kt\" | xargs grep -l \"CertificatePinner\\\\|certificate\\\\|pinning\\\\|extractHostname\" | head -10)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/test/kotlin -type f -name \"*.kt\" | xargs grep -l \"Security\\\\|Auth\\\\|Token\\\\|Keystore\" | head -10)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/test/kotlin/com/fccmiddleware/edge/api -type f -name \"*.kt\" 2>/dev/null | head -10)",
+      "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.security.*\" --no-daemon 2>&1 | tail -60)",
+      "Bash(./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.security.*\" --no-daemon 2>&1 | tail -80)"
     ]
   }
 }

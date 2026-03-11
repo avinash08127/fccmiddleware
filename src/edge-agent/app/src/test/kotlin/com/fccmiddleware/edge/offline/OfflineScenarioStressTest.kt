@@ -18,6 +18,7 @@ import com.fccmiddleware.edge.offline.OfflineScenarioTestHelpers.makeTransaction
 import com.fccmiddleware.edge.runtime.CadenceController
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudStatusPollResult
+import com.fccmiddleware.edge.sync.CloudUploadResponse
 import com.fccmiddleware.edge.sync.CloudUploadResult
 import com.fccmiddleware.edge.sync.CloudUploadWorker
 import com.fccmiddleware.edge.sync.CloudUploadWorkerConfig

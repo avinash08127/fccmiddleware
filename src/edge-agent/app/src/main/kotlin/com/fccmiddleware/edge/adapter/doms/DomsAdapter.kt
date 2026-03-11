@@ -38,7 +38,7 @@ class DomsAdapter(private val config: AgentFccConfig) : IFccAdapter {
     }
 
     companion object {
-        const val VENDOR = FccVendor.DOMS
+        val VENDOR = FccVendor.DOMS
         const val ADAPTER_VERSION = "1.0.0"
         const val PROTOCOL = "REST"
     }

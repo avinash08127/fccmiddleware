@@ -26,4 +26,14 @@ public interface IPollTransactionsDbContext
         Guid? cursorId,
         int take,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns FCC transaction IDs for records at the given site that have been acknowledged by Odoo
+    /// since the supplied timestamp.
+    /// </summary>
+    Task<List<string>> FetchSyncedTransactionIdsAsync(
+        Guid legalEntityId,
+        string siteCode,
+        DateTimeOffset since,
+        CancellationToken ct = default);
 }

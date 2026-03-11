@@ -44,3 +44,19 @@ public interface IFccAdapter
     /// </summary>
     AdapterInfo GetAdapterMetadata();
 }
+
+/// <summary>
+/// Optional FCC adapter capability for best-effort pump deauthorization.
+/// Implement only for cloud adapters that can revoke a live pre-auth remotely.
+/// </summary>
+public interface IFccPumpDeauthorizationAdapter
+{
+    /// <summary>
+    /// Attempts to deauthorize an active pump/nozzle combination.
+    /// Implementations should throw when the outbound call fails so callers can log it.
+    /// </summary>
+    Task DeauthorizePumpAsync(
+        int pumpNumber,
+        int? nozzleNumber,
+        CancellationToken cancellationToken = default);
+}

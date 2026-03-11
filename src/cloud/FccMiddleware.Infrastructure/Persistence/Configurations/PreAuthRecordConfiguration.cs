@@ -63,10 +63,12 @@ internal sealed class PreAuthRecordConfiguration : IEntityTypeConfiguration<PreA
             .HasForeignKey(e => e.LegalEntityId)
             .HasConstraintName("fk_preauth_legal_entity");
 
-        // Idempotency key — prevents duplicate pre-auth creation from Odoo retries.
+        // Idempotency key — prevents duplicate pre-auth creation while a non-terminal record exists.
+        // Terminal statuses (COMPLETED, CANCELLED, EXPIRED, FAILED) allow re-request with same key.
         builder.HasIndex(e => new { e.OdooOrderId, e.SiteCode })
             .IsUnique()
-            .HasDatabaseName("ix_preauth_idemp");
+            .HasDatabaseName("ix_preauth_idemp")
+            .HasFilter("status IN ('PENDING','AUTHORIZED','DISPENSING')");
 
         // Reconciliation: match incoming dispenses to pre-auths via FCC-issued correlation ID.
         builder.HasIndex(e => e.FccCorrelationId)

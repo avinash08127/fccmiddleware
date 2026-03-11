@@ -182,19 +182,21 @@ class StatusRoutesTest {
     // -------------------------------------------------------------------------
 
     private fun io.ktor.server.testing.ApplicationTestBuilder.setupRouting() {
-        install(ContentNegotiation) {
-            json(Json { ignoreUnknownKeys = true })
-        }
-        routing {
-            statusRoutes(
-                connectivityManager = mockConnectivityManager,
-                transactionDao = mockTransactionDao,
-                syncStateDao = mockSyncStateDao,
-                agentVersion = "1.0.0-test",
-                deviceId = "test-device-id",
-                siteCode = "TEST_SITE",
-                serviceStartMs = System.currentTimeMillis() - 10_000L,
-            )
+        application {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true })
+            }
+            routing {
+                statusRoutes(
+                    connectivityManager = mockConnectivityManager,
+                    transactionDao = mockTransactionDao,
+                    syncStateDao = mockSyncStateDao,
+                    agentVersion = "1.0.0-test",
+                    deviceId = "test-device-id",
+                    siteCode = "TEST_SITE",
+                    serviceStartMs = System.currentTimeMillis() - 10_000L,
+                )
+            }
         }
     }
 }

@@ -306,32 +306,27 @@ paths:
     get:
       operationId: getSyncedStatus
       tags: [EdgeSync]
-      summary: Edge Agent → Cloud — query SYNCED_TO_ODOO status for uploaded records
+      summary: Edge Agent → Cloud — query SYNCED_TO_ODOO transaction IDs since a timestamp
       description: |
-        The Edge Agent polls this endpoint to determine which of its locally buffered records
-        have reached `SYNCED_TO_ODOO` status, allowing it to advance those records in its
-        local SQLite buffer (and eventually archive/clean them).
+        The Edge Agent polls this endpoint to determine which transactions for its registered
+        site have reached `SYNCED_TO_ODOO`, allowing it to advance those records in its local
+        SQLite buffer (and eventually archive/clean them).
 
-        Maximum 500 IDs per request. IDs not found on the cloud return status `NOT_FOUND`.
+        The cloud scopes results to the authenticated device's `site` claim and returns FCC
+        transaction IDs whose `syncedToOdooAt >= since`.
       security:
         - EdgeAgentJwt: []
       parameters:
-        - name: ids
+        - name: since
           in: query
           required: true
           schema:
-            type: array
-            items:
-              type: string
-              format: uuid
-            minItems: 1
-            maxItems: 500
-          style: form
-          explode: false
-          description: Comma-separated list of middleware-assigned transaction UUIDs to check.
+            type: string
+            format: date-time
+          description: Inclusive UTC lower bound for `syncedToOdooAt`.
       responses:
         "200":
-          description: Status map for requested IDs
+          description: FCC transaction IDs acknowledged by Odoo since the requested time
           content:
             application/json:
               schema:
@@ -458,6 +453,10 @@ paths:
         304 when no changes are present, avoiding unnecessary data transfer.
 
         The ETag format is `"<configVersion>"` (integer, quoted). Example: `"42"`.
+        `mappings.nozzles` contains one entry per active nozzle with
+        `odooPumpNumber`, `fccPumpNumber`, `odooNozzleNumber`, `fccNozzleNumber`,
+        and `productCode` so the agent can translate Odoo pump/nozzle numbers
+        before sending FCC pre-auth commands.
       security:
         - EdgeAgentJwt: []
       parameters:
@@ -513,13 +512,21 @@ paths:
       security:
         - EdgeAgentJwt: []
       parameters:
-        - name: agentVersion
+        - name: appVersion
           in: query
           required: true
           schema:
             type: string
             pattern: '^\d+\.\d+\.\d+$'
           description: Current Edge Agent APK version (SemVer, e.g., `1.4.2`).
+        - name: agentVersion
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+            pattern: '^\d+\.\d+\.\d+$'
+          description: Deprecated alias for `appVersion`.
       responses:
         "200":
           description: Version compatibility result
@@ -1129,27 +1136,14 @@ components:
 
     SyncedStatusResponse:
       type: object
-      required: [statuses]
+      required: [fccTransactionIds]
       additionalProperties: false
       properties:
-        statuses:
+        fccTransactionIds:
           type: array
           items:
-            $ref: '#/components/schemas/TransactionStatusEntry'
-
-    TransactionStatusEntry:
-      type: object
-      required: [id, status]
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-          format: uuid
-          description: Middleware transaction UUID.
-        status:
-          type: string
-          enum: [PENDING, SYNCED, SYNCED_TO_ODOO, STALE_PENDING, DUPLICATE, ARCHIVED, NOT_FOUND]
-          description: Current cloud-side status. `NOT_FOUND` if the ID is unknown to the cloud.
+            type: string
+          description: FCC transaction IDs for the authenticated device site that reached `SYNCED_TO_ODOO`.
 
     # ── Pre-Auth forward ────────────────────────────────────────────────────
 
@@ -1336,9 +1330,20 @@ components:
 
     VersionCheckResponse:
       type: object
-      required: [agentVersion, minSupportedVersion, latestVersion, updateRequired, updateAvailable]
+      required: [compatible, minimumVersion, latestVersion, updateRequired, agentVersion, minSupportedVersion, updateAvailable]
       additionalProperties: false
       properties:
+        compatible:
+          type: boolean
+          description: "`true` if the current agent version is still supported by the cloud."
+        minimumVersion:
+          type: string
+          description: Minimum agent version still compatible with cloud APIs.
+        updateUrl:
+          type: string
+          format: uri
+          nullable: true
+          description: Preferred update URL for the latest agent package when direct download is enabled.
         agentVersion:
           type: string
           description: The version reported by the agent in the request.

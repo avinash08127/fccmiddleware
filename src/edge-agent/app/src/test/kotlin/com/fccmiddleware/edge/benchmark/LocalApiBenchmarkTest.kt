@@ -1,9 +1,31 @@
 package com.fccmiddleware.edge.benchmark
 
+import com.fccmiddleware.edge.adapter.common.ConnectivityState
+import com.fccmiddleware.edge.api.PumpStatusCache
+import com.fccmiddleware.edge.api.preAuthRoutes
+import com.fccmiddleware.edge.api.pumpStatusRoutes
+import com.fccmiddleware.edge.api.statusRoutes
+import com.fccmiddleware.edge.api.transactionRoutes
+import com.fccmiddleware.edge.buffer.dao.SyncStateDao
+import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.preauth.PreAuthHandler
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.install
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.routing.routing
 import io.ktor.server.testing.*
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.mockk
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,25 +44,49 @@ import org.junit.Test
  */
 class LocalApiBenchmarkTest {
 
-    private fun buildTestApp() = testApplication {
-        // Route stubs return 501; latency measurement is still valid for
-        // routing overhead benchmarking before real implementation.
-        routing {
-            com.fccmiddleware.edge.api.transactionRoutes()
-            com.fccmiddleware.edge.api.statusRoutes()
-            com.fccmiddleware.edge.api.preAuthRoutes()
-            com.fccmiddleware.edge.api.pumpStatusRoutes()
+    private val transactionDao: TransactionBufferDao = mockk(relaxed = true)
+    private val syncStateDao: SyncStateDao = mockk(relaxed = true)
+    private val connectivityManager: ConnectivityManager = mockk(relaxed = true)
+    private val preAuthHandler: PreAuthHandler = mockk(relaxed = true)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+
+    private fun io.ktor.server.testing.ApplicationTestBuilder.setupRoutes() {
+        every { connectivityManager.state } returns MutableStateFlow(ConnectivityState.FULLY_ONLINE)
+        every { connectivityManager.fccHeartbeatAgeSeconds() } returns 1
+        coEvery { transactionDao.getForLocalApi(any(), any()) } returns emptyList()
+        coEvery { transactionDao.countForLocalApi() } returns 0
+        coEvery { syncStateDao.get() } returns null
+
+        application {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true })
+            }
+            routing {
+                transactionRoutes(transactionDao)
+                statusRoutes(
+                    connectivityManager = connectivityManager,
+                    transactionDao = transactionDao,
+                    syncStateDao = syncStateDao,
+                    agentVersion = "1.0.0-test",
+                    deviceId = "benchmark-device",
+                    siteCode = "BENCH",
+                    serviceStartMs = System.currentTimeMillis(),
+                )
+                preAuthRoutes(preAuthHandler, connectivityManager)
+                pumpStatusRoutes(PumpStatusCache(null, connectivityManager, scope))
+            }
         }
     }
 
     @Test
     fun `GET api-transactions p95 within 150ms`() = testApplication {
+        setupRoutes()
         val iterations = 50
         val latencies = LongArray(iterations)
 
         repeat(iterations) { i ->
             val start = System.currentTimeMillis()
-            val response = client.get("/api/transactions")
+            val response = client.get("/api/v1/transactions")
             latencies[i] = System.currentTimeMillis() - start
             // Stubs return 501 until EA-1.x; accept 501 at this stage
             assertTrue(
@@ -56,12 +102,13 @@ class LocalApiBenchmarkTest {
 
     @Test
     fun `GET api-status p95 within 100ms`() = testApplication {
+        setupRoutes()
         val iterations = 50
         val latencies = LongArray(iterations)
 
         repeat(iterations) { i ->
             val start = System.currentTimeMillis()
-            val response = client.get("/api/status")
+            val response = client.get("/api/v1/status")
             latencies[i] = System.currentTimeMillis() - start
             assertTrue(
                 "Unexpected status: ${response.status}",
