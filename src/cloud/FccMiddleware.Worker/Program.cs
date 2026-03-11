@@ -1,10 +1,15 @@
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Infrastructure.Adapters;
 using FccMiddleware.Infrastructure.Events;
+using FccMiddleware.Infrastructure.Observability;
 using FccMiddleware.Infrastructure.Persistence;
 using FccMiddleware.Infrastructure.Repositories;
+using FccMiddleware.Infrastructure.Storage;
 using FccMiddleware.Infrastructure.Workers;
+using FccMiddleware.Application.Reconciliation;
+using FccMiddleware.Application.Observability;
 using FccMiddleware.Adapter.Doms;
 using FccMiddleware.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
@@ -38,6 +43,13 @@ try
         opts.UseNpgsql(
             sp.GetRequiredService<IConfiguration>().GetConnectionString("FccMiddleware")
             ?? string.Empty));
+    builder.Services.AddScoped<IReconciliationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddSingleton<IPostgresPartitionManager, PostgresPartitionManager>();
+    builder.Services.AddSingleton<IArchiveObjectStore, ArchiveObjectStore>();
+    builder.Services.AddSingleton<IObservabilityMetrics, CloudWatchEmfMetricSink>();
+    builder.Services.Configure<ReconciliationOptions>(
+        builder.Configuration.GetSection(ReconciliationOptions.SectionName));
+    builder.Services.AddScoped<ReconciliationMatchingService>();
 
     // ── Infrastructure: Event publisher ───────────────────────────────────────
     builder.Services.AddScoped<IEventPublisher, OutboxEventPublisher>();
@@ -75,6 +87,18 @@ try
     builder.Services.Configure<PreAuthExpiryWorkerOptions>(
         builder.Configuration.GetSection(PreAuthExpiryWorkerOptions.SectionName));
     builder.Services.AddHostedService<PreAuthExpiryWorker>();
+
+    builder.Services.Configure<UnmatchedReconciliationWorkerOptions>(
+        builder.Configuration.GetSection(UnmatchedReconciliationWorkerOptions.SectionName));
+    builder.Services.AddHostedService<UnmatchedReconciliationWorker>();
+
+    builder.Services.Configure<MonitoringSnapshotWorkerOptions>(
+        builder.Configuration.GetSection(MonitoringSnapshotWorkerOptions.SectionName));
+    builder.Services.AddHostedService<MonitoringSnapshotWorker>();
+
+    builder.Services.Configure<ArchiveWorkerOptions>(
+        builder.Configuration.GetSection(ArchiveWorkerOptions.SectionName));
+    builder.Services.AddHostedService<ArchiveWorker>();
 
     var host = builder.Build();
     host.Run();

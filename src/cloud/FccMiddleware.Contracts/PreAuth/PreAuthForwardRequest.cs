@@ -1,3 +1,5 @@
+using FccMiddleware.Domain.Common;
+
 namespace FccMiddleware.Contracts.PreAuth;
 
 /// <summary>
@@ -21,6 +23,7 @@ public sealed record PreAuthForwardRequest
     public string? FccCorrelationId { get; init; }
     public string? FccAuthorizationCode { get; init; }
     public string? VehicleNumber { get; init; }
+    [Sensitive]
     public string? CustomerName { get; init; }
     public string? AttendantId { get; init; }
 }

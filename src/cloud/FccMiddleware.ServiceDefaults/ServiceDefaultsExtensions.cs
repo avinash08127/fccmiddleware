@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
+using FccMiddleware.ServiceDefaults.Logging;
+using FccMiddleware.ServiceDefaults.Security;
 using Serilog;
 using Serilog.Formatting.Compact;
 
@@ -25,9 +27,11 @@ public static class ServiceDefaultsExtensions
         builder.Services.AddSerilog((services, cfg) => cfg
             .ReadFrom.Configuration(builder.Configuration)
             .ReadFrom.Services(services)
+            .Destructure.With<RedactingDestructuringPolicy>()
+            .Enrich.With<ActivityEnricher>()
             .Enrich.FromLogContext()
-            .Enrich.WithProperty("Application", builder.Environment.ApplicationName)
-            .Enrich.WithProperty("Environment", builder.Environment.EnvironmentName)
+            .Enrich.WithProperty("service", builder.Environment.ApplicationName)
+            .Enrich.WithProperty("environment", builder.Environment.EnvironmentName)
             // Structured JSON to console (CLEF format — parseable by Seq, CloudWatch Logs Insights, etc.)
             .WriteTo.Console(new RenderedCompactJsonFormatter()));
 

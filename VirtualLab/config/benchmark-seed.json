@@ -1,0 +1,16 @@
+{
+  "profileName": "phase0-default",
+  "sites": 10,
+  "pumpsPerSite": 10,
+  "nozzlesPerPump": 4,
+  "transactions": 10000,
+  "pushTransactions": 4000,
+  "pullTransactions": 3500,
+  "hybridTransactions": 2500,
+  "normalOrderTransactions": 7000,
+  "preAuthCreateOnlyTransactions": 1500,
+  "preAuthCreateThenAuthorizeTransactions": 1500,
+  "callbackTargets": 10,
+  "scenarioSeed": 424242,
+  "replayIterations": 3
+}

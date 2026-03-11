@@ -9,6 +9,7 @@ import com.fccmiddleware.edge.sync.DeviceRegistrationResponse
 import com.fccmiddleware.edge.sync.HttpCloudApiClient
 import com.fccmiddleware.edge.sync.TokenRefreshRequest
 import com.fccmiddleware.edge.sync.TokenRefreshResponse
+import kotlin.reflect.full.memberProperties
 import okhttp3.CertificatePinner
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -18,7 +19,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.assertThrows
+import javax.net.ssl.SSLPeerUnverifiedException
 
 private data class SensitiveFilterTestModel(
     @Sensitive val secretToken: String,
@@ -96,92 +97,88 @@ class SecurityHardeningTest {
     @DisplayName("@Sensitive annotation placement")
     inner class SensitiveAnnotation {
 
+        /** Helper: checks if a Kotlin property is annotated @Sensitive (property or field). */
+        private inline fun <reified T : Any> isSensitive(propName: String): Boolean {
+            val prop = T::class.memberProperties.first { it.name == propName }
+            return prop.annotations.any { it is Sensitive }
+        }
+
         @Test
         fun `DeviceRegistrationRequest provisioningToken is @Sensitive`() {
-            val field = DeviceRegistrationRequest::class.java.getDeclaredField("provisioningToken")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<DeviceRegistrationRequest>("provisioningToken"),
                 "provisioningToken must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `DeviceRegistrationResponse deviceToken is @Sensitive`() {
-            val field = DeviceRegistrationResponse::class.java.getDeclaredField("deviceToken")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<DeviceRegistrationResponse>("deviceToken"),
                 "deviceToken must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `DeviceRegistrationResponse refreshToken is @Sensitive`() {
-            val field = DeviceRegistrationResponse::class.java.getDeclaredField("refreshToken")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<DeviceRegistrationResponse>("refreshToken"),
                 "refreshToken must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `TokenRefreshRequest refreshToken is @Sensitive`() {
-            val field = TokenRefreshRequest::class.java.getDeclaredField("refreshToken")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<TokenRefreshRequest>("refreshToken"),
                 "refreshToken must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `TokenRefreshResponse deviceToken is @Sensitive`() {
-            val field = TokenRefreshResponse::class.java.getDeclaredField("deviceToken")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<TokenRefreshResponse>("deviceToken"),
                 "deviceToken must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `TokenRefreshResponse refreshToken is @Sensitive`() {
-            val field = TokenRefreshResponse::class.java.getDeclaredField("refreshToken")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<TokenRefreshResponse>("refreshToken"),
                 "refreshToken must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `AgentFccConfig authCredential is @Sensitive`() {
-            val field = AgentFccConfig::class.java.getDeclaredField("authCredential")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<AgentFccConfig>("authCredential"),
                 "authCredential (FCC API key) must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `PreAuthCommand customerTaxId is @Sensitive`() {
-            val field = PreAuthCommand::class.java.getDeclaredField("customerTaxId")
             assertTrue(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<PreAuthCommand>("customerTaxId"),
                 "customerTaxId (PII) must be annotated with @Sensitive",
             )
         }
 
         @Test
         fun `DeviceRegistrationRequest siteCode is NOT @Sensitive`() {
-            val field = DeviceRegistrationRequest::class.java.getDeclaredField("siteCode")
             assertFalse(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<DeviceRegistrationRequest>("siteCode"),
                 "siteCode is not sensitive and should not be annotated",
             )
         }
 
         @Test
         fun `AgentFccConfig hostAddress is NOT @Sensitive`() {
-            val field = AgentFccConfig::class.java.getDeclaredField("hostAddress")
             assertFalse(
-                field.isAnnotationPresent(Sensitive::class.java),
+                isSensitive<AgentFccConfig>("hostAddress"),
                 "hostAddress is not sensitive",
             )
         }
@@ -251,14 +248,15 @@ class SecurityHardeningTest {
         }
 
         @Test
-        fun `real model — TokenRefreshRequest redacts refreshToken`() {
+        fun `real model — TokenRefreshRequest redacts refreshToken fully`() {
             val request = TokenRefreshRequest(refreshToken = "opaque-refresh-token-with-many-characters")
             val redacted = SensitiveFieldFilter.redact(request)
 
-            val value = redacted["refreshToken"] as String
-            assertFalse(
-                value.contains("opaque-refresh"),
-                "Refresh token plaintext must not appear in redacted output",
+            // Per spec: refresh tokens are fully redacted (not last-8-chars like device JWT)
+            assertEquals(
+                "[REDACTED]",
+                redacted["refreshToken"],
+                "Refresh token must be fully redacted — only deviceToken gets suffix preview",
             )
         }
 
@@ -394,14 +392,16 @@ class SecurityHardeningTest {
 
             // Verifying that check() throws when presented with zero matching certificates.
             // This simulates a self-signed or mismatched cert scenario.
-            assertThrows<IllegalArgumentException> {
-                // check() with empty cert list throws — proves pinner will not accept
-                // connections without a matching pin
+            var threw = false
+            try {
                 pinner.check(
                     "api.fcc-middleware.prod.example.com",
                     emptyList(),
                 )
+            } catch (_: SSLPeerUnverifiedException) {
+                threw = true
             }
+            assertTrue(threw, "CertificatePinner.check() must throw SSLPeerUnverifiedException for mismatched pins")
         }
 
         @Test
@@ -489,22 +489,23 @@ class SecurityHardeningTest {
         }
 
         @Test
-        fun `@Sensitive targets properties, fields, and value parameters`() {
+        fun `@Sensitive targets properties and fields`() {
             val targets = Sensitive::class.annotations
                 .filterIsInstance<Target>()
                 .first().allowedTargets.toSet()
 
             assertTrue(
                 targets.contains(AnnotationTarget.PROPERTY),
-                "@Sensitive must target PROPERTY",
+                "@Sensitive must target PROPERTY — ensures data class val params are redacted",
             )
             assertTrue(
                 targets.contains(AnnotationTarget.FIELD),
-                "@Sensitive must target FIELD",
+                "@Sensitive must target FIELD — enables Java reflection detection",
             )
-            assertTrue(
+            assertFalse(
                 targets.contains(AnnotationTarget.VALUE_PARAMETER),
-                "@Sensitive must target VALUE_PARAMETER",
+                "@Sensitive must NOT target VALUE_PARAMETER — otherwise Kotlin applies it " +
+                    "to constructor params instead of properties, breaking SensitiveFieldFilter",
             )
         }
     }
@@ -524,9 +525,20 @@ class SecurityHardeningTest {
                 refreshToken = "opaque-refresh-token-90-days",
                 tokenExpiresAt = "2026-03-12T00:00:00Z",
             )
+            val redacted = SensitiveFieldFilter.redact(response)
             val safe = SensitiveFieldFilter.redactToString(response)
 
-            assertFalse(safe.contains("eyJhbGciOiJSUzI1NiJ9"), "JWT must not appear in redacted output")
+            // deviceToken: last 8 chars preserved per spec (it's the device JWT)
+            val dtValue = redacted["deviceToken"] as String
+            assertTrue(dtValue.startsWith("..."), "deviceToken should show ...suffix")
+            assertTrue(dtValue.endsWith("ignature"), "deviceToken suffix should be last 8 chars")
+
+            // refreshToken: fully redacted per spec (not a JWT)
+            assertEquals("[REDACTED]", redacted["refreshToken"],
+                "Refresh token must be fully redacted")
+
+            // Full string must not leak any token body
+            assertFalse(safe.contains("eyJhbGciOiJSUzI1NiJ9"), "JWT body must not appear in redacted output")
             assertFalse(safe.contains("opaque-refresh"), "Refresh token must not appear in redacted output")
             assertTrue(safe.contains("2026-03-12T00:00:00Z"), "Non-sensitive tokenExpiresAt should be visible")
         }
@@ -542,7 +554,15 @@ class SecurityHardeningTest {
                 legalEntityId = "10000000-0000-0000-0000-000000000004",
                 registeredAt = "2026-03-11T10:00:00Z",
             )
+            val redacted = SensitiveFieldFilter.redact(response)
             val safe = SensitiveFieldFilter.redactToString(response)
+
+            // deviceToken: last 8 chars preserved (device JWT)
+            val dtValue = redacted["deviceToken"] as String
+            assertTrue(dtValue.startsWith("..."), "deviceToken should show ...suffix")
+
+            // refreshToken: fully redacted
+            assertEquals("[REDACTED]", redacted["refreshToken"])
 
             assertFalse(safe.contains("eyJhbGciOiJSUzI1NiJ9"))
             assertFalse(safe.contains("opaque-refresh"))

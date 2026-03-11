@@ -15,6 +15,9 @@ public class LegalEntity
     public bool FiscalizationRequired { get; set; }
     public string? FiscalizationProvider { get; set; }
     public string DefaultTimezone { get; set; } = null!;
+    public decimal? AmountTolerancePercent { get; set; }
+    public long? AmountToleranceAbsolute { get; set; }
+    public int? TimeWindowMinutes { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTimeOffset? DeactivatedAt { get; set; }
     public DateTimeOffset SyncedAt { get; set; }

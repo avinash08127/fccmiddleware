@@ -20,6 +20,8 @@ public sealed record UploadTransactionItem
     public required string CurrencyCode { get; init; }
     public required DateTimeOffset StartedAt { get; init; }
     public required DateTimeOffset CompletedAt { get; init; }
+    public string? FccCorrelationId { get; init; }
+    public string? OdooOrderId { get; init; }
     public string? FiscalReceiptNumber { get; init; }
     public string? AttendantId { get; init; }
 }

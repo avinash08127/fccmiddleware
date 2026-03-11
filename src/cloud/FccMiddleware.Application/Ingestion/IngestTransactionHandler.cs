@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FccMiddleware.Application.Common;
+using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Exceptions;
@@ -29,6 +30,7 @@ public sealed class IngestTransactionHandler
     private readonly IDeduplicationService _deduplicationService;
     private readonly IRawPayloadArchiver _rawPayloadArchiver;
     private readonly IIngestDbContext _db;
+    private readonly ReconciliationMatchingService _reconciliationMatchingService;
     private readonly ILogger<IngestTransactionHandler> _logger;
 
     public IngestTransactionHandler(
@@ -37,6 +39,7 @@ public sealed class IngestTransactionHandler
         IDeduplicationService deduplicationService,
         IRawPayloadArchiver rawPayloadArchiver,
         IIngestDbContext db,
+        ReconciliationMatchingService reconciliationMatchingService,
         ILogger<IngestTransactionHandler> logger)
     {
         _adapterFactory = adapterFactory;
@@ -44,6 +47,7 @@ public sealed class IngestTransactionHandler
         _deduplicationService = deduplicationService;
         _rawPayloadArchiver = rawPayloadArchiver;
         _db = db;
+        _reconciliationMatchingService = reconciliationMatchingService;
         _logger = logger;
     }
 
@@ -137,33 +141,18 @@ public sealed class IngestTransactionHandler
             CurrencyCode = canonical.CurrencyCode,
             StartedAt = canonical.StartedAt,
             CompletedAt = canonical.CompletedAt,
+            FccCorrelationId = canonical.FccCorrelationId,
             FccVendor = canonical.FccVendor,
             FiscalReceiptNumber = canonical.FiscalReceiptNumber,
             AttendantId = canonical.AttendantId,
             Status = TransactionStatus.PENDING,
             IngestionSource = IngestionSource.FCC_PUSH,
+            OdooOrderId = canonical.OdooOrderId,
             CorrelationId = command.CorrelationId,
             SchemaVersion = 1
         };
 
-        // ── Step 8: Secondary fuzzy match (flag only; do NOT mark as duplicate) ──
-        var fuzzyMatchFlagged = await _db.HasFuzzyMatchAsync(
-            legalEntityId, canonical.SiteCode,
-            canonical.PumpNumber, canonical.NozzleNumber,
-            canonical.AmountMinorUnits,
-            canonical.CompletedAt.AddSeconds(-FuzzyMatchWindowSeconds),
-            canonical.CompletedAt.AddSeconds(FuzzyMatchWindowSeconds),
-            cancellationToken);
-
-        if (fuzzyMatchFlagged)
-        {
-            transaction.ReconciliationStatus = ReconciliationStatus.REVIEW_FUZZY_MATCH;
-            _logger.LogWarning(
-                "Secondary fuzzy match flagged for {FccTransactionId} at site {SiteCode}",
-                canonical.FccTransactionId, canonical.SiteCode);
-        }
-
-        // ── Step 9: Archive raw payload to S3 (non-fatal on failure) ─────────
+        // ── Step 8: Archive raw payload to S3 (non-fatal on failure) ─────────
         try
         {
             transaction.RawPayloadRef = await _rawPayloadArchiver.ArchiveAsync(
@@ -178,7 +167,7 @@ public sealed class IngestTransactionHandler
                 canonical.FccTransactionId);
         }
 
-        // ── Step 10: Persist transaction + outbox event (single DB transaction) ──
+        // ── Step 9: Persist transaction + outbox event (single DB transaction) ──
         _db.AddTransaction(transaction);
         _db.AddOutboxMessage(BuildIngestedOutboxMessage(transaction, command.CorrelationId));
 
@@ -206,7 +195,10 @@ public sealed class IngestTransactionHandler
             });
         }
 
-        // ── Step 11: Populate Redis cache after successful DB commit ──────────
+        await _reconciliationMatchingService.MatchAsync(transaction, cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
+
+        // ── Step 10: Populate Redis cache after successful DB commit ──────────
         await _deduplicationService.SetCacheAsync(
             canonical.FccTransactionId, canonical.SiteCode,
             transaction.Id, DefaultDedupWindowDays, cancellationToken);
@@ -219,7 +211,7 @@ public sealed class IngestTransactionHandler
         {
             TransactionId = transaction.Id,
             IsDuplicate = false,
-            FuzzyMatchFlagged = fuzzyMatchFlagged
+            FuzzyMatchFlagged = false
         });
     }
 

@@ -24,6 +24,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\FccMiddleware.Application\FccMiddleware.Application.csproj" />
     <ProjectReference Include="..\..\FccMiddleware.Domain\FccMiddleware.Domain.csproj" />
+    <ProjectReference Include="..\..\FccMiddleware.ServiceDefaults\FccMiddleware.ServiceDefaults.csproj" />
   </ItemGroup>
 
 </Project>

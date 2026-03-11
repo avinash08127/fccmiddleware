@@ -1,0 +1,14 @@
+<linker>
+  <!-- Preserve Avalonia UI reflection-heavy internals -->
+  <assembly fullname="Avalonia" preserve="All" />
+  <assembly fullname="Avalonia.Desktop" preserve="All" />
+  <assembly fullname="Avalonia.Themes.Fluent" preserve="All" />
+  <assembly fullname="Avalonia.ReactiveUI" preserve="All" />
+
+  <!-- Preserve EF Core proxies and metadata -->
+  <assembly fullname="Microsoft.EntityFrameworkCore" preserve="All" />
+  <assembly fullname="Microsoft.EntityFrameworkCore.Sqlite" preserve="All" />
+
+  <!-- Preserve JSON serialization for contracts -->
+  <assembly fullname="System.Text.Json" preserve="All" />
+</linker>

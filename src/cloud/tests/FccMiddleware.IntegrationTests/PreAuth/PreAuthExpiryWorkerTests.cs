@@ -24,11 +24,16 @@ public sealed class PreAuthExpiryWorkerTests
         var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
 
         var legalEntityId = Guid.NewGuid();
+        var expiredPending = CreateRecord(legalEntityId, PreAuthStatus.PENDING, expiresInMinutes: -30);
+        var expiredAuthorized = CreateRecord(legalEntityId, PreAuthStatus.AUTHORIZED, expiresInMinutes: -20);
+        var expiredDispensing = CreateRecord(legalEntityId, PreAuthStatus.DISPENSING, expiresInMinutes: -10);
+        var activePending = CreateRecord(legalEntityId, PreAuthStatus.PENDING, expiresInMinutes: 15);
+
         db.PreAuthRecords.AddRange(
-            CreateRecord(legalEntityId, PreAuthStatus.PENDING, expiresInMinutes: -30),
-            CreateRecord(legalEntityId, PreAuthStatus.AUTHORIZED, expiresInMinutes: -20),
-            CreateRecord(legalEntityId, PreAuthStatus.DISPENSING, expiresInMinutes: -10),
-            CreateRecord(legalEntityId, PreAuthStatus.PENDING, expiresInMinutes: 15));
+            expiredPending,
+            expiredAuthorized,
+            expiredDispensing,
+            activePending);
         await db.SaveChangesAsync();
 
         var worker = new PreAuthExpiryWorker(
@@ -40,13 +45,17 @@ public sealed class PreAuthExpiryWorkerTests
 
         expired.Should().Be(3);
 
-        using var verifyScope = services.CreateScope();
-        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
-        var records = await verifyDb.PreAuthRecords.OrderBy(p => p.ExpiresAt).ToListAsync();
-        records.Count(p => p.Status == PreAuthStatus.EXPIRED).Should().Be(3);
-        records.Count(p => p.Status == PreAuthStatus.PENDING).Should().Be(1);
+        await db.Entry(expiredPending).ReloadAsync();
+        await db.Entry(expiredAuthorized).ReloadAsync();
+        await db.Entry(expiredDispensing).ReloadAsync();
+        await db.Entry(activePending).ReloadAsync();
 
-        var outboxCount = await verifyDb.OutboxMessages.CountAsync(m => m.EventType == "PreAuthExpired");
+        expiredPending.Status.Should().Be(PreAuthStatus.EXPIRED);
+        expiredAuthorized.Status.Should().Be(PreAuthStatus.EXPIRED);
+        expiredDispensing.Status.Should().Be(PreAuthStatus.EXPIRED);
+        activePending.Status.Should().Be(PreAuthStatus.PENDING);
+
+        var outboxCount = await db.OutboxMessages.CountAsync(m => m.EventType == "PreAuthExpired");
         outboxCount.Should().Be(3);
     }
 
@@ -83,10 +92,11 @@ public sealed class PreAuthExpiryWorkerTests
         ISiteFccConfigProvider siteFccConfigProvider)
     {
         var services = new ServiceCollection();
+        var databaseName = Guid.NewGuid().ToString();
 
         services.AddSingleton<ICurrentTenantProvider>(new TestTenantProvider());
         services.AddDbContext<FccMiddlewareDbContext>(opts =>
-            opts.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+            opts.UseInMemoryDatabase(databaseName));
         services.AddScoped<IEventPublisher, OutboxEventPublisher>();
         services.AddSingleton<IFccAdapterFactory>(adapterFactory);
         services.AddSingleton<ISiteFccConfigProvider>(siteFccConfigProvider);

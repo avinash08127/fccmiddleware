@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using FccMiddleware.Api.Auth;
+using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Application.Ingestion;
+using FccMiddleware.Application.Observability;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Ingestion;
@@ -16,7 +18,7 @@ namespace FccMiddleware.Api.Controllers;
 
 /// <summary>
 /// Handles transaction ingestion, Edge Agent uploads, Odoo polling, and Odoo acknowledgement.
-/// POST /api/v1/transactions/ingest       — single raw FCC payload (FCC API key auth, not yet enforced).
+/// POST /api/v1/transactions/ingest       — single raw FCC payload (FCC API key + HMAC auth).
 /// POST /api/v1/transactions/upload       — batch canonical upload from Edge Agent (device JWT).
 /// GET  /api/v1/transactions              — Odoo poll: paginated PENDING transactions (Odoo API key).
 /// POST /api/v1/transactions/acknowledge  — Odoo acknowledge: batch stamp PENDING → SYNCED_TO_ODOO (Odoo API key).
@@ -27,11 +29,16 @@ public sealed class TransactionsController : ControllerBase
 {
     private readonly IMediator _mediator;
     private readonly ILogger<TransactionsController> _logger;
+    private readonly IObservabilityMetrics _metrics;
 
-    public TransactionsController(IMediator mediator, ILogger<TransactionsController> logger)
+    public TransactionsController(
+        IMediator mediator,
+        ILogger<TransactionsController> logger,
+        IObservabilityMetrics metrics)
     {
         _mediator = mediator;
         _logger = logger;
+        _metrics = metrics;
     }
 
     /// <summary>
@@ -45,9 +52,10 @@ public sealed class TransactionsController : ControllerBase
     /// <param name="request">FCC vendor, site code, capture timestamp and raw payload.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     [HttpPost("ingest")]
-    [AllowAnonymous] // FCC API key auth not yet implemented; will be replaced with [Authorize(Policy="FccApiKey")]
+    [Authorize(Policy = FccHmacAuthOptions.PolicyName)]
     [ProducesResponseType(typeof(IngestResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
     public async Task<IActionResult> Ingest(
@@ -62,7 +70,7 @@ public sealed class TransactionsController : ControllerBase
                 retryable: false));
         }
 
-        var correlationId = GetOrCreateCorrelationId();
+        var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
         var rawPayload = request.RawPayload.GetRawText();
 
         var command = new IngestTransactionCommand
@@ -79,6 +87,15 @@ public sealed class TransactionsController : ControllerBase
 
         if (result.IsFailure)
         {
+            if (!result.Error!.Code.StartsWith("VALIDATION.", StringComparison.Ordinal))
+            {
+                _metrics.RecordIngestionFailure(
+                    source: "fcc-push",
+                    category: result.Error.Code,
+                    siteCode: request.SiteCode,
+                    vendor: vendor.ToString());
+            }
+
             return result.Error!.Code switch
             {
                 "SITE_NOT_FOUND"          => NotFound(BuildError(result.Error.Code, result.Error.Message)),
@@ -100,6 +117,8 @@ public sealed class TransactionsController : ControllerBase
                 details: new { fccTransactionId = GetFccTransactionIdFromPayload(rawPayload), existingId = value.OriginalTransactionId },
                 retryable: false));
         }
+
+        _metrics.RecordIngestionSuccess("fcc-push", request.SiteCode, vendor.ToString());
 
         return StatusCode(StatusCodes.Status202Accepted, new IngestResponse
         {
@@ -153,7 +172,7 @@ public sealed class TransactionsController : ControllerBase
                 "JWT 'lei' claim is not a valid UUID."));
         }
 
-        var correlationId = GetOrCreateCorrelationId();
+        var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
 
         var command = new UploadTransactionBatchCommand
         {
@@ -171,6 +190,8 @@ public sealed class TransactionsController : ControllerBase
                 CurrencyCode           = r.CurrencyCode,
                 StartedAt              = r.StartedAt,
                 CompletedAt            = r.CompletedAt,
+                FccCorrelationId       = r.FccCorrelationId,
+                OdooOrderId            = r.OdooOrderId,
                 FiscalReceiptNumber    = r.FiscalReceiptNumber,
                 AttendantId            = r.AttendantId
             }).ToList(),
@@ -196,6 +217,21 @@ public sealed class TransactionsController : ControllerBase
             DuplicateCount = result.Results.Count(r => r.Outcome == "DUPLICATE"),
             RejectedCount  = result.Results.Count(r => r.Outcome == "REJECTED")
         };
+
+        if (response.AcceptedCount > 0)
+        {
+            _metrics.RecordIngestionSuccess("edge-upload", siteCode, "CANONICAL", response.AcceptedCount);
+        }
+
+        if (response.RejectedCount > 0)
+        {
+            _metrics.RecordIngestionFailure(
+                "edge-upload",
+                "UPLOAD.REJECTED",
+                siteCode,
+                "CANONICAL",
+                response.RejectedCount);
+        }
 
         return Ok(response);
     }
@@ -290,7 +326,10 @@ public sealed class TransactionsController : ControllerBase
             PageSize      = pageSize
         };
 
+        var stopwatch = Stopwatch.StartNew();
         var result = await _mediator.Send(query, cancellationToken);
+        stopwatch.Stop();
+        _metrics.RecordOdooPollLatency(legalEntityId, stopwatch.Elapsed.TotalMilliseconds, result.Transactions.Count);
 
         var response = new PollTransactionsResponse
         {
@@ -370,6 +409,12 @@ public sealed class TransactionsController : ControllerBase
             }).ToList()
         };
 
+        using var scope = _logger.BeginScope(new Dictionary<string, object?>
+        {
+            ["eventType"] = "transaction_acknowledge_batch",
+            ["legalEntityId"] = legalEntityId
+        });
+
         var result = await _mediator.Send(command, cancellationToken);
 
         var response = new AcknowledgeResponse
@@ -407,17 +452,6 @@ public sealed class TransactionsController : ControllerBase
             Timestamp = DateTimeOffset.UtcNow.ToString("O"),
             Retryable = retryable
         };
-
-    private Guid GetOrCreateCorrelationId()
-    {
-        if (HttpContext.Request.Headers.TryGetValue("X-Correlation-Id", out var header)
-            && Guid.TryParse(header, out var parsed))
-        {
-            return parsed;
-        }
-
-        return Guid.NewGuid();
-    }
 
     private static string? GetFccTransactionIdFromPayload(string rawPayload)
     {

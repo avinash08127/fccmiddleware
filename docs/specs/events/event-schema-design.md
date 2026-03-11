@@ -62,9 +62,11 @@
 |------------|------------|----------------|-------------|
 | `PreAuthCreated` | cloud-preauth | `preAuthId`, `pumpNumber`, `nozzleNumber`, `requestedAmount`, `currency` | Pre-auth request received |
 | `PreAuthAuthorized` | cloud-preauth | `preAuthId`, `authorizedAmount`, `fccAuthCode` | FCC confirmed authorization |
+| `PreAuthDispensing` | cloud-preauth | `preAuthId`, `pumpNumber`, `nozzleNumber`, `fccCorrelationId` | FCC reported dispensing has started |
 | `PreAuthCompleted` | cloud-preauth | `preAuthId`, `dispensedAmount`, `matchedTransactionId` | Dispensing finished; matched to transaction |
 | `PreAuthCancelled` | cloud-preauth | `preAuthId`, `cancelledBy`, `reason` | Manually cancelled. `cancelledBy`: `operator` or `system` |
 | `PreAuthExpired` | cloud-preauth | `preAuthId`, `expiredAfterSeconds` | Timed out without completion |
+| `PreAuthFailed` | cloud-preauth | `preAuthId`, `reason` | FCC or workflow reported the pre-auth failed |
 
 #### Reconciliation Events — Topic: `reconciliation.events`
 

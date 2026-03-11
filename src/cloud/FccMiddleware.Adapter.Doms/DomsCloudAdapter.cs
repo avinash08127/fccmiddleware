@@ -249,6 +249,8 @@ public sealed class DomsCloudAdapter : IFccAdapter
             CurrencyCode = _config.CurrencyCode,
             StartedAt = dto.StartTime,
             CompletedAt = dto.EndTime,
+            FccCorrelationId = dto.FccCorrelationId,
+            OdooOrderId = dto.OdooOrderId,
             FccVendor = vendor,
             FiscalReceiptNumber = dto.ReceiptNumber,
             AttendantId = dto.AttendantId

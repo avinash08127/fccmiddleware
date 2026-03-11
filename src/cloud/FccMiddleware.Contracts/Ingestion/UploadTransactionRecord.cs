@@ -42,6 +42,12 @@ public sealed record UploadTransactionRecord
     /// <summary>Dispense completion time in UTC.</summary>
     public required DateTimeOffset CompletedAt { get; init; }
 
+    /// <summary>FCC-side pre-auth correlation ID echoed on the final dispense when available.</summary>
+    public string? FccCorrelationId { get; init; }
+
+    /// <summary>Odoo order ID echoed by the FCC when available.</summary>
+    public string? OdooOrderId { get; init; }
+
     /// <summary>Fiscal receipt reference if the FCC fiscalizes directly. Null otherwise.</summary>
     public string? FiscalReceiptNumber { get; init; }
 

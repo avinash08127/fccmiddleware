@@ -1,0 +1,23 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="FccDesktopAgent.App.Views.MainWindow"
+        Title="FCC Desktop Agent"
+        Width="900"
+        Height="600"
+        MinWidth="600"
+        MinHeight="400">
+
+  <Grid RowDefinitions="Auto,*">
+    <TextBlock Grid.Row="0"
+               Text="FCC Desktop Agent — Diagnostics Dashboard"
+               FontSize="18"
+               Margin="16,12"
+               FontWeight="SemiBold" />
+    <TextBlock Grid.Row="1"
+               Text="Agent starting... DEA-2.x will populate this dashboard."
+               VerticalAlignment="Center"
+               HorizontalAlignment="Center"
+               Foreground="Gray" />
+  </Grid>
+
+</Window>

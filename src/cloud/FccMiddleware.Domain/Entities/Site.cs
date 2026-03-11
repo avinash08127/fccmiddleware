@@ -13,6 +13,10 @@ public class Site
     public string SiteCode { get; set; } = null!;
     public string SiteName { get; set; } = null!;
     public SiteOperatingModel OperatingModel { get; set; }
+    public bool SiteUsesPreAuth { get; set; }
+    public decimal? AmountTolerancePercent { get; set; }
+    public long? AmountToleranceAbsolute { get; set; }
+    public int? TimeWindowMinutes { get; set; }
     public string ConnectivityMode { get; set; } = "CONNECTED";
     public string? OperatorName { get; set; }
     public string? OperatorTaxPayerId { get; set; }

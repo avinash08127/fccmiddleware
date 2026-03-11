@@ -43,6 +43,12 @@ public sealed record CanonicalTransaction
     /// <summary>Dispense completion time in UTC. Must be >= StartedAt.</summary>
     public required DateTimeOffset CompletedAt { get; init; }
 
+    /// <summary>FCC-side pre-auth correlation ID echoed on the final dispense when available.</summary>
+    public string? FccCorrelationId { get; init; }
+
+    /// <summary>Odoo order ID echoed back by the FCC when available.</summary>
+    public string? OdooOrderId { get; init; }
+
     /// <summary>FCC vendor that produced this transaction. From the RawPayloadEnvelope.</summary>
     public required FccVendor FccVendor { get; init; }
 

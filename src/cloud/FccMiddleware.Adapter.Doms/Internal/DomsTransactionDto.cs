@@ -43,6 +43,12 @@ internal sealed class DomsTransactionDto
     [JsonPropertyName("endTime")]
     public DateTimeOffset EndTime { get; init; }
 
+    [JsonPropertyName("fccCorrelationId")]
+    public string? FccCorrelationId { get; init; }
+
+    [JsonPropertyName("odooOrderId")]
+    public string? OdooOrderId { get; init; }
+
     [JsonPropertyName("attendantId")]
     public string? AttendantId { get; init; }
 

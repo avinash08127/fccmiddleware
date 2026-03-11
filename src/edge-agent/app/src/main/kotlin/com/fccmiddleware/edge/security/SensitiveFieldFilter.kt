@@ -1,6 +1,8 @@
 package com.fccmiddleware.edge.security
 
 import kotlin.reflect.full.memberProperties
+import kotlin.reflect.full.primaryConstructor
+import kotlin.reflect.jvm.isAccessible
 import kotlin.reflect.jvm.javaField
 
 /**
@@ -34,12 +36,24 @@ object SensitiveFieldFilter {
         val klass = obj::class
         val result = mutableMapOf<String, Any?>()
 
+        // Build a set of parameter names annotated @Sensitive on the primary constructor.
+        // This is a fallback for cases where the annotation ends up on the constructor
+        // parameter rather than the property (e.g. if @Sensitive targets VALUE_PARAMETER).
+        val sensitiveCtorParams: Set<String> = klass.primaryConstructor
+            ?.parameters
+            ?.filter { p -> p.annotations.any { it is Sensitive } }
+            ?.mapNotNull { it.name }
+            ?.toSet()
+            ?: emptySet()
+
         for (prop in klass.memberProperties) {
             val name = prop.name
             val isSensitive = prop.javaField?.isAnnotationPresent(Sensitive::class.java) == true ||
-                prop.annotations.any { it is Sensitive }
+                prop.annotations.any { it is Sensitive } ||
+                name in sensitiveCtorParams
 
             val rawValue = try {
+                prop.isAccessible = true
                 prop.getter.call(obj)
             } catch (_: Exception) {
                 null
@@ -58,15 +72,17 @@ object SensitiveFieldFilter {
      * Redact a single value based on the field name hint.
      *
      * Per security spec §5.4:
-     *   - Device JWT: log last 8 chars only → "...aBcDeFgH"
-     *   - All other sensitive fields: "[REDACTED]"
+     *   - Device JWT (`deviceToken` or `*jwt*` fields): log last 8 chars only → "...aBcDeFgH"
+     *   - All other sensitive fields (refresh token, bootstrap token, FCC creds,
+     *     customer TIN, LAN API key, etc.): "[REDACTED]"
      */
     private fun redactValue(fieldName: String, value: Any?): String {
         if (value == null) return REDACTED
         val str = value.toString()
-        val isTokenField = fieldName.contains("token", ignoreCase = true) ||
+        // Only the device JWT gets the suffix preview; all other tokens/secrets are fully redacted.
+        val isDeviceJwt = fieldName.equals("deviceToken", ignoreCase = true) ||
             fieldName.contains("jwt", ignoreCase = true)
-        return if (isTokenField && str.length > JWT_SUFFIX_LENGTH) {
+        return if (isDeviceJwt && str.length > JWT_SUFFIX_LENGTH) {
             "...${str.takeLast(JWT_SUFFIX_LENGTH)}"
         } else {
             REDACTED

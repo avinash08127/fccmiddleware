@@ -58,6 +58,12 @@ public sealed class AcknowledgeTransactionsBatchHandler
 
             if (transaction.Status == TransactionStatus.SYNCED_TO_ODOO)
             {
+                using var syncedScope = _logger.BeginScope(new Dictionary<string, object?>
+                {
+                    ["correlationId"] = transaction.CorrelationId,
+                    ["transactionId"] = transaction.Id
+                });
+
                 if (transaction.OdooOrderId == item.OdooOrderId)
                 {
                     // Idempotent re-acknowledgement with the same order ID.
@@ -87,6 +93,12 @@ public sealed class AcknowledgeTransactionsBatchHandler
 
             if (transaction.Status != TransactionStatus.PENDING)
             {
+                using var invalidStateScope = _logger.BeginScope(new Dictionary<string, object?>
+                {
+                    ["correlationId"] = transaction.CorrelationId,
+                    ["transactionId"] = transaction.Id
+                });
+
                 // DUPLICATE, ARCHIVED, or any future terminal state — cannot acknowledge.
                 _logger.LogWarning(
                     "Cannot acknowledge transaction {TransactionId} in status {Status}",
@@ -109,9 +121,16 @@ public sealed class AcknowledgeTransactionsBatchHandler
 
             _db.AddOutboxMessage(BuildSyncedOutboxMessage(transaction, acknowledgedAt));
 
-            _logger.LogInformation(
-                "Transaction {TransactionId} acknowledged with order {OdooOrderId} for tenant {LegalEntityId}",
-                transaction.Id, item.OdooOrderId, command.LegalEntityId);
+            using (var acknowledgedScope = _logger.BeginScope(new Dictionary<string, object?>
+                   {
+                       ["correlationId"] = transaction.CorrelationId,
+                       ["transactionId"] = transaction.Id
+                   }))
+            {
+                _logger.LogInformation(
+                    "Transaction {TransactionId} acknowledged with order {OdooOrderId} for tenant {LegalEntityId}",
+                    transaction.Id, item.OdooOrderId, command.LegalEntityId);
+            }
 
             results.Add(new SingleAcknowledgeResult
             {

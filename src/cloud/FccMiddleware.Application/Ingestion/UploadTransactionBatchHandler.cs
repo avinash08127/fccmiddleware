@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using MediatR;
@@ -20,15 +21,18 @@ public sealed class UploadTransactionBatchHandler
 
     private readonly IDeduplicationService _deduplicationService;
     private readonly IIngestDbContext _db;
+    private readonly ReconciliationMatchingService _reconciliationMatchingService;
     private readonly ILogger<UploadTransactionBatchHandler> _logger;
 
     public UploadTransactionBatchHandler(
         IDeduplicationService deduplicationService,
         IIngestDbContext db,
+        ReconciliationMatchingService reconciliationMatchingService,
         ILogger<UploadTransactionBatchHandler> logger)
     {
         _deduplicationService = deduplicationService;
         _db = db;
+        _reconciliationMatchingService = reconciliationMatchingService;
         _logger = logger;
     }
 
@@ -100,11 +104,13 @@ public sealed class UploadTransactionBatchHandler
                 CurrencyCode           = record.CurrencyCode,
                 StartedAt              = record.StartedAt,
                 CompletedAt            = record.CompletedAt,
+                FccCorrelationId       = record.FccCorrelationId,
                 FccVendor              = vendor,
                 FiscalReceiptNumber    = record.FiscalReceiptNumber,
                 AttendantId            = record.AttendantId,
                 Status                 = TransactionStatus.PENDING,
                 IngestionSource        = IngestionSource.EDGE_UPLOAD,
+                OdooOrderId            = record.OdooOrderId,
                 CorrelationId          = command.CorrelationId,
                 SchemaVersion          = 1
             };
@@ -132,6 +138,9 @@ public sealed class UploadTransactionBatchHandler
                 results.Add(Duplicate(record.FccTransactionId, racedId));
                 continue;
             }
+
+            await _reconciliationMatchingService.MatchAsync(transaction, cancellationToken);
+            await _db.SaveChangesAsync(cancellationToken);
 
             // ── Step 7: Populate Redis cache + track accepted ─────────────────────
             await _deduplicationService.SetCacheAsync(

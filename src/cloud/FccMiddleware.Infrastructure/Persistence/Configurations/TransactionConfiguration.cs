@@ -32,6 +32,7 @@ internal sealed class TransactionConfiguration : IEntityTypeConfiguration<Transa
         builder.Property(e => e.StartedAt).HasColumnName("started_at").IsRequired();
         builder.Property(e => e.CompletedAt).HasColumnName("completed_at").IsRequired();
         builder.Property(e => e.FiscalReceiptNumber).HasColumnName("fiscal_receipt_number").HasMaxLength(200);
+        builder.Property(e => e.FccCorrelationId).HasColumnName("fcc_correlation_id").HasMaxLength(200);
         builder.Property(e => e.FccVendor)
             .HasColumnName("fcc_vendor")
             .HasMaxLength(30)

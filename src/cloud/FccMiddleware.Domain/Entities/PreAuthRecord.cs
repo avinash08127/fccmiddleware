@@ -1,5 +1,6 @@
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Exceptions;
+using FccMiddleware.Domain.Common;
 
 namespace FccMiddleware.Domain.Entities;
 
@@ -42,9 +43,11 @@ public class PreAuthRecord
     public string? FccAuthorizationCode { get; set; }
     public string? FailureReason { get; set; }
     public string? VehicleNumber { get; set; }
+    [Sensitive]
     public string? CustomerName { get; set; }
 
     /// <summary>Customer Tax Identification Number (TIN). PII — never log.</summary>
+    [Sensitive]
     public string? CustomerTaxId { get; set; }
 
     public string? CustomerBusinessName { get; set; }

@@ -99,6 +99,64 @@ jobs:
       - name: Unit tests
         run: npm test -- --watch=false --browsers=ChromeHeadless
 
+  virtual-lab-backend-ci:
+    name: Virtual Lab Backend CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: VirtualLab/src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore VirtualLab.sln
+
+      - name: Build
+        run: dotnet build VirtualLab.sln --no-restore -c Release
+
+      - name: Test
+        run: dotnet test VirtualLab.sln --no-build -c Release
+
+  virtual-lab-ui-ci:
+    name: Virtual Lab UI CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: VirtualLab/ui/virtual-lab
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: VirtualLab/ui/virtual-lab/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Build
+        run: npm run build -- --configuration=production
+
+      - name: Unit tests
+        run: npm test -- --watch=false --browsers=ChromeHeadless
+
   # ─────────────────────────────────────────────────────────────────────────────
   # Edge Agent — Build / Lint / Test
   # ─────────────────────────────────────────────────────────────────────────────
@@ -176,3 +234,28 @@ jobs:
             -f src/cloud/Dockerfile.worker \
             -t fcc-middleware-worker:${{ github.sha }} \
             src/cloud/
+
+  dependency-check:
+    name: OWASP Dependency Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run dependency-check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "fccmiddleware-cloud"
+          path: "src/cloud"
+          format: "HTML,JSON"
+          args: >
+            --enableExperimental
+            --failOnCVSS 7
+
+      - name: Upload dependency-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: reports/

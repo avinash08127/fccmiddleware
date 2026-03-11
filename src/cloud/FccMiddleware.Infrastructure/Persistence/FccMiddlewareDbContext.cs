@@ -2,6 +2,7 @@ using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
 using FccMiddleware.Application.PreAuth;
+using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Application.Registration;
 using FccMiddleware.Application.Telemetry;
 using FccMiddleware.Application.Transactions;
@@ -26,7 +27,7 @@ namespace FccMiddleware.Infrastructure.Persistence;
 ///
 /// Outbox: <see cref="OutboxMessage"/> uses a bigint GENERATED ALWAYS AS IDENTITY column.
 /// </summary>
-public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext, IRegistrationDbContext, IAgentConfigDbContext, ITelemetryDbContext, IPreAuthDbContext
+public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext, IRegistrationDbContext, IAgentConfigDbContext, ITelemetryDbContext, IPreAuthDbContext, IReconciliationDbContext
 {
     private readonly ICurrentTenantProvider _tenantProvider;
 
@@ -53,6 +54,7 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     // -------------------------------------------------------------------------
     public DbSet<Transaction> Transactions => Set<Transaction>();
     public DbSet<PreAuthRecord> PreAuthRecords => Set<PreAuthRecord>();
+    public DbSet<ReconciliationRecord> ReconciliationRecords => Set<ReconciliationRecord>();
 
     // -------------------------------------------------------------------------
     // Configuration & registration
@@ -286,6 +288,10 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
 
+        modelBuilder.Entity<ReconciliationRecord>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
         modelBuilder.Entity<FccConfig>()
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
@@ -479,4 +485,230 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         OutboxMessages.Add(message);
 
     void IPreAuthDbContext.ClearTracked() => ChangeTracker.Clear();
+
+    // -------------------------------------------------------------------------
+    // IReconciliationDbContext implementation
+    // -------------------------------------------------------------------------
+
+    Task<ReconciliationRecord?> IReconciliationDbContext.FindByIdAsync(
+        Guid reconciliationId,
+        CancellationToken ct) =>
+        Set<ReconciliationRecord>()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(r => r.Id == reconciliationId, ct);
+
+    Task<ReconciliationRecord?> IReconciliationDbContext.FindByTransactionIdAsync(
+        Guid transactionId,
+        CancellationToken ct) =>
+        Set<ReconciliationRecord>()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(r => r.TransactionId == transactionId, ct);
+
+    Task<Transaction?> IReconciliationDbContext.FindTransactionByIdAsync(
+        Guid transactionId,
+        CancellationToken ct) =>
+        Set<Transaction>()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == transactionId, ct);
+
+    async Task<List<ReconciliationExceptionListItem>> IReconciliationDbContext.FetchExceptionsPageAsync(
+        Guid? legalEntityId,
+        IReadOnlyCollection<Guid> scopedLegalEntityIds,
+        bool allowAllLegalEntities,
+        string? siteCode,
+        IReadOnlyCollection<ReconciliationStatus> statuses,
+        DateTimeOffset? since,
+        DateTimeOffset? cursorCreatedAt,
+        Guid? cursorId,
+        int take,
+        CancellationToken ct)
+    {
+        var query = Set<ReconciliationRecord>()
+            .IgnoreQueryFilters()
+            .AsQueryable();
+
+        if (legalEntityId.HasValue)
+        {
+            query = query.Where(r => r.LegalEntityId == legalEntityId.Value);
+        }
+        else if (!allowAllLegalEntities)
+        {
+            query = query.Where(r => scopedLegalEntityIds.Contains(r.LegalEntityId));
+        }
+
+        if (!string.IsNullOrWhiteSpace(siteCode))
+        {
+            query = query.Where(r => r.SiteCode == siteCode);
+        }
+
+        if (statuses.Count > 0)
+        {
+            query = query.Where(r => statuses.Contains(r.Status));
+        }
+
+        if (since.HasValue)
+        {
+            query = query.Where(r => r.CreatedAt >= since.Value);
+        }
+
+        if (cursorCreatedAt.HasValue && cursorId.HasValue)
+        {
+            var createdAt = cursorCreatedAt.Value;
+            var id = cursorId.Value;
+
+            query = query.Where(r =>
+                r.CreatedAt > createdAt
+                || (r.CreatedAt == createdAt && r.Id.CompareTo(id) > 0));
+        }
+
+        return await query
+            .OrderBy(r => r.CreatedAt)
+            .ThenBy(r => r.Id)
+            .Take(take)
+            .Select(r => new ReconciliationExceptionListItem(
+                r.Id,
+                r.Status,
+                r.SiteCode,
+                r.LegalEntityId,
+                r.PumpNumber,
+                r.NozzleNumber,
+                r.AuthorizedAmountMinorUnits,
+                r.ActualAmountMinorUnits,
+                r.VarianceMinorUnits,
+                r.VariancePercent,
+                r.MatchMethod,
+                r.AmbiguityFlag,
+                r.CreatedAt,
+                r.LastMatchAttemptAt))
+            .ToListAsync(ct);
+    }
+
+    async Task<List<ReconciliationRetryWorkItem>> IReconciliationDbContext.FindDueUnmatchedRetriesAsync(
+        DateTimeOffset now,
+        int batchSize,
+        CancellationToken ct)
+    {
+        var phase1Threshold = now.AddMinutes(-5);
+        var phase2Threshold = now.AddHours(-1);
+        var phaseBoundary = now.AddMinutes(-60);
+        var giveUpBoundary = now.AddHours(-24);
+
+        var records = await Set<ReconciliationRecord>()
+            .IgnoreQueryFilters()
+            .Where(r =>
+                r.Status == ReconciliationStatus.UNMATCHED
+                && (
+                    (r.CreatedAt >= phaseBoundary && r.LastMatchAttemptAt <= phase1Threshold)
+                    || (r.CreatedAt < phaseBoundary && r.CreatedAt >= giveUpBoundary && r.LastMatchAttemptAt <= phase2Threshold)
+                    || (r.CreatedAt < giveUpBoundary && r.EscalatedAtUtc == null)))
+            .OrderBy(r => r.LastMatchAttemptAt)
+            .ThenBy(r => r.CreatedAt)
+            .ThenBy(r => r.Id)
+            .Take(batchSize)
+            .Join(
+                Set<Transaction>().IgnoreQueryFilters(),
+                reconciliation => reconciliation.TransactionId,
+                transaction => transaction.Id,
+                (reconciliation, transaction) => new ReconciliationRetryWorkItem(reconciliation, transaction))
+            .ToListAsync(ct);
+
+        return records;
+    }
+
+    async Task<ReconciliationSiteContext?> IReconciliationDbContext.FindSiteContextAsync(
+        Guid legalEntityId,
+        string siteCode,
+        ReconciliationOptions defaults,
+        CancellationToken ct)
+    {
+        var site = await Set<Site>()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(
+                s => s.LegalEntityId == legalEntityId && s.SiteCode == siteCode,
+                ct);
+
+        if (site is null)
+        {
+            return null;
+        }
+
+        var legalEntity = await Set<LegalEntity>()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(le => le.Id == legalEntityId, ct);
+
+        if (legalEntity is null)
+        {
+            return null;
+        }
+
+        return new ReconciliationSiteContext(
+            legalEntityId,
+            siteCode,
+            new ReconciliationSettings(
+                site.SiteUsesPreAuth,
+                site.AmountTolerancePercent
+                    ?? legalEntity.AmountTolerancePercent
+                    ?? defaults.DefaultAmountTolerancePercent,
+                site.AmountToleranceAbsolute
+                    ?? legalEntity.AmountToleranceAbsolute
+                    ?? defaults.DefaultAmountToleranceAbsolute,
+                site.TimeWindowMinutes
+                    ?? legalEntity.TimeWindowMinutes
+                    ?? defaults.DefaultTimeWindowMinutes));
+    }
+
+    Task<List<PreAuthRecord>> IReconciliationDbContext.FindCorrelationCandidatesAsync(
+        Guid legalEntityId,
+        string siteCode,
+        string fccCorrelationId,
+        CancellationToken ct) =>
+        Set<PreAuthRecord>()
+            .IgnoreQueryFilters()
+            .Where(p =>
+                p.LegalEntityId == legalEntityId
+                && p.SiteCode == siteCode
+                && p.FccCorrelationId == fccCorrelationId
+                && (p.Status == PreAuthStatus.AUTHORIZED || p.Status == PreAuthStatus.DISPENSING)
+                && p.MatchedTransactionId == null)
+            .ToListAsync(ct);
+
+    Task<List<PreAuthRecord>> IReconciliationDbContext.FindPumpNozzleTimeCandidatesAsync(
+        Guid legalEntityId,
+        string siteCode,
+        int pumpNumber,
+        int nozzleNumber,
+        DateTimeOffset windowStart,
+        DateTimeOffset windowEnd,
+        CancellationToken ct) =>
+        Set<PreAuthRecord>()
+            .IgnoreQueryFilters()
+            .Where(p =>
+                p.LegalEntityId == legalEntityId
+                && p.SiteCode == siteCode
+                && p.PumpNumber == pumpNumber
+                && p.NozzleNumber == nozzleNumber
+                && p.AuthorizedAt.HasValue
+                && p.AuthorizedAt.Value >= windowStart
+                && p.AuthorizedAt.Value <= windowEnd
+                && (p.Status == PreAuthStatus.AUTHORIZED || p.Status == PreAuthStatus.DISPENSING)
+                && p.MatchedTransactionId == null)
+            .ToListAsync(ct);
+
+    Task<List<PreAuthRecord>> IReconciliationDbContext.FindOdooOrderCandidatesAsync(
+        Guid legalEntityId,
+        string siteCode,
+        string odooOrderId,
+        CancellationToken ct) =>
+        Set<PreAuthRecord>()
+            .IgnoreQueryFilters()
+            .Where(p =>
+                p.LegalEntityId == legalEntityId
+                && p.SiteCode == siteCode
+                && p.OdooOrderId == odooOrderId
+                && (p.Status == PreAuthStatus.AUTHORIZED || p.Status == PreAuthStatus.DISPENSING)
+                && p.MatchedTransactionId == null)
+            .ToListAsync(ct);
+
+    void IReconciliationDbContext.AddReconciliationRecord(ReconciliationRecord record) =>
+        ReconciliationRecords.Add(record);
 }

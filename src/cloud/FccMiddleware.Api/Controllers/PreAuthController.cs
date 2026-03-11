@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Claims;
+using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Application.PreAuth;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.PreAuth;
@@ -87,7 +88,7 @@ public sealed class PreAuthController : ControllerBase
                 "unitPrice must be greater than 0."));
         }
 
-        var correlationId = GetOrCreateCorrelationId();
+        var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
 
         var command = new ForwardPreAuthCommand
         {
@@ -186,7 +187,7 @@ public sealed class PreAuthController : ControllerBase
             ActualVolumeMillilitres = request.ActualVolume,
             MatchedFccTransactionId = request.MatchedFccTransactionId,
             MatchedTransactionId = request.MatchedTransactionId,
-            CorrelationId = GetOrCreateCorrelationId()
+            CorrelationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext)
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -230,14 +231,4 @@ public sealed class PreAuthController : ControllerBase
             Retryable = retryable
         };
 
-    private Guid GetOrCreateCorrelationId()
-    {
-        if (HttpContext.Request.Headers.TryGetValue("X-Correlation-Id", out var header)
-            && Guid.TryParse(header, out var parsed))
-        {
-            return parsed;
-        }
-
-        return Guid.NewGuid();
-    }
 }

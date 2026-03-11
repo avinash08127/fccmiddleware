@@ -6,7 +6,6 @@ import com.fccmiddleware.edge.buffer.entity.AuditLog
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
-import io.mockk.slot
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -160,17 +159,20 @@ class ConnectivityManagerTest {
         val mgr = buildManager(
             internet = {
                 internetCallCount++
-                // Fail 3 times to go DOWN, then succeed
-                internetCallCount > 3
+                // First probe at t=0. With 100ms interval and threshold=3:
+                //   t=0: call 1 (false), t=100: call 2 (false), t=200: call 3 (false) → INTERNET_DOWN
+                //   t=300: call 4 (false), t=400: call 5 (false) — safe assert window
+                //   t=500: call 6 (true) → recovery to FULLY_ONLINE
+                internetCallCount > 5
             },
             fcc = { true },
         )
         mgr.start()
-        // First 3 calls fail → internetUp = false → INTERNET_DOWN
-        advanceTimeBy(400L)
+        // After 5 failed probes (t=0..400), state is INTERNET_DOWN
+        advanceTimeBy(450L)
         assertEquals(ConnectivityState.INTERNET_DOWN, mgr.state.value)
 
-        // 4th call succeeds → immediately recover
+        // 6th call at t=500 succeeds → immediately recover
         advanceTimeBy(200L)
         assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
         mgr.stop()
@@ -228,12 +230,10 @@ class ConnectivityManagerTest {
             mgr.start()
             advanceTimeBy(200L)
 
-            val logSlot = slot<AuditLog>()
-            coVerify(atLeast = 1) { auditLogDao.insert(capture(logSlot)) }
-            assertEquals("CONNECTIVITY_TRANSITION", logSlot.captured.eventType)
-            assert(logSlot.captured.message.contains("FULLY_ONLINE")) {
-                "Expected audit log to mention FULLY_ONLINE, got: ${logSlot.captured.message}"
-            }
+            val captured = mutableListOf<AuditLog>()
+            coVerify(atLeast = 1) { auditLogDao.insert(capture(captured)) }
+            val onlineLog = captured.firstOrNull { it.eventType == "CONNECTIVITY_TRANSITION" && it.message.contains("FULLY_ONLINE") }
+            assertNotNull("Expected audit log entry mentioning FULLY_ONLINE", onlineLog)
             mgr.stop()
         }
 

@@ -24,6 +24,10 @@ internal sealed class SiteConfiguration : IEntityTypeConfiguration<Site>
             .HasMaxLength(20)
             .HasConversion<string>()
             .IsRequired();
+        builder.Property(e => e.SiteUsesPreAuth).HasColumnName("site_uses_pre_auth").HasDefaultValue(false).IsRequired();
+        builder.Property(e => e.AmountTolerancePercent).HasColumnName("amount_tolerance_percent").HasPrecision(5, 2);
+        builder.Property(e => e.AmountToleranceAbsolute).HasColumnName("amount_tolerance_absolute");
+        builder.Property(e => e.TimeWindowMinutes).HasColumnName("time_window_minutes");
         builder.Property(e => e.ConnectivityMode).HasColumnName("connectivity_mode").HasMaxLength(20).HasDefaultValue("CONNECTED").IsRequired();
         builder.Property(e => e.OperatorName).HasColumnName("operator_name").HasMaxLength(200);
         builder.Property(e => e.OperatorTaxPayerId).HasColumnName("operator_tax_payer_id").HasMaxLength(100);

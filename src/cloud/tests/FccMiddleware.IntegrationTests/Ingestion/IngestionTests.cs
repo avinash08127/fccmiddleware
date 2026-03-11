@@ -1,8 +1,11 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Api.Auth;
 using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -20,6 +23,9 @@ namespace FccMiddleware.IntegrationTests.Ingestion;
 [Collection("Integration")]
 public sealed class IngestionTests : IAsyncLifetime
 {
+    private const string TestFccApiKeyId = "fcc-client-001";
+    private const string TestFccSecret = "fcc-secret-integration-key-32-chars";
+
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()
         .WithImage("postgres:16-alpine").Build();
     private readonly RedisContainer _redis = new RedisBuilder()
@@ -54,7 +60,10 @@ public sealed class IngestionTests : IAsyncLifetime
                     cfg.AddInMemoryCollection(new Dictionary<string, string?>
                     {
                         ["ConnectionStrings:FccMiddleware"] = _postgres.GetConnectionString(),
-                        ["ConnectionStrings:Redis"]         = _redis.GetConnectionString()
+                        ["ConnectionStrings:Redis"]         = _redis.GetConnectionString(),
+                        ["FccHmac:Clients:0:ApiKeyId"]      = TestFccApiKeyId,
+                        ["FccHmac:Clients:0:Secret"]        = TestFccSecret,
+                        ["FccHmac:Clients:0:SiteCode"]      = "ACCRA-001"
                     });
                 });
             });
@@ -90,7 +99,7 @@ public sealed class IngestionTests : IAsyncLifetime
             rawPayload = ValidDomsPayload
         };
 
-        var response = await _client.PostAsJsonAsync("/api/v1/transactions/ingest", request);
+        var response = await PostIngestAsync(request);
 
         response.StatusCode.Should().Be(HttpStatusCode.Accepted);
 
@@ -141,13 +150,13 @@ public sealed class IngestionTests : IAsyncLifetime
         };
 
         // First ingest — should succeed
-        var first = await _client.PostAsJsonAsync("/api/v1/transactions/ingest", request);
+        var first = await PostIngestAsync(request);
         first.StatusCode.Should().Be(HttpStatusCode.Accepted);
         var firstBody = await first.Content.ReadFromJsonAsync<JsonElement>();
         var originalId = firstBody.GetProperty("transactionId").GetGuid();
 
         // Second ingest — same (fccTransactionId, siteCode) → should conflict
-        var second = await _client.PostAsJsonAsync("/api/v1/transactions/ingest", request);
+        var second = await PostIngestAsync(request);
 
         second.StatusCode.Should().Be(HttpStatusCode.Conflict);
 
@@ -179,7 +188,7 @@ public sealed class IngestionTests : IAsyncLifetime
             }
         };
 
-        var response = await _client.PostAsJsonAsync("/api/v1/transactions/ingest", request);
+        var response = await PostIngestAsync(request);
 
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
 
@@ -190,7 +199,70 @@ public sealed class IngestionTests : IAsyncLifetime
         body.GetProperty("timestamp").GetString().Should().NotBeNullOrEmpty();
     }
 
+    [Fact]
+    public async Task Ingest_InvalidHmacSignature_Returns401()
+    {
+        var request = new
+        {
+            fccVendor = "DOMS",
+            siteCode = "ACCRA-001",
+            capturedAt = "2026-03-11T14:10:00Z",
+            rawPayload = ValidDomsPayload
+        };
+
+        var response = await PostIngestAsync(request, useValidSignature: false);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Ingest_ExpiredHmacTimestamp_Returns401()
+    {
+        var request = new
+        {
+            fccVendor = "DOMS",
+            siteCode = "ACCRA-001",
+            capturedAt = "2026-03-11T14:10:00Z",
+            rawPayload = ValidDomsPayload
+        };
+
+        var response = await PostIngestAsync(request, timestamp: DateTimeOffset.UtcNow.AddMinutes(-10));
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
     // ── Seed helpers ──────────────────────────────────────────────────────────
+
+    private async Task<HttpResponseMessage> PostIngestAsync(
+        object request,
+        bool useValidSignature = true,
+        DateTimeOffset? timestamp = null)
+    {
+        var body = JsonSerializer.Serialize(request);
+        var sentAt = timestamp ?? DateTimeOffset.UtcNow;
+        var timestampValue = sentAt.ToString("O");
+        var signature = useValidSignature
+            ? ComputeSignature("POST", "/api/v1/transactions/ingest", timestampValue, body)
+            : "bad-signature";
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, "/api/v1/transactions/ingest")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+        message.Headers.Add(FccHmacAuthOptions.ApiKeyHeaderName, TestFccApiKeyId);
+        message.Headers.Add(FccHmacAuthOptions.SignatureHeaderName, signature);
+        message.Headers.Add(FccHmacAuthOptions.TimestampHeaderName, timestampValue);
+
+        return await _client.SendAsync(message);
+    }
+
+    private static string ComputeSignature(string method, string path, string timestamp, string body)
+    {
+        var bodyHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(TestFccSecret));
+        var canonical = $"{method}{path}{timestamp}{bodyHash}";
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+    }
 
     private static async Task SeedTestDataAsync(FccMiddlewareDbContext db)
     {

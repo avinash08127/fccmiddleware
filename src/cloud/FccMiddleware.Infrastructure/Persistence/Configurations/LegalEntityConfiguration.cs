@@ -31,6 +31,9 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
         builder.Property(e => e.FiscalizationRequired).HasColumnName("fiscalization_required").HasDefaultValue(false);
         builder.Property(e => e.FiscalizationProvider).HasColumnName("fiscalization_provider").HasMaxLength(50);
         builder.Property(e => e.DefaultTimezone).HasColumnName("default_timezone").HasMaxLength(50).IsRequired();
+        builder.Property(e => e.AmountTolerancePercent).HasColumnName("amount_tolerance_percent").HasPrecision(5, 2);
+        builder.Property(e => e.AmountToleranceAbsolute).HasColumnName("amount_tolerance_absolute");
+        builder.Property(e => e.TimeWindowMinutes).HasColumnName("time_window_minutes");
         builder.Property(e => e.IsActive).HasColumnName("is_active").HasDefaultValue(true);
         builder.Property(e => e.DeactivatedAt).HasColumnName("deactivated_at");
         builder.Property(e => e.SyncedAt).HasColumnName("synced_at").IsRequired();

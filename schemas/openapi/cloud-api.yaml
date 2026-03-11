@@ -389,6 +389,52 @@ paths:
         "500":
           $ref: '#/components/responses/InternalServerError'
 
+  /api/v1/preauth/{id}:
+    patch:
+      operationId: updatePreAuthStatus
+      tags: [PreAuth]
+      summary: Edge Agent → Cloud — update an existing pre-auth lifecycle status
+      security:
+        - EdgeAgentJwt: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePreAuthStatusRequest'
+      responses:
+        "200":
+          description: Pre-auth record updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreAuthForwardResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          description: Pre-auth record not found for the authenticated device tenant/site
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: Invalid pre-auth state transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
   # ───────────────────────────────────────────────────────────────────────────
   # AGENT — registration
   # ───────────────────────────────────────────────────────────────────────────
@@ -1249,6 +1295,43 @@ components:
         updatedAt:
           type: string
           format: date-time
+          nullable: true
+
+    UpdatePreAuthStatusRequest:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [PENDING, AUTHORIZED, DISPENSING, COMPLETED, CANCELLED, EXPIRED, FAILED]
+        fccCorrelationId:
+          type: string
+          nullable: true
+          maxLength: 100
+        fccAuthorizationCode:
+          type: string
+          nullable: true
+          maxLength: 100
+        failureReason:
+          type: string
+          nullable: true
+          maxLength: 500
+        actualAmount:
+          type: integer
+          nullable: true
+          minimum: 0
+        actualVolume:
+          type: integer
+          nullable: true
+          minimum: 0
+        matchedFccTransactionId:
+          type: string
+          nullable: true
+          maxLength: 100
+        matchedTransactionId:
+          type: string
+          format: uuid
           nullable: true
 
     # ── Device registration ─────────────────────────────────────────────────

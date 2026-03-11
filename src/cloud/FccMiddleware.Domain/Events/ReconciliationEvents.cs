@@ -30,3 +30,23 @@ public sealed class ReconciliationApproved : DomainEvent
     public string ApprovedBy { get; init; } = null!;
     public string? ApprovalNote { get; init; }
 }
+
+/// <summary>Ops Manager rejected a flagged variance.</summary>
+public sealed class ReconciliationRejected : DomainEvent
+{
+    public override string EventType => "ReconciliationRejected";
+    public Guid ReconciliationId { get; init; }
+    public string RejectedBy { get; init; } = null!;
+    public string? RejectionNote { get; init; }
+}
+
+/// <summary>Unmatched reconciliation aged beyond the automatic retry window.</summary>
+public sealed class ReconciliationUnmatchedAged : DomainEvent
+{
+    public override string EventType => "ReconciliationUnmatchedAged";
+    public Guid ReconciliationId { get; init; }
+    public Guid TransactionId { get; init; }
+    public DateTimeOffset FirstAttemptedAt { get; init; }
+    public DateTimeOffset AgedAt { get; init; }
+    public int AgeMinutes { get; init; }
+}

@@ -19,7 +19,7 @@ package com.fccmiddleware.edge.security
  * )
  * ```
  */
-@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD, AnnotationTarget.VALUE_PARAMETER)
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
 @Retention(AnnotationRetention.RUNTIME)
 @MustBeDocumented
 annotation class Sensitive

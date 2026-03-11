@@ -1,4 +1,5 @@
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Common;
 
 namespace FccMiddleware.Domain.Models.Adapter;
 
@@ -28,6 +29,7 @@ public sealed record SiteFccConfig
     /// API key used in the X-API-Key header. Must be resolved from Secrets Manager
     /// (FccConfig.CredentialRef) before calling Resolve — never the raw credential ref.
     /// </summary>
+    [Sensitive]
     public required string ApiKey { get; init; }
 
     /// <summary>How transactions flow from the FCC to the middleware.</summary>

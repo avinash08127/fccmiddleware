@@ -1,0 +1,19 @@
+{
+  "/api": {
+    "target": "http://localhost:5099",
+    "secure": false
+  },
+  "/fcc": {
+    "target": "http://localhost:5099",
+    "secure": false
+  },
+  "/callbacks": {
+    "target": "http://localhost:5099",
+    "secure": false
+  },
+  "/hubs": {
+    "target": "http://localhost:5099",
+    "ws": true,
+    "secure": false
+  }
+}

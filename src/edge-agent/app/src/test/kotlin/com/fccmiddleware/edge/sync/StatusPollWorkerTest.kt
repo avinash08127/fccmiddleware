@@ -3,9 +3,11 @@ package com.fccmiddleware.edge.sync
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.SyncState
+import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.test.runTest
@@ -60,6 +62,7 @@ class StatusPollWorkerTest {
             tokenProvider = tokenProvider,
         )
         every { tokenProvider.isDecommissioned() } returns false
+        every { tokenProvider.markDecommissioned() } just Runs
         every { tokenProvider.getAccessToken() } returns "valid-jwt-token"
         every { tokenProvider.getLegalEntityId() } returns "10000000-0000-0000-0000-000000000001"
         coEvery { syncStateDao.get() } returns null

@@ -2,9 +2,11 @@ package com.fccmiddleware.edge.sync
 
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
+import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.test.runTest
@@ -63,6 +65,7 @@ class PreAuthCloudForwardWorkerTest {
             config = config,
         )
         every { tokenProvider.isDecommissioned() } returns false
+        every { tokenProvider.markDecommissioned() } just Runs
         every { tokenProvider.getAccessToken() } returns "valid-jwt-token"
     }
 

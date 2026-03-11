@@ -1,3 +1,5 @@
+using FccMiddleware.Domain.Common;
+
 namespace FccMiddleware.Domain.Models;
 
 /// <summary>
@@ -16,6 +18,7 @@ public class QrCodePayload
     public string Cu { get; set; } = null!;
 
     /// <summary>Provisioning token (base64url-encoded, 32 bytes).</summary>
+    [Sensitive]
     public string Pt { get; set; } = null!;
 }
 
@@ -26,6 +29,7 @@ public class QrCodePayload
 public class DeviceRegistrationRequest
 {
     /// <summary>One-time bootstrap token from QR code or manual entry.</summary>
+    [Sensitive]
     public string ProvisioningToken { get; set; } = null!;
 
     public string SiteCode { get; set; } = null!;
@@ -56,6 +60,7 @@ public class DeviceRegistrationResponse
     public Guid DeviceId { get; set; }
 
     /// <summary>Signed JWT for authenticating subsequent API calls. ES256.</summary>
+    [Sensitive]
     public string DeviceToken { get; set; } = null!;
 
     public DateTimeOffset TokenExpiresAt { get; set; }

@@ -6,6 +6,7 @@ using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
 using FccMiddleware.Application.PreAuth;
+using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Application.Registration;
 using FccMiddleware.Application.Telemetry;
 using FccMiddleware.Application.Transactions;
@@ -14,11 +15,13 @@ using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Infrastructure.Adapters;
 using FccMiddleware.Infrastructure.Deduplication;
 using FccMiddleware.Infrastructure.Events;
+using FccMiddleware.Infrastructure.Observability;
 using FccMiddleware.Infrastructure.Persistence;
 using FccMiddleware.Infrastructure.Repositories;
 using FccMiddleware.Infrastructure.Storage;
 using FccMiddleware.ServiceDefaults;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
@@ -28,6 +31,7 @@ using StackExchange.Redis;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FccMiddleware.Application.Observability;
 
 // Bootstrap logger — active only until DI container is built.
 // ServiceDefaults replaces this with the full structured-JSON logger.
@@ -55,10 +59,15 @@ try
     // without requiring an explicit scheme name on [Authorize] attributes that don't specify one.
     builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         .AddJwtBearer(JwtBearerDefaults.AuthenticationScheme)
+        .AddScheme<FccHmacAuthOptions, FccHmacAuthHandler>(
+            FccHmacAuthOptions.SchemeName, _ => { })
         .AddScheme<OdooApiKeyAuthOptions, OdooApiKeyAuthHandler>(
             OdooApiKeyAuthOptions.SchemeName, _ => { })
         .AddScheme<DatabricksApiKeyAuthOptions, DatabricksApiKeyAuthHandler>(
             DatabricksApiKeyAuthOptions.SchemeName, _ => { });
+
+    builder.Services.Configure<FccHmacAuthOptions>(
+        builder.Configuration.GetSection(FccHmacAuthOptions.SectionName));
 
     builder.Services
         .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
@@ -86,17 +95,52 @@ try
                 IssuerSigningKey         = new SymmetricSecurityKey(
                     Encoding.UTF8.GetBytes(signingKey)),
                 ValidateLifetime         = true,
-                ClockSkew                = TimeSpan.FromSeconds(30)
+                ClockSkew                = TimeSpan.FromSeconds(30),
+                RoleClaimType            = "roles",
+                NameClaimType            = "oid"
             };
         });
 
     builder.Services.AddAuthorization(opts =>
     {
+        static bool HasAnyRole(AuthorizationHandlerContext context, params string[] allowedRoles)
+        {
+            var roles = context.User.FindAll("roles")
+                .SelectMany(claim => claim.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return roles.Overlaps(allowedRoles);
+        }
+
+        opts.AddPolicy("PortalUser", policy =>
+            policy
+                .RequireAuthenticatedUser()
+                .RequireAssertion(context => HasAnyRole(context,
+                    "OperationsManager",
+                    "SystemAdmin",
+                    "SystemAdministrator",
+                    "Auditor",
+                    "SiteSupervisor",
+                    "SupportReadOnly")));
+
+        opts.AddPolicy("PortalReconciliationReview", policy =>
+            policy
+                .RequireAuthenticatedUser()
+                .RequireAssertion(context => HasAnyRole(context,
+                    "OperationsManager",
+                    "SystemAdmin",
+                    "SystemAdministrator")));
+
         opts.AddPolicy("EdgeAgentDevice", policy =>
             policy
                 .RequireAuthenticatedUser()
                 .RequireClaim("site")
                 .RequireClaim("lei"));
+
+        opts.AddPolicy(FccHmacAuthOptions.PolicyName, policy =>
+            policy
+                .AddAuthenticationSchemes(FccHmacAuthOptions.SchemeName)
+                .RequireAuthenticatedUser());
 
         opts.AddPolicy(OdooApiKeyAuthOptions.PolicyName, policy =>
             policy
@@ -192,6 +236,11 @@ try
     builder.Services.AddScoped<IAgentConfigDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<ITelemetryDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IPreAuthDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IReconciliationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddSingleton<IObservabilityMetrics, CloudWatchEmfMetricSink>();
+    builder.Services.Configure<ReconciliationOptions>(
+        builder.Configuration.GetSection(ReconciliationOptions.SectionName));
+    builder.Services.AddScoped<ReconciliationMatchingService>();
 
     // ── Infrastructure: Device token service ────────────────────────────────
     builder.Services.AddSingleton<IDeviceTokenService, DeviceTokenService>();
@@ -241,9 +290,25 @@ try
             name: "redis", tags: ["ready"]);
 
     var app = builder.Build();
+    SecurityConfigurationValidator.Validate(app.Configuration, app.Environment);
 
     // Emit one structured-JSON log line per HTTP request
-    app.UseSerilogRequestLogging();
+    app.UseMiddleware<CorrelationIdMiddleware>();
+    app.UseSerilogRequestLogging(opts =>
+    {
+        opts.EnrichDiagnosticContext = (diag, httpContext) =>
+        {
+            var correlationId = CorrelationIdMiddleware.GetCorrelationId(httpContext);
+            if (correlationId != Guid.Empty)
+            {
+                diag.Set("correlationId", correlationId);
+            }
+
+            diag.Set("httpMethod", httpContext.Request.Method);
+            diag.Set("httpPath", httpContext.Request.Path.Value ?? "/");
+            diag.Set("eventType", "http_request");
+        };
+    });
 
     var swaggerEnabled = builder.Configuration.GetValue<bool?>("Swagger:Enabled")
                          ?? app.Environment.IsDevelopment();
@@ -257,7 +322,13 @@ try
     }
 
     app.UseHttpsRedirection();
+    if (!app.Environment.IsDevelopment())
+    {
+        app.UseHsts();
+    }
+
     app.UseAuthentication();
+    app.UseMiddleware<TenantScopeMiddleware>();
     app.UseAuthorization();
 
     // /health       → liveness  (is the process up?)

@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Globalization;
+using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Application.AgentConfig;
+using FccMiddleware.Application.Observability;
 using FccMiddleware.Application.Registration;
 using FccMiddleware.Application.Telemetry;
 using FccMiddleware.Contracts.Agent;
@@ -31,12 +33,18 @@ public sealed class AgentController : ControllerBase
     private readonly IMediator _mediator;
     private readonly ILogger<AgentController> _logger;
     private readonly IConfiguration _configuration;
+    private readonly IObservabilityMetrics _metrics;
 
-    public AgentController(IMediator mediator, ILogger<AgentController> logger, IConfiguration configuration)
+    public AgentController(
+        IMediator mediator,
+        ILogger<AgentController> logger,
+        IConfiguration configuration,
+        IObservabilityMetrics metrics)
     {
         _mediator = mediator;
         _logger = logger;
         _configuration = configuration;
+        _metrics = metrics;
     }
 
     /// <summary>
@@ -406,6 +414,7 @@ public sealed class AgentController : ControllerBase
         }
 
         LogTelemetryWarnings(request);
+        RecordTelemetryMetrics(request);
 
         return NoContent();
     }
@@ -495,6 +504,43 @@ public sealed class AgentController : ControllerBase
             _logger.LogWarning(
                 "Edge Agent sync lag threshold exceeded. DeviceId={DeviceId} SiteCode={SiteCode} SyncLagSeconds={SyncLagSeconds} Threshold={Threshold}",
                 request.DeviceId, request.SiteCode, syncLagSeconds, syncLagThresholdSeconds);
+        }
+    }
+
+    private void RecordTelemetryMetrics(SubmitTelemetryRequest request)
+    {
+        _metrics.RecordEdgeBufferDepth(
+            request.LegalEntityId,
+            request.SiteCode,
+            request.DeviceId,
+            request.Buffer.PendingUploadCount);
+
+        if (request.Sync.SyncLagSeconds is int syncLagSeconds)
+        {
+            _metrics.RecordEdgeSyncLag(
+                request.LegalEntityId,
+                request.SiteCode,
+                request.DeviceId,
+                syncLagSeconds / 3600d);
+        }
+
+        if (request.FccHealth.HeartbeatAgeSeconds is int heartbeatAgeSeconds)
+        {
+            _metrics.RecordFccHeartbeatAge(
+                request.LegalEntityId,
+                request.SiteCode,
+                request.DeviceId,
+                heartbeatAgeSeconds / 60d);
+        }
+
+        if (request.ErrorCounts.CloudUploadErrors > 0)
+        {
+            _metrics.RecordApplicationError("EDGE.CLOUD_UPLOAD", "/api/v1/agent/telemetry", request.ErrorCounts.CloudUploadErrors);
+        }
+
+        if (request.ErrorCounts.CloudAuthErrors > 0)
+        {
+            _metrics.RecordApplicationError("EDGE.CLOUD_AUTH", "/api/v1/agent/telemetry", request.ErrorCounts.CloudAuthErrors);
         }
     }
 

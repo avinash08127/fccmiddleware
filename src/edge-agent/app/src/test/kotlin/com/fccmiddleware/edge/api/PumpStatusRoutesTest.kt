@@ -166,7 +166,7 @@ class PumpStatusRoutesTest {
         )
         application {
             install(ContentNegotiation) {
-                json(Json { ignoreUnknownKeys = true })
+                json(Json { ignoreUnknownKeys = true; encodeDefaults = true })
             }
             routing {
                 pumpStatusRoutes(cache)

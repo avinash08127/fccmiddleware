@@ -25,6 +25,7 @@ public class Transaction
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset CompletedAt { get; set; }
     public string? FiscalReceiptNumber { get; set; }
+    public string? FccCorrelationId { get; set; }
     public FccVendor FccVendor { get; set; }
     public string? AttendantId { get; set; }
     public TransactionStatus Status { get; set; } = TransactionStatus.PENDING;

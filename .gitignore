@@ -47,6 +47,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 package-lock.json
+!VirtualLab/ui/virtual-lab/package-lock.json
 yarn.lock
 .env
 .env.*

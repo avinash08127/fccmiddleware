@@ -1,6 +1,7 @@
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Events;
 using FccMiddleware.Domain.Interfaces;
+using FccMiddleware.Application.Observability;
 using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -74,6 +75,7 @@ public sealed class StaleTransactionWorker : BackgroundService
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
         var eventPublisher = scope.ServiceProvider.GetRequiredService<IEventPublisher>();
+        var metrics = scope.ServiceProvider.GetRequiredService<IObservabilityMetrics>();
 
         var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.StalePendingThresholdDays);
 
@@ -112,6 +114,11 @@ public sealed class StaleTransactionWorker : BackgroundService
         }
 
         await db.SaveChangesAsync(ct);
+
+        var staleCount = await db.Set<Domain.Entities.Transaction>()
+            .IgnoreQueryFilters()
+            .CountAsync(t => t.Status == TransactionStatus.PENDING && t.IsStale, ct);
+        metrics.RecordStaleTransactionCount(staleCount);
 
         _logger.LogInformation(
             "StaleTransactionWorker flagged {Count} transactions as stale (threshold={ThresholdDays}d)",

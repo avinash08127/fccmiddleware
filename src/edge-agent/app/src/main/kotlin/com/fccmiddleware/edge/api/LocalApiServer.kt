@@ -101,6 +101,7 @@ class LocalApiServer(
                 prettyPrint = false
                 isLenient = false
                 ignoreUnknownKeys = true
+                encodeDefaults = true
             })
         }
     }

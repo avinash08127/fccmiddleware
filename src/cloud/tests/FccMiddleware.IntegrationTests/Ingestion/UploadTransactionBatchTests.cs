@@ -186,6 +186,24 @@ public sealed class UploadTransactionBatchTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Upload_InvalidSignatureToken_Returns401()
+    {
+        var invalidToken = CreateDeviceJwt(
+            TestDeviceId,
+            TestSiteCode,
+            TestLegalEntityId,
+            signingKeyOverride: "WrongSigningKey-EdgeAgent-Integration-256bits!!");
+
+        _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", invalidToken);
+
+        var request = new { transactions = new[] { MakeRecord("UPLOAD-BADSIG-001", TestSiteCode) } };
+
+        var response = await _client.PostAsJsonAsync("/api/v1/transactions/upload", request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
     public async Task Upload_SiteMismatch_RecordsRejectedWithSiteMismatchCode()
     {
         // JWT says UPLOAD-SITE-001 but records claim a different site
@@ -251,9 +269,10 @@ public sealed class UploadTransactionBatchTests : IAsyncLifetime
         string siteCode,
         Guid legalEntityId,
         DateTimeOffset? notBefore = null,
-        DateTimeOffset? expires   = null)
+        DateTimeOffset? expires   = null,
+        string? signingKeyOverride = null)
     {
-        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TestSigningKey));
+        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKeyOverride ?? TestSigningKey));
         var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
 
         var now = DateTimeOffset.UtcNow;
