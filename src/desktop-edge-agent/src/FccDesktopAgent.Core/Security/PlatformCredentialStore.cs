@@ -140,11 +140,14 @@ public sealed class PlatformCredentialStore : ICredentialStore
 
     private async Task SetSecretMacOsAsync(string key, string secret, CancellationToken ct)
     {
-        // -U flag updates if exists, otherwise adds
+        // Pass the secret via stdin to avoid leaking it in `ps aux` output.
+        // The -w flag without a value reads the password from stdin (one line).
+        // -U flag updates if exists, otherwise adds.
         var (exitCode, _, stderr) = await RunProcessAsync(
             "/usr/bin/security",
-            ["add-generic-password", "-a", key, "-s", ServiceName, "-w", secret, "-U"],
-            ct);
+            ["add-generic-password", "-a", key, "-s", ServiceName, "-U", "-w"],
+            ct,
+            stdinData: secret);
 
         if (exitCode != 0)
             _logger.LogWarning("Keychain set for key {Key} returned exit code {ExitCode}: {Stderr}",

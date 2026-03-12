@@ -73,6 +73,15 @@ public sealed class CloudWatchEmfMetricSink : IObservabilityMetrics
             ("siteCode", siteCode),
             ("matchMethod", matchMethod));
 
+    public void RecordReconciliationSkipped(Guid legalEntityId, string siteCode, string reason) =>
+        EmitMetric(
+            "reconciliation_skipped_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("reason", reason));
+
     public void RecordEdgeBufferDepth(Guid legalEntityId, string siteCode, Guid deviceId, int pendingUploadCount) =>
         EmitMetric(
             "edge_buffer_depth_records",

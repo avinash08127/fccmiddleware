@@ -70,6 +70,12 @@ internal sealed class ApiKeyMiddleware
     /// </summary>
     internal static bool ConstantTimeEquals(string a, string b)
     {
+        // Cap input length to prevent stack overflow from oversized headers.
+        // API keys longer than 1024 chars are rejected outright.
+        const int MaxKeyLength = 1024;
+        if (a.Length > MaxKeyLength || b.Length > MaxKeyLength)
+            return false;
+
         if (a.Length != b.Length)
         {
             // Even though the length mismatch leaks length information, we still

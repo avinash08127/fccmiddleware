@@ -148,6 +148,7 @@ public sealed class UnmatchedReconciliationWorkerTests
         public void RecordIngestionSuccess(string source, string siteCode, string vendor, int count = 1) { }
         public void RecordOdooPollLatency(Guid legalEntityId, double latencyMs, int transactionCount) { }
         public void RecordReconciliationMatchRate(Guid legalEntityId, string siteCode, string matchMethod, bool matched) { }
+        public void RecordReconciliationSkipped(Guid legalEntityId, string siteCode, string reason) { }
         public void RecordStaleTransactionCount(int staleCount) { }
     }
 

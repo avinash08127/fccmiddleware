@@ -181,6 +181,20 @@ interface CloudApiClient {
     suspend fun refreshToken(refreshToken: String): CloudTokenRefreshResult
 
     /**
+     * Check agent version compatibility with the cloud.
+     *
+     * Calls `GET /api/v1/agent/version-check?agentVersion={version}`.
+     * Returns compatibility info including whether the agent must be updated.
+     *
+     * @param agentVersion Agent version in semantic format (e.g. "1.0.0").
+     * @param bearerToken Device JWT from [DeviceTokenProvider.getAccessToken].
+     */
+    suspend fun checkVersion(
+        agentVersion: String,
+        bearerToken: String,
+    ): CloudVersionCheckResult
+
+    /**
      * Update the cloud base URL at runtime.
      *
      * Called after device registration to replace the stub "not-yet-provisioned" URL
@@ -208,6 +222,29 @@ class HttpCloudApiClient(
     @Volatile private var cloudBaseUrl: String,
     private val httpClient: HttpClient,
 ) : CloudApiClient {
+
+    override suspend fun checkVersion(
+        agentVersion: String,
+        bearerToken: String,
+    ): CloudVersionCheckResult {
+        return try {
+            val response = httpClient.get("$cloudBaseUrl/api/v1/agent/version-check") {
+                bearerAuth(bearerToken)
+                parameter("agentVersion", agentVersion)
+            }
+            when (response.status) {
+                HttpStatusCode.OK -> CloudVersionCheckResult.Success(response.body())
+                HttpStatusCode.Unauthorized -> CloudVersionCheckResult.Unauthorized
+                else -> {
+                    CloudVersionCheckResult.TransportError(
+                        "HTTP ${response.status.value}: ${response.status.description}",
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            CloudVersionCheckResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
 
     override fun updateBaseUrl(newBaseUrl: String) {
         Log.i(TAG, "Updating cloud base URL")

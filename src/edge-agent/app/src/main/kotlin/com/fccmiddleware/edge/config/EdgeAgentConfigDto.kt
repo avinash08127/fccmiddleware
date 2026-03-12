@@ -109,6 +109,14 @@ data class SyncDto(
     val maxReplayBackoffSeconds: Int = 300,
     val initialReplayBackoffSeconds: Int = 5,
     val maxRecordsPerUploadWindow: Int = 5000,
+    /**
+     * Runtime certificate pins (SHA-256 public key hashes) for TLS certificate pinning.
+     * Format: "sha256/BASE64HASH=". When non-empty, agents prefer these over bootstrap
+     * pins bundled in the APK. Enables pin rotation without APK update.
+     * Per security spec §5.3: 30-day overlap window for graceful rotation.
+     * Applied on next app restart (OkHttp CertificatePinner is immutable after construction).
+     */
+    val certificatePins: List<String> = emptyList(),
 )
 
 @Serializable

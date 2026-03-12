@@ -1,11 +1,13 @@
 using FccDesktopAgent.Api.Auth;
 using FccDesktopAgent.Api.Endpoints;
+using FccDesktopAgent.Core.Security;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -29,6 +31,11 @@ public static class LocalApiStartup
     {
         // Bind LocalApiOptions from "LocalApi" section (port + api key)
         services.Configure<LocalApiOptions>(configuration.GetSection(LocalApiOptions.SectionName));
+
+        // Load LAN API key from credential store on startup.
+        // The key is persisted during provisioning (ProvisioningWindow) so that
+        // ApiKeyMiddleware has a valid key after restart.
+        services.AddSingleton<IPostConfigureOptions<LocalApiOptions>, CredentialStoreApiKeyPostConfigure>();
 
         // Configure System.Text.Json for all Minimal API responses:
         //   - camelCase field names (matches OpenAPI spec conventions)
@@ -82,5 +89,33 @@ public static class LocalApiStartup
         app.MapStatusEndpoints();
 
         return app;
+    }
+}
+
+/// <summary>
+/// Loads the LAN API key from <see cref="ICredentialStore"/> and injects it into
+/// <see cref="LocalApiOptions.ApiKey"/>. Called lazily when the options are first
+/// accessed (typically by <see cref="Auth.ApiKeyMiddleware"/>).
+///
+/// The key is cached after the first load to avoid repeated credential store lookups.
+/// </summary>
+internal sealed class CredentialStoreApiKeyPostConfigure : IPostConfigureOptions<LocalApiOptions>
+{
+    private readonly ICredentialStore _store;
+    private string? _cachedKey;
+    private bool _loaded;
+
+    public CredentialStoreApiKeyPostConfigure(ICredentialStore store) => _store = store;
+
+    public void PostConfigure(string? name, LocalApiOptions options)
+    {
+        if (!_loaded)
+        {
+            _cachedKey = _store.GetSecretAsync(CredentialKeys.LanApiKey).GetAwaiter().GetResult();
+            _loaded = true;
+        }
+
+        if (!string.IsNullOrEmpty(_cachedKey))
+            options.ApiKey = _cachedKey;
     }
 }

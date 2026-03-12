@@ -100,6 +100,15 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
         _logger.LogWarning("Device marked as decommissioned");
     }
 
+    public async Task MarkReprovisioningRequiredAsync(CancellationToken ct = default)
+    {
+        var state = LoadState();
+        state.IsRegistered = false;
+        state.IsDecommissioned = false;
+        await SaveStateAsync(state, ct);
+        _logger.LogWarning("Device marked for re-provisioning — restart to begin provisioning wizard");
+    }
+
     // ── IPostConfigureOptions<AgentConfiguration> ────────────────────────────
 
     public void PostConfigure(string? name, AgentConfiguration options)

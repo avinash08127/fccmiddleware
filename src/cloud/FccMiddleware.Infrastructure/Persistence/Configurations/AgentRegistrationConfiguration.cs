@@ -23,7 +23,7 @@ internal sealed class AgentRegistrationConfiguration : IEntityTypeConfiguration<
         builder.Property(e => e.OsVersion).HasColumnName("os_version").HasMaxLength(50).IsRequired();
         builder.Property(e => e.AgentVersion).HasColumnName("agent_version").HasMaxLength(50).IsRequired();
         builder.Property(e => e.IsActive).HasColumnName("is_active").HasDefaultValue(true);
-        builder.Property(e => e.TokenHash).HasColumnName("token_hash").HasMaxLength(500).IsRequired();
+        builder.Property(e => e.TokenHash).HasColumnName("token_hash").HasMaxLength(64).IsRequired();
         builder.Property(e => e.TokenExpiresAt).HasColumnName("token_expires_at").IsRequired();
         builder.Property(e => e.LastSeenAt).HasColumnName("last_seen_at");
         builder.Property(e => e.RegisteredAt).HasColumnName("registered_at").IsRequired();

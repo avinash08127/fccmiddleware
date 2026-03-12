@@ -147,7 +147,7 @@ interface LoadRequest {
             </ng-template>
 
             <ng-template pTemplate="body" let-tx>
-              <tr class="clickable-row" (click)="onRowClick(tx)">
+              <tr class="clickable-row" tabindex="0" (click)="onRowClick(tx)" (keydown.enter)="onRowClick(tx)">
                 <td><code class="tx-id">{{ tx.fccTransactionId }}</code></td>
                 <td>{{ tx.siteCode }}</td>
                 <td>{{ tx.pumpNumber }}</td>

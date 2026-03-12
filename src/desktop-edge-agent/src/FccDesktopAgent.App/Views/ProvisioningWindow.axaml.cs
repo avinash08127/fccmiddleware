@@ -3,6 +3,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -241,32 +242,33 @@ public sealed partial class ProvisioningWindow : Window
         }
     }
 
-    private Task ValidateManualConfigAsync()
+    private async Task ValidateManualConfigAsync()
     {
         var cloudUrl = ManualCloudUrlBox.Text?.Trim();
         var siteCode = ManualSiteCodeBox.Text?.Trim();
         var fccHost = ManualFccHostBox.Text?.Trim();
         var fccPortText = ManualFccPortBox.Text?.Trim();
+        var manualToken = ManualTokenBox.Text?.Trim();
 
         if (string.IsNullOrWhiteSpace(cloudUrl))
         {
             ShowManualStatus("Please enter the cloud URL.", isError: true);
-            return Task.CompletedTask;
+            return;
         }
         if (string.IsNullOrWhiteSpace(siteCode))
         {
             ShowManualStatus("Please enter the site code.", isError: true);
-            return Task.CompletedTask;
+            return;
         }
         if (string.IsNullOrWhiteSpace(fccHost))
         {
             ShowManualStatus("Please enter the FCC host address.", isError: true);
-            return Task.CompletedTask;
+            return;
         }
         if (!int.TryParse(fccPortText, out var fccPort) || fccPort < 1 || fccPort > 65535)
         {
             ShowManualStatus("Please enter a valid FCC port (1-65535).", isError: true);
-            return Task.CompletedTask;
+            return;
         }
 
         // Validate URL format
@@ -274,17 +276,105 @@ public sealed partial class ProvisioningWindow : Window
             || (uri.Scheme != "http" && uri.Scheme != "https"))
         {
             ShowManualStatus("Cloud URL must be a valid HTTP/HTTPS URL.", isError: true);
-            return Task.CompletedTask;
+            return;
         }
 
         _resolvedCloudUrl = cloudUrl;
         _resolvedSiteCode = siteCode;
         _resolvedFccHost = fccHost;
         _resolvedFccPort = fccPort;
+
+        // If a provisioning token was provided, perform cloud registration
+        // instead of generating a local-only device ID.
+        if (!string.IsNullOrWhiteSpace(manualToken))
+        {
+            await RegisterManualWithTokenAsync(cloudUrl, siteCode, manualToken, fccHost, fccPort);
+            return;
+        }
+
+        // Offline mode — generate a local device ID (no cloud registration)
         _resolvedDeviceId = $"manual-{Guid.NewGuid():N}"[..24];
 
         GoToStep(3);
-        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Perform cloud registration using a provisioning token entered in the manual config form.
+    /// On success, store the cloud-assigned device ID and FCC details, then advance to step 3.
+    /// </summary>
+    private async Task RegisterManualWithTokenAsync(
+        string cloudUrl, string siteCode, string token,
+        string fccHost, int fccPort)
+    {
+        if (_registrationService is null)
+        {
+            ShowManualStatus("Registration service unavailable.", isError: true);
+            return;
+        }
+
+        NextButton.IsEnabled = false;
+        BackButton.IsEnabled = false;
+        NextButton.Content = "Registering...";
+        ShowManualStatus("Contacting cloud server...", isError: false);
+
+        try
+        {
+            var request = DeviceInfoProvider.BuildRequest(
+                provisioningToken: token,
+                siteCode: siteCode,
+                replacePreviousAgent: false);
+
+            var result = await _registrationService.RegisterAsync(cloudUrl, request);
+
+            switch (result)
+            {
+                case RegistrationResult.Success success:
+                    _logger?.LogInformation(
+                        "Manual config registration successful — deviceId={DeviceId}",
+                        success.Response.DeviceId);
+
+                    _resolvedDeviceId = success.Response.DeviceId;
+
+                    // Use FCC details from bootstrap config if available,
+                    // otherwise keep the user-provided values.
+                    var siteConfig = success.Response.SiteConfig;
+                    if (siteConfig?.Fcc is not null)
+                    {
+                        _resolvedFccHost = siteConfig.Fcc.HostAddress ?? fccHost;
+                        _resolvedFccPort = siteConfig.Fcc.Port ?? fccPort;
+                    }
+
+                    // Mark as code method so LaunchAgentAsync skips duplicate state save
+                    // (DeviceRegistrationService.RegisterAsync already persisted state).
+                    _isCodeMethod = true;
+
+                    GoToStep(3);
+                    break;
+
+                case RegistrationResult.Rejected rejected:
+                    var hint = GetErrorHint(rejected.Code);
+                    ShowManualStatus($"Registration rejected: {rejected.Message}{hint}", isError: true);
+                    NextButton.IsEnabled = true;
+                    BackButton.IsEnabled = true;
+                    NextButton.Content = "Next";
+                    break;
+
+                case RegistrationResult.TransportError transport:
+                    ShowManualStatus($"Connection error: {transport.Message}", isError: true);
+                    NextButton.IsEnabled = true;
+                    BackButton.IsEnabled = true;
+                    NextButton.Content = "Next";
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Unexpected error during manual-token registration");
+            ShowManualStatus($"Unexpected error: {ex.Message}", isError: true);
+            NextButton.IsEnabled = true;
+            BackButton.IsEnabled = true;
+            NextButton.Content = "Next";
+        }
     }
 
     // ── Step 3: Connection Tests ────────────────────────────────────────────
@@ -490,6 +580,22 @@ public sealed partial class ProvisioningWindow : Window
                 _logger?.LogInformation(
                     "Manual config registration state persisted (deviceId={DeviceId}, site={SiteCode})",
                     _resolvedDeviceId, _resolvedSiteCode);
+            }
+
+            // Persist the generated LAN API key to credential store before starting
+            // the host, so ApiKeyMiddleware can load it via PostConfigure.
+            var credStore = AgentAppContext.ServiceProvider?.GetService<ICredentialStore>();
+            if (credStore is not null && !string.IsNullOrEmpty(_apiKey))
+            {
+                try
+                {
+                    await credStore.SetSecretAsync(CredentialKeys.LanApiKey, _apiKey);
+                    _logger?.LogInformation("LAN API key persisted to credential store");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogError(ex, "Failed to persist LAN API key to credential store");
+                }
             }
 
             // Start the host if not already running

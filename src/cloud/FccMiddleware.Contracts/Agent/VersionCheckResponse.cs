@@ -8,8 +8,6 @@ public sealed class VersionCheckResponse
     public required bool UpdateRequired { get; set; }
     public string? UpdateUrl { get; set; }
     public required string AgentVersion { get; set; }
-    public required string MinSupportedVersion { get; set; }
     public required bool UpdateAvailable { get; set; }
     public string? ReleaseNotes { get; set; }
-    public string? DownloadUrl { get; set; }
 }

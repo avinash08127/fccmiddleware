@@ -1,5 +1,5 @@
 import { inject } from '@angular/core';
-import { CanActivateFn, Router, ActivatedRouteSnapshot } from '@angular/router';
+import { CanActivateFn, Router } from '@angular/router';
 import { MsalService } from '@azure/msal-angular';
 import { AppRole, getCurrentAccount, hasAnyRequiredRole } from './auth-state';
 
@@ -8,7 +8,7 @@ import { AppRole, getCurrentAccount, hasAnyRequiredRole } from './auth-state';
  * Usage: canActivate: [roleGuard(['SystemAdmin', 'OperationsManager'])]
  */
 export function roleGuard(requiredRoles: AppRole[]): CanActivateFn {
-  return (_route: ActivatedRouteSnapshot) => {
+  return () => {
     const msal = inject(MsalService);
     const router = inject(Router);
 

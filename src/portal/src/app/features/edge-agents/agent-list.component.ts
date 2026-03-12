@@ -20,6 +20,8 @@ import { AgentHealthSummary, ConnectivityState } from '../../core/models/agent.m
 import { LegalEntity } from '../../core/models/master-data.model';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
+import { hasAnyRequiredRole, getCurrentAccount } from '../../core/auth/auth-state';
+import { MsalService } from '@azure/msal-angular';
 
 type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast';
 
@@ -106,6 +108,15 @@ interface AgentFilters {
             placeholder="Select Legal Entity"
             styleClass="entity-selector"
           />
+          @if (isAdmin()) {
+            <p-button
+              label="Generate Token"
+              icon="pi pi-key"
+              severity="secondary"
+              size="small"
+              (onClick)="navigateToBootstrapToken()"
+            />
+          }
           <p-button
             icon="pi pi-refresh"
             severity="secondary"
@@ -129,17 +140,19 @@ interface AgentFilters {
         <p-panel header="Filters" [toggleable]="true" styleClass="filters-panel">
           <div class="filters-row">
             <div class="filter-field">
-              <label>Site Code</label>
+              <label for="agent-filter-site-code">Site Code</label>
               <input
                 pInputText
+                id="agent-filter-site-code"
                 [(ngModel)]="filters.siteCode"
                 placeholder="Search site code…"
                 (ngModelChange)="onFiltersChange()"
               />
             </div>
             <div class="filter-field">
-              <label>Connectivity State</label>
+              <label for="agent-filter-connectivity-state">Connectivity State</label>
               <p-select
+                inputId="agent-filter-connectivity-state"
                 [options]="connectivityOptions"
                 [(ngModel)]="filters.connectivityState"
                 placeholder="All States"
@@ -166,7 +179,7 @@ interface AgentFilters {
         @if (error()) {
           <div class="error-msg">
             <i class="pi pi-exclamation-triangle"></i>
-            Failed to load agents. <a (click)="manualRefresh()">Retry</a>
+            Failed to load agents. <button type="button" class="link-btn" (click)="manualRefresh()">Retry</button>
           </div>
         }
 
@@ -200,7 +213,7 @@ interface AgentFilters {
                 </tr>
               </ng-template>
               <ng-template pTemplate="body" let-agent>
-                <tr class="clickable-row" (click)="navigateToDetail(agent)">
+                <tr class="clickable-row" tabindex="0" (click)="navigateToDetail(agent)" (keydown.enter)="navigateToDetail(agent)">
                   <td>
                     <div class="site-cell">
                       <strong>{{ agent.siteCode }}</strong>
@@ -261,7 +274,7 @@ interface AgentFilters {
             </ng-template>
 
             <ng-template pTemplate="body" let-agent>
-              <tr class="clickable-row" (click)="navigateToDetail(agent)">
+              <tr class="clickable-row" tabindex="0" (click)="navigateToDetail(agent)" (keydown.enter)="navigateToDetail(agent)">
                 <td>
                   <div class="site-cell">
                     <strong>{{ agent.siteCode }}</strong>
@@ -427,7 +440,15 @@ interface AgentFilters {
       align-items: center;
       gap: 0.5rem;
     }
-    .error-msg a { cursor: pointer; text-decoration: underline; color: inherit; }
+    .error-msg .link-btn {
+      cursor: pointer;
+      text-decoration: underline;
+      color: inherit;
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+    }
 
     code { font-family: monospace; font-size: 0.78rem; }
   `],
@@ -435,8 +456,14 @@ interface AgentFilters {
 export class AgentListComponent {
   private readonly agentService = inject(AgentService);
   private readonly masterDataService = inject(MasterDataService);
+  private readonly msal = inject(MsalService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+
+  readonly isAdmin = computed(() => {
+    const account = getCurrentAccount(this.msal.instance);
+    return account ? hasAnyRequiredRole(account, ['SystemAdmin']) : false;
+  });
 
   // ── Legal entity ─────────────────────────────────────────────────────────
   private readonly legalEntities = signal<LegalEntity[]>([]);
@@ -532,6 +559,10 @@ export class AgentListComponent {
 
   navigateToDetail(agent: AgentHealthSummary): void {
     this.router.navigate(['/agents', agent.deviceId]);
+  }
+
+  navigateToBootstrapToken(): void {
+    this.router.navigate(['/agents', 'bootstrap-token']);
   }
 
   // ── Template helpers ──────────────────────────────────────────────────────

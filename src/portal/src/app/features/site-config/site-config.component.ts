@@ -80,8 +80,9 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
         <p-panel header="Filters" [toggleable]="true" styleClass="filters-panel">
           <div class="filters-grid">
             <div class="filter-field">
-              <label>Operating Model</label>
+              <label for="site-filter-operating-model">Operating Model</label>
               <p-select
+                inputId="site-filter-operating-model"
                 [options]="operatingModelOptions"
                 [(ngModel)]="filterOperatingModel"
                 placeholder="All models"
@@ -91,8 +92,9 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
             </div>
 
             <div class="filter-field">
-              <label>Connectivity Mode</label>
+              <label for="site-filter-connectivity-mode">Connectivity Mode</label>
               <p-select
+                inputId="site-filter-connectivity-mode"
                 [options]="connectivityModeOptions"
                 [(ngModel)]="filterConnectivityMode"
                 placeholder="All modes"
@@ -102,8 +104,8 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
             </div>
 
             <div class="filter-field filter-field--toggle">
-              <p-toggleswitch [(ngModel)]="filterActiveOnly" (ngModelChange)="onFilterChange()" />
-              <label>Active only</label>
+              <p-toggleswitch inputId="site-filter-active-only" [(ngModel)]="filterActiveOnly" (ngModelChange)="onFilterChange()" />
+              <label for="site-filter-active-only">Active only</label>
             </div>
           </div>
         </p-panel>
@@ -137,7 +139,7 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
             </ng-template>
 
             <ng-template pTemplate="body" let-site>
-              <tr class="clickable-row" (click)="onRowClick(site)">
+              <tr class="clickable-row" tabindex="0" (click)="onRowClick(site)" (keydown.enter)="onRowClick(site)">
                 <td><code class="site-code">{{ site.siteCode }}</code></td>
                 <td>{{ site.siteName }}</td>
                 <td>{{ legalEntityName(site.legalEntityId) }}</td>

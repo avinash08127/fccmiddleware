@@ -172,12 +172,12 @@ interface LoadRequest {
                     </tr>
                   </ng-template>
                   <ng-template pTemplate="body" let-ex>
-                    <tr class="clickable-row" (click)="onRowClick(ex)">
+                    <tr class="clickable-row" tabindex="0" (click)="onRowClick(ex)" (keydown.enter)="onRowClick(ex)">
                       <td>{{ ex.siteCode }}</td>
                       <td>{{ ex.pumpNumber }}</td>
                       <td>{{ ex.nozzleNumber }}</td>
                       <td>{{ ex.requestedAmount | currencyMinorUnits: ex.currencyCode }}</td>
-                      <td>{{ ex.actualAmount != null ? (ex.actualAmount | currencyMinorUnits: ex.currencyCode) : '—' }}</td>
+                      <td>{{ ex.actualAmount !== null ? (ex.actualAmount | currencyMinorUnits: ex.currencyCode) : '—' }}</td>
                       <td>
                         <span [class]="varianceClass(ex)">
                           {{ formatVariance(ex) }}
@@ -243,12 +243,12 @@ interface LoadRequest {
                     </tr>
                   </ng-template>
                   <ng-template pTemplate="body" let-ex>
-                    <tr class="clickable-row" (click)="onRowClick(ex)">
+                    <tr class="clickable-row" tabindex="0" (click)="onRowClick(ex)" (keydown.enter)="onRowClick(ex)">
                       <td>{{ ex.siteCode }}</td>
                       <td>{{ ex.pumpNumber }}</td>
                       <td>{{ ex.nozzleNumber }}</td>
                       <td>{{ ex.requestedAmount | currencyMinorUnits: ex.currencyCode }}</td>
-                      <td>{{ ex.actualAmount != null ? (ex.actualAmount | currencyMinorUnits: ex.currencyCode) : '—' }}</td>
+                      <td>{{ ex.actualAmount !== null ? (ex.actualAmount | currencyMinorUnits: ex.currencyCode) : '—' }}</td>
                       <td>
                         <span [class]="varianceClass(ex)">
                           {{ formatVariance(ex) }}
@@ -307,12 +307,12 @@ interface LoadRequest {
                     </tr>
                   </ng-template>
                   <ng-template pTemplate="body" let-ex>
-                    <tr class="clickable-row" (click)="onRowClick(ex)">
+                    <tr class="clickable-row" tabindex="0" (click)="onRowClick(ex)" (keydown.enter)="onRowClick(ex)">
                       <td>{{ ex.siteCode }}</td>
                       <td>{{ ex.pumpNumber }}</td>
                       <td>{{ ex.nozzleNumber }}</td>
                       <td>{{ ex.requestedAmount | currencyMinorUnits: ex.currencyCode }}</td>
-                      <td>{{ ex.actualAmount != null ? (ex.actualAmount | currencyMinorUnits: ex.currencyCode) : '—' }}</td>
+                      <td>{{ ex.actualAmount !== null ? (ex.actualAmount | currencyMinorUnits: ex.currencyCode) : '—' }}</td>
                       <td>
                         <span [class]="varianceClass(ex)">
                           {{ formatVariance(ex) }}
@@ -570,7 +570,6 @@ export class ReconciliationListComponent {
     if (!entityId) return;
     const page = Math.floor((event.first ?? 0) / (event.rows ?? this.pageSize));
     this.varianceTab.update((s) => {
-      const cursor = page < s.cursors.length ? (s.cursors[page] ?? undefined) : undefined;
       return { ...s, currentPage: page, tableFirst: event.first ?? 0 };
     });
     const cursor = this.varianceTab().cursors[page] ?? undefined;

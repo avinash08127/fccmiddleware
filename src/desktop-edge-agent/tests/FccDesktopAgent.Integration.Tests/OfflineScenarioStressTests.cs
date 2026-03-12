@@ -248,7 +248,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
                 var results = uploadReq!.Transactions.Take(5).Select(t => new UploadResultItem
                 {
                     FccTransactionId = t.FccTransactionId,
-                    SiteCode = t.SiteCode,
+    
                     Outcome = "ACCEPTED"
                 }).ToList();
 
@@ -256,9 +256,9 @@ public sealed class OfflineScenarioStressTests : IDisposable
                 results.AddRange(uploadReq.Transactions.Skip(5).Select(t => new UploadResultItem
                 {
                     FccTransactionId = t.FccTransactionId,
-                    SiteCode = t.SiteCode,
+    
                     Outcome = "REJECTED",
-                    Error = new UploadResultError { Code = "NETWORK_INTERRUPTED", Message = "Connection reset" }
+                    ErrorCode = "NETWORK_INTERRUPTED", ErrorMessage = "Connection reset"
                 }));
 
                 var response = new UploadResponse
@@ -276,7 +276,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             var results2 = req2!.Transactions.Select(t => new UploadResultItem
             {
                 FccTransactionId = t.FccTransactionId,
-                SiteCode = t.SiteCode,
+
                 Outcome = "ACCEPTED"
             }).ToList();
 
@@ -443,7 +443,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             var results = uploadReq!.Transactions.Select(t => new UploadResultItem
             {
                 FccTransactionId = t.FccTransactionId,
-                SiteCode = t.SiteCode,
+
                 Outcome = "ACCEPTED"
             }).ToList();
 
@@ -561,7 +561,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             var results = uploadReq.Transactions.Select(t => new UploadResultItem
             {
                 FccTransactionId = t.FccTransactionId,
-                SiteCode = t.SiteCode,
+
                 Outcome = "ACCEPTED"
             }).ToList();
 
@@ -616,7 +616,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             var results = uploadReq!.Transactions.Select(t => new UploadResultItem
             {
                 FccTransactionId = t.FccTransactionId,
-                SiteCode = t.SiteCode,
+
                 Outcome = "ACCEPTED"
             }).ToList();
 
@@ -748,7 +748,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
                 return new UploadResultItem
                 {
                     FccTransactionId = t.FccTransactionId,
-                    SiteCode = t.SiteCode,
+    
                     Outcome = "ACCEPTED"
                 };
             }).ToList();
@@ -1008,7 +1008,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             var results = uploadReq!.Transactions.Select(t => new UploadResultItem
             {
                 FccTransactionId = t.FccTransactionId,
-                SiteCode = t.SiteCode,
+
                 Outcome = "ACCEPTED"
             }).ToList();
 
@@ -1072,9 +1072,10 @@ public sealed class OfflineScenarioStressTests : IDisposable
             var results = uploadReq.Transactions.Select((t, idx) => new UploadResultItem
             {
                 FccTransactionId = t.FccTransactionId,
-                SiteCode = t.SiteCode,
+
                 Outcome = idx == 0 ? "REJECTED" : "ACCEPTED",
-                Error = idx == 0 ? new UploadResultError { Code = "VALIDATION", Message = "bad data" } : null,
+                ErrorCode = idx == 0 ? "VALIDATION" : null,
+                ErrorMessage = idx == 0 ? "bad data" : null,
             }).ToList();
 
             return FakeHandler.JsonResponse(JsonSerializer.Serialize(new UploadResponse
@@ -1132,7 +1133,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             var results = uploadReq!.Transactions.Select(t => new UploadResultItem
             {
                 FccTransactionId = t.FccTransactionId,
-                SiteCode = t.SiteCode,
+
                 Outcome = "ACCEPTED"
             }).ToList();
 

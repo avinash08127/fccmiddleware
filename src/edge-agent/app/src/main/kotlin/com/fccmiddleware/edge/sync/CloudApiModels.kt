@@ -419,6 +419,38 @@ sealed class CloudPreAuthForwardResult {
     data class TransportError(val message: String) : CloudPreAuthForwardResult()
 }
 
+// ---------------------------------------------------------------------------
+// Version Check — GET /api/v1/agent/version-check
+// ---------------------------------------------------------------------------
+
+/**
+ * Response from GET /api/v1/agent/version-check.
+ * Matches VersionCheckResponse schema from cloud API.
+ */
+@Serializable
+data class VersionCheckResponse(
+    val compatible: Boolean,
+    val minimumVersion: String,
+    val latestVersion: String,
+    val updateRequired: Boolean,
+    val updateUrl: String? = null,
+    val agentVersion: String,
+    val updateAvailable: Boolean,
+    val releaseNotes: String? = null,
+)
+
+/** Result of calling GET /api/v1/agent/version-check. */
+sealed class CloudVersionCheckResult {
+    /** HTTP 200 — version check response received. */
+    data class Success(val response: VersionCheckResponse) : CloudVersionCheckResult()
+
+    /** HTTP 401 — token expired; caller should refresh and retry. */
+    data object Unauthorized : CloudVersionCheckResult()
+
+    /** Network or unexpected HTTP error. */
+    data class TransportError(val message: String) : CloudVersionCheckResult()
+}
+
 /** Result of submitting telemetry to cloud. */
 sealed class CloudTelemetryResult {
     /** HTTP 204 — telemetry accepted. */

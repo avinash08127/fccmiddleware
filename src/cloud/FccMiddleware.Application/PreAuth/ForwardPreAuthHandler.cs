@@ -1,4 +1,6 @@
+using System.Text.Json;
 using FccMiddleware.Application.Common;
+using FccMiddleware.Application.DeadLetter;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Exceptions;
@@ -24,15 +26,18 @@ public sealed class ForwardPreAuthHandler
 
     private readonly IPreAuthDbContext _db;
     private readonly IEventPublisher _eventPublisher;
+    private readonly IDeadLetterService _deadLetterService;
     private readonly ILogger<ForwardPreAuthHandler> _logger;
 
     public ForwardPreAuthHandler(
         IPreAuthDbContext db,
         IEventPublisher eventPublisher,
+        IDeadLetterService deadLetterService,
         ILogger<ForwardPreAuthHandler> logger)
     {
         _db = db;
         _eventPublisher = eventPublisher;
+        _deadLetterService = deadLetterService;
         _logger = logger;
     }
 
@@ -88,9 +93,16 @@ public sealed class ForwardPreAuthHandler
                 "Invalid pre-auth transition for {OdooOrderId}/{SiteCode}: {From} → {To}",
                 command.OdooOrderId, command.SiteCode, ex.From, ex.To);
 
+            var errorMsg = $"Cannot transition pre-auth from {ex.From} to {ex.To}.";
+            await _deadLetterService.CreateAsync(
+                command.LegalEntityId, command.SiteCode,
+                DeadLetterType.PRE_AUTH, DeadLetterReason.VALIDATION_FAILURE,
+                "CONFLICT.INVALID_TRANSITION", errorMsg,
+                rawPayloadJson: JsonSerializer.Serialize(new { command.OdooOrderId, command.SiteCode, command.Status }),
+                cancellationToken: cancellationToken);
+
             return Result<ForwardPreAuthResult>.Failure(
-                "CONFLICT.INVALID_TRANSITION",
-                $"Cannot transition pre-auth from {ex.From} to {ex.To}.");
+                "CONFLICT.INVALID_TRANSITION", errorMsg);
         }
 
         // Apply timestamp for the new status

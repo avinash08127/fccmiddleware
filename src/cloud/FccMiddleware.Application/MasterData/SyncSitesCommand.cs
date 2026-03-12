@@ -25,5 +25,8 @@ public sealed class SiteSyncItem
     public bool RequireCustomerTaxId { get; init; }
     public bool FiscalReceiptRequired { get; init; }
     public string? OdooSiteId { get; init; }
+    public decimal? AmountTolerancePercent { get; init; }
+    public long? AmountToleranceAbsolute { get; init; }
+    public int? TimeWindowMinutes { get; init; }
     public bool IsActive { get; init; }
 }

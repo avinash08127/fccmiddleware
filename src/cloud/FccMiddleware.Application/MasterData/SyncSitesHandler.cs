@@ -152,6 +152,9 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
         e.RequireCustomerTaxId  != i.RequireCustomerTaxId ||
         e.FiscalReceiptRequired != i.FiscalReceiptRequired ||
         e.OdooSiteId            != NormalizeOptional(i.OdooSiteId) ||
+        e.AmountTolerancePercent  != i.AmountTolerancePercent ||
+        e.AmountToleranceAbsolute != i.AmountToleranceAbsolute ||
+        e.TimeWindowMinutes       != i.TimeWindowMinutes ||
         e.IsActive              != i.IsActive;
 
     private static void ApplyChanges(
@@ -175,6 +178,12 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
         e.RequireCustomerTaxId  = i.RequireCustomerTaxId;
         e.FiscalReceiptRequired = i.FiscalReceiptRequired;
         e.OdooSiteId            = NormalizeOptional(i.OdooSiteId);
+        if (i.AmountTolerancePercent.HasValue)
+            e.AmountTolerancePercent = i.AmountTolerancePercent.Value;
+        if (i.AmountToleranceAbsolute.HasValue)
+            e.AmountToleranceAbsolute = i.AmountToleranceAbsolute.Value;
+        if (i.TimeWindowMinutes.HasValue)
+            e.TimeWindowMinutes = i.TimeWindowMinutes.Value;
         e.IsActive              = i.IsActive;
         e.DeactivatedAt         = i.IsActive ? null : now;
         e.SyncedAt  = now;
@@ -202,6 +211,9 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
         RequireCustomerTaxId   = i.RequireCustomerTaxId,
         FiscalReceiptRequired  = i.FiscalReceiptRequired,
         OdooSiteId             = NormalizeOptional(i.OdooSiteId),
+        AmountTolerancePercent = i.AmountTolerancePercent,
+        AmountToleranceAbsolute = i.AmountToleranceAbsolute,
+        TimeWindowMinutes      = i.TimeWindowMinutes,
         IsActive               = i.IsActive,
         DeactivatedAt          = i.IsActive ? null : now,
         SyncedAt               = now,

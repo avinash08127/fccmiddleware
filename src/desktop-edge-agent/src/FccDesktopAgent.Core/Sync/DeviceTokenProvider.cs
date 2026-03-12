@@ -18,8 +18,8 @@ namespace FccDesktopAgent.Core.Sync;
 /// </summary>
 public sealed class DeviceTokenProvider : IDeviceTokenProvider
 {
-    internal const string TokenKey = "device:token";
-    internal const string RefreshTokenKey = "device:refresh_token";
+    internal const string TokenKey = CredentialKeys.DeviceToken;
+    internal const string RefreshTokenKey = CredentialKeys.RefreshToken;
     private const string RefreshPath = "/api/v1/agent/token/refresh";
 
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
@@ -105,6 +105,13 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         {
             _logger.LogWarning("Token refresh returned 403 Forbidden — device may be decommissioned");
             throw new DeviceDecommissionedException("Token refresh returned 403 Forbidden");
+        }
+
+        // Handle 401 — refresh token expired or revoked
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            _logger.LogWarning("Token refresh returned 401 Unauthorized — refresh token expired or revoked, re-provisioning required");
+            throw new RefreshTokenExpiredException("Token refresh returned 401 Unauthorized");
         }
 
         if (!response.IsSuccessStatusCode)

@@ -143,7 +143,28 @@ public sealed class CloudUploadWorker : ICloudSyncService
         {
             // 401: refresh token once and retry the entire batch
             _logger.LogWarning("Cloud upload received 401; refreshing device token");
-            token = await _tokenProvider.RefreshTokenAsync(ct);
+            try
+            {
+                token = await _tokenProvider.RefreshTokenAsync(ct);
+            }
+            catch (RefreshTokenExpiredException rex)
+            {
+                await _registrationManager.MarkReprovisioningRequiredAsync();
+                _decommissioned = true;
+                _logger.LogCritical(
+                    "REFRESH_TOKEN_EXPIRED: Device requires re-provisioning. " +
+                    "Restart the agent to begin provisioning. Reason: {Reason}", rex.Message);
+                return 0;
+            }
+            catch (DeviceDecommissionedException dex)
+            {
+                await _registrationManager.MarkDecommissionedAsync();
+                _decommissioned = true;
+                _logger.LogCritical(
+                    "DEVICE_DECOMMISSIONED during token refresh. All cloud sync halted. " +
+                    "Reason: {Reason}", dex.Message);
+                return 0;
+            }
             if (token is null)
             {
                 _logger.LogWarning("Token refresh failed; recording upload failure for batch");
@@ -242,10 +263,9 @@ public sealed class CloudUploadWorker : ICloudSyncService
         UploadResponse uploadResponse,
         CancellationToken ct)
     {
-        // Build lookup: (fccTransactionId, siteCode) → local buffer Id
-        var lookup = batch.ToDictionary(
-            t => (t.FccTransactionId, t.SiteCode),
-            t => t.Id);
+        // Build lookup: fccTransactionId → local buffer Id
+        // All records in a single batch share the same siteCode, so fccTransactionId alone is unique.
+        var lookup = batch.ToDictionary(t => t.FccTransactionId, t => t.Id);
 
         var acceptedIds = new List<string>();
         var duplicateIds = new List<string>();
@@ -253,12 +273,11 @@ public sealed class CloudUploadWorker : ICloudSyncService
 
         foreach (var result in uploadResponse.Results)
         {
-            var key = (result.FccTransactionId, result.SiteCode);
-            if (!lookup.TryGetValue(key, out var localId))
+            if (!lookup.TryGetValue(result.FccTransactionId, out var localId))
             {
                 _logger.LogWarning(
-                    "Upload response references unknown transaction fccId={FccId} site={Site}",
-                    result.FccTransactionId, result.SiteCode);
+                    "Upload response references unknown transaction fccId={FccId}",
+                    result.FccTransactionId);
                 continue;
             }
 
@@ -279,7 +298,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
                     rejectedIds.Add(localId);
                     _logger.LogWarning(
                         "Transaction {FccId} rejected by cloud: [{Code}] {Message}",
-                        result.FccTransactionId, result.Error?.Code, result.Error?.Message);
+                        result.FccTransactionId, result.ErrorCode, result.ErrorMessage);
                     break;
 
                 default:
@@ -343,8 +362,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
         Id = t.Id,
         FccTransactionId = t.FccTransactionId,
         SiteCode = t.SiteCode,
-        // TODO DEA-3.x: populate LegalEntityId from device registration record.
-        LegalEntityId = config.SiteId,
+        LegalEntityId = !string.IsNullOrWhiteSpace(config.LegalEntityId) ? config.LegalEntityId : config.SiteId,
         PumpNumber = t.PumpNumber,
         NozzleNumber = t.NozzleNumber,
         ProductCode = t.ProductCode,

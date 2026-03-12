@@ -65,6 +65,12 @@ public sealed class SiteConfigSync
     public int UploadIntervalSeconds { get; set; } = 60;
     public int ConfigPollIntervalSeconds { get; set; } = 60;
     public string? CursorStrategy { get; set; }
+
+    /// <summary>
+    /// Runtime certificate pins (SHA-256 public key hashes) for TLS certificate pinning.
+    /// Format: "sha256/BASE64HASH=". Enables pin rotation without installer update.
+    /// </summary>
+    public List<string>? CertificatePins { get; set; }
 }
 
 public sealed class SiteConfigBuffer

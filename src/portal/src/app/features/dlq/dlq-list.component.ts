@@ -133,8 +133,9 @@ interface LoadRequest {
         <p-panel header="Filters" [toggleable]="true" styleClass="filters-panel">
           <div class="filters-grid">
             <div class="filter-field">
-              <label>Error Category</label>
+              <label for="dlq-filter-error-category">Error Category</label>
               <p-select
+                inputId="dlq-filter-error-category"
                 [options]="reasonOptions"
                 [(ngModel)]="filterReason"
                 optionLabel="label"
@@ -145,13 +146,14 @@ interface LoadRequest {
             </div>
 
             <div class="filter-field">
-              <label>Site Code</label>
-              <input pInputText [(ngModel)]="filterSiteCode" placeholder="e.g. MW-001" />
+              <label for="dlq-filter-site-code">Site Code</label>
+              <input pInputText id="dlq-filter-site-code" [(ngModel)]="filterSiteCode" placeholder="e.g. MW-001" />
             </div>
 
             <div class="filter-field">
-              <label>Status</label>
+              <label for="dlq-filter-status">Status</label>
               <p-select
+                inputId="dlq-filter-status"
                 [options]="statusOptions"
                 [(ngModel)]="filterStatus"
                 optionLabel="label"
@@ -162,8 +164,9 @@ interface LoadRequest {
             </div>
 
             <div class="filter-field filter-field--wide">
-              <label>Date Range</label>
+              <label for="dlq-filter-date-range">Date Range</label>
               <app-date-range-picker
+                id="dlq-filter-date-range"
                 placeholder="Select date range"
                 [(ngModel)]="filterDateRange"
               />
@@ -243,7 +246,7 @@ interface LoadRequest {
             </ng-template>
 
             <ng-template pTemplate="body" let-item>
-              <tr class="clickable-row" (click)="viewDetail(item.id)">
+              <tr class="clickable-row" tabindex="0" (click)="viewDetail(item.id)" (keydown.enter)="viewDetail(item.id)">
                 <td (click)="$event.stopPropagation()">
                   <p-tableCheckbox [value]="item" />
                 </td>

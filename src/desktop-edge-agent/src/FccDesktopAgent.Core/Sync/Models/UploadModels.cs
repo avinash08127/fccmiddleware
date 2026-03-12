@@ -16,6 +16,7 @@ public sealed class UploadRequest
 /// <summary>
 /// Response from POST /api/v1/transactions/upload.
 /// HTTP 200 is always returned if the batch was processed, even if some records were rejected.
+/// Aligned with cloud contract: FccMiddleware.Contracts.Ingestion.UploadResponse.
 /// </summary>
 public sealed class UploadResponse
 {
@@ -34,36 +35,34 @@ public sealed class UploadResponse
 
 /// <summary>
 /// Per-record result from the cloud upload endpoint.
+/// Aligned with cloud contract: FccMiddleware.Contracts.Ingestion.UploadRecordResult.
 /// Outcome: ACCEPTED | DUPLICATE | REJECTED.
 /// </summary>
 public sealed class UploadResultItem
 {
+    /// <summary>FCC transaction ID echoed back from the request.</summary>
     [JsonPropertyName("fccTransactionId")]
     public string FccTransactionId { get; init; } = string.Empty;
-
-    [JsonPropertyName("siteCode")]
-    public string SiteCode { get; init; } = string.Empty;
 
     /// <summary>ACCEPTED, DUPLICATE, or REJECTED.</summary>
     [JsonPropertyName("outcome")]
     public string Outcome { get; init; } = string.Empty;
 
-    /// <summary>Cloud-assigned UUID. Set when outcome is ACCEPTED.</summary>
-    [JsonPropertyName("id")]
-    public string? Id { get; init; }
+    /// <summary>Cloud-assigned UUID for accepted transactions. Null for duplicates and rejections.</summary>
+    [JsonPropertyName("transactionId")]
+    public Guid? TransactionId { get; init; }
 
-    /// <summary>Error detail. Set when outcome is REJECTED.</summary>
-    [JsonPropertyName("error")]
-    public UploadResultError? Error { get; init; }
-}
+    /// <summary>ID of the original transaction when Outcome is DUPLICATE.</summary>
+    [JsonPropertyName("originalTransactionId")]
+    public Guid? OriginalTransactionId { get; init; }
 
-public sealed class UploadResultError
-{
-    [JsonPropertyName("code")]
-    public string Code { get; init; } = string.Empty;
+    /// <summary>Structured error code for REJECTED records.</summary>
+    [JsonPropertyName("errorCode")]
+    public string? ErrorCode { get; init; }
 
-    [JsonPropertyName("message")]
-    public string Message { get; init; } = string.Empty;
+    /// <summary>Human-readable error detail for REJECTED records.</summary>
+    [JsonPropertyName("errorMessage")]
+    public string? ErrorMessage { get; init; }
 }
 
 /// <summary>

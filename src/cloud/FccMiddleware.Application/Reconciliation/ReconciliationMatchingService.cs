@@ -59,6 +59,13 @@ public sealed class ReconciliationMatchingService
 
         if (siteContext is null || !siteContext.Settings.SiteUsesPreAuth)
         {
+            var skipReason = siteContext is null ? "SITE_NOT_FOUND" : "PRE_AUTH_DISABLED";
+            _metrics.RecordReconciliationSkipped(
+                transaction.LegalEntityId, transaction.SiteCode, skipReason);
+            _logger.LogDebug(
+                "Reconciliation skipped for transaction {TransactionId} at site {SiteCode}: {Reason}",
+                transaction.Id, transaction.SiteCode, skipReason);
+
             return new ReconciliationMatchResult(
                 Skipped: true,
                 CreatedOrUpdated: false,
@@ -150,6 +157,13 @@ public sealed class ReconciliationMatchingService
 
         if (siteContext is null || !siteContext.Settings.SiteUsesPreAuth)
         {
+            var retrySkipReason = siteContext is null ? "SITE_NOT_FOUND" : "PRE_AUTH_DISABLED";
+            _metrics.RecordReconciliationSkipped(
+                transaction.LegalEntityId, transaction.SiteCode, retrySkipReason);
+            _logger.LogDebug(
+                "Reconciliation retry skipped for record {ReconciliationId} at site {SiteCode}: {Reason}",
+                record.Id, transaction.SiteCode, retrySkipReason);
+
             record.LastMatchAttemptAt = attemptAt;
             record.UpdatedAt = attemptAt;
 

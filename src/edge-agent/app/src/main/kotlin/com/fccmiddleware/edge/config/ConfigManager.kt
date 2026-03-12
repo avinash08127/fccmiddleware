@@ -27,6 +27,7 @@ import java.time.Instant
 class ConfigManager(
     private val agentConfigDao: AgentConfigDao,
     private val keystoreManager: KeystoreManager? = null,
+    private val encryptedPrefsManager: com.fccmiddleware.edge.security.EncryptedPrefsManager? = null,
 ) {
 
     companion object {
@@ -171,6 +172,22 @@ class ConfigManager(
 
         // 7. Apply in memory (hot-reload takes effect on next scheduler cycle)
         _config.value = newConfig
+
+        // 8. Persist runtime certificate pins from SiteConfig to EncryptedPrefs.
+        //    These will be used on next app restart (OkHttp CertificatePinner is immutable).
+        if (encryptedPrefsManager != null && newConfig.sync.certificatePins.isNotEmpty()) {
+            val currentPins = encryptedPrefsManager.runtimeCertificatePins
+            if (currentPins != newConfig.sync.certificatePins) {
+                encryptedPrefsManager.runtimeCertificatePins = newConfig.sync.certificatePins
+                Log.i(
+                    TAG,
+                    "Runtime certificate pins updated from SiteConfig " +
+                        "(${newConfig.sync.certificatePins.size} pin(s)). " +
+                        "New pins will take effect on next app restart.",
+                )
+            }
+        }
+
         Log.i(
             TAG,
             "Config applied: version=${newConfig.configVersion}, configId=${newConfig.configId}",

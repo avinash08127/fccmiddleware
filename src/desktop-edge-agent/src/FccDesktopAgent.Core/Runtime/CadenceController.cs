@@ -41,6 +41,7 @@ public sealed class CadenceController : BackgroundService
     private readonly IConfigPoller? _configPoller;
     private readonly IConfigManager? _configManager;
     private readonly ITelemetryReporter? _telemetryReporter;
+    private readonly IVersionChecker? _versionChecker;
 
     // Wake-up gate: signalled by state-change events so the loop runs an immediate cycle
     // rather than waiting for the full tick interval. Bounded at 1 to avoid queuing.
@@ -51,6 +52,11 @@ public sealed class CadenceController : BackgroundService
 
     // Monotonic tick counter for sub-interval scheduling (telemetry, status poll, config poll).
     private int _tick;
+
+    // Version compatibility flag. Set to false when cloud reports this agent version
+    // is below minimum supported. When false, FCC communication is disabled.
+    // Defaults to true (fail-open) — FCC is allowed until explicit incompatibility is detected.
+    private volatile bool _versionCompatible = true;
 
     public CadenceController(
         IConnectivityMonitor connectivity,
@@ -67,6 +73,7 @@ public sealed class CadenceController : BackgroundService
         _configPoller = (IConfigPoller?)services.GetService(typeof(IConfigPoller));
         _configManager = (IConfigManager?)services.GetService(typeof(IConfigManager));
         _telemetryReporter = (ITelemetryReporter?)services.GetService(typeof(ITelemetryReporter));
+        _versionChecker = (IVersionChecker?)services.GetService(typeof(IVersionChecker));
         _scopeFactory = services.GetRequiredService<IServiceScopeFactory>();
     }
 
@@ -103,6 +110,10 @@ public sealed class CadenceController : BackgroundService
             }
         }
 
+        // Per requirements §15.13: check version compatibility on startup.
+        // If below minimum version, disable FCC communication to prevent data format mismatches.
+        await PerformStartupVersionCheckAsync(stoppingToken);
+
         _connectivity.StateChanged += OnConnectivityStateChanged;
 
         try
@@ -135,8 +146,14 @@ public sealed class CadenceController : BackgroundService
             _tick, snapshot.State, config.IngestionMode, snapshot.IsInternetUp, snapshot.IsFccUp);
 
         // ── FCC Poll ─────────────────────────────────────────────────────────
-        // Only when FCC is reachable AND ingestion mode requires polling.
-        if (snapshot.IsFccUp && ShouldPollFcc(config))
+        // Only when FCC is reachable AND ingestion mode requires polling
+        // AND agent version is compatible (per §15.13).
+        if (!_versionCompatible)
+        {
+            _logger.LogDebug(
+                "FCC poll skipped (tick {Tick}): agent version below minimum — FCC communication disabled", _tick);
+        }
+        else if (snapshot.IsFccUp && ShouldPollFcc(config))
         {
             if (_ingestion is not null)
             {
@@ -349,6 +366,59 @@ public sealed class CadenceController : BackgroundService
         }
     }
 
+    // ── Startup version check ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Per requirements §15.13: call /agent/version-check on startup.
+    /// If agent version is below minimum supported, disable FCC communication.
+    /// Fail-open: if the check cannot be completed, FCC communication remains enabled.
+    /// </summary>
+    private async Task PerformStartupVersionCheckAsync(CancellationToken ct)
+    {
+        if (_versionChecker is null)
+            return;
+
+        try
+        {
+            var result = await _versionChecker.CheckVersionAsync(ct);
+            if (result is null)
+            {
+                _logger.LogDebug("Version check returned no result — allowing FCC (fail-open)");
+                return;
+            }
+
+            if (!result.Compatible)
+            {
+                _versionCompatible = false;
+                _logger.LogCritical(
+                    "VERSION INCOMPATIBLE: agent version is below minimum {MinVersion}. " +
+                    "FCC communication DISABLED to prevent data format mismatches. " +
+                    "Update agent to at least {MinVersion}.{UpdateUrl}",
+                    result.MinimumVersion,
+                    result.MinimumVersion,
+                    result.UpdateUrl is not null ? $" Download: {result.UpdateUrl}" : "");
+            }
+            else
+            {
+                _versionCompatible = true;
+                if (result.UpdateAvailable)
+                {
+                    _logger.LogInformation(
+                        "Version check passed (compatible). Update available: {LatestVersion}",
+                        result.LatestVersion);
+                }
+                else
+                {
+                    _logger.LogInformation("Version check passed (compatible, up to date)");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Version check failed on startup — allowing FCC (fail-open)");
+        }
+    }
+
     // ── Tick sub-interval helpers ─────────────────────────────────────────────
 
     private bool ShouldPollFcc(AgentConfiguration config)
@@ -378,7 +448,8 @@ public sealed class CadenceController : BackgroundService
     private bool IsSyncedToOdooPollTick(AgentConfiguration config)
     {
         var cadence = Math.Max(1, config.CloudSyncIntervalSeconds);
-        var every = Math.Max(1, cadence / 30);
+        var tickIntervalSeconds = Math.Max(1, config.CloudSyncIntervalSeconds);
+        var every = Math.Max(1, cadence / tickIntervalSeconds);
         return _tick % every == 0;
     }
 
@@ -396,7 +467,8 @@ public sealed class CadenceController : BackgroundService
 
     private bool IsTelemetryTick(AgentConfiguration config)
     {
-        var every = Math.Max(1, config.TelemetryIntervalSeconds / 30);
+        var tickIntervalSeconds = Math.Max(1, config.CloudSyncIntervalSeconds);
+        var every = Math.Max(1, config.TelemetryIntervalSeconds / tickIntervalSeconds);
         return _tick % every == 0;
     }
 }

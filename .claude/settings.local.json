@@ -186,7 +186,22 @@
       "Bash(./gradlew testDebugUnitTest 2>&1 | grep -E \"FAILED|tests completed\")",
       "Bash(dotnet exec:*)",
       "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -type f -name \"*.cs\" | xargs grep -l \"IDeviceRegistrationService\" | head -10)",
-      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent/tests -type f -name \"*.cs\" | xargs grep -l \"RegistrationManager\\\\|registration.json\" | head -5)"
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent/tests -type f -name \"*.cs\" | xargs grep -l \"RegistrationManager\\\\|registration.json\" | head -5)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\cloud\" -type f -name \"*.cs\" | xargs grep -l \"UploadTransactionRecord\\\\|UploadRecordResult\" | head -5)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\cloud\\\\FccMiddleware.Domain\" -type f \\\\\\( -name \"*Bootstrap*\" -o -name \"*Agent*\" \\\\\\) 2>/dev/null | head -20)",
+      "Bash(cd /c/Users/a0812/fccmiddleware/src/portal && npm install qrcode@1 2>&1 | tail -5)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src -name \"*SiteConfig*\" -o -name \"*Config*Dto*\" | grep -E \"\\\\.\\(cs|kt\\)$\")",
+      "Bash(find /c/Users/a0812/fccmiddleware -name \"*bootstrap*\" -type f | grep -E \"\\\\.\\(md|json|ts|kt|cs\\)$\")",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/cloud -type f -name \"*.cs\" | xargs grep -l \"FindBootstrapToken\\\\|AddBootstrapToken\")",
+      "Bash(grep -r \"HttpClient\\\\|OkHttp\\\\|CertificatePinner\\\\|HttpClientHandler\" /c/Users/a0812/fccmiddleware/src --include=\"*.cs\" --include=\"*.kt\" 2>/dev/null | grep -v \"obj/\" | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src -type f -name \"*.cs\" | xargs grep -l \"class.*AgentsController\\\\|POST.*bootstrap.*revoke\\\\|revoke.*bootstrap\")",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\\\\src\" -name \"*.cs\" -type f | xargs grep -l \"MainWindow\\\\|Title\\\\|Icon\\\\|Window\" | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -name \"ic_launcher*\" -o -name \"*splash*\" -o -name \"*launcher*\" 2>/dev/null | head -20)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\portal\" -type f \\\\\\( -name \"*.png\" -o -name \"*.svg\" \\\\\\) 2>/dev/null | head -20)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\\\\src\" -name \"*.cs\" | xargs grep -l \"Title\\\\|Icon\\\\|Window\" 2>/dev/null | head -20)",
+      "Bash(grep -r -i -n \"TODO\\\\|FIXME\\\\|HACK\\\\|PLACEHOLDER\\\\|STUB\\\\|not yet implemented\\\\|not implemented\\\\|throw new NotImplementedException\\\\|// temporary\\\\|// workaround\\\\|REVISIT\\\\|XXX\\\\|REFACTOR\\\\|OPTIMIZE\" \"C:/Users/a0812/fccmiddleware/src/edge-agent\" --include=\"*.kt\" --include=\"*.java\" --include=\"*.xml\" --include=\"*.gradle\" --include=\"*.json\" --include=\"*.properties\" --exclude-dir=\"build\" --exclude-dir=\".gradle\" --exclude-dir=\".idea\" 2>/dev/null | head -200)",
+      "Bash(grep -r -i -n \"TODO\\\\|FIXME\\\\|HACK\\\\|PLACEHOLDER\\\\|STUB\\\\|not yet implemented\\\\|not implemented\\\\|throw new NotImplementedException\\\\|// temporary\\\\|// workaround\\\\|REVISIT\\\\|XXX\\\\|REFACTOR\\\\|OPTIMIZE\" \"C:/Users/a0812/fccmiddleware/src/edge-agent\" --include=\"*.kt\" --include=\"*.java\" --include=\"*.xml\" --include=\"*.gradle\" --include=\"*.json\" --include=\"*.properties\" --exclude-dir=\"build\" --exclude-dir=\".gradle\" --exclude-dir=\".idea\" 2>/dev/null | wc -l)",
+      "Bash(git -C \"C:\\\\Users\\\\a0812\\\\fccmiddleware\" log --oneline -10)"
     ]
   }
 }

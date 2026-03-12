@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FccMiddleware.Application.Common;
+using FccMiddleware.Application.DeadLetter;
 using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
@@ -31,6 +32,7 @@ public sealed class IngestTransactionHandler
     private readonly IRawPayloadArchiver _rawPayloadArchiver;
     private readonly IIngestDbContext _db;
     private readonly ReconciliationMatchingService _reconciliationMatchingService;
+    private readonly IDeadLetterService _deadLetterService;
     private readonly ILogger<IngestTransactionHandler> _logger;
 
     public IngestTransactionHandler(
@@ -40,6 +42,7 @@ public sealed class IngestTransactionHandler
         IRawPayloadArchiver rawPayloadArchiver,
         IIngestDbContext db,
         ReconciliationMatchingService reconciliationMatchingService,
+        IDeadLetterService deadLetterService,
         ILogger<IngestTransactionHandler> logger)
     {
         _adapterFactory = adapterFactory;
@@ -48,6 +51,7 @@ public sealed class IngestTransactionHandler
         _rawPayloadArchiver = rawPayloadArchiver;
         _db = db;
         _reconciliationMatchingService = reconciliationMatchingService;
+        _deadLetterService = deadLetterService;
         _logger = logger;
     }
 
@@ -74,6 +78,12 @@ public sealed class IngestTransactionHandler
         }
         catch (AdapterNotRegisteredException ex)
         {
+            await _deadLetterService.CreateAsync(
+                legalEntityId, command.SiteCode,
+                DeadLetterType.TRANSACTION, DeadLetterReason.ADAPTER_ERROR,
+                "ADAPTER_NOT_REGISTERED", ex.Message,
+                rawPayloadJson: command.RawPayload,
+                cancellationToken: cancellationToken);
             return Result<IngestTransactionResult>.Failure("ADAPTER_NOT_REGISTERED", ex.Message);
         }
 
@@ -94,6 +104,14 @@ public sealed class IngestTransactionHandler
             _logger.LogWarning(
                 "Payload validation failed for site {SiteCode} vendor {Vendor}: {ErrorCode} — {Message}",
                 command.SiteCode, command.FccVendor, validation.ErrorCode, validation.Message);
+
+            await _deadLetterService.CreateAsync(
+                legalEntityId, command.SiteCode,
+                DeadLetterType.TRANSACTION, DeadLetterReason.VALIDATION_FAILURE,
+                $"VALIDATION.{validation.ErrorCode}",
+                validation.Message ?? "Payload validation failed.",
+                rawPayloadJson: command.RawPayload,
+                cancellationToken: cancellationToken);
 
             return Result<IngestTransactionResult>.Failure(
                 $"VALIDATION.{validation.ErrorCode}",

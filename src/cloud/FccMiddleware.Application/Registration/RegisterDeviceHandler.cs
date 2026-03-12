@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Domain.Entities;
@@ -145,6 +146,28 @@ public sealed class RegisterDeviceHandler
         bootstrapToken.Status = ProvisioningTokenStatus.USED;
         bootstrapToken.UsedAt = now;
         bootstrapToken.UsedByDeviceId = deviceId;
+
+        // Audit: device registration
+        _db.AddAuditEvent(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = bootstrapToken.LegalEntityId,
+            EventType = "DEVICE_REGISTERED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = request.SiteCode,
+            Source = "RegisterDeviceHandler",
+            Payload = JsonSerializer.Serialize(new
+            {
+                DeviceId = deviceId,
+                SiteCode = request.SiteCode,
+                DeviceModel = request.DeviceModel,
+                AgentVersion = request.AgentVersion,
+                ReplacedPreviousAgent = existingAgent is not null,
+                ReplacedDeviceId = existingAgent?.Id,
+                RegisteredAt = now,
+            })
+        });
 
         // BUG-007: TrySaveChangesAsync returns false when a concurrency conflict
         // is detected (xmin on BootstrapToken changed), preventing two concurrent

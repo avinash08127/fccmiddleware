@@ -55,6 +55,15 @@ public sealed class SiteRecord
     /// <summary>Optional Odoo-side site identifier.</summary>
     public string? OdooSiteId { get; init; }
 
+    /// <summary>Reconciliation amount tolerance as a percentage (e.g. 2.0 = 2%). Owned by Databricks.</summary>
+    public decimal? AmountTolerancePercent { get; init; }
+
+    /// <summary>Reconciliation amount tolerance in minor currency units. Owned by Databricks.</summary>
+    public long? AmountToleranceAbsolute { get; init; }
+
+    /// <summary>Reconciliation time window in minutes for pump/nozzle matching. Owned by Databricks.</summary>
+    public int? TimeWindowMinutes { get; init; }
+
     public bool IsActive { get; init; }
 
     public DateTimeOffset? UpdatedAt { get; init; }

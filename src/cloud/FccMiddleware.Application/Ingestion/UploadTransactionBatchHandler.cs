@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FccMiddleware.Application.DeadLetter;
 using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
@@ -22,17 +23,20 @@ public sealed class UploadTransactionBatchHandler
     private readonly IDeduplicationService _deduplicationService;
     private readonly IIngestDbContext _db;
     private readonly ReconciliationMatchingService _reconciliationMatchingService;
+    private readonly IDeadLetterService _deadLetterService;
     private readonly ILogger<UploadTransactionBatchHandler> _logger;
 
     public UploadTransactionBatchHandler(
         IDeduplicationService deduplicationService,
         IIngestDbContext db,
         ReconciliationMatchingService reconciliationMatchingService,
+        IDeadLetterService deadLetterService,
         ILogger<UploadTransactionBatchHandler> logger)
     {
         _deduplicationService = deduplicationService;
         _db = db;
         _reconciliationMatchingService = reconciliationMatchingService;
+        _deadLetterService = deadLetterService;
         _logger = logger;
     }
 
@@ -51,16 +55,30 @@ public sealed class UploadTransactionBatchHandler
             // ── Step 1: Site-claim validation ─────────────────────────────────────
             if (!string.Equals(record.SiteCode, command.DeviceSiteCode, StringComparison.OrdinalIgnoreCase))
             {
-                results.Add(Rejected(record.FccTransactionId, "SITE_MISMATCH",
-                    $"Transaction siteCode '{record.SiteCode}' does not match device site '{command.DeviceSiteCode}'."));
+                var msg = $"Transaction siteCode '{record.SiteCode}' does not match device site '{command.DeviceSiteCode}'.";
+                await _deadLetterService.CreateAsync(
+                    command.LegalEntityId, record.SiteCode,
+                    DeadLetterType.TRANSACTION, DeadLetterReason.VALIDATION_FAILURE,
+                    "SITE_MISMATCH", msg,
+                    fccTransactionId: record.FccTransactionId,
+                    rawPayloadJson: JsonSerializer.Serialize(record),
+                    cancellationToken: cancellationToken);
+                results.Add(Rejected(record.FccTransactionId, "SITE_MISMATCH", msg));
                 continue;
             }
 
             // ── Step 2: FCC vendor parse ───────────────────────────────────────────
             if (!Enum.TryParse<FccVendor>(record.FccVendor, ignoreCase: true, out var vendor))
             {
-                results.Add(Rejected(record.FccTransactionId, "INVALID_VENDOR",
-                    $"Unknown FCC vendor '{record.FccVendor}'."));
+                var msg = $"Unknown FCC vendor '{record.FccVendor}'.";
+                await _deadLetterService.CreateAsync(
+                    command.LegalEntityId, record.SiteCode,
+                    DeadLetterType.TRANSACTION, DeadLetterReason.VALIDATION_FAILURE,
+                    "INVALID_VENDOR", msg,
+                    fccTransactionId: record.FccTransactionId,
+                    rawPayloadJson: JsonSerializer.Serialize(record),
+                    cancellationToken: cancellationToken);
+                results.Add(Rejected(record.FccTransactionId, "INVALID_VENDOR", msg));
                 continue;
             }
 

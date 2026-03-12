@@ -76,17 +76,19 @@ export type FccConfigDraft = Pick<
           <!-- Enabled toggle -->
           <div class="form-field form-field--toggle">
             <p-toggleswitch
+              inputId="fcc-enabled"
               [(ngModel)]="draft.enabled"
               [disabled]="!editMode"
               (ngModelChange)="onDraftChange()"
             />
-            <label>FCC Integration Enabled</label>
+            <label for="fcc-enabled">FCC Integration Enabled</label>
           </div>
 
           <!-- Vendor -->
           <div class="form-field">
-            <label>FCC Vendor <span class="required">*</span></label>
+            <label for="fcc-vendor">FCC Vendor <span class="required">*</span></label>
             <p-select
+              inputId="fcc-vendor"
               [options]="vendorOptions"
               [(ngModel)]="draft.vendor"
               placeholder="Select vendor"
@@ -97,8 +99,9 @@ export type FccConfigDraft = Pick<
 
           <!-- Protocol -->
           <div class="form-field">
-            <label>Connection Protocol <span class="required">*</span></label>
+            <label for="fcc-connection-protocol">Connection Protocol <span class="required">*</span></label>
             <p-select
+              inputId="fcc-connection-protocol"
               [options]="protocolOptions"
               [(ngModel)]="draft.connectionProtocol"
               placeholder="Select protocol"
@@ -109,9 +112,10 @@ export type FccConfigDraft = Pick<
 
           <!-- Host -->
           <div class="form-field">
-            <label>Host Address <span class="required">*</span></label>
+            <label for="fcc-host-address">Host Address <span class="required">*</span></label>
             <input
               pInputText
+              id="fcc-host-address"
               [(ngModel)]="draft.hostAddress"
               placeholder="e.g. 192.168.1.100"
               [disabled]="!editMode"
@@ -124,8 +128,9 @@ export type FccConfigDraft = Pick<
 
           <!-- Port -->
           <div class="form-field">
-            <label>Port <span class="required">*</span></label>
+            <label for="fcc-port">Port <span class="required">*</span></label>
             <p-inputnumber
+              inputId="fcc-port"
               [(ngModel)]="draft.port"
               placeholder="e.g. 8080"
               [min]="1"
@@ -135,15 +140,16 @@ export type FccConfigDraft = Pick<
               [disabled]="!editMode"
               (ngModelChange)="onDraftChange()"
             />
-            @if (editMode && (draft.port == null || draft.port < 1 || draft.port > 65535)) {
+            @if (editMode && (draft.port === null || draft.port < 1 || draft.port > 65535)) {
               <small class="validation-error">Port must be 1–65535.</small>
             }
           </div>
 
           <!-- Transaction mode -->
           <div class="form-field">
-            <label>Transaction Mode</label>
+            <label for="fcc-transaction-mode">Transaction Mode</label>
             <p-select
+              inputId="fcc-transaction-mode"
               [options]="transactionModeOptions"
               [(ngModel)]="draft.transactionMode"
               placeholder="Select mode"
@@ -155,8 +161,9 @@ export type FccConfigDraft = Pick<
 
           <!-- Ingestion mode -->
           <div class="form-field">
-            <label>Ingestion Mode</label>
+            <label for="fcc-ingestion-mode">Ingestion Mode</label>
             <p-select
+              inputId="fcc-ingestion-mode"
               [options]="ingestionModeOptions"
               [(ngModel)]="draft.ingestionMode"
               placeholder="Select mode"
@@ -169,8 +176,9 @@ export type FccConfigDraft = Pick<
           <!-- Pull interval (only when PULL or HYBRID) -->
           @if (draft.transactionMode === 'PULL' || draft.transactionMode === 'HYBRID') {
             <div class="form-field">
-              <label>Pull Interval (seconds)</label>
+              <label for="fcc-pull-interval">Pull Interval (seconds)</label>
               <p-inputnumber
+                inputId="fcc-pull-interval"
                 [(ngModel)]="draft.pullIntervalSeconds"
                 [min]="5"
                 [max]="3600"
@@ -184,8 +192,9 @@ export type FccConfigDraft = Pick<
 
           <!-- Heartbeat interval -->
           <div class="form-field">
-            <label>Heartbeat Interval (seconds) <span class="required">*</span></label>
+            <label for="fcc-heartbeat-interval">Heartbeat Interval (seconds) <span class="required">*</span></label>
             <p-inputnumber
+              inputId="fcc-heartbeat-interval"
               [(ngModel)]="draft.heartbeatIntervalSeconds"
               [min]="10"
               [max]="3600"
@@ -198,8 +207,9 @@ export type FccConfigDraft = Pick<
 
           <!-- Heartbeat timeout -->
           <div class="form-field">
-            <label>Heartbeat Timeout (seconds) <span class="required">*</span></label>
+            <label for="fcc-heartbeat-timeout">Heartbeat Timeout (seconds) <span class="required">*</span></label>
             <p-inputnumber
+              inputId="fcc-heartbeat-timeout"
               [(ngModel)]="draft.heartbeatTimeoutSeconds"
               [min]="10"
               [max]="3600"
@@ -217,8 +227,9 @@ export type FccConfigDraft = Pick<
             <h4 class="vendor-section-title">DOMS TCP/JPL Configuration</h4>
             <div class="form-grid">
               <div class="form-field">
-                <label>JPL Port</label>
+                <label for="fcc-jpl-port">JPL Port</label>
                 <p-inputnumber
+                  inputId="fcc-jpl-port"
                   [(ngModel)]="draft.jplPort"
                   [min]="1" [max]="65535"
                   [showButtons]="false" [useGrouping]="false"
@@ -227,8 +238,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>Access Code</label>
+                <label for="fcc-access-code">Access Code</label>
                 <input pInputText type="password"
+                  id="fcc-access-code"
                   [(ngModel)]="draft.fcAccessCode"
                   placeholder="FcLogon access code"
                   [disabled]="!editMode"
@@ -236,8 +248,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>Country Code</label>
+                <label for="fcc-country-code">Country Code</label>
                 <input pInputText
+                  id="fcc-country-code"
                   [(ngModel)]="draft.domsCountryCode"
                   placeholder="e.g. ZA"
                   [disabled]="!editMode"
@@ -245,8 +258,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>POS Version ID</label>
+                <label for="fcc-pos-version-id">POS Version ID</label>
                 <input pInputText
+                  id="fcc-pos-version-id"
                   [(ngModel)]="draft.posVersionId"
                   placeholder="e.g. FccMiddleware/1.0"
                   [disabled]="!editMode"
@@ -254,8 +268,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>Configured Pumps</label>
+                <label for="fcc-configured-pumps">Configured Pumps</label>
                 <input pInputText
+                  id="fcc-configured-pumps"
                   [(ngModel)]="draft.configuredPumps"
                   placeholder="e.g. 1,2,3,4"
                   [disabled]="!editMode"
@@ -272,8 +287,9 @@ export type FccConfigDraft = Pick<
             <h4 class="vendor-section-title">Radix FDC Configuration</h4>
             <div class="form-grid">
               <div class="form-field">
-                <label>Shared Secret</label>
+                <label for="fcc-shared-secret">Shared Secret</label>
                 <input pInputText type="password"
+                  id="fcc-shared-secret"
                   [(ngModel)]="draft.sharedSecret"
                   placeholder="SHA-1 signing password"
                   [disabled]="!editMode"
@@ -281,8 +297,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>USN Code</label>
+                <label for="fcc-usn-code">USN Code</label>
                 <p-inputnumber
+                  inputId="fcc-usn-code"
                   [(ngModel)]="draft.usnCode"
                   [min]="1" [max]="999999"
                   [showButtons]="false" [useGrouping]="false"
@@ -291,8 +308,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>Auth Port (P)</label>
+                <label for="fcc-auth-port">Auth Port (P)</label>
                 <p-inputnumber
+                  inputId="fcc-auth-port"
                   [(ngModel)]="draft.authPort"
                   [min]="1" [max]="65535"
                   [showButtons]="false" [useGrouping]="false"
@@ -301,8 +319,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field" style="grid-column: 1 / -1;">
-                <label>Pump Address Map (JSON)</label>
+                <label for="fcc-pump-address-map">Pump Address Map (JSON)</label>
                 <textarea pInputText rows="3"
+                  id="fcc-pump-address-map"
                   [(ngModel)]="draft.fccPumpAddressMap"
                   placeholder='{"1": {"pumpAddr": 1, "fp": 1}, "2": {"pumpAddr": 1, "fp": 2}}'
                   [disabled]="!editMode"
@@ -319,8 +338,9 @@ export type FccConfigDraft = Pick<
             <h4 class="vendor-section-title">Petronite OAuth2 Configuration</h4>
             <div class="form-grid">
               <div class="form-field">
-                <label>Client ID</label>
+                <label for="fcc-client-id">Client ID</label>
                 <input pInputText
+                  id="fcc-client-id"
                   [(ngModel)]="draft.clientId"
                   placeholder="OAuth2 Client ID"
                   [disabled]="!editMode"
@@ -328,8 +348,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>Client Secret</label>
+                <label for="fcc-client-secret">Client Secret</label>
                 <input pInputText type="password"
+                  id="fcc-client-secret"
                   [(ngModel)]="draft.clientSecret"
                   placeholder="OAuth2 Client Secret"
                   [disabled]="!editMode"
@@ -337,8 +358,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>Webhook Secret</label>
+                <label for="fcc-webhook-secret">Webhook Secret</label>
                 <input pInputText type="password"
+                  id="fcc-webhook-secret"
                   [(ngModel)]="draft.webhookSecret"
                   placeholder="X-Webhook-Secret header value"
                   [disabled]="!editMode"
@@ -346,8 +368,9 @@ export type FccConfigDraft = Pick<
                 />
               </div>
               <div class="form-field">
-                <label>OAuth Token Endpoint</label>
+                <label for="fcc-oauth-token-endpoint">OAuth Token Endpoint</label>
                 <input pInputText
+                  id="fcc-oauth-token-endpoint"
                   [(ngModel)]="draft.oauthTokenEndpoint"
                   placeholder="https://api.petronite.com/oauth/token"
                   [disabled]="!editMode"

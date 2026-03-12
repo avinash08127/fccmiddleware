@@ -130,7 +130,7 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               <div class="field">
                 <span class="field-label">Authorised Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.requestedAmount != null
+                  {{ record()!.requestedAmount !== null
                       ? (record()!.requestedAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
                       : '—' }}
                 </span>
@@ -185,13 +185,13 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
                 <div class="field">
                   <span class="field-label">Actual Amount</span>
                   <span class="field-value amount">
-                    {{ record()!.actualAmount != null
+                    {{ record()!.actualAmount !== null
                         ? (record()!.actualAmount! | currencyMinorUnits: record()!.currencyCode)
                         : '—' }}
                   </span>
                 </div>
                 @if (record()!.transactionSummary; as tx) {
-                  @if (tx.volumeMicrolitres != null) {
+                  @if (tx.volumeMicrolitres !== null) {
                     <div class="field">
                       <span class="field-label">Volume Dispensed</span>
                       <span class="field-value">{{ formatVolume(tx.volumeMicrolitres!) }} L</span>
@@ -226,7 +226,7 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               <div class="field">
                 <span class="field-label">Authorised Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.requestedAmount != null
+                  {{ record()!.requestedAmount !== null
                       ? (record()!.requestedAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
                       : '—' }}
                 </span>
@@ -234,7 +234,7 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               <div class="field">
                 <span class="field-label">Actual Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.actualAmount != null
+                  {{ record()!.actualAmount !== null
                       ? (record()!.actualAmount! | currencyMinorUnits: record()!.currencyCode)
                       : '—' }}
                 </span>

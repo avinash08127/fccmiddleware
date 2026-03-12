@@ -155,8 +155,9 @@ interface NozzleRow {
     >
       <div class="dialog-form">
         <div class="form-field">
-          <label>Pump Number <span class="required">*</span></label>
+          <label for="pump-number">Pump Number <span class="required">*</span></label>
           <p-inputnumber
+            id="pump-number"
             [(ngModel)]="newPump.pumpNumber"
             [min]="1"
             [max]="99"
@@ -167,8 +168,9 @@ interface NozzleRow {
         </div>
 
         <div class="form-field">
-          <label>FCC Pump Number <span class="required">*</span></label>
+          <label for="fcc-pump-number">FCC Pump Number <span class="required">*</span></label>
           <p-inputnumber
+            id="fcc-pump-number"
             [(ngModel)]="newPump.fccPumpNumber"
             [min]="1"
             [max]="99"
@@ -193,8 +195,9 @@ interface NozzleRow {
           @for (nozzle of newPump.nozzles; track $index; let i = $index) {
             <div class="nozzle-row">
               <div class="form-field">
-                <label>Nozzle #</label>
+                <label [for]="'nozzle-number-' + i">Nozzle #</label>
                 <p-inputnumber
+                  [id]="'nozzle-number-' + i"
                   [(ngModel)]="nozzle.nozzleNumber"
                   [min]="1"
                   [max]="99"
@@ -203,8 +206,9 @@ interface NozzleRow {
                 />
               </div>
               <div class="form-field">
-                <label>FCC Nozzle #</label>
+                <label [for]="'fcc-nozzle-number-' + i">FCC Nozzle #</label>
                 <p-inputnumber
+                  [id]="'fcc-nozzle-number-' + i"
                   [(ngModel)]="nozzle.fccNozzleNumber"
                   [min]="1"
                   [max]="99"
@@ -213,8 +217,9 @@ interface NozzleRow {
                 />
               </div>
               <div class="form-field">
-                <label>Product</label>
+                <label [for]="'nozzle-product-' + i">Product</label>
                 <p-select
+                  [id]="'nozzle-product-' + i"
                   [options]="productOptions"
                   [(ngModel)]="nozzle.canonicalProductCode"
                   placeholder="Select product"

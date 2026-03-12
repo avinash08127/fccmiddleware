@@ -210,6 +210,17 @@ public sealed class SitesController : PortalControllerBase
 
         if (request.SiteUsesPreAuth.HasValue)
         {
+            // Block enabling pre-auth on sites missing required master data fields
+            if (request.SiteUsesPreAuth.Value && !site.SiteUsesPreAuth)
+            {
+                if (string.IsNullOrWhiteSpace(site.CompanyTaxPayerId))
+                {
+                    return BadRequest(BuildError(
+                        "VALIDATION.INCOMPLETE_MASTER_DATA",
+                        "Cannot enable SiteUsesPreAuth: site is missing companyTaxPayerId. Sync master data from Databricks first."));
+                }
+            }
+
             site.SiteUsesPreAuth = request.SiteUsesPreAuth.Value;
         }
 

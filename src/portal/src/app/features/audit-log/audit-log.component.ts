@@ -103,17 +103,19 @@ interface LoadRequest {
         <p-panel header="Filters" [toggleable]="true" styleClass="filters-panel">
           <div class="filters-grid">
             <div class="filter-field filter-field--wide">
-              <label>Correlation ID <small class="hint">(exact match — primary trace key)</small></label>
+              <label for="audit-filter-correlation-id">Correlation ID <small class="hint">(exact match — primary trace key)</small></label>
               <input
                 pInputText
+                id="audit-filter-correlation-id"
                 [(ngModel)]="filterCorrelationId"
                 placeholder="UUID e.g. 550e8400-e29b-41d4-a716-446655440000"
               />
             </div>
 
             <div class="filter-field filter-field--wide">
-              <label>Event Types</label>
+              <label for="audit-filter-event-types">Event Types</label>
               <p-multiselect
+                inputId="audit-filter-event-types"
                 [options]="eventTypeOptions"
                 [(ngModel)]="filterEventTypes"
                 placeholder="All event types"
@@ -124,16 +126,17 @@ interface LoadRequest {
             </div>
 
             <div class="filter-field">
-              <label>Site Code</label>
-              <input pInputText [(ngModel)]="filterSiteCode" placeholder="e.g. MW-001" />
+              <label for="audit-filter-site-code">Site Code</label>
+              <input pInputText id="audit-filter-site-code" [(ngModel)]="filterSiteCode" placeholder="e.g. MW-001" />
             </div>
 
             <div class="filter-field filter-field--wide">
-              <label>
+              <label for="audit-filter-date-range">
                 Date Range
                 <small class="hint">(required for non-correlationId search; max {{ maxDays }} days)</small>
               </label>
               <app-date-range-picker
+                id="audit-filter-date-range"
                 placeholder="Select date range"
                 [(ngModel)]="filterDateRange"
                 (rangeSelected)="onDateRangeSelected($event)"
@@ -200,7 +203,7 @@ interface LoadRequest {
             </ng-template>
 
             <ng-template pTemplate="body" let-event let-expanded="expanded">
-              <tr class="clickable-row" (click)="toggleRow(event)">
+              <tr class="clickable-row" tabindex="0" (click)="toggleRow(event)" (keydown.enter)="toggleRow(event)">
                 <td>
                   <i [class]="'pi ' + (expanded ? 'pi-chevron-down' : 'pi-chevron-right')"></i>
                 </td>

@@ -88,17 +88,22 @@ public sealed class AgentsController : PortalControllerBase
                 || (agent.RegisteredAt == cursorTimestamp && agent.Id.CompareTo(cursorId) > 0));
         }
 
+        // Push connectivity filter into the SQL query by joining with telemetry snapshots,
+        // so pagination and totalCount are correct when filtering by connectivity state.
+        if (connectivityFilter.HasValue)
+        {
+            query = query.Where(agent =>
+                _db.AgentTelemetrySnapshots
+                    .IgnoreQueryFilters()
+                    .Any(snapshot => snapshot.DeviceId == agent.Id
+                                    && snapshot.ConnectivityState == connectivityFilter.Value));
+        }
+
         var orderedQuery = query
             .OrderBy(agent => agent.RegisteredAt)
             .ThenBy(agent => agent.Id);
 
-        var totalCount = await _db.AgentRegistrations
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Where(agent => agent.LegalEntityId == legalEntityId)
-            .Where(agent => string.IsNullOrWhiteSpace(siteCode) || agent.SiteCode == siteCode)
-            .Where(agent => !activeFilter.HasValue || agent.IsActive == activeFilter.Value)
-            .CountAsync(cancellationToken);
+        var totalCount = await query.CountAsync(cancellationToken);
 
         var page = await orderedQuery
             .Take(pageSize + 1)
@@ -137,7 +142,6 @@ public sealed class AgentsController : PortalControllerBase
                     LastSeenAt = agent.LastSeenAt
                 };
             })
-            .Where(dto => connectivityFilter is null || string.Equals(dto.ConnectivityState, connectivityFilter.ToString(), StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         string? nextCursor = null;

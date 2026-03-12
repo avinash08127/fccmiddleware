@@ -13,6 +13,8 @@ using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Infrastructure.Adapters;
+using FccMiddleware.Application.DeadLetter;
+using FccMiddleware.Infrastructure.DeadLetter;
 using FccMiddleware.Infrastructure.Deduplication;
 using FccMiddleware.Infrastructure.Events;
 using FccMiddleware.Infrastructure.Observability;
@@ -336,6 +338,10 @@ try
         var connStr = sp.GetRequiredService<IConfiguration>().GetConnectionString("Redis") ?? string.Empty;
         return ConnectionMultiplexer.Connect(connStr);
     });
+
+    // ── Infrastructure: Dead-letter services ─────────────────────────────────
+    builder.Services.AddScoped<IDeadLetterService, DeadLetterService>();
+    builder.Services.AddScoped<IDlqReplayService, DlqReplayService>();
 
     // ── Infrastructure: Ingestion services ───────────────────────────────────
     builder.Services.AddScoped<IDeduplicationService, RedisDeduplicationService>();

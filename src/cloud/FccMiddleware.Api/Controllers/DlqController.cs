@@ -1,4 +1,5 @@
 using FccMiddleware.Api.Portal;
+using FccMiddleware.Application.DeadLetter;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
 using FccMiddleware.Domain.Entities;
@@ -18,11 +19,16 @@ public sealed class DlqController : PortalControllerBase
 {
     private readonly FccMiddlewareDbContext _db;
     private readonly PortalAccessResolver _accessResolver;
+    private readonly IDlqReplayService _replayService;
 
-    public DlqController(FccMiddlewareDbContext db, PortalAccessResolver accessResolver)
+    public DlqController(
+        FccMiddlewareDbContext db,
+        PortalAccessResolver accessResolver,
+        IDlqReplayService replayService)
     {
         _db = db;
         _accessResolver = accessResolver;
+        _replayService = replayService;
     }
 
     [HttpGet]
@@ -185,6 +191,7 @@ public sealed class DlqController : PortalControllerBase
 
         var item = await _db.DeadLetterItems
             .IgnoreQueryFilters()
+            .AsNoTracking()
             .FirstOrDefaultAsync(row => row.Id == id, cancellationToken);
 
         if (item is null)
@@ -197,14 +204,18 @@ public sealed class DlqController : PortalControllerBase
             return Forbid();
         }
 
-        ApplyRetry(item, "SUCCESS", null, null);
-        await _db.SaveChangesAsync(cancellationToken);
+        if (item.Status is DeadLetterStatus.RESOLVED or DeadLetterStatus.DISCARDED)
+        {
+            return BadRequest(BuildError("DLQ.INVALID_STATE", $"Cannot retry item in {item.Status} state."));
+        }
+
+        var result = await _replayService.ReplayAsync(id, cancellationToken);
 
         return Ok(new RetryResultDto
         {
             Id = item.Id,
-            Queued = true,
-            Error = null
+            Queued = result.Success,
+            Error = result.Success ? null : result.ErrorMessage
         });
     }
 
@@ -261,6 +272,7 @@ public sealed class DlqController : PortalControllerBase
 
         var rows = await _db.DeadLetterItems
             .IgnoreQueryFilters()
+            .AsNoTracking()
             .Where(item => request.Ids.Contains(item.Id))
             .ToListAsync(cancellationToken);
 
@@ -282,11 +294,22 @@ public sealed class DlqController : PortalControllerBase
                 continue;
             }
 
-            ApplyRetry(row, "SUCCESS", null, null);
-            succeeded.Add(id);
-        }
+            if (row.Status is DeadLetterStatus.RESOLVED or DeadLetterStatus.DISCARDED)
+            {
+                failed.Add(new BatchRetryFailureDto { Id = id, Error = $"Cannot retry item in {row.Status} state." });
+                continue;
+            }
 
-        await _db.SaveChangesAsync(cancellationToken);
+            var result = await _replayService.ReplayAsync(id, cancellationToken);
+            if (result.Success)
+            {
+                succeeded.Add(id);
+            }
+            else
+            {
+                failed.Add(new BatchRetryFailureDto { Id = id, Error = result.ErrorMessage ?? "Replay failed." });
+            }
+        }
 
         return Ok(new BatchRetryResultDto
         {
@@ -330,25 +353,6 @@ public sealed class DlqController : PortalControllerBase
 
         await _db.SaveChangesAsync(cancellationToken);
         return Ok();
-    }
-
-    private void ApplyRetry(DeadLetterItem item, string outcome, string? errorCode, string? errorMessage)
-    {
-        var history = DeserializeHistory(item);
-        history.Add(new RetryHistoryEntryDto
-        {
-            AttemptNumber = history.Count + 1,
-            AttemptedAt = DateTimeOffset.UtcNow,
-            Outcome = outcome,
-            ErrorCode = errorCode,
-            ErrorMessage = errorMessage
-        });
-
-        item.RetryCount += 1;
-        item.LastRetryAt = DateTimeOffset.UtcNow;
-        item.Status = DeadLetterStatus.RETRYING;
-        item.RetryHistoryJson = JsonSerializer.Serialize(history, PortalJson.SerializerOptions);
-        item.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     private static List<RetryHistoryEntryDto> DeserializeHistory(DeadLetterItem item) =>

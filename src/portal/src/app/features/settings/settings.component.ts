@@ -98,7 +98,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="amtPct">Amount Tolerance (%)</label>
                     <p-inputnumber
-                      id="amtPct"
+                      inputId="amtPct"
                       [(ngModel)]="tolerance.amountTolerancePercent"
                       mode="decimal"
                       [minFractionDigits]="0"
@@ -112,7 +112,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="amtAbs">Amount Tolerance (Absolute, minor units)</label>
                     <p-inputnumber
-                      id="amtAbs"
+                      inputId="amtAbs"
                       [(ngModel)]="tolerance.amountToleranceAbsoluteMinorUnits"
                       [min]="0"
                       [useGrouping]="true"
@@ -122,7 +122,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="timeWin">Time Window (minutes)</label>
                     <p-inputnumber
-                      id="timeWin"
+                      inputId="timeWin"
                       [(ngModel)]="tolerance.timeWindowMinutes"
                       [min]="1"
                       [max]="60"
@@ -132,7 +132,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="stalePending">Stale Pending Threshold (days)</label>
                     <p-inputnumber
-                      id="stalePending"
+                      inputId="stalePending"
                       [(ngModel)]="tolerance.stalePendingThresholdDays"
                       [min]="1"
                       [max]="90"
@@ -180,7 +180,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <ng-template pTemplate="body" let-row>
                     <tr>
                       <td>{{ row.legalEntityName }} ({{ row.legalEntityCode }})</td>
-                      <td>{{ row.amountTolerancePercent != null ? row.amountTolerancePercent + '%' : '—' }}</td>
+                      <td>{{ row.amountTolerancePercent !== null ? row.amountTolerancePercent + '%' : '—' }}</td>
                       <td>{{ row.amountToleranceAbsoluteMinorUnits ?? '—' }}</td>
                       <td>{{ row.timeWindowMinutes ?? '—' }}</td>
                       <td>{{ row.stalePendingThresholdDays ?? '—' }}</td>
@@ -299,7 +299,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="renotify">Re-notify Interval (hours)</label>
                     <p-inputnumber
-                      id="renotify"
+                      inputId="renotify"
                       [(ngModel)]="renotifyIntervalHours"
                       [min]="1"
                       [max]="48"
@@ -308,7 +308,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="autoResolve">Auto-Resolve After N Healthy Checks</label>
                     <p-inputnumber
-                      id="autoResolve"
+                      inputId="autoResolve"
                       [(ngModel)]="autoResolveHealthyCount"
                       [min]="1"
                       [max]="20"
@@ -333,7 +333,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="archiveMonths">Archive Retention (months)</label>
                     <p-inputnumber
-                      id="archiveMonths"
+                      inputId="archiveMonths"
                       [(ngModel)]="retention.archiveRetentionMonths"
                       [min]="1"
                       [max]="120"
@@ -343,7 +343,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="outboxDays">Outbox Cleanup (days)</label>
                     <p-inputnumber
-                      id="outboxDays"
+                      inputId="outboxDays"
                       [(ngModel)]="retention.outboxCleanupDays"
                       [min]="1"
                       [max]="90"
@@ -353,7 +353,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="rawDays">Raw Payload Retention (days)</label>
                     <p-inputnumber
-                      id="rawDays"
+                      inputId="rawDays"
                       [(ngModel)]="retention.rawPayloadRetentionDays"
                       [min]="1"
                       [max]="365"
@@ -363,7 +363,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="auditDays">Audit Event Retention (days)</label>
                     <p-inputnumber
-                      id="auditDays"
+                      inputId="auditDays"
                       [(ngModel)]="retention.auditEventRetentionDays"
                       [min]="30"
                       [max]="2555"
@@ -373,7 +373,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   <div class="field">
                     <label for="dlqDays">Dead-Letter Retention (days)</label>
                     <p-inputnumber
-                      id="dlqDays"
+                      inputId="dlqDays"
                       [(ngModel)]="retention.deadLetterRetentionDays"
                       [min]="1"
                       [max]="365"
@@ -405,8 +405,9 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
         <div class="dialog-fields">
           @if (!editingOverride) {
             <div class="field">
-              <label>Legal Entity</label>
+              <label for="override-legal-entity">Legal Entity</label>
               <p-select
+                inputId="override-legal-entity"
                 [options]="availableLegalEntities()"
                 [(ngModel)]="overrideForm.legalEntityId"
                 optionLabel="label"
@@ -417,13 +418,14 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
             </div>
           } @else {
             <div class="field">
-              <label>Legal Entity</label>
-              <span class="readonly-value">{{ editingOverride.legalEntityName }} ({{ editingOverride.legalEntityCode }})</span>
+              <label for="override-legal-entity-readonly">Legal Entity</label>
+              <span id="override-legal-entity-readonly" class="readonly-value">{{ editingOverride.legalEntityName }} ({{ editingOverride.legalEntityCode }})</span>
             </div>
           }
           <div class="field">
-            <label>Amount Tolerance (%)</label>
+            <label for="override-amt-pct">Amount Tolerance (%)</label>
             <p-inputnumber
+              inputId="override-amt-pct"
               [(ngModel)]="overrideForm.amountTolerancePercent"
               mode="decimal"
               [minFractionDigits]="0"
@@ -435,16 +437,18 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
             />
           </div>
           <div class="field">
-            <label>Amount Tolerance (Absolute)</label>
+            <label for="override-amt-abs">Amount Tolerance (Absolute)</label>
             <p-inputnumber
+              inputId="override-amt-abs"
               [(ngModel)]="overrideForm.amountToleranceAbsoluteMinorUnits"
               [min]="0"
               placeholder="Leave blank to use global"
             />
           </div>
           <div class="field">
-            <label>Time Window (minutes)</label>
+            <label for="override-time-window">Time Window (minutes)</label>
             <p-inputnumber
+              inputId="override-time-window"
               [(ngModel)]="overrideForm.timeWindowMinutes"
               [min]="1"
               [max]="60"
@@ -452,8 +456,9 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
             />
           </div>
           <div class="field">
-            <label>Stale Pending Threshold (days)</label>
+            <label for="override-stale-pending">Stale Pending Threshold (days)</label>
             <p-inputnumber
+              inputId="override-stale-pending"
               [(ngModel)]="overrideForm.stalePendingThresholdDays"
               [min]="1"
               [max]="90"

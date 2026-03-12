@@ -19,4 +19,11 @@ public interface IRegistrationManager
     /// Called when the cloud returns 403 DEVICE_DECOMMISSIONED.
     /// </summary>
     Task MarkDecommissionedAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Clears registration state so the provisioning wizard shows on next restart.
+    /// Called when the refresh token has expired (401 from token refresh endpoint).
+    /// Unlike decommission, re-provisioning can restore the device with a new bootstrap token.
+    /// </summary>
+    Task MarkReprovisioningRequiredAsync(CancellationToken ct = default);
 }

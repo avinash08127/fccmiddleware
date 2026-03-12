@@ -1,4 +1,6 @@
+using System.Text.Json;
 using FccMiddleware.Application.Common;
+using FccMiddleware.Domain.Entities;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -39,6 +41,25 @@ public sealed class DecommissionDeviceHandler
         var tokens = await _db.GetActiveRefreshTokensForDeviceAsync(device.Id, cancellationToken);
         foreach (var token in tokens)
             token.RevokedAt = now;
+
+        // Audit: device decommissioned
+        _db.AddAuditEvent(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = device.LegalEntityId,
+            EventType = "DEVICE_DECOMMISSIONED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = device.SiteCode,
+            Source = "DecommissionDeviceHandler",
+            Payload = JsonSerializer.Serialize(new
+            {
+                DeviceId = device.Id,
+                SiteCode = device.SiteCode,
+                RevokedTokenCount = tokens.Count,
+                DeactivatedAt = now,
+            })
+        });
 
         await _db.SaveChangesAsync(cancellationToken);
 

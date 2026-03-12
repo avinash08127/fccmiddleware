@@ -6,10 +6,12 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
 import android.os.Bundle
+import android.text.InputType
 import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -45,18 +47,18 @@ import org.koin.android.ext.android.inject
 import java.time.Instant
 
 /**
- * ProvisioningActivity — QR code scanner and device registration flow.
+ * ProvisioningActivity — QR code scanner and manual entry device registration flow.
  *
  * Shown on first launch (or after factory reset) when no registration exists.
- * Flow:
- *   1. User taps "Scan QR Code"
- *   2. Camera opens and scans QR containing { v, sc, cu, pt }
- *   3. Extracts bootstrap data (siteCode, cloudBaseUrl, provisioningToken)
- *   4. Collects device fingerprint (serial, model, OS, app version)
- *   5. Calls POST /api/v1/agent/register
- *   6. On success: stores tokens in Keystore, identity in EncryptedPrefs, config in Room
- *   7. Starts EdgeAgentForegroundService
- *   8. Navigates to DiagnosticsActivity
+ * Two provisioning paths:
+ *   A. QR code scan (preferred): camera scans QR containing { v, sc, cu, pt }
+ *   B. Manual entry (fallback): user types Cloud URL, Site Code, and Provisioning Token
+ * Both paths then:
+ *   1. Collect device fingerprint (serial, model, OS, app version)
+ *   2. Call POST /api/v1/agent/register
+ *   3. On success: store tokens in Keystore, identity in EncryptedPrefs, config in Room
+ *   4. Start EdgeAgentForegroundService
+ *   5. Navigate to DiagnosticsActivity
  */
 class ProvisioningActivity : AppCompatActivity() {
 
@@ -69,6 +71,7 @@ class ProvisioningActivity : AppCompatActivity() {
     private val keystoreManager: KeystoreManager by inject()
     private val cloudApiClient: CloudApiClient by inject()
     private val agentConfigDao: AgentConfigDao by inject()
+    private val tokenProvider: DeviceTokenProvider by inject()
 
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -77,10 +80,22 @@ class ProvisioningActivity : AppCompatActivity() {
         isLenient = true
     }
 
-    // UI elements
+    // UI elements — method selection screen
+    private lateinit var methodPanel: LinearLayout
+    private lateinit var scanButton: Button
+    private lateinit var manualEntryButton: Button
+
+    // UI elements — manual entry screen
+    private lateinit var manualPanel: LinearLayout
+    private lateinit var cloudUrlInput: EditText
+    private lateinit var siteCodeInput: EditText
+    private lateinit var tokenInput: EditText
+    private lateinit var manualRegisterButton: Button
+    private lateinit var manualBackButton: Button
+
+    // UI elements — shared status area
     private lateinit var statusText: TextView
     private lateinit var errorText: TextView
-    private lateinit var scanButton: Button
     private lateinit var progressBar: ProgressBar
 
     // QR scanner launcher
@@ -93,12 +108,37 @@ class ProvisioningActivity : AppCompatActivity() {
         setContentView(buildLayout())
 
         scanButton.setOnClickListener { startQrScan() }
+        manualEntryButton.setOnClickListener { showManualEntryScreen() }
+        manualBackButton.setOnClickListener { showMethodSelectionScreen() }
+        manualRegisterButton.setOnClickListener { submitManualEntry() }
     }
 
     override fun onDestroy() {
         activityScope.cancel()
         super.onDestroy()
     }
+
+    // ── Screen navigation ────────────────────────────────────────────────────
+
+    private fun showMethodSelectionScreen() {
+        methodPanel.visibility = View.VISIBLE
+        manualPanel.visibility = View.GONE
+        errorText.visibility = View.GONE
+        statusText.visibility = View.GONE
+        progressBar.visibility = View.GONE
+    }
+
+    private fun showManualEntryScreen() {
+        methodPanel.visibility = View.GONE
+        manualPanel.visibility = View.VISIBLE
+        errorText.visibility = View.GONE
+        statusText.visibility = View.GONE
+        progressBar.visibility = View.GONE
+        manualRegisterButton.isEnabled = true
+        manualBackButton.isEnabled = true
+    }
+
+    // ── QR code scan path ────────────────────────────────────────────────────
 
     private fun startQrScan() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -126,7 +166,7 @@ class ProvisioningActivity : AppCompatActivity() {
         ) {
             launchScanner()
         } else {
-            showError("Camera permission is required to scan provisioning QR codes")
+            showError("Camera permission is required to scan provisioning QR codes.\nYou can use manual entry instead.")
         }
     }
 
@@ -143,7 +183,7 @@ class ProvisioningActivity : AppCompatActivity() {
     private fun onScanResult(result: ScanIntentResult) {
         val contents = result.contents
         if (contents == null) {
-            showError("QR scan cancelled")
+            showError("QR scan cancelled. You can try again or use manual entry.")
             return
         }
 
@@ -156,6 +196,41 @@ class ProvisioningActivity : AppCompatActivity() {
 
         performRegistration(qrData)
     }
+
+    // ── Manual entry path ────────────────────────────────────────────────────
+
+    private fun submitManualEntry() {
+        val cloudUrl = cloudUrlInput.text.toString().trim()
+        val siteCode = siteCodeInput.text.toString().trim()
+        val token = tokenInput.text.toString().trim()
+
+        if (cloudUrl.isBlank()) {
+            showError("Please enter the Cloud URL.")
+            return
+        }
+        if (!cloudUrl.startsWith("https://")) {
+            showError("Cloud URL must start with https://")
+            return
+        }
+        if (siteCode.isBlank()) {
+            showError("Please enter the Site Code.")
+            return
+        }
+        if (token.isBlank()) {
+            showError("Please enter the Provisioning Token.")
+            return
+        }
+
+        Log.i(TAG, "Manual entry submitted, starting registration")
+        val bootstrapData = QrBootstrapData(
+            siteCode = siteCode,
+            cloudBaseUrl = cloudUrl.trimEnd('/'),
+            provisioningToken = token,
+        )
+        performRegistration(bootstrapData)
+    }
+
+    // ── QR payload parsing ───────────────────────────────────────────────────
 
     /**
      * Parse the QR code JSON payload.
@@ -194,9 +269,13 @@ class ProvisioningActivity : AppCompatActivity() {
         }
     }
 
+    // ── Cloud registration (shared by both paths) ────────────────────────────
+
     private fun performRegistration(qrData: QrBootstrapData) {
         showProgress("Registering device with cloud...")
         scanButton.isEnabled = false
+        manualRegisterButton.isEnabled = false
+        manualBackButton.isEnabled = false
 
         activityScope.launch {
             try {
@@ -212,16 +291,22 @@ class ProvisioningActivity : AppCompatActivity() {
                     is CloudRegistrationResult.Rejected -> {
                         showError("Registration rejected: ${result.errorCode} — ${result.message}")
                         scanButton.isEnabled = true
+                        manualRegisterButton.isEnabled = true
+                        manualBackButton.isEnabled = true
                     }
                     is CloudRegistrationResult.TransportError -> {
                         showError("Network error: ${result.message}. Check connectivity and try again.")
                         scanButton.isEnabled = true
+                        manualRegisterButton.isEnabled = true
+                        manualBackButton.isEnabled = true
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Registration failed", e)
                 showError("Registration failed: ${e.message}")
                 scanButton.isEnabled = true
+                manualRegisterButton.isEnabled = true
+                manualBackButton.isEnabled = true
             }
         }
     }
@@ -263,8 +348,7 @@ class ProvisioningActivity : AppCompatActivity() {
             val effectiveCloudBaseUrl = parsedSiteConfig?.sync?.cloudBaseUrl ?: qrData.cloudBaseUrl
             cloudApiClient.updateBaseUrl(effectiveCloudBaseUrl)
 
-            // 1. Store tokens in Android Keystore
-            val tokenProvider = KeystoreDeviceTokenProvider(keystoreManager, encryptedPrefs, cloudApiClient)
+            // 1. Store tokens in Android Keystore (use DI singleton to keep in-memory state consistent)
             tokenProvider.storeTokens(response.deviceToken, response.refreshToken)
 
             // 2. Store identity in EncryptedSharedPreferences
@@ -324,42 +408,166 @@ class ProvisioningActivity : AppCompatActivity() {
         statusText.visibility = View.GONE
     }
 
+    // ── Layout ───────────────────────────────────────────────────────────────
+
     private fun buildLayout(): View {
         val padding = (16 * resources.displayMetrics.density).toInt()
+        val halfPad = padding / 2
 
-        val layout = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(padding, padding, padding, padding)
         }
 
+        // ── Title (always visible)
         val title = TextView(this).apply {
             text = "FCC Edge Agent Provisioning"
             textSize = 22f
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, padding)
         }
-        layout.addView(title)
+        root.addView(title)
+
+        // ── Method selection panel ──────────────────────────────────
+        methodPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
 
         val description = TextView(this).apply {
-            text = "Scan the provisioning QR code from the management portal to register this device."
+            text = "Choose how to register this device with the cloud."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, padding * 2)
         }
-        layout.addView(description)
+        methodPanel.addView(description)
 
         scanButton = Button(this).apply {
             text = "Scan QR Code"
             textSize = 18f
         }
-        layout.addView(scanButton)
+        methodPanel.addView(scanButton)
 
+        val orLabel = TextView(this).apply {
+            text = "— or —"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setPadding(0, halfPad, 0, halfPad)
+            setTextColor(0xFF888888.toInt())
+        }
+        methodPanel.addView(orLabel)
+
+        manualEntryButton = Button(this).apply {
+            text = "Enter Manually"
+            textSize = 16f
+        }
+        methodPanel.addView(manualEntryButton)
+
+        root.addView(methodPanel)
+
+        // ── Manual entry panel (initially hidden) ───────────────────
+        manualPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+
+        val manualTitle = TextView(this).apply {
+            text = "Manual Provisioning"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, halfPad)
+        }
+        manualPanel.addView(manualTitle)
+
+        val manualDesc = TextView(this).apply {
+            text = "Enter the provisioning details from the admin portal."
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(0xFF666666.toInt())
+            setPadding(0, 0, 0, padding)
+        }
+        manualPanel.addView(manualDesc)
+
+        val cloudUrlLabel = TextView(this).apply {
+            text = "Cloud URL"
+            textSize = 14f
+            setPadding(0, 0, 0, halfPad / 2)
+        }
+        manualPanel.addView(cloudUrlLabel)
+
+        cloudUrlInput = EditText(this).apply {
+            hint = "https://api.fccmiddleware.io"
+            setText("https://api.fccmiddleware.io")
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine()
+            setPadding(halfPad, halfPad, halfPad, halfPad)
+        }
+        manualPanel.addView(cloudUrlInput)
+
+        val siteCodeLabel = TextView(this).apply {
+            text = "Site Code"
+            textSize = 14f
+            setPadding(0, halfPad, 0, halfPad / 2)
+        }
+        manualPanel.addView(siteCodeLabel)
+
+        siteCodeInput = EditText(this).apply {
+            hint = "e.g., SITE-001"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            setSingleLine()
+            setPadding(halfPad, halfPad, halfPad, halfPad)
+        }
+        manualPanel.addView(siteCodeInput)
+
+        val tokenLabel = TextView(this).apply {
+            text = "Provisioning Token"
+            textSize = 14f
+            setPadding(0, halfPad, 0, halfPad / 2)
+        }
+        manualPanel.addView(tokenLabel)
+
+        tokenInput = EditText(this).apply {
+            hint = "Paste the one-time token from the admin portal"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine()
+            setPadding(halfPad, halfPad, halfPad, halfPad)
+        }
+        manualPanel.addView(tokenInput)
+
+        val manualButtonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, padding, 0, 0)
+        }
+
+        manualBackButton = Button(this).apply {
+            text = "Back"
+            textSize = 16f
+        }
+        manualButtonRow.addView(manualBackButton)
+
+        val spacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(padding, 0)
+        }
+        manualButtonRow.addView(spacer)
+
+        manualRegisterButton = Button(this).apply {
+            text = "Register"
+            textSize = 16f
+        }
+        manualButtonRow.addView(manualRegisterButton)
+
+        manualPanel.addView(manualButtonRow)
+
+        root.addView(manualPanel)
+
+        // ── Shared status elements ──────────────────────────────────
         progressBar = ProgressBar(this).apply {
             visibility = View.GONE
             setPadding(0, padding, 0, 0)
         }
-        layout.addView(progressBar)
+        root.addView(progressBar)
 
         statusText = TextView(this).apply {
             visibility = View.GONE
@@ -367,7 +575,7 @@ class ProvisioningActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(0, padding, 0, 0)
         }
-        layout.addView(statusText)
+        root.addView(statusText)
 
         errorText = TextView(this).apply {
             visibility = View.GONE
@@ -376,10 +584,10 @@ class ProvisioningActivity : AppCompatActivity() {
             setTextColor(0xFFCC0000.toInt())
             setPadding(0, padding, 0, 0)
         }
-        layout.addView(errorText)
+        root.addView(errorText)
 
         val scrollView = ScrollView(this)
-        scrollView.addView(layout)
+        scrollView.addView(root)
         return scrollView
     }
 }

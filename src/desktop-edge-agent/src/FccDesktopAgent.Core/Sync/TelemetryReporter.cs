@@ -181,7 +181,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
             SchemaVersion = "1.0",
             DeviceId = config.DeviceId,
             SiteCode = config.SiteId,
-            LegalEntityId = config.SiteId, // TODO DEA-3.x: populate from device registration record
+            LegalEntityId = !string.IsNullOrWhiteSpace(config.LegalEntityId) ? config.LegalEntityId : config.SiteId,
             ReportedAtUtc = now,
             SequenceNumber = sequence,
             ConnectivityState = MapConnectivityState(snapshot.State),

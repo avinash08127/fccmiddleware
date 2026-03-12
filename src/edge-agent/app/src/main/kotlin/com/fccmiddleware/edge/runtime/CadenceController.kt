@@ -11,7 +11,9 @@ import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.preauth.PreAuthHandler
+import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudUploadWorker
+import com.fccmiddleware.edge.sync.CloudVersionCheckResult
 import com.fccmiddleware.edge.sync.ConfigPollWorker
 import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
 import kotlinx.coroutines.CoroutineScope
@@ -58,6 +60,10 @@ class CadenceController(
     private val preAuthCloudForwardWorker: PreAuthCloudForwardWorker? = null,
     /** Token provider — checked between worker calls to short-circuit on decommission. */
     private val tokenProvider: com.fccmiddleware.edge.sync.DeviceTokenProvider? = null,
+    /** Cloud API client — used for version check on startup. */
+    private val cloudApiClient: CloudApiClient? = null,
+    /** Agent version in semantic format (e.g. "1.0.0"). Used for version check on startup. */
+    private val agentVersion: String? = null,
     fccAdapter: IFccAdapter? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) {
@@ -79,6 +85,15 @@ class CadenceController(
         /** Run telemetry report every N ticks. */
         val telemetryTickFrequency: Int = 4,
     )
+
+    /**
+     * Version compatibility flag. Set to false when the cloud reports this agent version
+     * is below the minimum supported version. When false, FCC communication is disabled
+     * to prevent data format mismatches per requirements §15.13.
+     * Defaults to true (fail-open) — FCC is allowed until an explicit incompatibility is detected.
+     */
+    @Volatile
+    internal var versionCompatible: Boolean = true
 
     /** Late-bound: wired when FCC config becomes available after startup. */
     @Volatile
@@ -178,9 +193,14 @@ class CadenceController(
     fun start() {
         cadenceJob?.cancel()
         cadenceJob = scope.launch {
+            // Version check on startup — per requirements §15.13, agent calls
+            // /agent/version-check on startup and disables FCC communication if
+            // below minimum supported version.
+            performStartupVersionCheck()
+
             // If adapter has persistent connection, establish it before starting cadence
             val lifecycle = connectionLifecycle
-            if (lifecycle != null) {
+            if (lifecycle != null && versionCompatible) {
                 try {
                     lifecycle.setEventListener(fccEventListener)
                     lifecycle.connect()
@@ -341,9 +361,34 @@ class CadenceController(
      */
     private fun isDecommissioned(): Boolean = tokenProvider?.isDecommissioned() == true
 
+    private fun isReprovisioningRequired(): Boolean = tokenProvider?.isReprovisioningRequired() == true
+
     private suspend fun runTick(state: ConnectivityState, backlogDepth: Int) {
         if (isDecommissioned()) {
             Log.w(TAG, "runTick() skipped — device decommissioned")
+            return
+        }
+
+        if (isReprovisioningRequired()) {
+            Log.w(TAG, "runTick() skipped — re-provisioning required (refresh token expired)")
+            return
+        }
+
+        if (!versionCompatible) {
+            Log.w(TAG, "runTick() — FCC communication disabled (agent version below minimum). " +
+                "Cloud operations continue for telemetry and config updates.")
+            // Allow cloud operations (upload existing buffer, config poll, telemetry)
+            // but skip FCC polling to prevent data format mismatches.
+            if (state.hasInternet()) {
+                cloudUploadWorker.uploadPendingBatch()
+                if (isDecommissioned()) return
+                if (tickCount % config.telemetryTickFrequency == 0L) {
+                    cloudUploadWorker.reportTelemetry()
+                }
+                if (tickCount % config.configPollTickFrequency == 0L) {
+                    configPollWorker?.pollConfig()
+                }
+            }
             return
         }
 
@@ -434,6 +479,85 @@ class CadenceController(
                 return
             } catch (e: Exception) {
                 Log.w(TAG, "FCC reconnect attempt $attempt failed: ${e.message}")
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Startup version check
+    // -------------------------------------------------------------------------
+
+    /**
+     * Per requirements §15.13: call /agent/version-check on startup.
+     * If agent version is below minimum supported:
+     *   - Log a critical warning (alert site supervisor)
+     *   - Disable FCC communication until updated
+     * Fail-open: if the check cannot be completed (no token, network error),
+     * FCC communication remains enabled.
+     */
+    private suspend fun performStartupVersionCheck() {
+        val client = cloudApiClient ?: return
+        val version = agentVersion ?: return
+        val tp = tokenProvider ?: return
+
+        val token = tp.getAccessToken()
+        if (token == null) {
+            Log.w(TAG, "Version check skipped: no device token available (not yet registered)")
+            return
+        }
+
+        Log.i(TAG, "Performing startup version check (agentVersion=$version)")
+        val result = client.checkVersion(version, token)
+
+        when (result) {
+            is CloudVersionCheckResult.Success -> {
+                handleVersionCheckResponse(result.response, version)
+            }
+            is CloudVersionCheckResult.Unauthorized -> {
+                // Token may be expired; try refresh once
+                Log.d(TAG, "Version check received 401; refreshing token and retrying")
+                val refreshed = tp.refreshAccessToken()
+                if (refreshed) {
+                    val newToken = tp.getAccessToken()
+                    if (newToken != null) {
+                        val retryResult = client.checkVersion(version, newToken)
+                        if (retryResult is CloudVersionCheckResult.Success) {
+                            handleVersionCheckResponse(retryResult.response, version)
+                        } else {
+                            Log.w(TAG, "Version check failed after token refresh — allowing FCC (fail-open)")
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "Version check skipped: token refresh failed — allowing FCC (fail-open)")
+                }
+            }
+            is CloudVersionCheckResult.TransportError -> {
+                Log.w(TAG, "Version check failed: ${result.message} — allowing FCC (fail-open)")
+            }
+        }
+    }
+
+    private fun handleVersionCheckResponse(resp: com.fccmiddleware.edge.sync.VersionCheckResponse, version: String) {
+        if (!resp.compatible) {
+            versionCompatible = false
+            Log.e(
+                TAG,
+                "VERSION INCOMPATIBLE: agent version $version is below minimum " +
+                    "${resp.minimumVersion}. FCC communication DISABLED to prevent " +
+                    "data format mismatches. Update agent to at least ${resp.minimumVersion}." +
+                    (resp.updateUrl?.let { " Download: $it" } ?: ""),
+            )
+        } else {
+            versionCompatible = true
+            if (resp.updateAvailable) {
+                Log.i(
+                    TAG,
+                    "Version check passed (compatible). Update available: " +
+                        "${resp.latestVersion}" +
+                        (resp.releaseNotes?.let { " — $it" } ?: ""),
+                )
+            } else {
+                Log.i(TAG, "Version check passed (compatible, up to date)")
             }
         }
     }

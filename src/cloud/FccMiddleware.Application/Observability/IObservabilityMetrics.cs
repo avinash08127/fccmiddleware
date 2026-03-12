@@ -12,6 +12,8 @@ public interface IObservabilityMetrics
 
     void RecordReconciliationMatchRate(Guid legalEntityId, string siteCode, string matchMethod, bool matched);
 
+    void RecordReconciliationSkipped(Guid legalEntityId, string siteCode, string reason);
+
     void RecordEdgeBufferDepth(Guid legalEntityId, string siteCode, Guid deviceId, int pendingUploadCount);
 
     void RecordEdgeSyncLag(Guid legalEntityId, string siteCode, Guid deviceId, double syncLagHours);

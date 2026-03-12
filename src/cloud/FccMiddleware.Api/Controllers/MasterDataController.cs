@@ -116,6 +116,9 @@ public sealed class MasterDataController : ControllerBase
                 RequireCustomerTaxId = r.RequireCustomerTaxId,
                 FiscalReceiptRequired = r.FiscalReceiptRequired,
                 OdooSiteId = r.OdooSiteId,
+                AmountTolerancePercent = r.AmountTolerancePercent,
+                AmountToleranceAbsolute = r.AmountToleranceAbsolute,
+                TimeWindowMinutes = r.TimeWindowMinutes,
                 IsActive        = r.IsActive
             }).ToList()
         };

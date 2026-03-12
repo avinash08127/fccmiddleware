@@ -1,3 +1,6 @@
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using FccDesktopAgent.Core.Adapter;
 using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Buffer;
@@ -59,6 +62,7 @@ public static class ServiceCollectionExtensions
 
         // Named HTTP client for cloud backend calls — longer timeout, internet-facing.
         // DEA-6.2: Enforce TLS for all cloud communication.
+        // MISSING-007: Certificate pinning — matches Android agent's bootstrap pins.
         services.AddHttpClient("cloud", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(30);
@@ -68,6 +72,7 @@ public static class ServiceCollectionExtensions
             // Enforce TLS 1.2+ for all cloud communication (architecture rule: TLS enforced)
             SslProtocols = System.Security.Authentication.SslProtocols.Tls12
                          | System.Security.Authentication.SslProtocols.Tls13,
+            ServerCertificateCustomValidationCallback = CertificatePinValidator.Validate,
         });
 
         // FCC adapter factory (DEA-2.5: pre-auth handler support)
@@ -100,6 +105,9 @@ public static class ServiceCollectionExtensions
         // DEA-3.4: Telemetry reporter and error tracker.
         services.AddSingleton<IErrorCountTracker, ErrorCountTracker>();
         services.AddSingleton<ITelemetryReporter, TelemetryReporter>();
+
+        // Version checker — called on startup to validate agent compatibility with cloud.
+        services.AddSingleton<IVersionChecker, VersionCheckService>();
 
         return services;
     }

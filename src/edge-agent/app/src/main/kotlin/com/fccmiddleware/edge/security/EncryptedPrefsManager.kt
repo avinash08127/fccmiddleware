@@ -41,6 +41,8 @@ class EncryptedPrefsManager(context: Context) {
         const val KEY_IS_DECOMMISSIONED = "is_decommissioned"
         const val KEY_DEVICE_TOKEN_ENCRYPTED = "device_token_enc"
         const val KEY_REFRESH_TOKEN_ENCRYPTED = "refresh_token_enc"
+        const val KEY_RUNTIME_CERTIFICATE_PINS = "runtime_certificate_pins"
+        const val KEY_REPROVISIONING_REQUIRED = "reprovisioning_required"
     }
 
     // No fallback to regular SharedPreferences — storing sensitive identity data
@@ -97,6 +99,16 @@ class EncryptedPrefsManager(context: Context) {
             prefs.edit().putBoolean(KEY_IS_DECOMMISSIONED, value).commit()
         }
 
+    /**
+     * True if the refresh token has expired and the device needs re-provisioning.
+     * Uses commit() (synchronous) for the same crash-safety reasons as [isDecommissioned].
+     */
+    var isReprovisioningRequired: Boolean
+        get() = prefs.getBoolean(KEY_REPROVISIONING_REQUIRED, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_REPROVISIONING_REQUIRED, value).commit()
+        }
+
     // ---- Encrypted token blobs (Keystore-encrypted, stored as Base64) ----
 
     fun storeDeviceTokenBlob(encoded: String) {
@@ -124,6 +136,9 @@ class EncryptedPrefsManager(context: Context) {
         legalEntityId: String,
         cloudBaseUrl: String,
     ) {
+        // Use commit() (synchronous) instead of apply() (async) to ensure registration
+        // data is durably persisted before the foreground service starts. An async apply()
+        // could race with the service reading isRegistered=false before the write completes.
         prefs.edit()
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_SITE_CODE, siteCode)
@@ -131,9 +146,31 @@ class EncryptedPrefsManager(context: Context) {
             .putString(KEY_CLOUD_BASE_URL, cloudBaseUrl)
             .putBoolean(KEY_IS_REGISTERED, true)
             .putBoolean(KEY_IS_DECOMMISSIONED, false)
-            .apply()
+            .putBoolean(KEY_REPROVISIONING_REQUIRED, false)
+            .commit()
         Log.i(TAG, "Registration data saved for site=$siteCode")
     }
+
+    // ---- Runtime certificate pins (from SiteConfig) ----
+
+    /**
+     * Store runtime certificate pins delivered via SiteConfig from cloud.
+     * These are preferred over bootstrap pins on next app restart.
+     * Stored as comma-separated SHA-256 hashes.
+     */
+    var runtimeCertificatePins: List<String>
+        get() {
+            val stored = prefs.getString(KEY_RUNTIME_CERTIFICATE_PINS, null)
+            return if (stored.isNullOrBlank()) emptyList()
+            else stored.split(",").filter { it.isNotBlank() }
+        }
+        set(value) {
+            if (value.isEmpty()) {
+                prefs.edit().remove(KEY_RUNTIME_CERTIFICATE_PINS).apply()
+            } else {
+                prefs.edit().putString(KEY_RUNTIME_CERTIFICATE_PINS, value.joinToString(",")).apply()
+            }
+        }
 
     /**
      * Clear all registration data. Used during re-provisioning.

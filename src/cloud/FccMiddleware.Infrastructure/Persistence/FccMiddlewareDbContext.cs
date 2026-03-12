@@ -402,6 +402,19 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         await Set<BootstrapToken>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(t => t.TokenHash == tokenHash, ct);
 
+    async Task<BootstrapToken?> IRegistrationDbContext.FindBootstrapTokenByIdAsync(Guid tokenId, CancellationToken ct) =>
+        await Set<BootstrapToken>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == tokenId, ct);
+
+    async Task<int> IRegistrationDbContext.CountActiveBootstrapTokensForSiteAsync(
+        string siteCode, Guid legalEntityId, CancellationToken ct) =>
+        await Set<BootstrapToken>().IgnoreQueryFilters()
+            .CountAsync(t =>
+                t.SiteCode == siteCode
+                && t.LegalEntityId == legalEntityId
+                && t.Status == ProvisioningTokenStatus.ACTIVE
+                && t.ExpiresAt > DateTimeOffset.UtcNow, ct);
+
     async Task<Site?> IRegistrationDbContext.FindSiteBySiteCodeAsync(string siteCode, CancellationToken ct) =>
         await Set<Site>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.SiteCode == siteCode, ct);

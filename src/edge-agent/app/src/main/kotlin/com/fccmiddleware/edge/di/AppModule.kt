@@ -57,7 +57,7 @@ val appModule = module {
     // -------------------------------------------------------------------------
     single { KeystoreManager() }
     single { EncryptedPrefsManager(androidContext()) }
-    single { ConfigManager(agentConfigDao = get()) }
+    single { ConfigManager(agentConfigDao = get(), keystoreManager = get(), encryptedPrefsManager = get()) }
     single { FccRuntimeState() }
 
     // -------------------------------------------------------------------------
@@ -74,11 +74,20 @@ val appModule = module {
         // during device registration (before SiteConfig delivers runtime pins).
         // These are SHA-256 hashes of the intermediate CA public keys for the
         // known cloud endpoint(s). Update when rotating cloud TLS certificates.
-        // TODO (EA-2.x): once SiteConfig delivers runtime pins, prefer those over bootstrap pins.
-        val certificatePins = listOf(
+        val bootstrapPins = listOf(
             "sha256/YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=", // Primary intermediate CA
             "sha256/Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=", // Backup intermediate CA
         )
+        // Prefer runtime pins from SiteConfig (stored in EncryptedPrefs) over bootstrap pins.
+        // This enables certificate pin rotation without APK update per security spec §5.3.
+        val runtimePins = encryptedPrefs.runtimeCertificatePins
+        val certificatePins = if (runtimePins.isNotEmpty()) {
+            android.util.Log.i("AppModule", "Using ${runtimePins.size} runtime certificate pin(s) from SiteConfig")
+            runtimePins
+        } else {
+            android.util.Log.i("AppModule", "Using ${bootstrapPins.size} bootstrap certificate pin(s)")
+            bootstrapPins
+        }
         HttpCloudApiClient.create(baseUrl, certificatePins)
     }
 
@@ -233,6 +242,9 @@ val appModule = module {
             configPollWorker = get(),
             preAuthCloudForwardWorker = get(),
             tokenProvider = get(),
+            cloudApiClient = get(),
+            agentVersion = androidContext().packageManager
+                .getPackageInfo(androidContext().packageName, 0).versionName ?: "1.0.0",
         )
     }
 

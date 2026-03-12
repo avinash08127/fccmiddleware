@@ -53,4 +53,25 @@ interface DeviceTokenProvider {
      * Called by [CloudUploadWorker] on that specific error code.
      */
     fun markDecommissioned()
+
+    /**
+     * True if the refresh token has expired and the device needs re-provisioning.
+     * Unlike decommission, re-provisioning can restore the device to active state
+     * with a new bootstrap token.
+     */
+    fun isReprovisioningRequired(): Boolean
+
+    /**
+     * Marks the device as requiring re-provisioning. Called when the refresh
+     * token has expired (401 from token refresh endpoint). Clears registration
+     * state so the device routes to [ProvisioningActivity] on next startup or
+     * when the foreground service detects this flag.
+     */
+    fun markReprovisioningRequired()
+
+    /**
+     * Stores the device token and refresh token after initial provisioning.
+     * Called by [ProvisioningActivity] on successful registration.
+     */
+    fun storeTokens(deviceToken: String, refreshToken: String)
 }

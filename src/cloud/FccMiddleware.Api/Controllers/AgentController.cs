@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Transactions;
 using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Observability;
@@ -25,6 +26,7 @@ namespace FccMiddleware.Api.Controllers;
 /// POST /api/v1/agent/register               — register a new device using a bootstrap token
 /// POST /api/v1/agent/token/refresh           — refresh device JWT (token rotation)
 /// POST /api/v1/admin/bootstrap-tokens        — generate a bootstrap token for a site
+/// DELETE /api/v1/admin/bootstrap-tokens/{tokenId} — revoke a bootstrap token before expiry
 /// POST /api/v1/admin/agent/{deviceId}/decommission — decommission a device
 /// </summary>
 [ApiController]
@@ -87,6 +89,42 @@ public sealed class AgentController : ControllerBase
     }
 
     /// <summary>
+    /// Revokes an active bootstrap token so it can no longer be used for registration.
+    /// </summary>
+    [HttpDelete("api/v1/admin/bootstrap-tokens/{tokenId}")]
+    [Authorize(Policy = "PortalAdminWrite")]
+    [ProducesResponseType(typeof(RevokeBootstrapTokenResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> RevokeBootstrapToken(
+        Guid tokenId,
+        CancellationToken cancellationToken)
+    {
+        var command = new RevokeBootstrapTokenCommand
+        {
+            TokenId = tokenId,
+            RevokedBy = User.Identity?.Name ?? "system"
+        };
+
+        var result = await _mediator.Send(command, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error!.Code switch
+            {
+                "TOKEN_NOT_FOUND" => NotFound(BuildError(result.Error.Code, result.Error.Message)),
+                _ => Conflict(BuildError(result.Error.Code, result.Error.Message))
+            };
+        }
+
+        return Ok(new RevokeBootstrapTokenResponse
+        {
+            TokenId = result.Value!.TokenId,
+            RevokedAt = result.Value.RevokedAt
+        });
+    }
+
+    /// <summary>
     /// Registers a new Edge Agent device using a single-use bootstrap token.
     /// The bootstrap token is passed in the X-Provisioning-Token header.
     /// </summary>
@@ -125,6 +163,12 @@ public sealed class AgentController : ControllerBase
             ReplacePreviousAgent = request.ReplacePreviousAgent
         };
 
+        // BUG-023: Wrap registration + config assembly in a transaction so the bootstrap
+        // token is not consumed if config assembly fails. Without this, a config failure
+        // leaves the device registered with token USED but the client receives HTTP 500
+        // and cannot retry (token is single-use).
+        using var txScope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+
         var result = await _mediator.Send(command, cancellationToken);
 
         if (result.IsFailure)
@@ -162,12 +206,17 @@ public sealed class AgentController : ControllerBase
                 value.SiteCode,
                 siteConfigResult.Error?.Code ?? "CONFIG_UNAVAILABLE");
 
+            // Transaction rolls back — registration and token consumption are reverted.
+            // The device can retry with the same bootstrap token.
             return StatusCode(StatusCodes.Status500InternalServerError,
                 BuildError(
                     "INITIAL_SITE_CONFIG_UNAVAILABLE",
-                    "Device registration completed, but the initial site configuration could not be loaded.",
+                    "Device registration failed because the initial site configuration could not be loaded. The bootstrap token has not been consumed — retry is safe.",
                     retryable: true));
         }
+
+        // Both registration and config assembly succeeded — commit the transaction.
+        txScope.Complete();
 
         return StatusCode(StatusCodes.Status201Created, new DeviceRegistrationApiResponse
         {
@@ -383,10 +432,8 @@ public sealed class AgentController : ControllerBase
             UpdateRequired = value.UpdateRequired,
             UpdateUrl = value.UpdateUrl,
             AgentVersion = value.AgentVersion,
-            MinSupportedVersion = value.MinimumVersion,
             UpdateAvailable = value.UpdateAvailable,
             ReleaseNotes = value.ReleaseNotes,
-            DownloadUrl = value.UpdateUrl
         });
     }
 

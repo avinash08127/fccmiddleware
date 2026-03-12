@@ -56,9 +56,10 @@ export const EMPTY_FILTERS: TransactionFilters = {
     <p-panel header="Filters" [toggleable]="true" styleClass="filters-panel">
       <div class="filters-grid">
         <div class="filter-field">
-          <label>Transaction ID</label>
+          <label for="filter-transaction-id">Transaction ID</label>
           <input
             pInputText
+            id="filter-transaction-id"
             [(ngModel)]="filters.fccTransactionId"
             placeholder="FCC Transaction ID"
             (ngModelChange)="emit()"
@@ -66,9 +67,10 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field">
-          <label>Odoo Order ID</label>
+          <label for="filter-odoo-order-id">Odoo Order ID</label>
           <input
             pInputText
+            id="filter-odoo-order-id"
             [(ngModel)]="filters.odooOrderId"
             placeholder="Odoo Order ID"
             (ngModelChange)="emit()"
@@ -76,8 +78,9 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field">
-          <label>Site</label>
+          <label for="filter-site">Site</label>
           <p-select
+            inputId="filter-site"
             [options]="siteOptions"
             [(ngModel)]="filters.siteCode"
             placeholder="All Sites"
@@ -87,8 +90,9 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field">
-          <label>Status</label>
+          <label for="filter-status">Status</label>
           <p-select
+            inputId="filter-status"
             [options]="statusOptions"
             [(ngModel)]="filters.status"
             placeholder="All Statuses"
@@ -98,8 +102,9 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field">
-          <label>FCC Vendor</label>
+          <label for="filter-fcc-vendor">FCC Vendor</label>
           <p-select
+            inputId="filter-fcc-vendor"
             [options]="vendorOptions"
             [(ngModel)]="filters.fccVendor"
             placeholder="All Vendors"
@@ -109,8 +114,9 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field">
-          <label>Ingestion Source</label>
+          <label for="filter-ingestion-source">Ingestion Source</label>
           <p-select
+            inputId="filter-ingestion-source"
             [options]="ingestionSourceOptions"
             [(ngModel)]="filters.ingestionSource"
             placeholder="All Sources"
@@ -120,8 +126,9 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field">
-          <label>Pump Number</label>
+          <label for="filter-pump-number">Pump Number</label>
           <p-inputnumber
+            inputId="filter-pump-number"
             [(ngModel)]="filters.pumpNumber"
             placeholder="Any pump"
             [showButtons]="false"
@@ -131,8 +138,9 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field filter-field--wide">
-          <label>Started At (range)</label>
+          <label for="filter-date-range">Started At (range)</label>
           <app-date-range-picker
+            id="filter-date-range"
             placeholder="Select date range"
             [(ngModel)]="filters.dateRange"
             (rangeSelected)="onDateRangeSelected($event)"
@@ -140,8 +148,8 @@ export const EMPTY_FILTERS: TransactionFilters = {
         </div>
 
         <div class="filter-field filter-field--toggle">
-          <p-toggleswitch [(ngModel)]="filters.isStale" (ngModelChange)="emit()" />
-          <label>Stale only</label>
+          <p-toggleswitch inputId="filter-stale-only" [(ngModel)]="filters.isStale" (ngModelChange)="emit()" />
+          <label for="filter-stale-only">Stale only</label>
         </div>
 
         <div class="filter-field filter-field--action">

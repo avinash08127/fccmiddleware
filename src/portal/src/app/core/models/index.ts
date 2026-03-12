@@ -8,3 +8,4 @@ export * from './master-data.model';
 export * from './audit.model';
 export * from './dlq.model';
 export * from './settings.model';
+export * from './bootstrap-token.model';

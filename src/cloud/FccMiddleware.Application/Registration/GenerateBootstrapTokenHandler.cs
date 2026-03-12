@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
@@ -10,6 +11,8 @@ namespace FccMiddleware.Application.Registration;
 public sealed class GenerateBootstrapTokenHandler
     : IRequestHandler<GenerateBootstrapTokenCommand, Result<GenerateBootstrapTokenResult>>
 {
+    internal const int MaxActiveTokensPerSite = 5;
+
     private readonly IRegistrationDbContext _db;
     private readonly ILogger<GenerateBootstrapTokenHandler> _logger;
 
@@ -32,6 +35,14 @@ public sealed class GenerateBootstrapTokenHandler
             return Result<GenerateBootstrapTokenResult>.Failure("SITE_ENTITY_MISMATCH",
                 "Site does not belong to the specified legal entity.");
 
+        // Enforce active bootstrap token limit per site
+        var activeCount = await _db.CountActiveBootstrapTokensForSiteAsync(
+            request.SiteCode, request.LegalEntityId, cancellationToken);
+        if (activeCount >= MaxActiveTokensPerSite)
+            return Result<GenerateBootstrapTokenResult>.Failure("ACTIVE_TOKEN_LIMIT_REACHED",
+                $"Site '{request.SiteCode}' already has {activeCount} active bootstrap token(s). " +
+                $"Maximum allowed is {MaxActiveTokensPerSite}. Revoke or wait for existing tokens to expire before generating new ones.");
+
         // Generate 32-byte random token, Base64URL-encoded
         var rawBytes = RandomNumberGenerator.GetBytes(32);
         var rawToken = Base64UrlEncode(rawBytes);
@@ -53,6 +64,26 @@ public sealed class GenerateBootstrapTokenHandler
         };
 
         _db.AddBootstrapToken(token);
+
+        // Audit: bootstrap token generation
+        _db.AddAuditEvent(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = request.LegalEntityId,
+            EventType = "BOOTSTRAP_TOKEN_GENERATED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = request.SiteCode,
+            Source = "GenerateBootstrapTokenHandler",
+            Payload = JsonSerializer.Serialize(new
+            {
+                TokenId = token.Id,
+                SiteCode = request.SiteCode,
+                CreatedBy = request.CreatedBy,
+                ExpiresAt = expiresAt,
+            })
+        });
+
         await _db.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("Bootstrap token generated for site {SiteCode}, expires at {ExpiresAt}",

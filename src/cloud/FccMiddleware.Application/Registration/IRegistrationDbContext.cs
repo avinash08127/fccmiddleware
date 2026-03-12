@@ -9,6 +9,8 @@ namespace FccMiddleware.Application.Registration;
 public interface IRegistrationDbContext
 {
     Task<BootstrapToken?> FindBootstrapTokenByHashAsync(string tokenHash, CancellationToken ct);
+    Task<BootstrapToken?> FindBootstrapTokenByIdAsync(Guid tokenId, CancellationToken ct);
+    Task<int> CountActiveBootstrapTokensForSiteAsync(string siteCode, Guid legalEntityId, CancellationToken ct);
     Task<Site?> FindSiteBySiteCodeAsync(string siteCode, CancellationToken ct);
     Task<AgentRegistration?> FindActiveAgentForSiteAsync(Guid siteId, CancellationToken ct);
     Task<AgentRegistration?> FindAgentByIdAsync(Guid deviceId, CancellationToken ct);

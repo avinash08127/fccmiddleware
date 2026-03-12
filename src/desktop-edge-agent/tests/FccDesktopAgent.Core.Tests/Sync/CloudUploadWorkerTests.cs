@@ -126,7 +126,6 @@ public sealed class CloudUploadWorkerTests : IDisposable
                 new UploadResultItem
                 {
                     FccTransactionId = fccId,
-                    SiteCode = siteCode,
                     Outcome = outcome,
                 }
             ],
@@ -212,12 +211,12 @@ public sealed class CloudUploadWorkerTests : IDisposable
         {
             Results =
             [
-                new UploadResultItem { FccTransactionId = "FCC-A", SiteCode = "SITE-A", Outcome = "ACCEPTED" },
-                new UploadResultItem { FccTransactionId = "FCC-B", SiteCode = "SITE-A", Outcome = "DUPLICATE" },
+                new UploadResultItem { FccTransactionId = "FCC-A", Outcome = "ACCEPTED" },
+                new UploadResultItem { FccTransactionId = "FCC-B", Outcome = "DUPLICATE" },
                 new UploadResultItem
                 {
-                    FccTransactionId = "FCC-C", SiteCode = "SITE-A", Outcome = "REJECTED",
-                    Error = new UploadResultError { Code = "SCHEMA_ERROR", Message = "bad data" }
+                    FccTransactionId = "FCC-C", Outcome = "REJECTED",
+                    ErrorCode = "SCHEMA_ERROR", ErrorMessage = "bad data"
                 },
             ],
             AcceptedCount = 1, DuplicateCount = 1, RejectedCount = 1,
@@ -257,7 +256,7 @@ public sealed class CloudUploadWorkerTests : IDisposable
 
             var response = new UploadResponse
             {
-                Results = [new UploadResultItem { FccTransactionId = "FCC-401", SiteCode = "SITE-A", Outcome = "ACCEPTED" }],
+                Results = [new UploadResultItem { FccTransactionId = "FCC-401", Outcome = "ACCEPTED" }],
                 AcceptedCount = 1,
             };
             return FakeHandler.JsonResponse(JsonSerializer.Serialize(response));
@@ -387,7 +386,7 @@ public sealed class CloudUploadWorkerTests : IDisposable
             captured = req;
             var response = new UploadResponse
             {
-                Results = [new UploadResultItem { FccTransactionId = "FCC-HDR", SiteCode = "SITE-A", Outcome = "ACCEPTED" }],
+                Results = [new UploadResultItem { FccTransactionId = "FCC-HDR", Outcome = "ACCEPTED" }],
                 AcceptedCount = 1,
             };
             return FakeHandler.JsonResponse(JsonSerializer.Serialize(response));
@@ -424,8 +423,8 @@ public sealed class CloudUploadWorkerTests : IDisposable
             {
                 Results =
                 [
-                    new UploadResultItem { FccTransactionId = "FCC-OLD", SiteCode = "SITE-A", Outcome = "ACCEPTED" },
-                    new UploadResultItem { FccTransactionId = "FCC-NEW", SiteCode = "SITE-A", Outcome = "ACCEPTED" },
+                    new UploadResultItem { FccTransactionId = "FCC-OLD", Outcome = "ACCEPTED" },
+                    new UploadResultItem { FccTransactionId = "FCC-NEW", Outcome = "ACCEPTED" },
                 ],
                 AcceptedCount = 2,
             };

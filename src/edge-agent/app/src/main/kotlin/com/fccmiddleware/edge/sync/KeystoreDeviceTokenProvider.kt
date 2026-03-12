@@ -48,6 +48,14 @@ class KeystoreDeviceTokenProvider(
     private var decommissionedCached: Boolean = false
 
     /**
+     * Volatile in-memory cache of the re-provisioning flag.
+     * Same pattern as [decommissionedCached] — eliminates race window between
+     * detection and SharedPreferences update.
+     */
+    @Volatile
+    private var reprovisioningCached: Boolean = false
+
+    /**
      * Mutex serializing [refreshAccessToken] calls so that concurrent 401
      * handlers (CloudUploadWorker, ConfigPollWorker, PreAuthCloudForwardWorker)
      * do not race to issue duplicate refresh requests. The first caller performs
@@ -101,6 +109,7 @@ class KeystoreDeviceTokenProvider(
             }
             is CloudTokenRefreshResult.Unauthorized -> {
                 Log.w(TAG, "Refresh token expired or revoked — re-provisioning required")
+                markReprovisioningRequired()
                 false
             }
             is CloudTokenRefreshResult.Forbidden -> {
@@ -131,6 +140,23 @@ class KeystoreDeviceTokenProvider(
         decommissionedCached = true
         encryptedPrefs.isDecommissioned = true
         Log.w(TAG, "Device marked as decommissioned — all sync stopped")
+    }
+
+    override fun isReprovisioningRequired(): Boolean {
+        if (reprovisioningCached) return true
+        val persisted = encryptedPrefs.isReprovisioningRequired
+        if (persisted) reprovisioningCached = true
+        return persisted
+    }
+
+    override fun markReprovisioningRequired() {
+        // Set volatile flag FIRST for immediate visibility, then persist.
+        reprovisioningCached = true
+        encryptedPrefs.isReprovisioningRequired = true
+        // Clear registration so LauncherActivity routes to ProvisioningActivity
+        // on next app startup.
+        encryptedPrefs.isRegistered = false
+        Log.w(TAG, "Device marked as requiring re-provisioning — refresh token expired")
     }
 
     /**

@@ -22,10 +22,13 @@ import com.fccmiddleware.edge.runtime.CadenceController
 import com.fccmiddleware.edge.runtime.FccRuntimeState
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.sync.CloudApiClient
+import com.fccmiddleware.edge.sync.DeviceTokenProvider
+import com.fccmiddleware.edge.ui.ProvisioningActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
@@ -58,6 +61,7 @@ class EdgeAgentForegroundService : Service() {
     private val fccRuntimeState: FccRuntimeState by inject()
     private val ingestionOrchestrator: IngestionOrchestrator by inject()
     private val preAuthHandler: PreAuthHandler by inject()
+    private val tokenProvider: DeviceTokenProvider by inject()
 
     @Volatile
     private var lastAppliedConfigVersion: Int? = null
@@ -95,6 +99,12 @@ class EdgeAgentForegroundService : Service() {
             localApiServer.start()
             cadenceController.start()
             observeConfigForRuntimeUpdates()
+        }
+
+        // Monitor for re-provisioning requirement (refresh token expired).
+        // Checks periodically and navigates to ProvisioningActivity if needed.
+        serviceScope.launch {
+            monitorReprovisioningState()
         }
 
         return START_STICKY
@@ -190,6 +200,36 @@ class EdgeAgentForegroundService : Service() {
         preAuthHandler.wireFccAdapter(null)
         localApiServer.wireFccAdapter(null)
         cadenceController.updateFccAdapter(null)
+    }
+
+    /**
+     * Periodically checks if the device requires re-provisioning (refresh token expired).
+     * When detected, stops all background work and navigates to ProvisioningActivity
+     * so the user can re-provision with a new bootstrap token.
+     */
+    private suspend fun monitorReprovisioningState() {
+        while (true) {
+            delay(10_000L) // Check every 10 seconds
+            if (tokenProvider.isReprovisioningRequired()) {
+                Log.w(TAG, "Re-provisioning required — stopping service and navigating to provisioning")
+                cadenceController.stop()
+                localApiServer.stop()
+                navigateToProvisioning()
+                stopSelf()
+                return
+            }
+        }
+    }
+
+    /**
+     * Navigates to ProvisioningActivity with CLEAR_TASK so the provisioning
+     * wizard becomes the only activity in the task stack.
+     */
+    private fun navigateToProvisioning() {
+        val intent = Intent(this, ProvisioningActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        startActivity(intent)
     }
 
     private fun failRuntimeReadiness(reason: String): Boolean {

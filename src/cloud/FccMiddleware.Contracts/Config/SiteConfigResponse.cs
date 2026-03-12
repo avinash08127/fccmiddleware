@@ -97,6 +97,14 @@ public sealed record SyncDto
     public required int MaxReplayBackoffSeconds { get; init; }
     public required int InitialReplayBackoffSeconds { get; init; }
     public required int MaxRecordsPerUploadWindow { get; init; }
+
+    /// <summary>
+    /// Runtime certificate pins (SHA-256 public key hashes) for TLS certificate pinning.
+    /// Format: "sha256/BASE64HASH=". When non-empty, agents should prefer these over
+    /// bootstrap pins bundled in the APK/installer. Enables pin rotation without app update.
+    /// Per security spec §5.3: 30-day overlap window for graceful rotation.
+    /// </summary>
+    public string[]? CertificatePins { get; init; }
 }
 
 public sealed record BufferDto

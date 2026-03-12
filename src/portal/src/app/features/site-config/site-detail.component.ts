@@ -217,9 +217,10 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
 
           <div class="form-grid">
             <div class="form-field">
-              <label>Amount Tolerance (%)</label>
+              <label for="tolerance-amt-pct">Amount Tolerance (%)</label>
               @if (editMode()) {
                 <p-inputnumber
+                  id="tolerance-amt-pct"
                   [(ngModel)]="draftTolerance.amountTolerancePct"
                   [min]="0"
                   [max]="100"
@@ -235,9 +236,10 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
             </div>
 
             <div class="form-field">
-              <label>Amount Tolerance Absolute (minor units)</label>
+              <label for="tolerance-amt-abs">Amount Tolerance Absolute (minor units)</label>
               @if (editMode()) {
                 <p-inputnumber
+                  id="tolerance-amt-abs"
                   [(ngModel)]="draftTolerance.amountToleranceAbsoluteMinorUnits"
                   [min]="0"
                   [showButtons]="false"
@@ -251,9 +253,10 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
             </div>
 
             <div class="form-field">
-              <label>Time Window (minutes)</label>
+              <label for="tolerance-time-win">Time Window (minutes)</label>
               @if (editMode()) {
                 <p-inputnumber
+                  id="tolerance-time-win"
                   [(ngModel)]="draftTolerance.timeWindowMinutes"
                   [min]="1"
                   [max]="1440"
@@ -279,9 +282,10 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
 
           <div class="form-grid">
             <div class="form-field">
-              <label>Fiscalization Mode</label>
+              <label for="fiscal-mode">Fiscalization Mode</label>
               @if (editMode()) {
                 <p-select
+                  id="fiscal-mode"
                   [options]="fiscalizationModeOptions"
                   [(ngModel)]="draftFiscalization.mode"
                   placeholder="Select mode"
@@ -293,9 +297,10 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
 
             @if (draftFiscalization.mode !== 'NONE' && draftFiscalization.mode) {
               <div class="form-field">
-                <label>Tax Authority Endpoint</label>
+                <label for="fiscal-tax-endpoint">Tax Authority Endpoint</label>
                 @if (editMode()) {
                   <input
+                    id="fiscal-tax-endpoint"
                     pInputText
                     [(ngModel)]="draftFiscalization.taxAuthorityEndpoint"
                     placeholder="https://…"
@@ -310,18 +315,20 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
 
             <div class="form-field form-field--toggle">
               <p-toggleswitch
+                id="fiscal-require-tax-id"
                 [(ngModel)]="draftFiscalization.requireCustomerTaxId"
                 [disabled]="!editMode()"
               />
-              <label>Require Customer Tax ID</label>
+              <label for="fiscal-require-tax-id">Require Customer Tax ID</label>
             </div>
 
             <div class="form-field form-field--toggle">
               <p-toggleswitch
+                id="fiscal-receipt-required"
                 [(ngModel)]="draftFiscalization.fiscalReceiptRequired"
                 [disabled]="!editMode()"
               />
-              <label>Fiscal Receipt Required</label>
+              <label for="fiscal-receipt-required">Fiscal Receipt Required</label>
             </div>
           </div>
         </p-card>

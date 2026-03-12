@@ -117,6 +117,23 @@ public sealed class RefreshDeviceTokenHandler
 
         _db.AddDeviceRefreshToken(newRefreshToken);
 
+        // Audit: token refresh
+        _db.AddAuditEvent(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = device.LegalEntityId,
+            EventType = "DEVICE_TOKEN_REFRESHED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = device.SiteCode,
+            Source = "RefreshDeviceTokenHandler",
+            Payload = JsonSerializer.Serialize(new
+            {
+                DeviceId = device.Id,
+                RefreshedAt = now,
+            })
+        });
+
         // BUG-008: Use optimistic concurrency to prevent race condition.
         // RevokedAt is configured as a concurrency token — if another request already
         // revoked this token, TrySaveChangesAsync returns false instead of creating

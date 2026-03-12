@@ -35,8 +35,9 @@ export const EMPTY_RECON_FILTERS: ReconciliationFilters = {
     <p-panel header="Filters" [toggleable]="true" styleClass="filters-panel">
       <div class="filters-grid">
         <div class="filter-field">
-          <label>Site</label>
+          <label for="recon-filter-site">Site</label>
           <p-select
+            inputId="recon-filter-site"
             [options]="siteOptions"
             [(ngModel)]="filters.siteCode"
             placeholder="All Sites"
@@ -46,8 +47,9 @@ export const EMPTY_RECON_FILTERS: ReconciliationFilters = {
         </div>
 
         <div class="filter-field filter-field--wide">
-          <label>Created At (range)</label>
+          <label for="recon-filter-date-range">Created At (range)</label>
           <app-date-range-picker
+            id="recon-filter-date-range"
             placeholder="Select date range"
             [(ngModel)]="filters.dateRange"
             (rangeSelected)="onDateRangeSelected($event)"
