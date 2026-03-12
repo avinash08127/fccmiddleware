@@ -35,6 +35,7 @@ class KeystoreManager {
         const val ALIAS_REFRESH_TOKEN = "fcc-middleware-refresh-token"
         const val ALIAS_FCC_CRED = "fcc-middleware-fcc-cred"
         const val ALIAS_LAN_KEY = "fcc-middleware-lan-key"
+        const val ALIAS_CONFIG_INTEGRITY = "fcc-middleware-config-integrity"
     }
 
     private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
@@ -70,11 +71,19 @@ class KeystoreManager {
      */
     fun retrieveSecret(alias: String, encrypted: ByteArray): String? {
         return try {
+            if (encrypted.size < 2) {
+                Log.w(TAG, "Encrypted blob too short for alias=$alias (size=${encrypted.size})")
+                return null
+            }
             val key = keyStore.getKey(alias, null) as? SecretKey ?: run {
                 Log.w(TAG, "No key found for alias=$alias")
                 return null
             }
             val ivLength = encrypted[0].toInt() and 0xFF
+            if (ivLength == 0 || 1 + ivLength >= encrypted.size) {
+                Log.w(TAG, "Invalid IV length=$ivLength for alias=$alias (blob size=${encrypted.size})")
+                return null
+            }
             val iv = encrypted.sliceArray(1..ivLength)
             val ciphertext = encrypted.sliceArray((1 + ivLength) until encrypted.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -110,11 +119,38 @@ class KeystoreManager {
     }
 
     /**
+     * Rotate the AES-256-GCM key for the given alias.
+     *
+     * Decrypts [currentEncrypted] with the existing key, deletes the old key,
+     * generates a fresh key, and re-encrypts the plaintext under the new key.
+     *
+     * @param alias Keystore alias to rotate.
+     * @param currentEncrypted The encrypted blob produced by [storeSecret] under the current key.
+     * @return New encrypted bytes (IV + ciphertext) under the rotated key, or null on failure.
+     */
+    fun rotateKey(alias: String, currentEncrypted: ByteArray): ByteArray? {
+        return try {
+            val plaintext = retrieveSecret(alias, currentEncrypted) ?: run {
+                Log.e(TAG, "Key rotation failed for alias=$alias — could not decrypt current data")
+                return null
+            }
+            deleteKey(alias)
+            storeSecret(alias, plaintext)
+        } catch (e: Exception) {
+            Log.e(TAG, "Key rotation failed for alias=$alias", e)
+            null
+        }
+    }
+
+    /**
      * Delete all FCC middleware keys from the Keystore.
      * Used during re-provisioning or factory reset.
      */
     fun clearAll() {
-        listOf(ALIAS_DEVICE_JWT, ALIAS_REFRESH_TOKEN, ALIAS_FCC_CRED, ALIAS_LAN_KEY).forEach {
+        listOf(
+            ALIAS_DEVICE_JWT, ALIAS_REFRESH_TOKEN, ALIAS_FCC_CRED,
+            ALIAS_LAN_KEY, ALIAS_CONFIG_INTEGRITY,
+        ).forEach {
             deleteKey(it)
         }
         Log.i(TAG, "All keystore keys cleared")

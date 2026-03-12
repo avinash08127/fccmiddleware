@@ -184,6 +184,9 @@ sealed class CloudConfigPollResult {
     /** HTTP 403 — forbidden (possibly decommissioned). */
     data class Forbidden(val errorCode: String?) : CloudConfigPollResult()
 
+    /** M-15: HTTP 429 — rate limited by cloud. */
+    data class RateLimited(val retryAfterSeconds: Long?) : CloudConfigPollResult()
+
     /** Network or unexpected HTTP error. */
     data class TransportError(val message: String) : CloudConfigPollResult()
 }
@@ -411,6 +414,9 @@ sealed class CloudPreAuthForwardResult {
     /** HTTP 403 — forbidden (possibly decommissioned). */
     data class Forbidden(val errorCode: String?) : CloudPreAuthForwardResult()
 
+    /** M-15: HTTP 429 — rate limited by cloud. */
+    data class RateLimited(val retryAfterSeconds: Long?) : CloudPreAuthForwardResult()
+
     /** HTTP 409 — invalid state transition on cloud. Treated as success (record exists). */
     data class Conflict(val errorCode: String?, val message: String?) : CloudPreAuthForwardResult()
 
@@ -428,6 +434,9 @@ sealed class CloudTelemetryResult {
 
     /** HTTP 403 — forbidden (possibly decommissioned). */
     data class Forbidden(val errorCode: String?) : CloudTelemetryResult()
+
+    /** M-15: HTTP 429 — rate limited by cloud. */
+    data class RateLimited(val retryAfterSeconds: Long?) : CloudTelemetryResult()
 
     /** Network or non-2xx/401/403 failure. */
     data class TransportError(val message: String) : CloudTelemetryResult()

@@ -45,9 +45,9 @@ import java.util.UUID
  *   - Transport error → failure recorded, backoff applied
  *   - Multiple consecutive failures increase backoff exponentially
  *   - Successful upload after failures resets consecutiveFailureCount and nextRetryAt
- *   - calculateBackoffMs: 0 failures → 0ms
- *   - calculateBackoffMs: 1-4 failures → 1s, 2s, 4s, 8s
- *   - calculateBackoffMs: capped at maxBackoffMs
+ *   - Circuit breaker: backoff doubles with each failure up to max
+ *   - Circuit breaker: caps at maxBackoffMs
+ *   - Circuit breaker: opens after threshold failures, resets on connectivity recovery
  *   - updateLastUploadAt: SyncState upserted with current timestamp
  *   - updateLastUploadAt: SyncState created when none exists
  */
@@ -138,7 +138,7 @@ class CloudUploadWorkerTest {
 
     @Test
     fun `returns early when backoff is active`() = runTest {
-        worker.nextRetryAt = Instant.now().plusSeconds(60)
+        worker.uploadCircuitBreaker.nextRetryAt = Instant.now().plusSeconds(60)
         coEvery { bufferManager.getPendingBatch(any()) } returns listOf(makeTransaction())
         worker.uploadPendingBatch()
         coVerify(exactly = 0) { cloudApiClient.uploadBatch(any(), any()) }
@@ -154,8 +154,8 @@ class CloudUploadWorkerTest {
     @Test
     fun `empty batch resets backoff so new records upload immediately (H-02)`() = runTest {
         // Seed prior failure state
-        worker.consecutiveFailureCount = 3
-        worker.nextRetryAt = Instant.EPOCH // expired so we pass the guard
+        worker.uploadCircuitBreaker.consecutiveFailureCount = 3
+        worker.uploadCircuitBreaker.nextRetryAt = Instant.EPOCH // expired so we pass the guard
 
         coEvery { bufferManager.getPendingBatch(any()) } returns emptyList()
         worker.uploadPendingBatch()
@@ -418,7 +418,7 @@ class CloudUploadWorkerTest {
 
         worker.uploadPendingBatch()
         // Reset backoff guard to allow second attempt
-        worker.nextRetryAt = Instant.EPOCH
+        worker.uploadCircuitBreaker.nextRetryAt = Instant.EPOCH
         worker.uploadPendingBatch()
 
         assertEquals(2, worker.consecutiveFailureCount)
@@ -427,8 +427,8 @@ class CloudUploadWorkerTest {
     @Test
     fun `successful upload after failures resets consecutiveFailureCount and nextRetryAt`() = runTest {
         // Seed failure state
-        worker.consecutiveFailureCount = 3
-        worker.nextRetryAt = Instant.EPOCH // expired backoff
+        worker.uploadCircuitBreaker.consecutiveFailureCount = 3
+        worker.uploadCircuitBreaker.nextRetryAt = Instant.EPOCH // expired backoff
 
         val tx = makeTransaction()
         coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
@@ -447,31 +447,50 @@ class CloudUploadWorkerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `calculateBackoffMs returns 0 for zero failures`() {
-        assertEquals(0L, worker.calculateBackoffMs(0))
+    fun `circuit breaker backoff doubles with each failure up to max`() = runTest {
+        // Backoff is now encapsulated in CircuitBreaker — test via recordFailure() return value
+        val cb = CircuitBreaker(name = "test", baseBackoffMs = 1_000L, maxBackoffMs = 60_000L)
+        assertEquals(1_000L, cb.recordFailure())  // failure 1
+        assertEquals(2_000L, cb.recordFailure())  // failure 2
+        assertEquals(4_000L, cb.recordFailure())  // failure 3
+        assertEquals(8_000L, cb.recordFailure())  // failure 4
+        assertEquals(16_000L, cb.recordFailure()) // failure 5
+        assertEquals(32_000L, cb.recordFailure()) // failure 6
     }
 
     @Test
-    fun `calculateBackoffMs returns 0 for negative failures`() {
-        assertEquals(0L, worker.calculateBackoffMs(-1))
+    fun `circuit breaker backoff caps at maxBackoffMs`() = runTest {
+        val cb = CircuitBreaker(name = "test", baseBackoffMs = 1_000L, maxBackoffMs = 60_000L)
+        // Drive past cap
+        repeat(6) { cb.recordFailure() }
+        // failure 7 = 64s → capped to 60s
+        assertEquals(60_000L, cb.recordFailure())
+        // Reset and go higher
+        cb.recordSuccess()
+        repeat(19) { cb.recordFailure() }
+        assertEquals(60_000L, cb.recordFailure()) // failure 20
     }
 
     @Test
-    fun `calculateBackoffMs doubles with each failure up to max`() {
-        assertEquals(1_000L, worker.calculateBackoffMs(1))
-        assertEquals(2_000L, worker.calculateBackoffMs(2))
-        assertEquals(4_000L, worker.calculateBackoffMs(3))
-        assertEquals(8_000L, worker.calculateBackoffMs(4))
-        assertEquals(16_000L, worker.calculateBackoffMs(5))
-        assertEquals(32_000L, worker.calculateBackoffMs(6))
+    fun `circuit breaker opens after threshold consecutive failures`() = runTest {
+        val cb = CircuitBreaker(name = "test", openThreshold = 5)
+        repeat(4) { cb.recordFailure() }
+        assertEquals(CircuitBreaker.State.CLOSED, cb.state)
+        cb.recordFailure() // 5th
+        assertEquals(CircuitBreaker.State.OPEN, cb.state)
+        // OPEN circuit rejects requests
+        assertFalse(cb.allowRequest())
     }
 
     @Test
-    fun `calculateBackoffMs caps at maxBackoffMs`() {
-        // 7 failures = 64s which exceeds max of 60s
-        assertEquals(60_000L, worker.calculateBackoffMs(7))
-        assertEquals(60_000L, worker.calculateBackoffMs(20))
-        assertEquals(60_000L, worker.calculateBackoffMs(100))
+    fun `circuit breaker resets on connectivity recovery`() = runTest {
+        val cb = CircuitBreaker(name = "test", openThreshold = 5)
+        repeat(5) { cb.recordFailure() }
+        assertEquals(CircuitBreaker.State.OPEN, cb.state)
+        cb.resetOnConnectivityRecovery()
+        assertEquals(CircuitBreaker.State.CLOSED, cb.state)
+        assertEquals(0, cb.consecutiveFailureCount)
+        assertTrue(cb.allowRequest())
     }
 
     // -------------------------------------------------------------------------

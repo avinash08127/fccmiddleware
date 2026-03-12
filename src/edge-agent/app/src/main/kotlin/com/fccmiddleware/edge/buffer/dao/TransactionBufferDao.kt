@@ -98,7 +98,30 @@ interface TransactionBufferDao {
     suspend fun markSyncedToOdoo(fccTransactionIds: List<String>, now: String)
 
     /**
-     * Retention cleanup: delete SYNCED_TO_ODOO records older than cutoff.
+     * M-14: Transition SYNCED_TO_ODOO records older than cutoff to ARCHIVED.
+     * This implements the documented lifecycle: SYNCED_TO_ODOO → ARCHIVED → (deleted).
+     * Returns the number of records archived.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET sync_status = 'ARCHIVED', updated_at = :now " +
+        "WHERE sync_status = 'SYNCED_TO_ODOO' " +
+        "AND updated_at < :cutoffDate"
+    )
+    suspend fun archiveOldSynced(cutoffDate: String, now: String): Int
+
+    /**
+     * Retention cleanup: delete ARCHIVED records older than cutoff.
+     * Returns the number of rows deleted.
+     */
+    @Query(
+        "DELETE FROM buffered_transactions " +
+        "WHERE sync_status = 'ARCHIVED' " +
+        "AND updated_at < :cutoffDate"
+    )
+    suspend fun deleteOldArchived(cutoffDate: String): Int
+
+    /**
+     * Legacy retention cleanup: delete SYNCED_TO_ODOO records older than cutoff.
      * Returns the number of rows deleted.
      */
     @Query(

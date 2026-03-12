@@ -17,8 +17,11 @@ import com.fccmiddleware.edge.adapter.common.*
  */
 class DomsAdapter(private val config: AgentFccConfig) : IFccAdapter {
 
-    override suspend fun normalize(rawPayload: RawPayloadEnvelope): CanonicalTransaction {
-        throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
+    override suspend fun normalize(rawPayload: RawPayloadEnvelope): NormalizationResult {
+        return NormalizationResult.Failure(
+            errorCode = "UNSUPPORTED_MESSAGE_TYPE",
+            message = "DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.",
+        )
     }
 
     override suspend fun sendPreAuth(command: PreAuthCommand): PreAuthResult {

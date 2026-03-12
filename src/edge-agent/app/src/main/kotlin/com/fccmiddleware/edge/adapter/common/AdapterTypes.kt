@@ -126,6 +126,34 @@ data class PreAuthResult(
 )
 
 // ---------------------------------------------------------------------------
+// Normalization result — sealed outcome of IFccAdapter.normalize()
+// ---------------------------------------------------------------------------
+
+/**
+ * Sealed result of [IFccAdapter.normalize].
+ *
+ * Adapters must return [Success] or [Failure] — never throw exceptions.
+ */
+sealed class NormalizationResult {
+    /** Normalization succeeded. */
+    data class Success(val transaction: CanonicalTransaction) : NormalizationResult()
+
+    /**
+     * Normalization failed.
+     *
+     * @param errorCode Machine-readable code: UNSUPPORTED_MESSAGE_TYPE, INVALID_PAYLOAD,
+     *   MISSING_REQUIRED_FIELD, or MALFORMED_FIELD.
+     * @param message Human-readable detail (never contains PII).
+     * @param fieldName Optional field path that caused the failure (e.g. "amount", "startedAt").
+     */
+    data class Failure(
+        val errorCode: String,
+        val message: String,
+        val fieldName: String? = null,
+    ) : NormalizationResult()
+}
+
+// ---------------------------------------------------------------------------
 // Factory configuration input
 // ---------------------------------------------------------------------------
 

@@ -16,11 +16,32 @@ interface IFccAdapter {
     /**
      * Parse one vendor payload object and produce a valid canonical transaction.
      *
-     * Must reject payloads containing multiple transactions (UNSUPPORTED_MESSAGE_TYPE);
-     * multi-item payloads must be iterated by the caller or by fetchTransactions.
-     * Must preserve rawPayloadJson on the canonical output.
+     * ## Error contract
+     * Returns [NormalizationResult.Success] on valid input, or [NormalizationResult.Failure]
+     * with a machine-readable error code on rejection. Must never throw — all errors must
+     * be returned via the sealed result.
+     *
+     * ## Error codes
+     * - `UNSUPPORTED_MESSAGE_TYPE` — payload contains multiple transactions or an
+     *   unrecognised message type; multi-item payloads must be iterated by the caller
+     *   or by [fetchTransactions].
+     * - `INVALID_PAYLOAD` — payload cannot be parsed (malformed JSON/XML, encoding error).
+     * - `MISSING_REQUIRED_FIELD` — a field required by the canonical schema is absent
+     *   in the vendor payload and has no safe default.
+     * - `MALFORMED_FIELD` — a field is present but its value cannot be converted to
+     *   the canonical type (e.g. non-numeric amount, invalid date format).
+     *
+     * ## Timeout contract
+     * Implementations must complete within 500 ms under normal conditions. Callers
+     * should enforce an external [withTimeout] as a safety net; the adapter must not
+     * perform network I/O during normalization.
+     *
+     * ## Nullable field handling
+     * Optional fields absent in the vendor payload must be set to `null` on the
+     * canonical output — never to empty strings or placeholder defaults.
+     * Must preserve [CanonicalTransaction.rawPayloadJson] on the output.
      */
-    suspend fun normalize(rawPayload: RawPayloadEnvelope): CanonicalTransaction
+    suspend fun normalize(rawPayload: RawPayloadEnvelope): NormalizationResult
 
     /**
      * Issue a pre-authorization command to the FCC over LAN.

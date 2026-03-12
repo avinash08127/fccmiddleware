@@ -13,7 +13,8 @@ public static class SecurityConfigurationValidator
 
         var disallowedJsonKeys = new[]
         {
-            "DeviceJwt:SigningKey"
+            "DeviceJwt:SigningKey",
+            "PortalJwt:SigningKey"
         };
 
         foreach (var key in disallowedJsonKeys)

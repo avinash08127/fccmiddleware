@@ -84,6 +84,7 @@ class ConnectivityManager(
      * per spec: "Initialize in FULLY_OFFLINE on app start, run both probes immediately."
      */
     fun start() {
+        probeJobs?.cancel()
         probeJobs = scope.launch {
             launch { runInternetProbeLoop() }
             launch { runFccProbeLoop() }

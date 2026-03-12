@@ -6,8 +6,6 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.config.ConfigApplyResult
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import java.time.Instant
 
@@ -51,12 +49,17 @@ class ConfigPollWorker(
         isLenient = true
     }
 
-    /** Guards compound read-modify-write of [consecutiveFailureCount] + [nextRetryAt]. */
-    private val backoffMutex = Mutex()
+    /**
+     * M-08: Circuit breaker for config poll operations.
+     */
+    internal val circuitBreaker = CircuitBreaker(
+        name = "ConfigPoll",
+        baseBackoffMs = BASE_BACKOFF_MS,
+        maxBackoffMs = MAX_BACKOFF_MS,
+    )
 
-    internal var consecutiveFailureCount: Int = 0
-
-    internal var nextRetryAt: Instant = Instant.EPOCH
+    internal val consecutiveFailureCount: Int get() = circuitBreaker.consecutiveFailureCount
+    internal val nextRetryAt: Instant get() = circuitBreaker.nextRetryAt
 
     /**
      * Poll cloud for configuration updates.
@@ -81,12 +84,10 @@ class ConfigPollWorker(
             return
         }
 
-        // Backoff check
-        val now = Instant.now()
-        val currentNextRetry = backoffMutex.withLock { nextRetryAt }
-        if (now.isBefore(currentNextRetry)) {
-            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
-            Log.d(TAG, "pollConfig() skipped — backoff active (${waitMs}ms remaining)")
+        // M-08: Circuit breaker check
+        if (!circuitBreaker.allowRequest()) {
+            val waitMs = circuitBreaker.remainingBackoffMs()
+            Log.d(TAG, "pollConfig() skipped — circuit breaker (state=${circuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
@@ -142,10 +143,15 @@ class ConfigPollWorker(
                         ConfigPollAttemptResult.TransportFailure("401 Unauthorized after token refresh retry")
                     is CloudConfigPollResult.Forbidden ->
                         resolveForbidden(retryResult.errorCode)
+                    is CloudConfigPollResult.RateLimited ->
+                        ConfigPollAttemptResult.RateLimited(retryResult.retryAfterSeconds)
                     is CloudConfigPollResult.TransportError ->
                         ConfigPollAttemptResult.TransportFailure(retryResult.message)
                 }
             }
+
+            is CloudConfigPollResult.RateLimited ->
+                ConfigPollAttemptResult.RateLimited(result.retryAfterSeconds)
 
             is CloudConfigPollResult.Forbidden -> resolveForbidden(result.errorCode)
 
@@ -179,18 +185,12 @@ class ConfigPollWorker(
                 when (applyResult) {
                     is ConfigApplyResult.Applied -> {
                         Log.i(TAG, "Config version ${parsed.configVersion} applied successfully")
-                        backoffMutex.withLock {
-                            consecutiveFailureCount = 0
-                            nextRetryAt = Instant.EPOCH
-                        }
+                        circuitBreaker.recordSuccess()
                         updateSyncState(parsed.configVersion)
                     }
                     is ConfigApplyResult.Skipped -> {
                         Log.d(TAG, "Config version ${parsed.configVersion} skipped (not newer)")
-                        backoffMutex.withLock {
-                            consecutiveFailureCount = 0
-                            nextRetryAt = Instant.EPOCH
-                        }
+                        circuitBreaker.recordSuccess()
                         updateLastConfigPullAt()
                     }
                     is ConfigApplyResult.Rejected -> {
@@ -202,11 +202,18 @@ class ConfigPollWorker(
 
             is ConfigPollAttemptResult.Unchanged -> {
                 Log.d(TAG, "Config unchanged (304 Not Modified)")
-                backoffMutex.withLock {
-                    consecutiveFailureCount = 0
-                    nextRetryAt = Instant.EPOCH
-                }
+                circuitBreaker.recordSuccess()
                 updateLastConfigPullAt()
+            }
+
+            is ConfigPollAttemptResult.RateLimited -> {
+                val retryAfter = result.retryAfterSeconds
+                if (retryAfter != null) {
+                    circuitBreaker.setBackoffSeconds(retryAfter)
+                    Log.w(TAG, "Config poll rate limited (429); backing off for ${retryAfter}s")
+                } else {
+                    recordFailure("429 Too Many Requests (no Retry-After header)")
+                }
             }
 
             is ConfigPollAttemptResult.Decommissioned -> {
@@ -221,23 +228,12 @@ class ConfigPollWorker(
     }
 
     private suspend fun recordFailure(message: String) {
-        backoffMutex.withLock {
-            consecutiveFailureCount++
-            val backoffMs = calculateBackoffMs(consecutiveFailureCount)
-            nextRetryAt = Instant.now().plusMillis(backoffMs)
-            Log.w(
-                TAG,
-                "Config poll failed (failure #$consecutiveFailureCount); " +
-                    "next retry after ${backoffMs}ms. Error: $message",
-            )
-        }
-    }
-
-    internal fun calculateBackoffMs(failureCount: Int): Long {
-        if (failureCount <= 0) return 0L
-        val shift = (failureCount - 1).coerceAtMost(30)
-        val exponential = BASE_BACKOFF_MS * (1L shl shift)
-        return minOf(exponential, MAX_BACKOFF_MS)
+        val backoffMs = circuitBreaker.recordFailure()
+        Log.w(
+            TAG,
+            "Config poll failed (failure #${circuitBreaker.consecutiveFailureCount}, " +
+                "state=${circuitBreaker.state}); next retry after ${backoffMs}ms. Error: $message",
+        )
     }
 
     /** Update both lastConfigPullAt and lastConfigVersion after a successful apply. */
@@ -293,6 +289,7 @@ class ConfigPollWorker(
         data class NewConfig(val rawJson: String, val etag: String?) : ConfigPollAttemptResult()
         data object Unchanged : ConfigPollAttemptResult()
         data object Decommissioned : ConfigPollAttemptResult()
+        data class RateLimited(val retryAfterSeconds: Long?) : ConfigPollAttemptResult()
         data class TransportFailure(val message: String) : ConfigPollAttemptResult()
     }
 }

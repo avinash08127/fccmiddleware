@@ -90,10 +90,8 @@ class IngestionOrchestrator(
      * Monotonic elapsed-realtime millis of the last completed scheduled poll.
      * Uses [SystemClock.elapsedRealtime] so system clock adjustments (NTP, user,
      * daylight-saving) cannot make the elapsed interval negative or skip polls.
-     * Volatile so the CadenceController coroutine and a concurrent [pollNow] see a
-     * consistent value; not a full mutex since double-polling is safe (cloud dedup handles it).
+     * Access is serialized by [pollMutex].
      */
-    @Volatile
     internal var lastScheduledPollElapsedMs: Long? = null
 
     /**
@@ -128,26 +126,26 @@ class IngestionOrchestrator(
             return
         }
 
-        if (fccConfig.ingestionMode == IngestionMode.CLOUD_DIRECT) {
-            val last = lastScheduledPollElapsedMs
-            if (last != null) {
-                val nowMonotonic = SystemClock.elapsedRealtime()
-                val elapsedMs = nowMonotonic - last
-                if (elapsedMs < CLOUD_DIRECT_MIN_POLL_INTERVAL_MS) {
-                    Log.d(
-                        TAG,
-                        "CLOUD_DIRECT: skipping scheduled poll " +
-                            "(${elapsedMs}ms elapsed, min=${CLOUD_DIRECT_MIN_POLL_INTERVAL_MS}ms)",
-                    )
-                    return
+        pollMutex.withLock {
+            if (fccConfig.ingestionMode == IngestionMode.CLOUD_DIRECT) {
+                val last = lastScheduledPollElapsedMs
+                if (last != null) {
+                    val nowMonotonic = SystemClock.elapsedRealtime()
+                    val elapsedMs = nowMonotonic - last
+                    if (elapsedMs < CLOUD_DIRECT_MIN_POLL_INTERVAL_MS) {
+                        Log.d(
+                            TAG,
+                            "CLOUD_DIRECT: skipping scheduled poll " +
+                                "(${elapsedMs}ms elapsed, min=${CLOUD_DIRECT_MIN_POLL_INTERVAL_MS}ms)",
+                        )
+                        return
+                    }
                 }
             }
-        }
 
-        pollMutex.withLock {
             doPoll(fccAdapter, fccConfig, pumpNumber = null, isManual = false)
+            lastScheduledPollElapsedMs = SystemClock.elapsedRealtime()
         }
-        lastScheduledPollElapsedMs = SystemClock.elapsedRealtime()
     }
 
     /**

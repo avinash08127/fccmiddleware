@@ -115,7 +115,7 @@ class PreAuthCloudForwardWorkerTest {
 
     @Test
     fun `returns early when backoff is active`() = runTest {
-        worker.nextRetryAt = Instant.now().plusSeconds(60)
+        worker.circuitBreaker.nextRetryAt = Instant.now().plusSeconds(60)
         worker.forwardUnsyncedPreAuths()
         coVerify(exactly = 0) { preAuthDao.getUnsynced(any()) }
     }
@@ -130,8 +130,8 @@ class PreAuthCloudForwardWorkerTest {
     @Test
     fun `empty batch resets backoff so new records forward immediately (H-02)`() = runTest {
         // Seed prior failure state
-        worker.consecutiveFailureCount = 3
-        worker.nextRetryAt = Instant.EPOCH // expired so we pass the guard
+        worker.circuitBreaker.consecutiveFailureCount = 3
+        worker.circuitBreaker.nextRetryAt = Instant.EPOCH // expired so we pass the guard
 
         coEvery { preAuthDao.getUnsynced(any()) } returns emptyList()
         worker.forwardUnsyncedPreAuths()
@@ -339,8 +339,8 @@ class PreAuthCloudForwardWorkerTest {
 
     @Test
     fun `successful forward after failures resets backoff`() = runTest {
-        worker.consecutiveFailureCount = 3
-        worker.nextRetryAt = Instant.EPOCH
+        worker.circuitBreaker.consecutiveFailureCount = 3
+        worker.circuitBreaker.nextRetryAt = Instant.EPOCH
 
         val record = makePreAuth()
         coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
@@ -358,22 +358,21 @@ class PreAuthCloudForwardWorkerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `calculateBackoffMs returns 0 for zero failures`() {
-        assertEquals(0L, worker.calculateBackoffMs(0))
+    fun `circuit breaker backoff doubles with each failure up to max`() = runTest {
+        val cb = worker.circuitBreaker
+        cb.resetOnConnectivityRecovery()
+        assertEquals(1_000L, cb.recordFailure())
+        assertEquals(2_000L, cb.recordFailure())
+        assertEquals(4_000L, cb.recordFailure())
+        assertEquals(8_000L, cb.recordFailure())
     }
 
     @Test
-    fun `calculateBackoffMs doubles with each failure up to max`() {
-        assertEquals(1_000L, worker.calculateBackoffMs(1))
-        assertEquals(2_000L, worker.calculateBackoffMs(2))
-        assertEquals(4_000L, worker.calculateBackoffMs(3))
-        assertEquals(8_000L, worker.calculateBackoffMs(4))
-    }
-
-    @Test
-    fun `calculateBackoffMs caps at maxBackoffMs`() {
-        assertEquals(60_000L, worker.calculateBackoffMs(7))
-        assertEquals(60_000L, worker.calculateBackoffMs(20))
+    fun `circuit breaker backoff caps at maxBackoffMs`() = runTest {
+        val cb = worker.circuitBreaker
+        cb.resetOnConnectivityRecovery()
+        repeat(6) { cb.recordFailure() }
+        assertEquals(60_000L, cb.recordFailure()) // failure 7
     }
 
     // -------------------------------------------------------------------------

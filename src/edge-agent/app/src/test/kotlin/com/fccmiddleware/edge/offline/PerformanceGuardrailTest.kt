@@ -391,7 +391,7 @@ class PerformanceGuardrailTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `exponential backoff caps correctly under prolonged failure`() {
+    fun `exponential backoff caps correctly under prolonged failure`() = runTest {
         val config = CloudUploadWorkerConfig(
             uploadBatchSize = 50,
             baseBackoffMs = 1_000L,
@@ -399,8 +399,9 @@ class PerformanceGuardrailTest {
         )
         val worker = CloudUploadWorker(config = config)
 
-        // Simulate 100 consecutive failures
-        val backoffs = (1..100).map { worker.calculateBackoffMs(it) }
+        // Simulate 100 consecutive failures via circuit breaker
+        val cb = worker.uploadCircuitBreaker
+        val backoffs = (1..100).map { cb.recordFailure() }
 
         // All must be >= 0 and <= maxBackoffMs
         assertTrue(

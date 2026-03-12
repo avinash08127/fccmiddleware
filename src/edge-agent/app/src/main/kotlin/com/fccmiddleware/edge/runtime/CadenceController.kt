@@ -4,7 +4,6 @@ import android.util.Log
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
-import com.fccmiddleware.edge.connectivity.ConnectivityTransitionListener
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.sync.CloudUploadWorker
@@ -36,8 +35,9 @@ import kotlin.random.Random
  *   - FULLY_ONLINE: trigger immediate buffer replay + SYNCED_TO_ODOO status sync.
  *   - Other transitions: workers are naturally suspended on next tick via state check.
  *
- * Implements [ConnectivityTransitionListener] so it can be registered with
- * [ConnectivityManager] for immediate reaction to state changes.
+ * M-10: Observes [ConnectivityManager.state] StateFlow only — does NOT implement
+ * [ConnectivityTransitionListener]. The listener callback was redundant with the
+ * StateFlow collection and caused double-trigger on recovery transitions.
  */
 class CadenceController(
     private val connectivityManager: ConnectivityManager,
@@ -54,7 +54,7 @@ class CadenceController(
     /** Token provider — checked between worker calls to short-circuit on decommission. */
     private val tokenProvider: com.fccmiddleware.edge.sync.DeviceTokenProvider? = null,
     val config: CadenceConfig = CadenceConfig(),
-) : ConnectivityTransitionListener {
+) {
 
     data class CadenceConfig(
         /** Base tick interval during normal operation. */
@@ -77,15 +77,35 @@ class CadenceController(
     private var cadenceJob: Job? = null
     private var tickCount = 0L
 
+    /**
+     * L-07: Tick modulus — tickCount wraps at LCM of all tick frequencies to prevent
+     * Long overflow from changing modulo behavior at the overflow boundary.
+     * At default frequencies (2, 4, 6) this is 12, so tickCount cycles 0..11 indefinitely.
+     */
+    internal val tickModulus: Long = computeTickModulus(config)
+
     companion object {
         private const val TAG = "CadenceController"
+
+        /** Compute LCM of all tick frequencies so tickCount wraps cleanly. */
+        internal fun computeTickModulus(config: CadenceConfig): Long {
+            val a = config.syncedToOdooTickFrequency.toLong().coerceAtLeast(1)
+            val b = config.telemetryTickFrequency.toLong().coerceAtLeast(1)
+            val c = config.configPollTickFrequency.toLong().coerceAtLeast(1)
+            return lcm(a, lcm(b, c))
+        }
+
+        private fun gcd(a: Long, b: Long): Long = if (b == 0L) a else gcd(b, a % b)
+        private fun lcm(a: Long, b: Long): Long = a / gcd(a, b) * b
     }
 
     /**
      * Start the cadence loop and begin observing connectivity transitions.
-     * Call once from the foreground service [onStartCommand].
+     * Idempotent — cancels any existing cadence loop before starting a new one,
+     * so repeated calls from [onStartCommand] (e.g. START_STICKY restart) are safe.
      */
     fun start() {
+        cadenceJob?.cancel()
         cadenceJob = scope.launch {
             // Observe connectivity transitions for immediate side effects
             launch { observeConnectivityTransitions() }
@@ -103,44 +123,56 @@ class CadenceController(
     /**
      * Trigger an immediate FCC poll — called by Odoo POS manual-pull or diagnostic UI.
      * Runs concurrently with (not instead of) the scheduled cadence.
+     *
+     * M-09: Re-checks connectivity state inside the launched coroutine to avoid
+     * acting on a stale snapshot taken at call-site time.
      */
     fun triggerImmediateFccPoll() {
-        val state = connectivityManager.state.value
-        if (state.canPollFcc()) {
-            scope.launch {
-                Log.i(TAG, "Immediate FCC poll triggered")
+        scope.launch {
+            val state = connectivityManager.state.value
+            if (state.canPollFcc()) {
+                Log.i(TAG, "Immediate FCC poll triggered (state=$state)")
                 ingestionOrchestrator.poll()
+            } else {
+                Log.w(TAG, "Immediate FCC poll requested but FCC not reachable (state=$state)")
             }
-        } else {
-            Log.w(TAG, "Immediate FCC poll requested but FCC not reachable (state=$state)")
         }
     }
 
     /**
      * Trigger an immediate buffer replay — called after internet recovery or manual trigger.
      * Runs concurrently with the scheduled cadence.
+     *
+     * M-09: Re-checks connectivity state inside the launched coroutine.
      */
     fun triggerImmediateReplay() {
-        val state = connectivityManager.state.value
-        if (state.hasInternet()) {
-            scope.launch {
-                Log.i(TAG, "Immediate replay triggered")
+        scope.launch {
+            val state = connectivityManager.state.value
+            if (state.hasInternet()) {
+                Log.i(TAG, "Immediate replay triggered (state=$state)")
                 cloudUploadWorker.uploadPendingBatch()
+            } else {
+                Log.w(TAG, "Immediate replay requested but internet not reachable (state=$state)")
             }
-        } else {
-            Log.w(TAG, "Immediate replay requested but internet not reachable (state=$state)")
         }
     }
 
     // -------------------------------------------------------------------------
-    // ConnectivityTransitionListener — immediate side effects per §5.4
+    // Connectivity transition side effects per §5.4
+    // M-10: Called only from StateFlow observation — no listener interface.
     // -------------------------------------------------------------------------
 
-    override fun onTransition(from: ConnectivityState, to: ConnectivityState) {
+    internal fun onTransition(from: ConnectivityState, to: ConnectivityState) {
         when (to) {
             ConnectivityState.FULLY_ONLINE -> {
                 Log.i(TAG, "→ FULLY_ONLINE: triggering immediate replay + SYNCED_TO_ODOO sync + pre-auth forward")
                 scope.launch {
+                    // M-08: Reset circuit breakers on internet recovery so workers retry immediately
+                    cloudUploadWorker.uploadCircuitBreaker.resetOnConnectivityRecovery()
+                    cloudUploadWorker.statusPollCircuitBreaker.resetOnConnectivityRecovery()
+                    configPollWorker?.circuitBreaker?.resetOnConnectivityRecovery()
+                    preAuthCloudForwardWorker?.circuitBreaker?.resetOnConnectivityRecovery()
+
                     // Per spec: "Cloud Upload Worker triggers immediate replay of PENDING buffer;
                     // SYNCED_TO_ODOO Poller triggers immediate poll"
                     cloudUploadWorker.uploadPendingBatch()
@@ -150,11 +182,20 @@ class CadenceController(
                     cloudUploadWorker.reportTelemetry()
                 }
             }
+            ConnectivityState.FCC_UNREACHABLE -> {
+                Log.i(TAG, "→ FCC_UNREACHABLE: FCC poller suspended; cloud workers continue")
+                scope.launch {
+                    // Internet came up (from FULLY_OFFLINE or INTERNET_DOWN) — reset cloud circuit breakers
+                    if (!from.hasInternet()) {
+                        cloudUploadWorker.uploadCircuitBreaker.resetOnConnectivityRecovery()
+                        cloudUploadWorker.statusPollCircuitBreaker.resetOnConnectivityRecovery()
+                        configPollWorker?.circuitBreaker?.resetOnConnectivityRecovery()
+                        preAuthCloudForwardWorker?.circuitBreaker?.resetOnConnectivityRecovery()
+                    }
+                }
+            }
             ConnectivityState.INTERNET_DOWN -> {
                 Log.i(TAG, "→ INTERNET_DOWN: cloud upload suspended (next tick will skip cloud ops)")
-            }
-            ConnectivityState.FCC_UNREACHABLE -> {
-                Log.i(TAG, "→ FCC_UNREACHABLE: FCC poller suspended (next tick will skip FCC ops)")
             }
             ConnectivityState.FULLY_OFFLINE -> {
                 Log.i(TAG, "→ FULLY_OFFLINE: all cloud+FCC workers suspended; local API continues")
@@ -187,7 +228,8 @@ class CadenceController(
             val backlogDepth = safeGetBacklogDepth()
 
             runTick(state, backlogDepth)
-            tickCount++
+            // L-07: Wrap tickCount at LCM of all frequencies to prevent Long overflow
+            tickCount = (tickCount + 1) % tickModulus
 
             val interval = computeInterval(state, backlogDepth)
             Log.d(TAG, "Tick $tickCount done (state=$state, backlog=$backlogDepth, next=${interval}ms)")

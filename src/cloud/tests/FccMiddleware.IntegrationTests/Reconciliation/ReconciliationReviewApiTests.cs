@@ -21,9 +21,12 @@ namespace FccMiddleware.IntegrationTests.Reconciliation;
 [Collection("Integration")]
 public sealed class ReconciliationReviewApiTests : IAsyncLifetime
 {
-    private const string TestSigningKey = "TestSigningKey-Portal-Integration-256bits!!!!!";
-    private const string TestIssuer = "fcc-middleware-cloud";
-    private const string TestAudience = "fcc-middleware-api";
+    private const string TestDeviceSigningKey = "TestSigningKey-Device-Integration-256bits!!!!!";
+    private const string TestDeviceIssuer = "fcc-middleware-cloud";
+    private const string TestDeviceAudience = "fcc-middleware-api";
+    private const string TestPortalSigningKey = "TestSigningKey-Portal-Integration-256bits!!!!!";
+    private const string TestPortalIssuer = "https://login.microsoftonline.com/test-tenant-id/v2.0";
+    private const string TestPortalAudience = "00000000-0000-0000-0000-000000000123";
 
     private static readonly Guid ScopedLegalEntityId = Guid.Parse("99000000-0000-0000-0000-000000000051");
     private static readonly Guid OtherLegalEntityId = Guid.Parse("99000000-0000-0000-0000-000000000052");
@@ -57,9 +60,13 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
                     {
                         ["ConnectionStrings:FccMiddleware"] = _postgres.GetConnectionString(),
                         ["ConnectionStrings:Redis"] = _redis.GetConnectionString(),
-                        ["DeviceJwt:SigningKey"] = TestSigningKey,
-                        ["DeviceJwt:Issuer"] = TestIssuer,
-                        ["DeviceJwt:Audience"] = TestAudience
+                        ["DeviceJwt:SigningKey"] = TestDeviceSigningKey,
+                        ["DeviceJwt:Issuer"] = TestDeviceIssuer,
+                        ["DeviceJwt:Audience"] = TestDeviceAudience,
+                        ["PortalJwt:SigningKey"] = TestPortalSigningKey,
+                        ["PortalJwt:Authority"] = TestPortalIssuer,
+                        ["PortalJwt:Audience"] = TestPortalAudience,
+                        ["PortalJwt:ClientId"] = TestPortalAudience
                     });
                 });
             });
@@ -98,6 +105,17 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
             .Should().BeEquivalentTo([FlaggedReconciliationId, UnmatchedReconciliationId]);
         items.Select(x => x.GetProperty("status").GetString())
             .Should().BeEquivalentTo(["VARIANCE_FLAGGED", "UNMATCHED"]);
+    }
+
+    [Fact]
+    public async Task GetExceptions_WithDeviceToken_ReturnsUnauthorized()
+    {
+        SetDeviceAuth("OPS-SITE-001", ScopedLegalEntityId);
+
+        var response = await _client.GetAsync(
+            $"/api/v1/ops/reconciliation/exceptions?legalEntityId={ScopedLegalEntityId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
     [Fact]
@@ -189,7 +207,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     private void SetPortalAuth(string role, string oid, params Guid[] legalEntityIds)
     {
         var tokenHandler = new JwtSecurityTokenHandler();
-        var key = Encoding.UTF8.GetBytes(TestSigningKey);
+        var key = Encoding.UTF8.GetBytes(TestPortalSigningKey);
 
         var claims = new List<Claim>
         {
@@ -211,8 +229,35 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
         {
             Subject = new ClaimsIdentity(claims),
             Expires = DateTime.UtcNow.AddMinutes(30),
-            Issuer = TestIssuer,
-            Audience = TestAudience,
+            Issuer = TestPortalIssuer,
+            Audience = TestPortalAudience,
+            SigningCredentials = new SigningCredentials(
+                new SymmetricSecurityKey(key),
+                SecurityAlgorithms.HmacSha256Signature)
+        };
+
+        var token = tokenHandler.CreateToken(descriptor);
+        _client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", tokenHandler.WriteToken(token));
+    }
+
+    private void SetDeviceAuth(string siteCode, Guid legalEntityId)
+    {
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var key = Encoding.UTF8.GetBytes(TestDeviceSigningKey);
+
+        var descriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(
+            [
+                new Claim(JwtRegisteredClaimNames.Sub, "device-review-test"),
+                new Claim("site", siteCode),
+                new Claim("lei", legalEntityId.ToString()),
+                new Claim("roles", "OperationsManager")
+            ]),
+            Expires = DateTime.UtcNow.AddMinutes(30),
+            Issuer = TestDeviceIssuer,
+            Audience = TestDeviceAudience,
             SigningCredentials = new SigningCredentials(
                 new SymmetricSecurityKey(key),
                 SecurityAlgorithms.HmacSha256Signature)

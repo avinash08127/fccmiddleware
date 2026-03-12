@@ -47,9 +47,12 @@ try
     builder.AddServiceDefaults();
 
     // ── Authentication ─────────────────────────────────────────────────────────
-    // Two schemes are registered:
-    //   1. JwtBearer  — Edge Agent device JWT (scheme: "Bearer")
-    //   2. OdooApiKey — Odoo service-to-service API key (scheme: "OdooApiKey")
+    // Auth schemes:
+    //   1. Bearer       — Edge Agent device JWT
+    //   2. PortalBearer — Azure Entra / MSAL JWT for portal users
+    //   3. FccHmac      — FCC service-to-service HMAC auth
+    //   4. OdooApiKey   — Odoo service-to-service API key
+    //   5. DatabricksApiKey — Databricks service-to-service API key
     //
     // JWT bearer options are configured lazily via AddOptions<JwtBearerOptions>.Configure<IConfiguration>
     // so that IConfiguration is resolved from the DI container at option-creation time, which
@@ -59,6 +62,7 @@ try
     // without requiring an explicit scheme name on [Authorize] attributes that don't specify one.
     builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         .AddJwtBearer(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer(PortalJwtOptions.SchemeName)
         .AddScheme<FccHmacAuthOptions, FccHmacAuthHandler>(
             FccHmacAuthOptions.SchemeName, _ => { })
         .AddScheme<OdooApiKeyAuthOptions, OdooApiKeyAuthHandler>(
@@ -73,6 +77,8 @@ try
         .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
         .Configure<IConfiguration>((options, config) =>
         {
+            options.MapInboundClaims = false;
+
             var jwtSection = config.GetSection(DeviceJwtOptions.SectionName);
             var signingKey = jwtSection["SigningKey"] ?? string.Empty;
             var issuer     = jwtSection["Issuer"]     ?? DeviceJwtOptions.DefaultIssuer;
@@ -101,6 +107,70 @@ try
             };
         });
 
+    builder.Services
+        .AddOptions<JwtBearerOptions>(PortalJwtOptions.SchemeName)
+        .Configure<IConfiguration>((options, config) =>
+        {
+            options.MapInboundClaims = false;
+
+            var portalSection = config.GetSection(PortalJwtOptions.SectionName);
+            var signingKey = portalSection["SigningKey"] ?? string.Empty;
+            var authority = portalSection["Authority"] ?? string.Empty;
+            var audience = portalSection["Audience"] ?? string.Empty;
+            var clientId = portalSection["ClientId"] ?? string.Empty;
+            var additionalAudiences = portalSection
+                .GetSection("AdditionalAudiences")
+                .GetChildren()
+                .Select(section => section.Value)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Cast<string>()
+                .ToArray();
+
+            var validAudiences = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(audience))
+            {
+                validAudiences.Add(audience);
+            }
+
+            if (!string.IsNullOrWhiteSpace(clientId))
+            {
+                validAudiences.Add(clientId);
+                validAudiences.Add($"api://{clientId}");
+            }
+
+            foreach (var additionalAudience in additionalAudiences)
+            {
+                validAudiences.Add(additionalAudience);
+            }
+
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidAudiences = validAudiences,
+                ValidateIssuerSigningKey = !string.IsNullOrWhiteSpace(signingKey),
+                ValidateLifetime = true,
+                ClockSkew = TimeSpan.FromSeconds(30),
+                RoleClaimType = "roles",
+                NameClaimType = "oid"
+            };
+
+            if (!string.IsNullOrWhiteSpace(signingKey))
+            {
+                options.TokenValidationParameters.IssuerSigningKey =
+                    new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(authority))
+            {
+                return;
+            }
+
+            options.Authority = authority.TrimEnd('/');
+            options.RequireHttpsMetadata = true;
+        });
+
     builder.Services.AddAuthorization(opts =>
     {
         static bool HasAnyRole(AuthorizationHandlerContext context, params string[] allowedRoles)
@@ -114,6 +184,7 @@ try
 
         opts.AddPolicy("PortalUser", policy =>
             policy
+                .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
                 .RequireAuthenticatedUser()
                 .RequireAssertion(context => HasAnyRole(context,
                     "OperationsManager",
@@ -125,6 +196,7 @@ try
 
         opts.AddPolicy("PortalReconciliationReview", policy =>
             policy
+                .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
                 .RequireAuthenticatedUser()
                 .RequireAssertion(context => HasAnyRole(context,
                     "OperationsManager",
@@ -170,7 +242,7 @@ try
             Type = Microsoft.OpenApi.SecuritySchemeType.Http,
             Scheme = "bearer",
             BearerFormat = "JWT",
-            Description = "Azure Entra JWT bearer token"
+            Description = "JWT bearer token. Portal endpoints expect Azure Entra access tokens; device endpoints expect device JWTs."
         });
 
         // Include XML doc comments

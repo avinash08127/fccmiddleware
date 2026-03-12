@@ -61,6 +61,7 @@ class CleanupWorker(
     }
 
     data class CleanupResult(
+        val transactionsArchived: Int = 0,
         val transactionsDeleted: Int,
         val preAuthsDeleted: Int,
         val auditEntriesDeleted: Int,
@@ -86,17 +87,21 @@ class CleanupWorker(
         pendingKeepCount: Int = DEFAULT_PENDING_KEEP_COUNT,
     ): CleanupResult {
         // Pass 1: retention-based cleanup
+        //   M-14: Follow the documented lifecycle SYNCED_TO_ODOO → ARCHIVED → (deleted).
+        //   First archive old SYNCED_TO_ODOO records, then delete old ARCHIVED records.
         val cutoff = Instant.now()
             .minus(retentionDays.toLong(), ChronoUnit.DAYS)
             .toString()
+        val now = Instant.now().toString()
 
-        val txDeleted = transactionDao.deleteOldSynced(cutoff)
+        val txArchived = transactionDao.archiveOldSynced(cutoff, now)
+        val txDeleted = transactionDao.deleteOldArchived(cutoff)
         val preAuthDeleted = preAuthDao.deleteTerminal(cutoff)
         val auditDeleted = auditLogDao.deleteOlderThan(cutoff)
 
         Log.d(
             TAG,
-            "Retention cleanup: tx=$txDeleted preAuth=$preAuthDeleted audit=$auditDeleted" +
+            "Retention cleanup: txArchived=$txArchived txDeleted=$txDeleted preAuth=$preAuthDeleted audit=$auditDeleted" +
                 " (cutoff=$cutoff retentionDays=$retentionDays)"
         )
 
@@ -112,6 +117,7 @@ class CleanupWorker(
         }
 
         val result = CleanupResult(
+            transactionsArchived = txArchived,
             transactionsDeleted = txDeleted,
             preAuthsDeleted = preAuthDeleted,
             auditEntriesDeleted = auditDeleted,
@@ -226,7 +232,7 @@ class CleanupWorker(
 
     private fun buildAuditMessage(result: CleanupResult, retentionDays: Int): String {
         val parts = mutableListOf<String>()
-        parts += "Retention: tx=${result.transactionsDeleted} preAuth=${result.preAuthsDeleted} audit=${result.auditEntriesDeleted} (${retentionDays}d)"
+        parts += "Retention: txArchived=${result.transactionsArchived} txDeleted=${result.transactionsDeleted} preAuth=${result.preAuthsDeleted} audit=${result.auditEntriesDeleted} (${retentionDays}d)"
         if (result.quotaDeletedArchived > 0 || result.quotaDeletedSynced > 0 || result.quotaArchivedPending > 0) {
             parts += "Quota: archived=${result.quotaDeletedArchived} synced=${result.quotaDeletedSynced} pendingArchived=${result.quotaArchivedPending}"
         }

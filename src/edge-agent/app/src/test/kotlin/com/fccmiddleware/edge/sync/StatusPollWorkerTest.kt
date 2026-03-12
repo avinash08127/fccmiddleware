@@ -119,7 +119,7 @@ class StatusPollWorkerTest {
 
     @Test
     fun `returns early when backoff is active`() = runTest {
-        worker.statusPollNextRetryAt = Instant.now().plusSeconds(60)
+        worker.statusPollCircuitBreaker.nextRetryAt = Instant.now().plusSeconds(60)
         coEvery { bufferManager.getUploadedFccTransactionIds(any()) } returns listOf("FCC-1")
         worker.pollSyncedToOdooStatus()
         coVerify(exactly = 0) { cloudApiClient.getSyncedStatus(any(), any()) }

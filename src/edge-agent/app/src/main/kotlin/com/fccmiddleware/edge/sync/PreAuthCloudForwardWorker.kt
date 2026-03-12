@@ -3,8 +3,6 @@ package com.fccmiddleware.edge.sync
 import android.util.Log
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 
 /**
@@ -60,12 +58,17 @@ class PreAuthCloudForwardWorker(
         private const val DECOMMISSIONED_ERROR_CODE = "DEVICE_DECOMMISSIONED"
     }
 
-    /** Guards compound read-modify-write of [consecutiveFailureCount] + [nextRetryAt]. */
-    private val backoffMutex = Mutex()
+    /**
+     * M-08: Circuit breaker for pre-auth forward operations.
+     */
+    internal val circuitBreaker = CircuitBreaker(
+        name = "PreAuthForward",
+        baseBackoffMs = config.baseBackoffMs,
+        maxBackoffMs = config.maxBackoffMs,
+    )
 
-    internal var consecutiveFailureCount: Int = 0
-
-    internal var nextRetryAt: Instant = Instant.EPOCH
+    internal val consecutiveFailureCount: Int get() = circuitBreaker.consecutiveFailureCount
+    internal val nextRetryAt: Instant get() = circuitBreaker.nextRetryAt
 
     // -------------------------------------------------------------------------
     // Public API — called by CadenceController
@@ -97,22 +100,18 @@ class PreAuthCloudForwardWorker(
             return
         }
 
-        val now = Instant.now()
-        val currentNextRetry = backoffMutex.withLock { nextRetryAt }
-        if (now.isBefore(currentNextRetry)) {
-            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
-            Log.d(TAG, "forwardUnsyncedPreAuths() skipped — backoff active (${waitMs}ms remaining)")
+        // M-08: Circuit breaker check
+        if (!circuitBreaker.allowRequest()) {
+            val waitMs = circuitBreaker.remainingBackoffMs()
+            Log.d(TAG, "forwardUnsyncedPreAuths() skipped — circuit breaker (state=${circuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
         val unsynced = dao.getUnsynced(config.batchSize)
         if (unsynced.isEmpty()) {
-            // H-02 fix: reset backoff when no unsynced records so new records forward immediately
-            backoffMutex.withLock {
-                consecutiveFailureCount = 0
-                nextRetryAt = Instant.EPOCH
-            }
-            Log.d(TAG, "forwardUnsyncedPreAuths() — no unsynced pre-auth records, backoff reset")
+            // H-02 fix: reset when no unsynced records so new records forward immediately
+            circuitBreaker.recordSuccess()
+            Log.d(TAG, "forwardUnsyncedPreAuths() — no unsynced pre-auth records, circuit breaker reset")
             return
         }
 
@@ -129,11 +128,20 @@ class PreAuthCloudForwardWorker(
                 is ForwardAttemptResult.Success -> {
                     val attemptNow = Instant.now().toString()
                     dao.markCloudSynced(record.id, attemptNow)
-                    backoffMutex.withLock {
-                        consecutiveFailureCount = 0
-                        nextRetryAt = Instant.EPOCH
-                    }
+                    circuitBreaker.recordSuccess()
                     Log.i(TAG, "Pre-auth ${record.odooOrderId} forwarded to cloud")
+                }
+
+                is ForwardAttemptResult.RateLimited -> {
+                    val retryAfter = result.retryAfterSeconds
+                    if (retryAfter != null) {
+                        circuitBreaker.setBackoffSeconds(retryAfter)
+                        Log.w(TAG, "Pre-auth forward rate limited (429); backing off for ${retryAfter}s")
+                    } else {
+                        val backoffMs = circuitBreaker.recordFailure()
+                        Log.w(TAG, "Pre-auth forward rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
+                    }
+                    return
                 }
 
                 is ForwardAttemptResult.Decommissioned -> {
@@ -145,16 +153,13 @@ class PreAuthCloudForwardWorker(
                 is ForwardAttemptResult.TransportFailure -> {
                     val attemptNow = Instant.now().toString()
                     dao.recordCloudSyncFailure(record.id, attemptNow)
-                    backoffMutex.withLock {
-                        consecutiveFailureCount++
-                        val backoffMs = calculateBackoffMs(consecutiveFailureCount)
-                        nextRetryAt = Instant.now().plusMillis(backoffMs)
-                        Log.w(
-                            TAG,
-                            "Pre-auth forward failed (failure #$consecutiveFailureCount); " +
-                                "next retry after ${backoffMs}ms. Error: ${result.message}",
-                        )
-                    }
+                    val backoffMs = circuitBreaker.recordFailure()
+                    Log.w(
+                        TAG,
+                        "Pre-auth forward failed (failure #${circuitBreaker.consecutiveFailureCount}, " +
+                            "state=${circuitBreaker.state}); next retry after ${backoffMs}ms. " +
+                            "Error: ${result.message}",
+                    )
                     // Stop processing remaining records — retry on next cycle
                     return
                 }
@@ -210,6 +215,9 @@ class PreAuthCloudForwardWorker(
                             "401 Unauthorized after token refresh retry",
                         )
 
+                    is CloudPreAuthForwardResult.RateLimited ->
+                        ForwardAttemptResult.RateLimited(retryResult.retryAfterSeconds)
+
                     is CloudPreAuthForwardResult.Forbidden ->
                         resolveForbidden(retryResult.errorCode)
 
@@ -217,6 +225,9 @@ class PreAuthCloudForwardWorker(
                         ForwardAttemptResult.TransportFailure(retryResult.message)
                 }
             }
+
+            is CloudPreAuthForwardResult.RateLimited ->
+                ForwardAttemptResult.RateLimited(result.retryAfterSeconds)
 
             is CloudPreAuthForwardResult.Forbidden ->
                 resolveForbidden(result.errorCode)
@@ -254,16 +265,6 @@ class PreAuthCloudForwardWorker(
             customerName = customerName,
         )
 
-    /**
-     * Exponential backoff: baseBackoffMs * 2^(failureCount-1), capped at maxBackoffMs.
-     */
-    internal fun calculateBackoffMs(failureCount: Int): Long {
-        if (failureCount <= 0) return 0L
-        val shift = (failureCount - 1).coerceAtMost(30)
-        val exponential = config.baseBackoffMs * (1L shl shift)
-        return minOf(exponential, config.maxBackoffMs)
-    }
-
     // -------------------------------------------------------------------------
     // Internal sealed result
     // -------------------------------------------------------------------------
@@ -271,6 +272,7 @@ class PreAuthCloudForwardWorker(
     private sealed class ForwardAttemptResult {
         data object Success : ForwardAttemptResult()
         data object Decommissioned : ForwardAttemptResult()
+        data class RateLimited(val retryAfterSeconds: Long?) : ForwardAttemptResult()
         data class TransportFailure(val message: String) : ForwardAttemptResult()
     }
 }

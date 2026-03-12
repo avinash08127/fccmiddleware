@@ -82,6 +82,7 @@ class LocalApiServer(
     private val tag = "LocalApiServer"
 
     fun start() {
+        server?.stop(1_000, 2_000)
         server = embeddedServer(CIO, port = config.port, host = config.bindAddress) {
             configureContentNegotiation()
             configureLanApiKeyAuth()

@@ -5,8 +5,6 @@ import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.SyncState
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 
 /**
@@ -82,23 +80,28 @@ class CloudUploadWorker(
         private const val CLOUD_MAX_BATCH_SIZE = 500
     }
 
-    /** Guards compound read-modify-write of [consecutiveFailureCount] + [nextRetryAt]. */
-    private val backoffMutex = Mutex()
+    /**
+     * M-15: Effective batch size — starts at config value, halved on 413 PayloadTooLarge,
+     * reset to config value on successful upload. Floor: 1 record.
+     */
+    @Volatile
+    internal var effectiveBatchSize: Int = config.uploadBatchSize
 
     /**
-     * Monotonically increasing count of consecutive upload batch transport failures.
-     * Reset to zero on any successful batch upload.
-     * Must be read/written under [backoffMutex].
+     * M-08: Circuit breaker for upload operations.
+     * Replaces the manual backoff mutex/counters with a circuit breaker that
+     * enters OPEN state after [CircuitBreaker.openThreshold] consecutive failures,
+     * blocking further attempts until connectivity recovery or half-open probe.
      */
-    internal var consecutiveFailureCount: Int = 0
+    internal val uploadCircuitBreaker = CircuitBreaker(
+        name = "CloudUpload",
+        baseBackoffMs = config.baseBackoffMs,
+        maxBackoffMs = config.maxBackoffMs,
+    )
 
-    /**
-     * Earliest [Instant] at which the next upload attempt is permitted.
-     * Set after a transport failure using exponential backoff.
-     * Reset to [Instant.EPOCH] after a successful batch.
-     * Must be read/written under [backoffMutex].
-     */
-    internal var nextRetryAt: Instant = Instant.EPOCH
+    // Convenience aliases for test compatibility
+    internal val consecutiveFailureCount: Int get() = uploadCircuitBreaker.consecutiveFailureCount
+    internal val nextRetryAt: Instant get() = uploadCircuitBreaker.nextRetryAt
 
     // -------------------------------------------------------------------------
     // Public API — called by CadenceController
@@ -129,24 +132,19 @@ class CloudUploadWorker(
             return
         }
 
-        // Exponential backoff check — skip if a recent failure still applies
-        val now = Instant.now()
-        val currentNextRetry = backoffMutex.withLock { nextRetryAt }
-        if (now.isBefore(currentNextRetry)) {
-            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
-            Log.d(TAG, "uploadPendingBatch() skipped — backoff active (${waitMs}ms remaining)")
+        // M-08: Circuit breaker check — skip if backoff active or circuit is OPEN
+        if (!uploadCircuitBreaker.allowRequest()) {
+            val waitMs = uploadCircuitBreaker.remainingBackoffMs()
+            Log.d(TAG, "uploadPendingBatch() skipped — circuit breaker (state=${uploadCircuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
-        val batchSize = config.uploadBatchSize.coerceAtMost(CLOUD_MAX_BATCH_SIZE)
+        val batchSize = effectiveBatchSize.coerceAtMost(CLOUD_MAX_BATCH_SIZE)
         val batch = bm.getPendingBatch(batchSize)
         if (batch.isEmpty()) {
             // H-02 fix: reset backoff when buffer drains so new records upload immediately
-            backoffMutex.withLock {
-                consecutiveFailureCount = 0
-                nextRetryAt = Instant.EPOCH
-            }
-            Log.d(TAG, "uploadPendingBatch() — no PENDING records, backoff reset")
+            uploadCircuitBreaker.recordSuccess()
+            Log.d(TAG, "uploadPendingBatch() — no PENDING records, circuit breaker reset")
             return
         }
 
@@ -167,23 +165,18 @@ class CloudUploadWorker(
         handleUploadResult(bm, batch, result)
     }
 
-    /** Guards compound read-modify-write of status poll backoff state. */
-    private val statusPollBackoffMutex = Mutex()
-
     /**
-     * Monotonically increasing count of consecutive status poll transport failures.
-     * Reset to zero on any successful poll.
-     * Must be read/written under [statusPollBackoffMutex].
+     * M-08: Circuit breaker for status poll operations.
      */
-    internal var statusPollConsecutiveFailureCount: Int = 0
+    internal val statusPollCircuitBreaker = CircuitBreaker(
+        name = "StatusPoll",
+        baseBackoffMs = config.baseBackoffMs,
+        maxBackoffMs = config.maxBackoffMs,
+    )
 
-    /**
-     * Earliest [Instant] at which the next status poll attempt is permitted.
-     * Set after a transport failure using exponential backoff.
-     * Reset to [Instant.EPOCH] after a successful poll.
-     * Must be read/written under [statusPollBackoffMutex].
-     */
-    internal var statusPollNextRetryAt: Instant = Instant.EPOCH
+    // Convenience aliases for test compatibility
+    internal val statusPollConsecutiveFailureCount: Int get() = statusPollCircuitBreaker.consecutiveFailureCount
+    internal val statusPollNextRetryAt: Instant get() = statusPollCircuitBreaker.nextRetryAt
 
     /**
      * Poll cloud for transactions confirmed SYNCED_TO_ODOO.
@@ -218,12 +211,10 @@ class CloudUploadWorker(
             return
         }
 
-        // Backoff check
-        val now = Instant.now()
-        val currentNextRetry = statusPollBackoffMutex.withLock { statusPollNextRetryAt }
-        if (now.isBefore(currentNextRetry)) {
-            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
-            Log.d(TAG, "pollSyncedToOdooStatus() skipped — backoff active (${waitMs}ms remaining)")
+        // M-08: Circuit breaker check
+        if (!statusPollCircuitBreaker.allowRequest()) {
+            val waitMs = statusPollCircuitBreaker.remainingBackoffMs()
+            Log.d(TAG, "pollSyncedToOdooStatus() skipped — circuit breaker (state=${statusPollCircuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
@@ -323,6 +314,10 @@ class CloudUploadWorker(
                     }
                 }
 
+                is CloudTelemetryResult.RateLimited -> {
+                    Log.w(TAG, "Telemetry rate limited (429); retryAfter=${result.retryAfterSeconds}s — discarding payload")
+                }
+
                 is CloudTelemetryResult.Forbidden -> {
                     reporter.cloudAuthErrors.incrementAndGet()
                     Log.w(TAG, "Telemetry forbidden: ${result.errorCode}")
@@ -378,10 +373,15 @@ class CloudUploadWorker(
                         StatusPollAttemptResult.TransportFailure("401 Unauthorized after token refresh retry")
                     is CloudStatusPollResult.Forbidden ->
                         resolveStatusPollForbidden(retryResult.errorCode)
+                    is CloudStatusPollResult.RateLimited ->
+                        StatusPollAttemptResult.RateLimited(retryResult.retryAfterSeconds)
                     is CloudStatusPollResult.TransportError ->
                         StatusPollAttemptResult.TransportFailure(retryResult.message)
                 }
             }
+
+            is CloudStatusPollResult.RateLimited ->
+                StatusPollAttemptResult.RateLimited(result.retryAfterSeconds)
 
             is CloudStatusPollResult.Forbidden -> resolveStatusPollForbidden(result.errorCode)
 
@@ -474,15 +474,23 @@ class CloudUploadWorker(
                     Log.d(TAG, "Status poll returned no actionable entries")
                 }
 
-                // M-03: Write SyncState before resetting in-memory backoff (same rationale as upload)
+                // M-03: Write SyncState before resetting circuit breaker (same rationale as upload)
                 val dbWriteSucceeded = updateLastStatusPollAt()
                 if (dbWriteSucceeded) {
-                    statusPollBackoffMutex.withLock {
-                        statusPollConsecutiveFailureCount = 0
-                        statusPollNextRetryAt = Instant.EPOCH
-                    }
+                    statusPollCircuitBreaker.recordSuccess()
                 } else {
-                    Log.w(TAG, "SyncState write failed after successful status poll; backoff NOT reset")
+                    Log.w(TAG, "SyncState write failed after successful status poll; circuit breaker NOT reset")
+                }
+            }
+
+            is StatusPollAttemptResult.RateLimited -> {
+                val retryAfter = result.retryAfterSeconds
+                if (retryAfter != null) {
+                    statusPollCircuitBreaker.setBackoffSeconds(retryAfter)
+                    Log.w(TAG, "Status poll rate limited (429); backing off for ${retryAfter}s")
+                } else {
+                    val backoffMs = statusPollCircuitBreaker.recordFailure()
+                    Log.w(TAG, "Status poll rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
                 }
             }
 
@@ -495,16 +503,13 @@ class CloudUploadWorker(
             }
 
             is StatusPollAttemptResult.TransportFailure -> {
-                statusPollBackoffMutex.withLock {
-                    statusPollConsecutiveFailureCount++
-                    val backoffMs = calculateBackoffMs(statusPollConsecutiveFailureCount)
-                    statusPollNextRetryAt = Instant.now().plusMillis(backoffMs)
-                    Log.w(
-                        TAG,
-                        "Status poll failed (failure #$statusPollConsecutiveFailureCount); " +
-                            "next retry after ${backoffMs}ms. Error: ${result.message}",
-                    )
-                }
+                val backoffMs = statusPollCircuitBreaker.recordFailure()
+                Log.w(
+                    TAG,
+                    "Status poll failed (failure #${statusPollCircuitBreaker.consecutiveFailureCount}, " +
+                        "state=${statusPollCircuitBreaker.state}); next retry after ${backoffMs}ms. " +
+                        "Error: ${result.message}",
+                )
             }
         }
     }
@@ -575,10 +580,20 @@ class CloudUploadWorker(
                         UploadAttemptResult.TransportFailure("401 Unauthorized after token refresh retry")
                     is CloudUploadResult.Forbidden ->
                         resolveForbidden(retryResult.errorCode)
+                    is CloudUploadResult.RateLimited ->
+                        UploadAttemptResult.RateLimited(retryResult.retryAfterSeconds)
+                    is CloudUploadResult.PayloadTooLarge ->
+                        UploadAttemptResult.PayloadTooLarge
                     is CloudUploadResult.TransportError ->
                         UploadAttemptResult.TransportFailure(retryResult.message)
                 }
             }
+
+            is CloudUploadResult.RateLimited ->
+                UploadAttemptResult.RateLimited(result.retryAfterSeconds)
+
+            is CloudUploadResult.PayloadTooLarge ->
+                UploadAttemptResult.PayloadTooLarge
 
             is CloudUploadResult.Forbidden -> resolveForbidden(result.errorCode)
 
@@ -603,21 +618,39 @@ class CloudUploadWorker(
             is UploadAttemptResult.Success -> {
                 processUploadResponse(bm, batch, result.response)
                 // M-03: Write SyncState to disk BEFORE resetting in-memory backoff counters.
-                // If the process crashes after an in-memory reset but before the DB write,
-                // on restart the counters re-initialize to 0/EPOCH anyway (harmless), but
-                // SyncState.lastUploadAt would be stale. Writing first ensures the durable
-                // state is consistent before we loosen the in-memory guard.
                 val dbWriteSucceeded = updateLastUploadAt()
                 if (dbWriteSucceeded) {
-                    backoffMutex.withLock {
-                        consecutiveFailureCount = 0
-                        nextRetryAt = Instant.EPOCH
-                    }
+                    uploadCircuitBreaker.recordSuccess()
+                    // M-15: Reset effective batch size on success
+                    effectiveBatchSize = config.uploadBatchSize
                 } else {
                     // DB write failed — keep backoff active so the next tick retries the write.
-                    // The batch itself was accepted by cloud, so records are already UPLOADED.
-                    Log.w(TAG, "SyncState write failed after successful upload; backoff NOT reset")
+                    Log.w(TAG, "SyncState write failed after successful upload; circuit breaker NOT reset")
                 }
+            }
+
+            is UploadAttemptResult.RateLimited -> {
+                // M-15: Use Retry-After if available, otherwise fall back to circuit breaker backoff.
+                // Do not count rate limiting as a failure — it is flow control, not a fault.
+                val retryAfter = result.retryAfterSeconds
+                if (retryAfter != null) {
+                    uploadCircuitBreaker.setBackoffSeconds(retryAfter)
+                    Log.w(TAG, "Rate limited (429); backing off for ${retryAfter}s (Retry-After header)")
+                } else {
+                    val backoffMs = uploadCircuitBreaker.recordFailure()
+                    Log.w(TAG, "Rate limited (429); no Retry-After header, using backoff ${backoffMs}ms")
+                }
+            }
+
+            is UploadAttemptResult.PayloadTooLarge -> {
+                // M-15: Halve the effective batch size (floor: 1) and retry on next tick.
+                val newSize = (effectiveBatchSize / 2).coerceAtLeast(1)
+                Log.w(
+                    TAG,
+                    "Payload too large (413); reducing batch size from $effectiveBatchSize to $newSize",
+                )
+                effectiveBatchSize = newSize
+                // No circuit breaker penalty — this is a configuration issue, not a transport fault.
             }
 
             is UploadAttemptResult.Decommissioned -> {
@@ -632,16 +665,13 @@ class CloudUploadWorker(
             }
 
             is UploadAttemptResult.TransportFailure -> {
-                backoffMutex.withLock {
-                    consecutiveFailureCount++
-                    val backoffMs = calculateBackoffMs(consecutiveFailureCount)
-                    nextRetryAt = Instant.now().plusMillis(backoffMs)
-                    Log.w(
-                        TAG,
-                        "Batch upload failed (failure #$consecutiveFailureCount); " +
-                            "next retry after ${backoffMs}ms. Error: ${result.message}",
-                    )
-                }
+                val backoffMs = uploadCircuitBreaker.recordFailure()
+                Log.w(
+                    TAG,
+                    "Batch upload failed (failure #${uploadCircuitBreaker.consecutiveFailureCount}, " +
+                        "state=${uploadCircuitBreaker.state}); next retry after ${backoffMs}ms. " +
+                        "Error: ${result.message}",
+                )
                 // Record the failure against every record in the batch so the diagnostics
                 // screen and telemetry can surface upload error details.
                 val attemptAt = Instant.now().toString()
@@ -796,22 +826,6 @@ class CloudUploadWorker(
             rawPayloadJson = rawPayloadJson,
         )
 
-    /**
-     * Exponential backoff: baseBackoffMs * 2^(failureCount-1), capped at maxBackoffMs.
-     *
-     * failureCount=1 → 1 s
-     * failureCount=2 → 2 s
-     * failureCount=3 → 4 s
-     * failureCount=4 → 8 s
-     * failureCount=7 → 64 s → capped to 60 s
-     */
-    internal fun calculateBackoffMs(failureCount: Int): Long {
-        if (failureCount <= 0) return 0L
-        val shift = (failureCount - 1).coerceAtMost(30) // avoid Long overflow
-        val exponential = config.baseBackoffMs * (1L shl shift)
-        return minOf(exponential, config.maxBackoffMs)
-    }
-
     /** Update [SyncState.lastUploadAt] after a successful batch upload. Returns true on success. */
     private suspend fun updateLastUploadAt(): Boolean {
         val dao = syncStateDao ?: return false
@@ -842,12 +856,15 @@ class CloudUploadWorker(
     private sealed class UploadAttemptResult {
         data class Success(val response: CloudUploadResponse) : UploadAttemptResult()
         data object Decommissioned : UploadAttemptResult()
+        data class RateLimited(val retryAfterSeconds: Long?) : UploadAttemptResult()
+        data object PayloadTooLarge : UploadAttemptResult()
         data class TransportFailure(val message: String) : UploadAttemptResult()
     }
 
     private sealed class StatusPollAttemptResult {
         data class Success(val response: SyncedStatusResponse) : StatusPollAttemptResult()
         data object Decommissioned : StatusPollAttemptResult()
+        data class RateLimited(val retryAfterSeconds: Long?) : StatusPollAttemptResult()
         data class TransportFailure(val message: String) : StatusPollAttemptResult()
     }
 }

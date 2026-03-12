@@ -37,7 +37,10 @@ sealed class CloudStatusPollResult {
      */
     data class Forbidden(val errorCode: String?) : CloudStatusPollResult()
 
-    /** Network or non-2xx/401/403 failure. Retry on next cadence tick. */
+    /** M-15: HTTP 429 — rate limited by cloud. */
+    data class RateLimited(val retryAfterSeconds: Long?) : CloudStatusPollResult()
+
+    /** Network or non-2xx/401/403/429 failure. Retry on next cadence tick. */
     data class TransportError(val message: String) : CloudStatusPollResult()
 }
 
@@ -59,7 +62,18 @@ sealed class CloudUploadResult {
      */
     data class Forbidden(val errorCode: String?) : CloudUploadResult()
 
-    /** Network or non-2xx/401/403 failure. Retry on next cadence tick. */
+    /**
+     * M-15: HTTP 429 — rate limited by cloud. Caller should back off for
+     * [retryAfterSeconds] seconds (from Retry-After header), or use default backoff if null.
+     */
+    data class RateLimited(val retryAfterSeconds: Long?) : CloudUploadResult()
+
+    /**
+     * M-15: HTTP 413 — request payload too large. Caller should reduce batch size and retry.
+     */
+    data object PayloadTooLarge : CloudUploadResult()
+
+    /** Network or non-2xx/401/403/429/413 failure. Retry on next cadence tick. */
     data class TransportError(val message: String) : CloudUploadResult()
 }
 
@@ -207,6 +221,11 @@ class HttpCloudApiClient(
                     }
                     CloudUploadResult.Forbidden(errorCode)
                 }
+                HttpStatusCode.TooManyRequests -> {
+                    val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
+                    CloudUploadResult.RateLimited(retryAfter)
+                }
+                HttpStatusCode.PayloadTooLarge -> CloudUploadResult.PayloadTooLarge
                 else -> {
                     CloudUploadResult.TransportError(
                         "HTTP ${response.status.value}: ${response.status.description}",
@@ -237,6 +256,10 @@ class HttpCloudApiClient(
                         null
                     }
                     CloudStatusPollResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.TooManyRequests -> {
+                    val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
+                    CloudStatusPollResult.RateLimited(retryAfter)
                 }
                 else -> {
                     CloudStatusPollResult.TransportError(
@@ -276,6 +299,10 @@ class HttpCloudApiClient(
                     }
                     CloudConfigPollResult.Forbidden(errorCode)
                 }
+                HttpStatusCode.TooManyRequests -> {
+                    val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
+                    CloudConfigPollResult.RateLimited(retryAfter)
+                }
                 else -> {
                     CloudConfigPollResult.TransportError(
                         "HTTP ${response.status.value}: ${response.status.description}",
@@ -307,6 +334,10 @@ class HttpCloudApiClient(
                         null
                     }
                     CloudTelemetryResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.TooManyRequests -> {
+                    val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
+                    CloudTelemetryResult.RateLimited(retryAfter)
                 }
                 else -> {
                     CloudTelemetryResult.TransportError(
@@ -340,6 +371,10 @@ class HttpCloudApiClient(
                         null
                     }
                     CloudPreAuthForwardResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.TooManyRequests -> {
+                    val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
+                    CloudPreAuthForwardResult.RateLimited(retryAfter)
                 }
                 HttpStatusCode.Conflict -> {
                     val error = try {
@@ -443,20 +478,25 @@ class HttpCloudApiClient(
             val client = HttpClient(OkHttp) {
                 engine {
                     if (certificatePins.isNotEmpty()) {
+                        // M-07: Fail-fast if hostname cannot be extracted. Silently disabling
+                        // pinning on a malformed URL is a security degradation that must not
+                        // go unnoticed — it is better to crash at startup than to send
+                        // credentials over an unpinned connection.
                         val hostname = extractHostname(cloudBaseUrl)
-                        if (hostname != null) {
-                            val pinnerBuilder = CertificatePinner.Builder()
-                            for (pin in certificatePins) {
-                                pinnerBuilder.add(hostname, pin)
-                            }
-                            val pinner = pinnerBuilder.build()
-                            config {
-                                certificatePinner(pinner)
-                            }
-                            Log.i(TAG, "Certificate pinning enabled for $hostname with ${certificatePins.size} pin(s)")
-                        } else {
-                            Log.w(TAG, "Could not extract hostname from $cloudBaseUrl — certificate pinning disabled")
+                            ?: throw IllegalArgumentException(
+                                "Cannot extract hostname from cloudBaseUrl '$cloudBaseUrl' — " +
+                                    "certificate pinning requires a valid URL. Fix the URL or " +
+                                    "remove certificate pins to proceed without pinning.",
+                            )
+                        val pinnerBuilder = CertificatePinner.Builder()
+                        for (pin in certificatePins) {
+                            pinnerBuilder.add(hostname, pin)
                         }
+                        val pinner = pinnerBuilder.build()
+                        config {
+                            certificatePinner(pinner)
+                        }
+                        Log.i(TAG, "Certificate pinning enabled for $hostname with ${certificatePins.size} pin(s)")
                     }
                 }
                 install(ContentNegotiation) {
@@ -469,6 +509,15 @@ class HttpCloudApiClient(
                 }
             }
             return HttpCloudApiClient(cloudBaseUrl, client)
+        }
+
+        /**
+         * M-15: Parse the Retry-After header value as seconds.
+         * Accepts integer seconds (e.g. "30") or returns null for HTTP-date / missing / invalid.
+         */
+        internal fun parseRetryAfterSeconds(header: String?): Long? {
+            if (header == null) return null
+            return header.trim().toLongOrNull()?.takeIf { it > 0 }
         }
 
         /**

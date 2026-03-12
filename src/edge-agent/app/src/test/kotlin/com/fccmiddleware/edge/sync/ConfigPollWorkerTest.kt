@@ -161,7 +161,7 @@ class ConfigPollWorkerTest {
 
     @Test
     fun `returns early when backoff is active`() = runTest {
-        worker.nextRetryAt = Instant.now().plusSeconds(60)
+        worker.circuitBreaker.nextRetryAt = Instant.now().plusSeconds(60)
         worker.pollConfig()
         coVerify(exactly = 0) { cloudApiClient.getConfig(any(), any()) }
     }
@@ -231,8 +231,8 @@ class ConfigPollWorkerTest {
 
     @Test
     fun `applied config resets backoff`() = runTest {
-        worker.consecutiveFailureCount = 3
-        worker.nextRetryAt = Instant.now().minusSeconds(1) // past backoff
+        worker.circuitBreaker.consecutiveFailureCount = 3
+        worker.circuitBreaker.nextRetryAt = Instant.now().minusSeconds(1) // past backoff
 
         coEvery { cloudApiClient.getConfig(4, VALID_TOKEN) } returns
             CloudConfigPollResult.Success(VALID_CONFIG_JSON, "\"5\"")
@@ -337,19 +337,20 @@ class ConfigPollWorkerTest {
 
     @Test
     fun `consecutive failures increase backoff exponentially`() = runTest {
-        val backoff1 = worker.calculateBackoffMs(1)
-        val backoff2 = worker.calculateBackoffMs(2)
-        val backoff3 = worker.calculateBackoffMs(3)
-
-        assertEquals(1_000L, backoff1)
-        assertEquals(2_000L, backoff2)
-        assertEquals(4_000L, backoff3)
+        // Backoff is now in CircuitBreaker — test via recordFailure() return value
+        val cb = worker.circuitBreaker
+        cb.resetOnConnectivityRecovery() // ensure clean state
+        assertEquals(1_000L, cb.recordFailure())
+        assertEquals(2_000L, cb.recordFailure())
+        assertEquals(4_000L, cb.recordFailure())
     }
 
     @Test
     fun `backoff is capped at 60 seconds`() = runTest {
-        val backoff = worker.calculateBackoffMs(10)
-        assertEquals(60_000L, backoff)
+        val cb = worker.circuitBreaker
+        cb.resetOnConnectivityRecovery()
+        repeat(9) { cb.recordFailure() }
+        assertEquals(60_000L, cb.recordFailure()) // 10th failure
     }
 
     // -------------------------------------------------------------------------

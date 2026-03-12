@@ -169,12 +169,14 @@ class PreAuthHandler(
 
         val insertedRowId = preAuthDao.insert(record)
         // -1 means the unique index (odoo_order_id, site_code) prevented insertion —
-        // a concurrent request raced us and already created the record; re-read it.
-        val activeRecord = if (insertedRowId == -1L) {
-            preAuthDao.getByOdooOrderId(odooOrderId, siteCode) ?: record
-        } else {
-            record
+        // a concurrent request raced us and already created the record.
+        // M-12: Return dedup result immediately to prevent both racers calling sendPreAuth().
+        if (insertedRowId == -1L) {
+            val raceWinner = preAuthDao.getByOdooOrderId(odooOrderId, siteCode) ?: record
+            Log.d(TAG, "Concurrent insert detected for orderId=$odooOrderId status=${raceWinner.status} — returning dedup result")
+            return dedupResult(raceWinner)
         }
+        val activeRecord = record
 
         // ------------------------------------------------------------------
         // 6. Send pre-auth to FCC over LAN using FCC numbers from nozzle mapping

@@ -44,7 +44,7 @@ fun Routing.transactionRoutes(
      */
     get("/api/v1/transactions") {
         if (!routeRequiresAuth(call, lanApiKey, enableLanApi)) return@get
-        val pumpNumber = call.request.queryParameters["pumpNumber"]?.toIntOrNull()
+        val pumpNumber = call.request.queryParameters["pumpNumber"]?.toIntOrNull()?.takeIf { it >= 0 }
         val sinceParam = call.request.queryParameters["since"]
         val limit = (call.request.queryParameters["limit"]?.toIntOrNull() ?: 50).coerceIn(1, 100)
         val offset = (call.request.queryParameters["offset"]?.toIntOrNull() ?: 0).coerceAtLeast(0)

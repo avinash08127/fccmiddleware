@@ -101,7 +101,21 @@
       "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:testDebugUnitTest --tests \"com.fccmiddleware.edge.sync.ConfigPollWorkerTest\" 2>&1 | tail -15)",
       "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:testDebugUnitTest --tests \"com.fccmiddleware.edge.sync.CloudUploadWorkerTest\" --tests \"com.fccmiddleware.edge.api.*\" 2>&1 | tail -15)",
       "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -type f -name \"*.cs\" | xargs grep -l \"Destructure\\\\|Enrich\\\\|appsettings\\\\|DbContext\" | head -20)",
-      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -type f -name \"*.cs\" | xargs grep -l \"Destructure\\\\|DestructureByTransforming\\\\|Policy\\\\|SerilogRequestLogging\" | head -20)"
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -type f -name \"*.cs\" | xargs grep -l \"Destructure\\\\|DestructureByTransforming\\\\|Policy\\\\|SerilogRequestLogging\" | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware -type d -name \"*DOMS*\" -o -type d -name \"*doms*\" 2>/dev/null | head -20)",
+      "Bash(ls -la \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\DOMSRealImplementation\\\\DppMiddleWareService\" | grep \"\\\\.cs$\" | head -20)",
+      "Bash(ls -R \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\DOMSRealImplementation\\\\DppMiddleWareService\" | grep \"\\\\.cs$\")",
+      "Bash(find src/edge-agent -name \"*.kt\" -newer src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/sync/CircuitBreaker.kt -type f 2>/dev/null | head -20)",
+      "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew compileDebugKotlin 2>&1 | tail -30)",
+      "Bash(./gradlew compileDebugUnitTestKotlin 2>&1 | tail -15)",
+      "Bash(ls -la /c/Users/a0812/fccmiddleware/src/cloud/FccMiddleware.Domain/Models/Adapter/ | grep -i \"\\\\.cs$\")",
+      "Bash(./gradlew compileDebugUnitTestKotlin 2>&1 | grep -i \"error\")",
+      "Bash(./gradlew compileDebugUnitTestKotlin 2>&1 | grep \"e:\")",
+      "Bash(./gradlew test:*)",
+      "Bash(./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.ingestion.IngestionOrchestratorTest\" 2>&1 | tail -20)",
+      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew compileDebugUnitTestKotlinSources 2>&1 | tail -80)",
+      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew tasks --all 2>&1 | grep -i \"compile.*test.*kotlin\" | head -10)",
+      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:compileDebugUnitTestKotlin 2>&1 | tail -100)"
     ]
   }
 }

@@ -1,8 +1,10 @@
 package com.fccmiddleware.edge.config
 
+import android.util.Base64
 import android.util.Log
 import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
 import com.fccmiddleware.edge.buffer.entity.AgentConfig
+import com.fccmiddleware.edge.security.KeystoreManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +27,7 @@ import java.time.Instant
  */
 class ConfigManager(
     private val agentConfigDao: AgentConfigDao,
+    private val keystoreManager: KeystoreManager? = null,
 ) {
 
     companion object {
@@ -56,7 +59,13 @@ class ConfigManager(
                 Log.i(TAG, "No stored config found — awaiting first cloud config push")
                 return
             }
-            val parsed = json.decodeFromString<EdgeAgentConfigDto>(stored.configJson)
+            // M-13: Decrypt config if KeystoreManager is available and data appears encrypted
+            val configJsonPlain = decryptConfigJson(stored.configJson)
+            if (configJsonPlain == null) {
+                Log.e(TAG, "Config integrity check failed — stored config may be tampered. Awaiting fresh config from cloud.")
+                return
+            }
+            val parsed = json.decodeFromString<EdgeAgentConfigDto>(configJsonPlain)
             _config.value = parsed
             Log.i(
                 TAG,
@@ -105,6 +114,16 @@ class ConfigManager(
             return ConfigApplyResult.Rejected("INVALID_NUMERIC_BOUNDS")
         }
 
+        // 3b. M-16: URL security validation — cloudBaseUrl must use HTTPS
+        val urlViolations = validateUrls(newConfig)
+        if (urlViolations.isNotEmpty()) {
+            Log.e(
+                TAG,
+                "Config rejected — URL security violations: $urlViolations",
+            )
+            return ConfigApplyResult.Rejected("INSECURE_URL")
+        }
+
         // 4. Provisioning-only field immutability check
         val current = _config.value
         if (current != null) {
@@ -129,9 +148,11 @@ class ConfigManager(
         }
 
         // 6. Persist to Room (staged → active atomically for single-row table)
+        //    M-13: Encrypt config JSON with AES-256-GCM via Android Keystore for integrity+confidentiality
         try {
+            val persistedJson = encryptConfigJson(rawJson)
             val entity = AgentConfig(
-                configJson = rawJson,
+                configJson = persistedJson,
                 configVersion = newConfig.configVersion,
                 schemaVersion = majorVersion.toIntOrNull() ?: 2,
                 receivedAt = Instant.now().toString(),
@@ -214,6 +235,18 @@ class ConfigManager(
     }
 
     /**
+     * M-16: Validate that URL fields use secure schemes.
+     * Returns list of violation descriptions (empty = all OK).
+     */
+    private fun validateUrls(cfg: EdgeAgentConfigDto): List<String> {
+        val violations = mutableListOf<String>()
+        if (!cfg.sync.cloudBaseUrl.startsWith("https://")) {
+            violations += "sync.cloudBaseUrl must use HTTPS (got: ${cfg.sync.cloudBaseUrl.take(8)}…)"
+        }
+        return violations
+    }
+
+    /**
      * Check provisioning-only fields for changes.
      * Returns list of field names that changed (empty = OK).
      */
@@ -238,6 +271,50 @@ class ConfigManager(
             violations += "api.localApiPort"
         }
         return violations
+    }
+
+    // -------------------------------------------------------------------------
+    // M-13: Config integrity — encrypt/decrypt via Android Keystore AES-256-GCM
+    // -------------------------------------------------------------------------
+
+    /**
+     * Encrypt config JSON for storage in Room.
+     * Returns Base64-encoded ciphertext when KeystoreManager is available,
+     * or raw JSON as fallback (pre-provisioning / test environments).
+     */
+    private fun encryptConfigJson(rawJson: String): String {
+        val ks = keystoreManager ?: return rawJson
+        val encrypted = ks.storeSecret(KeystoreManager.ALIAS_CONFIG_INTEGRITY, rawJson)
+        if (encrypted == null) {
+            Log.w(TAG, "Config encryption failed — persisting raw JSON (integrity not protected)")
+            return rawJson
+        }
+        // Prefix with "ENC:" so loadFromLocal can distinguish encrypted from plaintext
+        return "ENC:" + Base64.encodeToString(encrypted, Base64.NO_WRAP)
+    }
+
+    /**
+     * Decrypt config JSON from Room storage.
+     * Returns plaintext JSON, or null if decryption fails (tampered data).
+     * Handles both encrypted ("ENC:..." prefix) and legacy plaintext configs.
+     */
+    private fun decryptConfigJson(storedValue: String): String? {
+        if (!storedValue.startsWith("ENC:")) {
+            // Legacy plaintext config — accept it but log a warning
+            Log.w(TAG, "Stored config is not encrypted — accepting legacy plaintext")
+            return storedValue
+        }
+        val ks = keystoreManager ?: run {
+            Log.w(TAG, "Encrypted config found but KeystoreManager not available — cannot decrypt")
+            return null
+        }
+        val encrypted = try {
+            Base64.decode(storedValue.removePrefix("ENC:"), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to Base64-decode encrypted config", e)
+            return null
+        }
+        return ks.retrieveSecret(KeystoreManager.ALIAS_CONFIG_INTEGRITY, encrypted)
     }
 
     /**

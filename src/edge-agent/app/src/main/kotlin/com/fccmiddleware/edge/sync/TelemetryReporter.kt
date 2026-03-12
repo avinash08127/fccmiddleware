@@ -80,7 +80,26 @@ class TelemetryReporter(
     suspend fun buildPayload(): TelemetryPayload? {
         val cfg = configManager.config.value
         if (cfg == null) {
-            Log.d(TAG, "buildPayload() — no config loaded, skipping telemetry")
+            // M-06: Log accumulated error counters at WARN level so they are captured
+            // in device logs even when config is not yet loaded (unprovisioned device).
+            // Without this, errors accumulate silently in memory and are lost on restart.
+            val counts = snapshotErrorCounts()
+            val hasErrors = counts.fccConnectionErrors > 0 || counts.cloudUploadErrors > 0 ||
+                counts.cloudAuthErrors > 0 || counts.localApiErrors > 0 ||
+                counts.bufferWriteErrors > 0 || counts.adapterNormalizationErrors > 0 ||
+                counts.preAuthErrors > 0
+            if (hasErrors) {
+                Log.w(
+                    TAG,
+                    "buildPayload() — no config loaded; unreported error counters: " +
+                        "fcc=${counts.fccConnectionErrors} upload=${counts.cloudUploadErrors} " +
+                        "auth=${counts.cloudAuthErrors} localApi=${counts.localApiErrors} " +
+                        "bufferWrite=${counts.bufferWriteErrors} adapter=${counts.adapterNormalizationErrors} " +
+                        "preAuth=${counts.preAuthErrors}",
+                )
+            } else {
+                Log.d(TAG, "buildPayload() — no config loaded, skipping telemetry")
+            }
             return null
         }
 
