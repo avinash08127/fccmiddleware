@@ -1,0 +1,180 @@
+name: Desktop Agent CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/desktop-edge-agent/**'
+      - '.github/workflows/ci-desktop-agent.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/desktop-edge-agent/**'
+      - '.github/workflows/ci-desktop-agent.yml'
+
+env:
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_NOLOGO: true
+  ARTIFACT_SIZE_BUDGET_MB: 60
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build / Format / Test — matrix across Windows, macOS, Linux
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    defaults:
+      run:
+        working-directory: src/desktop-edge-agent
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-dea-${{ hashFiles('src/desktop-edge-agent/**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-dea-
+
+      - name: Restore
+        run: dotnet restore FccDesktopAgent.sln
+
+      - name: Build
+        run: dotnet build FccDesktopAgent.sln --no-restore -c Release
+
+      - name: Format check
+        run: dotnet format FccDesktopAgent.sln --verify-no-changes --no-restore
+
+      - name: Unit tests
+        run: |
+          dotnet test FccDesktopAgent.sln \
+            --no-build \
+            -c Release \
+            --logger "trx;LogFileName=unit-tests.trx" \
+            --results-directory ./TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-agent-test-results-${{ matrix.os }}
+          path: src/desktop-edge-agent/TestResults/
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Publish self-contained single-file executables — one per RID
+  # ─────────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish (${{ matrix.rid }})
+    runs-on: ${{ matrix.build-os }}
+    needs: build-and-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            build-os: windows-latest
+          - rid: osx-x64
+            build-os: macos-latest
+          - rid: osx-arm64
+            build-os: macos-latest
+          - rid: linux-x64
+            build-os: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: src/desktop-edge-agent
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-dea-${{ hashFiles('src/desktop-edge-agent/**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-dea-
+
+      - name: Restore
+        run: dotnet restore FccDesktopAgent.sln
+
+      - name: Publish Service (headless)
+        run: |
+          dotnet publish src/FccDesktopAgent.Service/FccDesktopAgent.Service.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            /p:PublishSingleFile=true \
+            /p:PublishTrimmed=true \
+            -o ./publish/${{ matrix.rid }}/service
+
+      - name: Publish App (GUI) — skip on Linux ARM / headless servers
+        if: matrix.rid != 'linux-x64'
+        run: |
+          dotnet publish src/FccDesktopAgent.App/FccDesktopAgent.App.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            /p:PublishSingleFile=true \
+            /p:PublishTrimmed=true \
+            -o ./publish/${{ matrix.rid }}/app
+
+      # ── Size budget check ───────────────────────────────────────────────────
+      - name: Check artifact size budget (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $budgetMb = $env:ARTIFACT_SIZE_BUDGET_MB
+          $files = Get-ChildItem ./publish/${{ matrix.rid }} -Recurse -File
+          foreach ($f in $files) {
+            $sizeMb = [math]::Round($f.Length / 1MB, 2)
+            Write-Host "$($f.Name): ${sizeMb} MB"
+            if ($sizeMb -gt $budgetMb) {
+              Write-Error "$($f.Name) exceeds ${budgetMb} MB budget (actual: ${sizeMb} MB)"
+              exit 1
+            }
+          }
+          Write-Host "All artifacts within ${budgetMb} MB budget."
+
+      - name: Check artifact size budget (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          budget_mb=$ARTIFACT_SIZE_BUDGET_MB
+          failed=0
+          find ./publish/${{ matrix.rid }} -type f | while read f; do
+            size_bytes=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
+            size_mb=$(echo "scale=2; $size_bytes / 1048576" | bc)
+            echo "$(basename "$f"): ${size_mb} MB"
+            if (( $(echo "$size_mb > $budget_mb" | bc -l) )); then
+              echo "ERROR: $(basename "$f") exceeds ${budget_mb} MB budget (actual: ${size_mb} MB)"
+              failed=1
+            fi
+          done
+          [ $failed -eq 0 ] || exit 1
+          echo "All artifacts within ${budget_mb} MB budget."
+
+      - name: Upload published artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-agent-${{ matrix.rid }}
+          path: src/desktop-edge-agent/publish/${{ matrix.rid }}/
+          retention-days: 14

@@ -56,9 +56,9 @@ internal static class SeedProfileFactory
             ResponseTemplates =
             [
                 Template("health", """{"status":"ok","profile":"{{profileKey}}"}"""),
-                Template("preauth-create", """{"status":"created","preauthId":"{{preauthId}}","correlationId":"{{correlationId}}"}"""),
-                Template("preauth-authorize", """{"status":"authorized","preauthId":"{{preauthId}}","correlationId":"{{correlationId}}"}"""),
-                Template("preauth-cancel", """{"status":"cancelled","preauthId":"{{preauthId}}","correlationId":"{{correlationId}}"}"""),
+                Template("preauth-create", """{"status":"{{status}}","preauthId":"{{preauthId}}","correlationId":"{{correlationId}}","expiresAtUtc":"{{expiresAtUtc}}"}"""),
+                Template("preauth-authorize", """{"status":"{{status}}","preauthId":"{{preauthId}}","correlationId":"{{correlationId}}","expiresAtUtc":"{{expiresAtUtc}}"}"""),
+                Template("preauth-cancel", """{"status":"{{status}}","preauthId":"{{preauthId}}","correlationId":"{{correlationId}}"}"""),
                 Template("transactions-pull", """{"transactions":[{"transactionId":"{{transactionId}}","siteCode":"{{siteCode}}","volume":{{volume}},"amount":{{amount}}}]}"""),
                 Template("transactions-ack", """{"status":"acknowledged","transactionId":"{{transactionId}}"}"""),
                 Template("transactions-push", """{"accepted":true,"transactionId":"{{transactionId}}"}"""),
@@ -84,6 +84,13 @@ internal static class SeedProfileFactory
                 HttpStatusCode = 503,
                 ErrorCode = "SIMULATED_FAILURE",
                 MessageTemplate = "Simulated failure for {{operation}}",
+            },
+            Extensions = new FccExtensionPointDefinition
+            {
+                Configuration = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["preAuthExpirySeconds"] = "300",
+                },
             },
         };
     }

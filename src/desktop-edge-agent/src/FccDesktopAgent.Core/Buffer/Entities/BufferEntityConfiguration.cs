@@ -84,6 +84,7 @@ internal sealed class PreAuthRecordConfiguration : IEntityTypeConfiguration<PreA
         builder.Property(p => p.CustomerTaxId).HasMaxLength(64);
         builder.Property(p => p.CustomerBusinessName).HasMaxLength(128);
         builder.Property(p => p.AttendantId).HasMaxLength(64);
+        builder.Property(p => p.FailureReason).HasMaxLength(64);
         builder.Property(p => p.FccCorrelationId).HasMaxLength(128);
         builder.Property(p => p.FccAuthorizationCode).HasMaxLength(128);
         builder.Property(p => p.MatchedFccTransactionId).HasMaxLength(36);

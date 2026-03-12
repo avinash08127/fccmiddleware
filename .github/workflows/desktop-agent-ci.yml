@@ -1,0 +1,82 @@
+name: Desktop Agent CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/desktop-edge-agent/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/desktop-edge-agent/**'
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-latest
+            rid: osx-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+
+    defaults:
+      run:
+        working-directory: src/desktop-edge-agent
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-desktop-${{ hashFiles('src/desktop-edge-agent/**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-desktop-
+
+      - name: Restore
+        run: dotnet restore FccDesktopAgent.sln
+
+      - name: Build
+        run: dotnet build FccDesktopAgent.sln --no-restore -c Release
+
+      - name: Unit Tests
+        run: |
+          dotnet test FccDesktopAgent.sln \
+            --no-build \
+            -c Release \
+            --filter "FullyQualifiedName!~IntegrationTests" \
+            --logger "trx;LogFileName=unit-tests.trx" \
+            --results-directory ./TestResults
+
+      - name: Publish (single-file)
+        run: |
+          dotnet publish src/FccDesktopAgent.App/FccDesktopAgent.App.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained \
+            -o ./publish/${{ matrix.rid }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-agent-${{ matrix.rid }}
+          path: src/desktop-edge-agent/publish/${{ matrix.rid }}/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-agent-test-results-${{ matrix.os }}
+          path: src/desktop-edge-agent/TestResults/

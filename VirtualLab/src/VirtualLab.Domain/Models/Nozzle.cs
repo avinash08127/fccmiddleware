@@ -11,6 +11,7 @@ public sealed class Nozzle
     public int FccNozzleNumber { get; set; }
     public string Label { get; set; } = string.Empty;
     public NozzleState State { get; set; }
+    public string SimulationStateJson { get; set; } = "{}";
     public bool IsActive { get; set; } = true;
     public DateTimeOffset UpdatedAtUtc { get; set; }
 

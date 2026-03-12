@@ -46,6 +46,9 @@ public sealed class PreAuthRecord
     public string? CustomerBusinessName { get; set; }
     public string? AttendantId { get; set; }
 
+    /// <summary>Structured failure/cancellation reason code (e.g. "FCC_DECLINED", "FCC_TIMEOUT").</summary>
+    public string? FailureReason { get; set; }
+
     /// <summary>Primary FCC match key returned by FCC on authorization.</summary>
     public string? FccCorrelationId { get; set; }
     public string? FccAuthorizationCode { get; set; }

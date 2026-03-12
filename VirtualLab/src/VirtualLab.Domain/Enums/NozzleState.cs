@@ -4,7 +4,8 @@ public enum NozzleState
 {
     Idle = 0,
     Lifted = 1,
-    Dispensing = 2,
-    Hung = 3,
-    Offline = 4,
+    Authorized = 2,
+    Dispensing = 3,
+    Hung = 4,
+    Faulted = 5,
 }

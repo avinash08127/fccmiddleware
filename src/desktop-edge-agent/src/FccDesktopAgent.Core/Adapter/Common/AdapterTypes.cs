@@ -38,10 +38,12 @@ public sealed record PreAuthResult(
     string? FccCorrelationId,
     string? FccAuthorizationCode,
     string? ErrorCode,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    DateTimeOffset? ExpiresAt = null);
 
 /// <summary>Connection configuration for a FCC adapter instance.</summary>
 public sealed record FccConnectionConfig(
     string BaseUrl,
     string ApiKey,
-    TimeSpan RequestTimeout);
+    TimeSpan RequestTimeout,
+    string SiteCode = "");

@@ -25,6 +25,7 @@ public sealed class PreAuthSession
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset? AuthorizedAtUtc { get; set; }
     public DateTimeOffset? CompletedAtUtc { get; set; }
+    public DateTimeOffset? ExpiresAtUtc { get; set; }
 
     public Site Site { get; set; } = null!;
     public Pump? Pump { get; set; }

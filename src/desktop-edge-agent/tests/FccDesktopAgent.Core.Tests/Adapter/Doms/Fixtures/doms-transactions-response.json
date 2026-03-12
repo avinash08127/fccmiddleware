@@ -1,0 +1,34 @@
+{
+  "transactions": [
+    {
+      "transactionId": "TX-20240101-001",
+      "pumpNumber": 1,
+      "nozzleNumber": 1,
+      "productCode": "DIESEL",
+      "volumeLitres": 50.123456,
+      "amountMinorUnits": 12531,
+      "unitPriceMinorPerLitre": 250,
+      "currencyCode": "KES",
+      "startedAt": "2024-01-01T10:00:00Z",
+      "completedAt": "2024-01-01T10:05:00Z",
+      "fiscalReceiptNumber": "RCP-001",
+      "attendantId": "ATT-01"
+    },
+    {
+      "transactionId": "TX-20240101-002",
+      "pumpNumber": 2,
+      "nozzleNumber": 2,
+      "productCode": "PETROL",
+      "volumeLitres": 30.000000,
+      "amountMinorUnits": 7500,
+      "unitPriceMinorPerLitre": 250,
+      "currencyCode": "KES",
+      "startedAt": "2024-01-01T10:10:00Z",
+      "completedAt": "2024-01-01T10:13:00Z",
+      "fiscalReceiptNumber": null,
+      "attendantId": null
+    }
+  ],
+  "nextCursor": "cursor-page-2",
+  "hasMore": true
+}

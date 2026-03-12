@@ -1,0 +1,323 @@
+{
+  "info": {
+    "_postman_id": "9506a83e-2c99-4e8b-980a-79a67d219938",
+    "name": "PETRONITE_PUMA",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "6821908"
+  },
+  "item": [
+    {
+      "name": "Authentication",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Basic Ym90OkJvdEAxMjNhKg==",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "grant_type",
+              "value": "client_credentials",
+              "type": "text",
+              "uuid": "707d8fc3-d416-4024-b101-7af23590e67f"
+            },
+            {
+              "key": "scope",
+              "value": "read",
+              "type": "text",
+              "uuid": "18fb6711-369d-421b-a442-47a81b444b7f"
+            }
+          ]
+        },
+        "url": {
+          "raw": "https://petronite-device.ngrok.app/oauth/token",
+          "protocol": "https",
+          "host": [
+            "petronite-device",
+            "ngrok",
+            "app"
+          ],
+          "path": [
+            "oauth",
+            "token"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Assigned Nozzles",
+      "protocolProfileBehavior": {
+        "disableBodyPruning": true
+      },
+      "request": {
+        "auth": {
+          "type": "oauth2",
+          "oauth2": [
+            {
+              "key": "grant_type",
+              "value": "client_credentials",
+              "type": "string"
+            },
+            {
+              "key": "password",
+              "value": "1234v5",
+              "type": "string"
+            },
+            {
+              "key": "username",
+              "value": "petro",
+              "type": "string"
+            },
+            {
+              "key": "clientSecret",
+              "value": "Bot@123a*",
+              "type": "string"
+            },
+            {
+              "key": "clientId",
+              "value": "bot",
+              "type": "string"
+            },
+            {
+              "key": "accessTokenUrl",
+              "value": "http://localhost:8884/oauth/token",
+              "type": "string"
+            },
+            {
+              "key": "tokenName",
+              "value": "bot",
+              "type": "string"
+            },
+            {
+              "key": "scope",
+              "value": "read",
+              "type": "string"
+            },
+            {
+              "key": "client_authentication",
+              "value": "header",
+              "type": "string"
+            },
+            {
+              "key": "headerPrefix",
+              "value": "bearer",
+              "type": "string"
+            },
+            {
+              "key": "addTokenTo",
+              "value": "header",
+              "type": "string"
+            },
+            {
+              "key": "challengeAlgorithm",
+              "value": "S256",
+              "type": "string"
+            },
+            {
+              "key": "tokenType",
+              "value": "bearer",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Basic Ym90OkJvdEAxMjNhKg==",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "grant_type",
+              "value": "client_credentials",
+              "type": "text"
+            },
+            {
+              "key": "scope",
+              "value": "read",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "https://petronite-device.ngrok.app/nozzles/assigned?access_token=99ec67ef-6640-45e2-8b4f-5d237a6f8a0a",
+          "protocol": "https",
+          "host": [
+            "petronite-device",
+            "ngrok",
+            "app"
+          ],
+          "path": [
+            "nozzles",
+            "assigned"
+          ],
+          "query": [
+            {
+              "key": "access_token",
+              "value": "99ec67ef-6640-45e2-8b4f-5d237a6f8a0a"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "New Order",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"customerName\": \"Petronite Company LTD\",\n  \"customerId\": \"112233\",\n  \"type\": \"PUMA_ORDER\",\n  \"nozzleId\": 1204,\n  \"authorizeType\": \"FullTank\",\n  \"dose\": null\n}\n",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://petronite-device.ngrok.app/direct-authorize-requests/create?access_token=99ec67ef-6640-45e2-8b4f-5d237a6f8a0a",
+          "protocol": "https",
+          "host": [
+            "petronite-device",
+            "ngrok",
+            "app"
+          ],
+          "path": [
+            "direct-authorize-requests",
+            "create"
+          ],
+          "query": [
+            {
+              "key": "access_token",
+              "value": "99ec67ef-6640-45e2-8b4f-5d237a6f8a0a"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Pending Orders",
+      "protocolProfileBehavior": {
+        "disableBodyPruning": true
+      },
+      "request": {
+        "method": "GET",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "\n",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://petronite-device.ngrok.app/direct-authorize-requests/pending?access_token=99ec67ef-6640-45e2-8b4f-5d237a6f8a0a",
+          "protocol": "https",
+          "host": [
+            "petronite-device",
+            "ngrok",
+            "app"
+          ],
+          "path": [
+            "direct-authorize-requests",
+            "pending"
+          ],
+          "query": [
+            {
+              "key": "access_token",
+              "value": "99ec67ef-6640-45e2-8b4f-5d237a6f8a0a"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Authorize Pump",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"requestId\": 25,\n  \"truckNumber\": \"T123ABC\"\n}\n\n",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://petronite-device.ngrok.app/direct-authorize-requests/authorize?access_token=99ec67ef-6640-45e2-8b4f-5d237a6f8a0a",
+          "protocol": "https",
+          "host": [
+            "petronite-device",
+            "ngrok",
+            "app"
+          ],
+          "path": [
+            "direct-authorize-requests",
+            "authorize"
+          ],
+          "query": [
+            {
+              "key": "access_token",
+              "value": "99ec67ef-6640-45e2-8b4f-5d237a6f8a0a"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Cancel Order",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"requestId\": 25,\n  \"truckNumber\": \"T123ABC\"\n}\n\n",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "https://petronite-device.ngrok.app/direct-authorize-requests/25/cancel?access_token=99ec67ef-6640-45e2-8b4f-5d237a6f8a0a",
+          "protocol": "https",
+          "host": [
+            "petronite-device",
+            "ngrok",
+            "app"
+          ],
+          "path": [
+            "direct-authorize-requests",
+            "25",
+            "cancel"
+          ],
+          "query": [
+            {
+              "key": "access_token",
+              "value": "99ec67ef-6640-45e2-8b4f-5d237a6f8a0a"
+            }
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

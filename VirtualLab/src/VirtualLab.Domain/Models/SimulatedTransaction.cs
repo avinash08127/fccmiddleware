@@ -25,6 +25,7 @@ public sealed class SimulatedTransaction
     public string CanonicalPayloadJson { get; set; } = "{}";
     public string RawHeadersJson { get; set; } = "{}";
     public string DeliveryCursor { get; set; } = string.Empty;
+    public string MetadataJson { get; set; } = "{}";
     public string TimelineJson { get; set; } = "[]";
 
     public Site Site { get; set; } = null!;

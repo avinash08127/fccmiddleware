@@ -11,6 +11,7 @@ internal sealed class CallbackAttemptConfiguration : IEntityTypeConfiguration<Ca
         builder.ToTable("CallbackAttempts");
         builder.HasKey(x => x.Id);
         builder.Property(x => x.CorrelationId).HasMaxLength(64);
+        builder.Property(x => x.RequestUrl).HasMaxLength(512);
         builder.Property(x => x.RequestHeadersJson).HasColumnType("TEXT");
         builder.Property(x => x.RequestPayloadJson).HasColumnType("TEXT");
         builder.Property(x => x.ResponseHeadersJson).HasColumnType("TEXT");

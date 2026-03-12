@@ -16,6 +16,7 @@ public enum SyncStatus
 {
     Pending,
     Uploaded,
+    DuplicateConfirmed,
     SyncedToOdoo,
     Archived
 }

@@ -19,6 +19,7 @@ internal sealed class SimulatedTransactionConfiguration : IEntityTypeConfigurati
         builder.Property(x => x.CanonicalPayloadJson).HasColumnType("TEXT");
         builder.Property(x => x.RawHeadersJson).HasColumnType("TEXT");
         builder.Property(x => x.DeliveryCursor).HasMaxLength(128);
+        builder.Property(x => x.MetadataJson).HasColumnType("TEXT");
         builder.Property(x => x.TimelineJson).HasColumnType("TEXT");
 
         builder.HasOne(x => x.Site)

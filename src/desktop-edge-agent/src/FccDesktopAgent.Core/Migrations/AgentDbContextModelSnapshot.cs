@@ -324,6 +324,10 @@ namespace FccDesktopAgent.Core.Migrations
                     b.Property<string>("FailedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("FailureReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("FccAuthorizationCode")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");

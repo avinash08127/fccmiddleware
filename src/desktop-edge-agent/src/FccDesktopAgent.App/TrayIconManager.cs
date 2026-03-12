@@ -24,6 +24,9 @@ internal sealed class TrayIconManager : IDisposable
     /// <summary>Raised when the user clicks "Restart Agent" in the tray menu.</summary>
     public event EventHandler? RestartAgentRequested;
 
+    /// <summary>Raised when the user clicks "Check for Updates" in the tray menu.</summary>
+    public event EventHandler? CheckForUpdatesRequested;
+
     /// <summary>Raised when the user clicks "Exit" in the tray menu.</summary>
     public event EventHandler? ExitRequested;
 
@@ -68,6 +71,13 @@ internal sealed class TrayIconManager : IDisposable
             ShowDashboardRequested?.Invoke(this, EventArgs.Empty);
         };
 
+        var updateItem = new NativeMenuItem("Check for Updates");
+        updateItem.Click += (_, _) =>
+        {
+            _logger.LogInformation("Tray: Check for Updates clicked");
+            CheckForUpdatesRequested?.Invoke(this, EventArgs.Empty);
+        };
+
         var restartItem = new NativeMenuItem("Restart Agent");
         restartItem.Click += (_, _) =>
         {
@@ -84,6 +94,7 @@ internal sealed class TrayIconManager : IDisposable
 
         menu.Add(showItem);
         menu.Add(new NativeMenuItemSeparator());
+        menu.Add(updateItem);
         menu.Add(restartItem);
         menu.Add(new NativeMenuItemSeparator());
         menu.Add(exitItem);

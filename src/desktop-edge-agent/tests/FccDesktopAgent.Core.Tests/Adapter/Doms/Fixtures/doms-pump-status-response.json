@@ -1,0 +1,30 @@
+[
+  {
+    "pumpNumber": 1,
+    "nozzleNumber": 1,
+    "state": "IDLE",
+    "productCode": "DIESEL",
+    "productName": "Diesel",
+    "currencyCode": "KES",
+    "currentVolumeLitres": "0.000",
+    "currentAmount": "0.00",
+    "unitPrice": "250.00",
+    "statusSequence": 12345,
+    "fccStatusCode": "0",
+    "lastChangedAt": "2024-01-01T09:55:00Z"
+  },
+  {
+    "pumpNumber": 2,
+    "nozzleNumber": 2,
+    "state": "DISPENSING",
+    "productCode": "PETROL",
+    "productName": "Petrol",
+    "currencyCode": "KES",
+    "currentVolumeLitres": "12.500",
+    "currentAmount": "31.25",
+    "unitPrice": "250.00",
+    "statusSequence": 12346,
+    "fccStatusCode": "4",
+    "lastChangedAt": "2024-01-01T10:11:00Z"
+  }
+]

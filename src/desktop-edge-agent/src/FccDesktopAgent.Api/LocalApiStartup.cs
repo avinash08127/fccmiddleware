@@ -13,17 +13,17 @@ namespace FccDesktopAgent.Api;
 
 /// <summary>
 /// Extension methods that register and configure the embedded Kestrel local REST API.
-/// Call <see cref="AddLocalApi"/> on the service collection, then <see cref="MapLocalApi"/>
+/// Call <see cref="AddAgentApi"/> on the service collection, then <see cref="MapLocalApi"/>
 /// on the built <see cref="WebApplication"/>. Both Program.cs entry points (GUI + headless
 /// service) use these to keep the two host modes in sync.
 /// </summary>
 public static class LocalApiStartup
 {
     /// <summary>
-    /// Registers local API services: JSON options, API key options.
-    /// Call before <c>builder.Build()</c>.
+    /// Registers local API services: JSON options, API key options from the "LocalApi"
+    /// configuration section. Call before <c>builder.Build()</c>.
     /// </summary>
-    public static IServiceCollection AddLocalApi(
+    public static IServiceCollection AddAgentApi(
         this IServiceCollection services,
         IConfiguration configuration)
     {

@@ -6,4 +6,5 @@ public enum CallbackAttemptStatus
     Succeeded = 1,
     Failed = 2,
     Cancelled = 3,
+    InProgress = 4,
 }

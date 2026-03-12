@@ -33,4 +33,11 @@ public interface IFccAdapter
     /// Fetch new transactions from the FCC starting at the given cursor position.
     /// </summary>
     Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken ct);
+
+    /// <summary>
+    /// Attempt to cancel/deauthorize a previously authorized pre-auth at the FCC.
+    /// Best-effort: returns true if successfully cancelled, false if not found or already terminal.
+    /// Never throws on transport failure — returns false instead.
+    /// </summary>
+    Task<bool> CancelPreAuthAsync(string fccCorrelationId, CancellationToken ct);
 }

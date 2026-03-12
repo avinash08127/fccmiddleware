@@ -147,6 +147,7 @@ public sealed class VirtualLabSeedService(
                     FccNozzleNumber = nozzleNumber,
                     Label = $"P{pumpNumber}-N{nozzleNumber}",
                     State = NozzleState.Idle,
+                    SimulationStateJson = "{}",
                     UpdatedAtUtc = now,
                 });
             }
@@ -206,6 +207,7 @@ public sealed class VirtualLabSeedService(
             CreatedAtUtc = now.AddSeconds(-5),
             AuthorizedAtUtc = now.AddSeconds(-4),
             CompletedAtUtc = now,
+            ExpiresAtUtc = now.AddMinutes(5),
         };
 
         SimulatedTransaction transaction = new()
@@ -231,6 +233,7 @@ public sealed class VirtualLabSeedService(
             CanonicalPayloadJson = """{"site":"VL-MW-BT001","totalAmount":9725.50,"volume":42.113}""",
             RawHeadersJson = """{"content-type":"application/json"}""",
             DeliveryCursor = "cursor-0001",
+            MetadataJson = """{"seeded":true,"duplicateInjectionEnabled":false,"simulateFailureEnabled":false}""",
             TimelineJson = """
             [
               {"event":"generated","at":"2026-03-11T00:00:04Z"},
@@ -248,12 +251,17 @@ public sealed class VirtualLabSeedService(
             AttemptNumber = 1,
             Status = CallbackAttemptStatus.Succeeded,
             ResponseStatusCode = 202,
+            RequestUrl = callbackTarget.CallbackUrl.ToString(),
             RequestHeadersJson = """{"authorization":"Basic ZGVtbzpkZW1vLXBhc3N3b3Jk"}""",
             RequestPayloadJson = transaction.RawPayloadJson,
             ResponseHeadersJson = """{"content-type":"application/json"}""",
             ResponsePayloadJson = """{"accepted":true}""",
+            RetryCount = 0,
+            MaxRetryCount = 3,
             AttemptedAtUtc = now,
             CompletedAtUtc = now,
+            NextRetryAtUtc = null,
+            AcknowledgedAtUtc = now,
         };
 
         List<LabEventLog> eventLogs =

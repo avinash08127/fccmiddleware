@@ -26,6 +26,9 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                     b.Property<int>("AttemptNumber")
                         .HasColumnType("INTEGER");
 
+                    b.Property<DateTime?>("AcknowledgedAtUtc")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("AttemptedAtUtc")
                         .HasColumnType("TEXT");
 
@@ -45,12 +48,23 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                         .HasMaxLength(2048)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("MaxRetryCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("NextRetryAtUtc")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("RequestHeadersJson")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<string>("RequestPayloadJson")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestUrl")
+                        .IsRequired()
+                        .HasMaxLength(512)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ResponseHeadersJson")
@@ -62,6 +76,9 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ResponseStatusCode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("RetryCount")
                         .HasColumnType("INTEGER");
 
                     b.Property<Guid>("SimulatedTransactionId")
@@ -396,6 +413,10 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("PumpId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("SimulationStateJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("State")
                         .HasColumnType("INTEGER");
 
@@ -442,6 +463,9 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ExpiresAtUtc")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ExternalReference")
@@ -502,6 +526,8 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                     b.HasIndex("ScenarioRunId");
 
                     b.HasIndex("SiteId", "CreatedAtUtc");
+
+                    b.HasIndex("Status", "ExpiresAtUtc");
 
                     b.ToTable("PreAuthSessions", (string)null);
                 });
@@ -732,6 +758,10 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                     b.Property<string>("ExternalTransactionId")
                         .IsRequired()
                         .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MetadataJson")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("NozzleId")

@@ -1,0 +1,117 @@
+name: Desktop Agent Release
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'    # e.g. desktop-v0.2.0
+
+permissions:
+  contents: write       # required for creating GitHub Releases
+
+env:
+  APP_ID: FccDesktopAgent
+  PUBLISH_DIR: src/desktop-edge-agent/publish
+  RELEASE_DIR: src/desktop-edge-agent/releases
+
+jobs:
+  build-and-pack:
+    name: Build & Pack (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-latest
+            rid: osx-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+
+    defaults:
+      run:
+        working-directory: src/desktop-edge-agent
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Restore & Publish
+        run: |
+          dotnet publish src/FccDesktopAgent.App/FccDesktopAgent.App.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained \
+            -p:Version=${{ steps.version.outputs.version }} \
+            -o ./publish/${{ matrix.rid }}
+
+      - name: Pack with Velopack
+        shell: bash
+        run: |
+          vpk pack \
+            --packId "${{ env.APP_ID }}" \
+            --packVersion "${{ steps.version.outputs.version }}" \
+            --packDir "./publish/${{ matrix.rid }}" \
+            --outputDir "./releases/${{ matrix.rid }}" \
+            --mainExe "FccDesktopAgent.App${{ matrix.rid == 'win-x64' && '.exe' || '' }}"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.rid }}
+          path: src/desktop-edge-agent/releases/${{ matrix.rid }}/
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-and-pack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: release-*
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Desktop Agent v${{ steps.version.outputs.version }}"
+          body: |
+            ## Desktop Edge Agent v${{ steps.version.outputs.version }}
+
+            ### Installers
+            - **Windows**: Download `FccDesktopAgent-Setup.exe` and run
+            - **macOS**: Download `FccDesktopAgent.app.zip`, extract, and run
+            - **Linux**: Download `FccDesktopAgent.AppImage`, `chmod +x`, and run
+
+            ### Auto-Update
+            Existing installations with auto-update enabled will receive this update automatically.
+            Delta updates are included for bandwidth efficiency.
+          files: |
+            artifacts/release-win-x64/*
+            artifacts/release-osx-x64/*
+            artifacts/release-linux-x64/*
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}

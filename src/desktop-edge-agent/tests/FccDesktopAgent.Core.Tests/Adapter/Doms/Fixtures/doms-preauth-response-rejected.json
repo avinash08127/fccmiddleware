@@ -1,0 +1,8 @@
+{
+  "accepted": false,
+  "correlationId": null,
+  "authorizationCode": null,
+  "expiresAtUtc": null,
+  "errorCode": "PUMP_BUSY",
+  "message": "Pump is already authorized for another transaction"
+}

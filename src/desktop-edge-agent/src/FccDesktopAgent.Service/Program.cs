@@ -32,11 +32,11 @@ try
         .WriteTo.Console()
         .WriteTo.File(path: GetLogPath(), rollingInterval: RollingInterval.Day));
 
-    // Core agent services (CadenceController + DEA-1.x stubs)
-    builder.Services.AddAgentCoreServices();
+    // Core agent services: database, HTTP clients, config binding, background workers
+    builder.Services.AddAgentCore(builder.Configuration);
 
     // Local REST API — Kestrel on configurable port (default 8585), API key auth, 8 endpoints
-    builder.Services.AddLocalApi(builder.Configuration);
+    builder.Services.AddAgentApi(builder.Configuration);
 
     // Built-in health checks — answers GET /health with 200 Healthy
     builder.Services.AddHealthChecks();

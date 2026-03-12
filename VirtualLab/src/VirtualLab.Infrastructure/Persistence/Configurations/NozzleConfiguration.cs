@@ -11,6 +11,7 @@ internal sealed class NozzleConfiguration : IEntityTypeConfiguration<Nozzle>
         builder.ToTable("Nozzles");
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Label).HasMaxLength(64);
+        builder.Property(x => x.SimulationStateJson).HasColumnType("TEXT");
 
         builder.HasOne(x => x.Pump)
             .WithMany(x => x.Nozzles)

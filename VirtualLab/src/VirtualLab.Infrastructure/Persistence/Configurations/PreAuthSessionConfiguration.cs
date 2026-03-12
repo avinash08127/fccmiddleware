@@ -44,5 +44,6 @@ internal sealed class PreAuthSessionConfiguration : IEntityTypeConfiguration<Pre
 
         builder.HasIndex(x => new { x.SiteId, x.CreatedAtUtc });
         builder.HasIndex(x => x.CorrelationId);
+        builder.HasIndex(x => new { x.Status, x.ExpiresAtUtc });
     }
 }

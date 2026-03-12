@@ -31,6 +31,19 @@ export interface LatencySummary {
   };
 }
 
+export interface LogRecord {
+  id: string;
+  siteCode: string | null;
+  category: string;
+  eventType: string;
+  severity: string;
+  message: string;
+  correlationId: string;
+  occurredAtUtc: string;
+  rawPayloadJson: string;
+  canonicalPayloadJson: string;
+}
+
 @Injectable({ providedIn: 'root' })
 export class LabApiService {
   private readonly http = inject(HttpClient);
@@ -45,6 +58,33 @@ export class LabApiService {
 
   getLatency(): Observable<LatencySummary> {
     return this.http.get<LatencySummary>(this.url('/api/diagnostics/latency'));
+  }
+
+  getLogs(filters: {
+    category?: string;
+    siteCode?: string;
+    correlationId?: string;
+    limit?: number;
+  } = {}): Observable<LogRecord[]> {
+    const params: Record<string, string | number> = {};
+
+    if (filters.category) {
+      params['category'] = filters.category;
+    }
+
+    if (filters.siteCode) {
+      params['siteCode'] = filters.siteCode;
+    }
+
+    if (filters.correlationId) {
+      params['correlationId'] = filters.correlationId;
+    }
+
+    if (filters.limit) {
+      params['limit'] = filters.limit;
+    }
+
+    return this.http.get<LogRecord[]>(this.url('/api/logs'), { params });
   }
 
   private url(path: string): string {

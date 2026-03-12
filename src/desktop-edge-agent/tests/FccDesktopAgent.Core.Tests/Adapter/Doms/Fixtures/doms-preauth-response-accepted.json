@@ -1,0 +1,8 @@
+{
+  "accepted": true,
+  "correlationId": "CORR-20240101-001",
+  "authorizationCode": "AUTH-001",
+  "expiresAtUtc": "2024-01-01T10:15:00Z",
+  "errorCode": null,
+  "message": "Authorized"
+}
