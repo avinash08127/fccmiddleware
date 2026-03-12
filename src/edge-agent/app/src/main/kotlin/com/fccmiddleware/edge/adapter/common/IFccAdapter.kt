@@ -52,6 +52,20 @@ interface IFccAdapter {
     suspend fun sendPreAuth(command: PreAuthCommand): PreAuthResult
 
     /**
+     * Cancel/deauthorize an active pre-authorization on the FCC.
+     *
+     * Idempotent: returns true if the pre-auth was successfully cancelled, was already
+     * cancelled, or was not found on the FCC. Returns false only on communication failure
+     * or a non-recoverable FCC error.
+     *
+     * Vendor-specific behavior:
+     * - DOMS JPL: sends deauthorize_Fp_req
+     * - Radix: sends AUTH_DATA with AUTH=FALSE
+     * - Petronite: POST /{orderId}/cancel
+     */
+    suspend fun cancelPreAuth(command: CancelPreAuthCommand): Boolean
+
+    /**
      * Return one latest status record per configured pump-nozzle pair reachable
      * through this FCC.
      *

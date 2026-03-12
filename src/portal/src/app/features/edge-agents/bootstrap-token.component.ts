@@ -79,6 +79,20 @@ import { environment } from '../../../environments/environment';
             </div>
           </div>
 
+          <div class="form-row">
+            <div class="form-field">
+              <label for="bootstrap-environment">Environment (optional)</label>
+              <p-select
+                id="bootstrap-environment"
+                [options]="environmentOptions"
+                [(ngModel)]="selectedEnvironment"
+                placeholder="Default (from server config)"
+                [showClear]="true"
+                styleClass="full-width"
+              />
+            </div>
+          </div>
+
           <div class="form-actions">
             <p-button
               label="Generate Token"
@@ -347,6 +361,15 @@ export class BootstrapTokenComponent {
   );
   selectedSiteCode: string | null = null;
 
+  // Environment
+  readonly environmentOptions = [
+    { label: 'Production', value: 'PRODUCTION' },
+    { label: 'Staging', value: 'STAGING' },
+    { label: 'Development', value: 'DEVELOPMENT' },
+    { label: 'Local', value: 'LOCAL' },
+  ];
+  selectedEnvironment: string | null = null;
+
   // Generation state
   readonly generating = signal(false);
   readonly error = signal<string | null>(null);
@@ -412,8 +435,14 @@ export class BootstrapTokenComponent {
     this.qrDataUrl.set(null);
     this.tokenRevoked.set(false);
 
+    const req: import('../../core/models/bootstrap-token.model').GenerateBootstrapTokenRequest = {
+      siteCode,
+      legalEntityId,
+      ...(this.selectedEnvironment ? { environment: this.selectedEnvironment } : {}),
+    };
+
     this.bootstrapTokenService
-      .generate({ siteCode, legalEntityId })
+      .generate(req)
       .pipe(
         catchError((err) => {
           const msg = err?.error?.message ?? 'Failed to generate bootstrap token.';
@@ -468,12 +497,16 @@ export class BootstrapTokenComponent {
   }
 
   private async generateQrCode(token: GenerateBootstrapTokenResponse): Promise<void> {
-    const payload = JSON.stringify({
-      v: 1,
+    const qrPayload: Record<string, unknown> = {
+      v: this.selectedEnvironment ? 2 : 1,
       sc: token.siteCode,
       cu: environment.apiBaseUrl,
       pt: token.rawToken,
-    });
+    };
+    if (this.selectedEnvironment) {
+      qrPayload['env'] = this.selectedEnvironment;
+    }
+    const payload = JSON.stringify(qrPayload);
 
     try {
       const dataUrl = await QRCode.toDataURL(payload, {

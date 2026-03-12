@@ -24,6 +24,7 @@
     <ProjectReference Include="..\FccMiddleware.Application\FccMiddleware.Application.csproj" />
     <ProjectReference Include="..\FccMiddleware.Infrastructure\FccMiddleware.Infrastructure.csproj" />
     <ProjectReference Include="..\FccMiddleware.Contracts\FccMiddleware.Contracts.csproj" />
+    <ProjectReference Include="..\FccMiddleware.Adapter.Advatec\FccMiddleware.Adapter.Advatec.csproj" />
     <ProjectReference Include="..\FccMiddleware.Adapter.Doms\FccMiddleware.Adapter.Doms.csproj" />
     <ProjectReference Include="..\FccMiddleware.Adapter.Radix\FccMiddleware.Adapter.Radix.csproj" />
     <ProjectReference Include="..\FccMiddleware.Adapter.Petronite\FccMiddleware.Adapter.Petronite.csproj" />

@@ -2,7 +2,7 @@ package com.fccmiddleware.edge.security
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -57,7 +57,7 @@ class KeystoreManager {
             // Prepend IV length (1 byte) + IV + ciphertext
             byteArrayOf(iv.size.toByte()) + iv + ciphertext
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to store secret for alias=$alias", e)
+            AppLogger.e(TAG, "Failed to store secret for alias=$alias", e)
             null
         }
     }
@@ -72,16 +72,16 @@ class KeystoreManager {
     fun retrieveSecret(alias: String, encrypted: ByteArray): String? {
         return try {
             if (encrypted.size < 2) {
-                Log.w(TAG, "Encrypted blob too short for alias=$alias (size=${encrypted.size})")
+                AppLogger.w(TAG, "Encrypted blob too short for alias=$alias (size=${encrypted.size})")
                 return null
             }
             val key = keyStore.getKey(alias, null) as? SecretKey ?: run {
-                Log.w(TAG, "No key found for alias=$alias")
+                AppLogger.w(TAG, "No key found for alias=$alias")
                 return null
             }
             val ivLength = encrypted[0].toInt() and 0xFF
             if (ivLength == 0 || 1 + ivLength >= encrypted.size) {
-                Log.w(TAG, "Invalid IV length=$ivLength for alias=$alias (blob size=${encrypted.size})")
+                AppLogger.w(TAG, "Invalid IV length=$ivLength for alias=$alias (blob size=${encrypted.size})")
                 return null
             }
             val iv = encrypted.sliceArray(1..ivLength)
@@ -90,7 +90,7 @@ class KeystoreManager {
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
             String(cipher.doFinal(ciphertext), Charsets.UTF_8)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to retrieve secret for alias=$alias", e)
+            AppLogger.e(TAG, "Failed to retrieve secret for alias=$alias", e)
             null
         }
     }
@@ -102,10 +102,10 @@ class KeystoreManager {
         try {
             if (keyStore.containsAlias(alias)) {
                 keyStore.deleteEntry(alias)
-                Log.d(TAG, "Deleted key alias=$alias")
+                AppLogger.d(TAG, "Deleted key alias=$alias")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to delete key alias=$alias", e)
+            AppLogger.e(TAG, "Failed to delete key alias=$alias", e)
         }
     }
 
@@ -131,13 +131,13 @@ class KeystoreManager {
     fun rotateKey(alias: String, currentEncrypted: ByteArray): ByteArray? {
         return try {
             val plaintext = retrieveSecret(alias, currentEncrypted) ?: run {
-                Log.e(TAG, "Key rotation failed for alias=$alias — could not decrypt current data")
+                AppLogger.e(TAG, "Key rotation failed for alias=$alias — could not decrypt current data")
                 return null
             }
             deleteKey(alias)
             storeSecret(alias, plaintext)
         } catch (e: Exception) {
-            Log.e(TAG, "Key rotation failed for alias=$alias", e)
+            AppLogger.e(TAG, "Key rotation failed for alias=$alias", e)
             null
         }
     }
@@ -153,7 +153,7 @@ class KeystoreManager {
         ).forEach {
             deleteKey(it)
         }
-        Log.i(TAG, "All keystore keys cleared")
+        AppLogger.i(TAG, "All keystore keys cleared")
     }
 
     private fun getOrCreateKey(alias: String): SecretKey {

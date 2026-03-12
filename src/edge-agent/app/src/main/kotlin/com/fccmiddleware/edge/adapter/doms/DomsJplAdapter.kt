@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.doms
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.*
 import com.fccmiddleware.edge.adapter.doms.jpl.JplHeartbeatManager
 import com.fccmiddleware.edge.adapter.doms.jpl.JplTcpClient
@@ -27,6 +27,9 @@ class DomsJplAdapter(
     private val config: AgentFccConfig,
     private val siteCode: String = "",
     private val legalEntityId: String = "",
+    /** Optional callback invoked on the raw TCP socket before connect().
+     *  Used to bind FCC traffic to WiFi via Android Network.bindSocket(). */
+    private val socketBinder: ((java.net.Socket) -> Unit)? = null,
 ) : IFccAdapter, IFccConnectionLifecycle {
 
     companion object {
@@ -43,6 +46,7 @@ class DomsJplAdapter(
         host = config.hostAddress,
         port = config.jplPort ?: config.port,
         scope = adapterScope,
+        socketBinder = socketBinder,
     )
 
     private val heartbeatManager = JplHeartbeatManager(
@@ -91,7 +95,7 @@ class DomsJplAdapter(
         DomsLogonHandler.validateLogonResponse(logonResponse)
         logonComplete = true
 
-        Log.i(TAG, "FcLogon successful")
+        AppLogger.i(TAG, "FcLogon successful")
 
         // Start heartbeat
         heartbeatManager.start()
@@ -167,6 +171,24 @@ class DomsJplAdapter(
         }
     }
 
+    override suspend fun cancelPreAuth(command: CancelPreAuthCommand): Boolean {
+        if (!isConnected) {
+            AppLogger.w(TAG, "Cannot cancel pre-auth: DOMS TCP not connected")
+            return false
+        }
+
+        return try {
+            val fpId = command.pumpNumber - config.pumpNumberOffset
+            val deauthRequest = DomsPreAuthHandler.buildDeauthRequest(fpId)
+            tcpClient.sendAndReceive(deauthRequest, "deauthorize_Fp_resp")
+            AppLogger.i(TAG, "FCC deauth succeeded for pump=${command.pumpNumber} (fpId=$fpId)")
+            true
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "FCC deauth failed for pump=${command.pumpNumber}: ${e::class.simpleName}: ${e.message}")
+            false
+        }
+    }
+
     override suspend fun getPumpStatus(): List<PumpStatus> {
         if (!isConnected) return emptyList()
 
@@ -185,7 +207,7 @@ class DomsJplAdapter(
                 observedAtUtc = java.time.Instant.now().toString(),
             )
         } catch (e: Exception) {
-            Log.w(TAG, "getPumpStatus failed: ${e.message}")
+            AppLogger.w(TAG, "getPumpStatus failed: ${e.message}")
             emptyList()
         }
     }
@@ -229,7 +251,7 @@ class DomsJplAdapter(
                 when (val result = DomsCanonicalMapper.mapToCanonical(dto, config, siteCode, legalEntityId)) {
                     is NormalizationResult.Success -> result.transaction
                     is NormalizationResult.Failure -> {
-                        Log.w(TAG, "Normalization failed for txn ${dto.transactionId}: ${result.message}")
+                        AppLogger.w(TAG, "Normalization failed for txn ${dto.transactionId}: ${result.message}")
                         null
                     }
                 }
@@ -243,7 +265,7 @@ class DomsJplAdapter(
             )
 
             if (!DomsTransactionParser.validateClearResponse(clearResponse)) {
-                Log.w(TAG, "Buffer clear failed — transactions may be re-fetched")
+                AppLogger.w(TAG, "Buffer clear failed — transactions may be re-fetched")
             }
 
             TransactionBatch(
@@ -251,7 +273,7 @@ class DomsJplAdapter(
                 hasMore = false, // DOMS buffer is drained in one pass
             )
         } catch (e: Exception) {
-            Log.e(TAG, "fetchTransactions failed: ${e.message}")
+            AppLogger.e(TAG, "fetchTransactions failed: ${e.message}")
             TransactionBatch(transactions = emptyList(), hasMore = false)
         }
     }
@@ -265,7 +287,7 @@ class DomsJplAdapter(
     // ── Unsolicited message handling ─────────────────────────────────────────
 
     private fun handleUnsolicitedMessage(message: com.fccmiddleware.edge.adapter.doms.jpl.JplMessage) {
-        Log.d(TAG, "Unsolicited message: ${message.name}")
+        AppLogger.d(TAG, "Unsolicited message: ${message.name}")
 
         when (message.name) {
             "FpStatusChanged" -> {

@@ -1,13 +1,16 @@
 using Avalonia;
 using FccDesktopAgent.Api;
+using FccDesktopAgent.Api.Endpoints;
 using FccDesktopAgent.App;
 using FccDesktopAgent.App.Services;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Runtime;
 using FccDesktopAgent.Core.Security;
+using FccDesktopAgent.Core.WebSocket;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
@@ -52,9 +55,43 @@ try
     // Built-in health checks — answers GET /health with 200 Healthy
     builder.Services.AddHealthChecks();
 
-    builder.WebHost.UseUrls($"http://0.0.0.0:{builder.Configuration["LocalApi:Port"] ?? "8585"}");
+    // ── Kestrel endpoint configuration ────────────────────────────────────────
+    // Primary: REST API port (HTTP). Secondary (optional): WebSocket port with optional TLS.
+    var wsConfig = builder.Configuration.GetSection(WebSocketServerOptions.SectionName);
+    var wsEnabled = wsConfig.GetValue<bool>("Enabled");
+    var wsPort = wsConfig.GetValue<int?>("Port") ?? 8443;
+    var wsUseTls = wsConfig.GetValue<bool>("UseTls");
+    var wsCertPath = wsConfig.GetValue<string?>("CertificatePath");
+    var wsCertPassword = wsConfig.GetValue<string?>("CertificatePassword");
+    var apiPort = int.TryParse(builder.Configuration["LocalApi:Port"], out var parsedApiPort) ? parsedApiPort : 8585;
+
+    builder.WebHost.ConfigureKestrel(serverOptions =>
+    {
+        // REST API — always HTTP
+        serverOptions.ListenAnyIP(apiPort);
+
+        // WebSocket — separate port if enabled and different from API port
+        if (wsEnabled && wsPort != apiPort)
+        {
+            if (wsUseTls && !string.IsNullOrEmpty(wsCertPath))
+            {
+                serverOptions.ListenAnyIP(wsPort, listenOptions =>
+                {
+                    listenOptions.UseHttps(wsCertPath, wsCertPassword ?? "");
+                    Log.Information("WebSocket TLS endpoint configured on port {Port} with certificate {Cert}", wsPort, wsCertPath);
+                });
+            }
+            else
+            {
+                serverOptions.ListenAnyIP(wsPort);
+                Log.Information("WebSocket endpoint configured on port {Port} (no TLS)", wsPort);
+            }
+        }
+    });
 
     var webApp = builder.Build();
+    webApp.UseWebSockets();
+    webApp.MapOdooWebSocket();
     webApp.MapHealthChecks("/health");
     webApp.MapLocalApi();
 
@@ -116,11 +153,19 @@ try
     AgentAppContext.Mode = StartupMode.Provisioning;
     var provisioningExitCode = RunAvalonia(args);
 
-    // After provisioning + normal operation, stop the host if it was started
+    // L-05: After provisioning + normal operation, stop the host if it was started.
+    // Wrap in try-catch so partial host starts don't leave orphaned resources.
     if (registrationManager.LoadState().IsRegistered)
     {
         Log.Information("Avalonia exited (code {ExitCode}), stopping host", provisioningExitCode);
-        webApp.StopAsync().GetAwaiter().GetResult();
+        try
+        {
+            webApp.StopAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Host cleanup failed during provisioning shutdown — process will exit");
+        }
     }
 
     return provisioningExitCode;

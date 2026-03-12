@@ -1,7 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="FccDesktopAgent.App.Views.DecommissionedWindow"
-        Title="FCC Desktop Agent — Decommissioned"
+        Title="Puma Energy — Decommissioned"
         Width="460"
         Height="280"
         MinWidth="400"

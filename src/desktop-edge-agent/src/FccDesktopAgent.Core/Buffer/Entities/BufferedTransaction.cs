@@ -64,8 +64,22 @@ public sealed class BufferedTransaction
 
     public string SchemaVersion { get; set; } = "1.0";
 
+    // ── WebSocket backward-compat fields (Odoo POS cart workflow) ──────────
+
+    /// <summary>Odoo order UUID set via WebSocket manager_update / attendant_update.</summary>
+    public string? OrderUuid { get; set; }
+
     /// <summary>Odoo order ID stamped by acknowledge. Null until acknowledged.</summary>
     public string? OdooOrderId { get; set; }
+
+    /// <summary>Whether Odoo has added this transaction to the POS cart.</summary>
+    public bool AddToCart { get; set; }
+
+    /// <summary>Odoo payment ID set via WebSocket.</summary>
+    public string? PaymentId { get; set; }
+
+    /// <summary>Whether this transaction was manually discarded via WebSocket.</summary>
+    public bool IsDiscard { get; set; }
 
     /// <summary>Timestamp when Odoo acknowledged this transaction. Null until acknowledged.</summary>
     public DateTimeOffset? AcknowledgedAt { get; set; }

@@ -26,6 +26,9 @@ public class BootstrapToken
 
     public DateTimeOffset CreatedAt { get; set; }
 
+    /// <summary>Cloud environment key (e.g. "PRODUCTION", "STAGING"). Null for legacy tokens.</summary>
+    public string? Environment { get; set; }
+
     // Navigation
     public LegalEntity LegalEntity { get; set; } = null!;
 

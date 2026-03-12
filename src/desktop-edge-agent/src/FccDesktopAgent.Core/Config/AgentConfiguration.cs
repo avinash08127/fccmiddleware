@@ -24,6 +24,9 @@ public sealed class AgentConfiguration
     /// <summary>Cloud backend base URL.</summary>
     public string CloudBaseUrl { get; set; } = string.Empty;
 
+    /// <summary>Cloud environment key (e.g. "PRODUCTION", "STAGING"). Null for legacy/custom URL registrations.</summary>
+    public string? Environment { get; set; }
+
     /// <summary>FCC polling interval in seconds.</summary>
     public int FccPollIntervalSeconds { get; set; } = 30;
 
@@ -83,9 +86,69 @@ public sealed class AgentConfiguration
     /// <summary>Config poll interval in seconds (range 30–3600, default 60).</summary>
     public int ConfigPollIntervalSeconds { get; set; } = 60;
 
+    /// <summary>SYNCED_TO_ODOO status poll interval in seconds (default 300 = 5 minutes).</summary>
+    public int StatusPollIntervalSeconds { get; set; } = 300;
+
     /// <summary>
     /// Petronite webhook listener port (default 8090). The local HTTP server that receives
     /// transaction callbacks from the Petronite bot. Cloud config takes precedence if set.
     /// </summary>
     public int PetroniteWebhookListenerPort { get; set; } = 8090;
+
+    // ── WebSocket Server ──────────────────────────────────────────────────
+
+    /// <summary>Whether the Odoo backward-compat WebSocket server is enabled.</summary>
+    public bool WebSocketEnabled { get; set; }
+
+    /// <summary>Port the WebSocket server listens on (legacy default: 8443).</summary>
+    public int WebSocketPort { get; set; } = 8443;
+
+    /// <summary>Maximum concurrent WebSocket connections.</summary>
+    public int WebSocketMaxConnections { get; set; } = 10;
+
+    /// <summary>Interval in seconds for per-connection pump status broadcasts.</summary>
+    public int WebSocketPumpStatusBroadcastIntervalSeconds { get; set; } = 3;
+
+    // ── Local Override Properties ───────────────────────────────────────────
+
+    /// <summary>
+    /// Local FCC host override. When set, takes precedence over the cloud-delivered host address.
+    /// Populated from <see cref="LocalOverrideManager"/> at runtime.
+    /// </summary>
+    public string? FccHostOverride { get; set; }
+
+    /// <summary>
+    /// Local FCC port override. When set, takes precedence over the cloud-delivered port.
+    /// Populated from <see cref="LocalOverrideManager"/> at runtime.
+    /// </summary>
+    public int? FccPortOverride { get; set; }
+
+    /// <summary>
+    /// Returns the effective FCC base URL, applying local overrides when present.
+    /// Falls back to <see cref="FccBaseUrl"/> when no overrides are active.
+    /// </summary>
+    public string GetEffectiveFccBaseUrl(LocalOverrideManager? overrides = null)
+    {
+        var host = overrides?.FccHost ?? FccHostOverride;
+        var port = overrides?.FccPort ?? FccPortOverride;
+
+        if (!string.IsNullOrWhiteSpace(host) && port is > 0)
+            return $"http://{host}:{port}";
+
+        if (!string.IsNullOrWhiteSpace(host) && !string.IsNullOrWhiteSpace(FccBaseUrl))
+        {
+            // Override host only — extract port from existing base URL
+            if (Uri.TryCreate(FccBaseUrl, UriKind.Absolute, out var existing))
+                return $"http://{host}:{existing.Port}";
+        }
+
+        if (port is > 0 && !string.IsNullOrWhiteSpace(FccBaseUrl))
+        {
+            // Override port only — extract host from existing base URL
+            if (Uri.TryCreate(FccBaseUrl, UriKind.Absolute, out var existing))
+                return $"http://{existing.Host}:{port}";
+        }
+
+        return FccBaseUrl;
+    }
 }

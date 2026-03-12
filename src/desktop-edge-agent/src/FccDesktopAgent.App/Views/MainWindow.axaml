@@ -2,7 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:FccDesktopAgent.App.ViewModels"
         x:Class="FccDesktopAgent.App.Views.MainWindow"
-        Title="FCC Desktop Agent"
+        Title="Puma Energy — FCC Desktop Agent"
         Width="960"
         Height="640"
         MinWidth="700"
@@ -23,9 +23,11 @@
           <!-- App title in sidebar header -->
           <Border DockPanel.Dock="Top" Padding="16,16,16,12">
             <StackPanel Spacing="4">
+              <Image Source="/Assets/puma-energy-logo.png"
+                     Height="24"
+                     HorizontalAlignment="Left"
+                     Margin="0,0,0,4" />
               <TextBlock Text="FCC Desktop Agent"
-                         FontSize="15" FontWeight="SemiBold" />
-              <TextBlock Text="Edge Agent"
                          FontSize="11" Opacity="0.5" />
             </StackPanel>
           </Border>
@@ -84,6 +86,14 @@
                     HorizontalContentAlignment="Left"
                     Padding="12,10"
                     Tag="Logs"
+                    Click="OnNavClicked"
+                    Classes="navButton" />
+            <Button x:Name="NavSettings"
+                    Content="   Settings"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Padding="12,10"
+                    Tag="Settings"
                     Click="OnNavClicked"
                     Classes="navButton" />
           </StackPanel>

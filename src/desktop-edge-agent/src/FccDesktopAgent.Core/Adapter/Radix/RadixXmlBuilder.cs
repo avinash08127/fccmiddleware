@@ -303,16 +303,16 @@ public static class RadixXmlBuilder
         sb.Append("    <PRESET_AMOUNT>").Append(p.PresetAmount).Append("</PRESET_AMOUNT>\n");
 
         if (p.CustomerName is not null)
-            sb.Append("    <CUSTNAME>").Append(p.CustomerName).Append("</CUSTNAME>\n");
+            sb.Append("    <CUSTNAME>").Append(EscapeXml(p.CustomerName)).Append("</CUSTNAME>\n");
 
         if (p.CustomerIdType is not null)
-            sb.Append("    <CUSTIDTYPE>").Append(p.CustomerIdType).Append("</CUSTIDTYPE>\n");
+            sb.Append("    <CUSTIDTYPE>").Append(p.CustomerIdType.Value).Append("</CUSTIDTYPE>\n");
 
         if (p.CustomerId is not null)
-            sb.Append("    <CUSTID>").Append(p.CustomerId).Append("</CUSTID>\n");
+            sb.Append("    <CUSTID>").Append(EscapeXml(p.CustomerId)).Append("</CUSTID>\n");
 
         if (p.MobileNumber is not null)
-            sb.Append("    <MOBILENUM>").Append(p.MobileNumber).Append("</MOBILENUM>\n");
+            sb.Append("    <MOBILENUM>").Append(EscapeXml(p.MobileNumber)).Append("</MOBILENUM>\n");
 
         if (p.DiscountValue is not null)
             sb.Append("    <DISC_VALUE>").Append(p.DiscountValue).Append("</DISC_VALUE>\n");
@@ -323,6 +323,19 @@ public static class RadixXmlBuilder
         sb.Append("    <TOKEN>").Append(p.Token).Append("</TOKEN>\n");
         sb.Append("</AUTH_DATA>");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Escapes XML special characters in user-provided string values.
+    /// </summary>
+    private static string EscapeXml(string value)
+    {
+        return value
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;")
+            .Replace("\"", "&quot;")
+            .Replace("'", "&apos;");
     }
 
     /// <summary>

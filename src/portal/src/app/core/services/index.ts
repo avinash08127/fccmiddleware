@@ -7,3 +7,4 @@ export * from './audit.service';
 export * from './dlq.service';
 export * from './settings.service';
 export * from './bootstrap-token.service';
+export * from './logging.service';

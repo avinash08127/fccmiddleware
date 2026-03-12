@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.FccEdgeAgent" parent="Theme.AppCompat.Light.NoActionBar">
-        <item name="colorPrimary">#1976D2</item>
-        <item name="colorPrimaryDark">#1565C0</item>
-        <item name="colorAccent">#FF6F00</item>
-        <item name="android:statusBarColor">#1565C0</item>
+        <item name="colorPrimary">#E30613</item>
+        <item name="colorPrimaryDark">#B8050F</item>
+        <item name="colorAccent">#007A33</item>
+        <item name="android:statusBarColor">#B8050F</item>
+    </style>
+
+    <style name="Theme.FccEdgeAgent.Splash" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+        <item name="android:statusBarColor">#E30613</item>
+        <item name="android:navigationBarColor">#E30613</item>
     </style>
 </resources>

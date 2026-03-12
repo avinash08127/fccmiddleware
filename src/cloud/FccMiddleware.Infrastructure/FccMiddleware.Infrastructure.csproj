@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\FccMiddleware.Adapter.Advatec\FccMiddleware.Adapter.Advatec.csproj" />
     <ProjectReference Include="..\FccMiddleware.Adapter.Doms\FccMiddleware.Adapter.Doms.csproj" />
     <ProjectReference Include="..\FccMiddleware.Adapter.Petronite\FccMiddleware.Adapter.Petronite.csproj" />
     <ProjectReference Include="..\FccMiddleware.Adapter.Radix\FccMiddleware.Adapter.Radix.csproj" />
@@ -15,6 +16,7 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Http.Polly" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
     <PackageReference Include="Parquet.Net" Version="5.3.0" />

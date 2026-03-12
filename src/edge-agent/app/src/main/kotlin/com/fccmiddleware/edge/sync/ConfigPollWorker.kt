@@ -1,11 +1,12 @@
 package com.fccmiddleware.edge.sync
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.config.ConfigApplyResult
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
+import com.fccmiddleware.edge.config.SiteDataManager
 import java.time.Instant
 
 /**
@@ -33,6 +34,7 @@ class ConfigPollWorker(
     private val syncStateDao: SyncStateDao? = null,
     private val cloudApiClient: CloudApiClient? = null,
     private val tokenProvider: DeviceTokenProvider? = null,
+    private val siteDataManager: SiteDataManager? = null,
 ) {
 
     companion object {
@@ -60,37 +62,37 @@ class ConfigPollWorker(
      */
     suspend fun pollConfig() {
         val cm = configManager ?: run {
-            Log.d(TAG, "pollConfig() skipped — configManager not wired")
+            AppLogger.d(TAG, "pollConfig() skipped — configManager not wired")
             return
         }
         val client = cloudApiClient ?: run {
-            Log.d(TAG, "pollConfig() skipped — cloudApiClient not wired")
+            AppLogger.d(TAG, "pollConfig() skipped — cloudApiClient not wired")
             return
         }
         val provider = tokenProvider ?: run {
-            Log.d(TAG, "pollConfig() skipped — tokenProvider not wired")
+            AppLogger.d(TAG, "pollConfig() skipped — tokenProvider not wired")
             return
         }
 
         if (provider.isDecommissioned()) {
-            Log.w(TAG, "pollConfig() skipped — device decommissioned")
+            AppLogger.w(TAG, "pollConfig() skipped — device decommissioned")
             return
         }
 
         // M-08: Circuit breaker check
         if (!circuitBreaker.allowRequest()) {
             val waitMs = circuitBreaker.remainingBackoffMs()
-            Log.d(TAG, "pollConfig() skipped — circuit breaker (state=${circuitBreaker.state}, ${waitMs}ms remaining)")
+            AppLogger.d(TAG, "pollConfig() skipped — circuit breaker (state=${circuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
         val token = provider.getAccessToken() ?: run {
-            Log.w(TAG, "pollConfig() skipped — no access token available")
+            AppLogger.w(TAG, "pollConfig() skipped — no access token available")
             return
         }
 
         val currentVersion = cm.currentConfigVersion
-        Log.d(TAG, "Polling config (currentVersion=$currentVersion)")
+        AppLogger.d(TAG, "Polling config (currentVersion=$currentVersion)")
 
         val result = doPoll(client, provider, currentVersion, token)
         handlePollResult(cm, result)
@@ -114,19 +116,19 @@ class ConfigPollWorker(
                 ConfigPollAttemptResult.Unchanged
 
             is CloudConfigPollResult.Unauthorized -> {
-                Log.i(TAG, "Config poll returned 401 — attempting token refresh")
+                AppLogger.i(TAG, "Config poll returned 401 — attempting token refresh")
                 val refreshed = provider.refreshAccessToken()
                 if (!refreshed) {
-                    Log.e(TAG, "Token refresh failed during config poll")
+                    AppLogger.e(TAG, "Token refresh failed during config poll")
                     return ConfigPollAttemptResult.TransportFailure("401 Unauthorized — token refresh failed")
                 }
                 val freshToken = provider.getAccessToken()
                 if (freshToken == null) {
                     // M-04: Critical state bug — refresh reported success but token store is empty/corrupt
-                    Log.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
+                    AppLogger.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
                     return ConfigPollAttemptResult.TransportFailure("CRITICAL: token store inconsistency — refresh succeeded but no token available")
                 }
-                Log.i(TAG, "Token refreshed; retrying config poll")
+                AppLogger.i(TAG, "Token refreshed; retrying config poll")
                 when (val retryResult = client.getConfig(currentVersion, freshToken)) {
                     is CloudConfigPollResult.Success ->
                         ConfigPollAttemptResult.NewConfig(retryResult.rawJson, retryResult.etag)
@@ -169,7 +171,7 @@ class ConfigPollWorker(
                 val parsed = try {
                     com.fccmiddleware.edge.config.EdgeAgentConfigJson.decode(result.rawJson)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse config JSON from cloud", e)
+                    AppLogger.e(TAG, "Failed to parse config JSON from cloud", e)
                     recordFailure("JSON parse error: ${e.message}")
                     return
                 }
@@ -177,24 +179,29 @@ class ConfigPollWorker(
                 val applyResult = cm.applyConfig(parsed, result.rawJson)
                 when (applyResult) {
                     is ConfigApplyResult.Applied -> {
-                        Log.i(TAG, "Config version ${parsed.configVersion} applied successfully")
+                        AppLogger.i(TAG, "Config version ${parsed.configVersion} applied successfully")
+                        try {
+                            siteDataManager?.syncFromConfig(parsed)
+                        } catch (e: Exception) {
+                            AppLogger.e(TAG, "Failed to sync site data after config apply", e)
+                        }
                         circuitBreaker.recordSuccess()
                         updateSyncState(parsed.configVersion)
                     }
                     is ConfigApplyResult.Skipped -> {
-                        Log.d(TAG, "Config version ${parsed.configVersion} skipped (not newer)")
+                        AppLogger.d(TAG, "Config version ${parsed.configVersion} skipped (not newer)")
                         circuitBreaker.recordSuccess()
                         updateLastConfigPullAt()
                     }
                     is ConfigApplyResult.Rejected -> {
-                        Log.w(TAG, "Config version ${parsed.configVersion} rejected: ${applyResult.reason}")
+                        AppLogger.w(TAG, "Config version ${parsed.configVersion} rejected: ${applyResult.reason}")
                         recordFailure("Config rejected: ${applyResult.reason}")
                     }
                 }
             }
 
             is ConfigPollAttemptResult.Unchanged -> {
-                Log.d(TAG, "Config unchanged (304 Not Modified)")
+                AppLogger.d(TAG, "Config unchanged (304 Not Modified)")
                 circuitBreaker.recordSuccess()
                 updateLastConfigPullAt()
             }
@@ -203,14 +210,14 @@ class ConfigPollWorker(
                 val retryAfter = result.retryAfterSeconds
                 if (retryAfter != null) {
                     circuitBreaker.setBackoffSeconds(retryAfter)
-                    Log.w(TAG, "Config poll rate limited (429); backing off for ${retryAfter}s")
+                    AppLogger.w(TAG, "Config poll rate limited (429); backing off for ${retryAfter}s")
                 } else {
                     recordFailure("429 Too Many Requests (no Retry-After header)")
                 }
             }
 
             is ConfigPollAttemptResult.Decommissioned -> {
-                Log.e(TAG, "DEVICE DECOMMISSIONED during config poll. All cloud sync permanently stopped.")
+                AppLogger.e(TAG, "DEVICE DECOMMISSIONED during config poll. All cloud sync permanently stopped.")
                 tokenProvider?.markDecommissioned()
             }
 
@@ -222,7 +229,7 @@ class ConfigPollWorker(
 
     private suspend fun recordFailure(message: String) {
         val backoffMs = circuitBreaker.recordFailure()
-        Log.w(
+        AppLogger.w(
             TAG,
             "Config poll failed (failure #${circuitBreaker.consecutiveFailureCount}, " +
                 "state=${circuitBreaker.state}); next retry after ${backoffMs}ms. Error: $message",
@@ -249,7 +256,7 @@ class ConfigPollWorker(
             )
             dao.upsert(updated)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to update SyncState after config apply", e)
+            AppLogger.e(TAG, "Failed to update SyncState after config apply", e)
         }
     }
 
@@ -270,7 +277,7 @@ class ConfigPollWorker(
                 )
             dao.upsert(updated)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to update lastConfigPullAt in SyncState", e)
+            AppLogger.e(TAG, "Failed to update lastConfigPullAt in SyncState", e)
         }
     }
 

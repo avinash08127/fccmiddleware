@@ -178,7 +178,8 @@ public sealed class GetAgentConfigHandler
             CursorStrategy = section["CursorStrategy"] ?? "FCC_TRANSACTION_ID",
             MaxReplayBackoffSeconds = section.GetValue("MaxReplayBackoffSeconds", 300),
             InitialReplayBackoffSeconds = section.GetValue("InitialReplayBackoffSeconds", 5),
-            MaxRecordsPerUploadWindow = section.GetValue("MaxRecordsPerUploadWindow", 5000)
+            MaxRecordsPerUploadWindow = section.GetValue("MaxRecordsPerUploadWindow", 5000),
+            Environment = section["Environment"]
         };
     }
 

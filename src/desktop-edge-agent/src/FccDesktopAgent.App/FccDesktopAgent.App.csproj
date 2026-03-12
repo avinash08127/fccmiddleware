@@ -12,6 +12,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <AvaloniaResource Include="Assets\AppIcon.png" />
+    <AvaloniaResource Include="Assets\puma-energy-logo.png" />
+  </ItemGroup>
+
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 

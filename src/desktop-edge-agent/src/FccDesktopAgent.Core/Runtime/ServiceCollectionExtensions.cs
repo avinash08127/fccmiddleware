@@ -9,9 +9,11 @@ using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Ingestion;
 using FccDesktopAgent.Core.PreAuth;
+using FccDesktopAgent.Core.MasterData;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.Sync;
+using FccDesktopAgent.Core.WebSocket;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -40,6 +42,12 @@ public static class ServiceCollectionExtensions
 
         // DEA-3.5: Platform-specific secure credential storage (DPAPI / Keychain / libsecret).
         services.AddSingleton<ICredentialStore, PlatformCredentialStore>();
+
+        // Local FCC override manager — reads/writes overrides.json for on-site config tuning.
+        services.AddSingleton<LocalOverrideManager>();
+
+        // Site data persistence — extracts products/pumps/nozzles from config to JSON.
+        services.AddSingleton<SiteDataManager>();
 
         // DEA-3.5: Registration state manager — also overlays identity (DeviceId, SiteId, CloudBaseUrl)
         // onto AgentConfiguration via IPostConfigureOptions so workers always see the current identity.
@@ -78,6 +86,9 @@ public static class ServiceCollectionExtensions
         // FCC adapter factory (DEA-2.5: pre-auth handler support)
         services.AddSingleton<IFccAdapterFactory, FccAdapterFactory>();
 
+        // Pump status service — single-flight protection + stale cache (architecture rule #13)
+        services.AddSingleton<IPumpStatusService, PumpStatusService>();
+
         // Pre-auth handler — scoped (depends on AgentDbContext which is scoped)
         services.AddScoped<IPreAuthHandler, PreAuthHandler>();
 
@@ -108,6 +119,10 @@ public static class ServiceCollectionExtensions
 
         // Version checker — called on startup to validate agent compatibility with cloud.
         services.AddSingleton<IVersionChecker, VersionCheckService>();
+
+        // Odoo backward-compat WebSocket server.
+        services.AddSingleton<OdooWebSocketServer>();
+        services.Configure<WebSocketServerOptions>(config.GetSection(WebSocketServerOptions.SectionName));
 
         return services;
     }

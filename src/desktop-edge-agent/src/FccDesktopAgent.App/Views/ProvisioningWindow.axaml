@@ -1,7 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="FccDesktopAgent.App.Views.ProvisioningWindow"
-        Title="FCC Desktop Agent — Setup Wizard"
+        Title="Puma Energy — FCC Agent Setup"
         Width="600"
         Height="580"
         MinWidth="500"
@@ -13,7 +13,7 @@
 
     <!-- Header with step indicator -->
     <StackPanel Grid.Row="0" Margin="0,0,0,20">
-      <TextBlock Text="FCC Desktop Agent Setup"
+      <TextBlock Text="Puma Energy FCC Agent Setup"
                  FontSize="22"
                  FontWeight="SemiBold"
                  Margin="0,0,0,8" />
@@ -89,6 +89,14 @@
                    Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
 
         <StackPanel Spacing="4">
+          <TextBlock Text="Environment" FontWeight="Medium" />
+          <ComboBox x:Name="EnvComboBox"
+                    SelectedIndex="0"
+                    HorizontalAlignment="Stretch"
+                    SelectionChanged="OnEnvSelectionChanged" />
+        </StackPanel>
+
+        <StackPanel Spacing="4">
           <TextBlock Text="Cloud URL" FontWeight="Medium" />
           <TextBox x:Name="CloudUrlBox"
                    Watermark="https://api.fccmiddleware.io"
@@ -130,6 +138,14 @@
                    FontSize="15" FontWeight="Medium" />
         <TextBlock Text="Enter the connection details for the cloud backend and the station's Forecourt Controller. Optionally provide a provisioning token for cloud registration."
                    Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+
+        <StackPanel Spacing="4">
+          <TextBlock Text="Environment" FontWeight="Medium" />
+          <ComboBox x:Name="ManualEnvComboBox"
+                    SelectedIndex="0"
+                    HorizontalAlignment="Stretch"
+                    SelectionChanged="OnManualEnvSelectionChanged" />
+        </StackPanel>
 
         <Grid ColumnDefinitions="*,12,*" RowDefinitions="Auto,Auto,Auto">
           <StackPanel Grid.Row="0" Grid.Column="0" Spacing="4">

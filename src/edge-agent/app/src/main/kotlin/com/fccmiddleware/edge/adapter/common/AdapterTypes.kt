@@ -144,6 +144,32 @@ data class PreAuthResult(
     val correlationId: String? = null,
 )
 
+/**
+ * Command to cancel/deauthorize an active pre-authorization on the FCC.
+ *
+ * Vendor-specific adapters use different fields:
+ * - DOMS JPL: pumpNumber → deauthorize_Fp_req with FpId
+ * - Radix: pumpNumber + fccCorrelationId → AUTH_DATA with AUTH=FALSE
+ * - Petronite: fccCorrelationId → POST /{orderId}/cancel
+ */
+@Serializable
+data class CancelPreAuthCommand(
+    /** Used to resolve FCC config and mappings. */
+    val siteCode: String,
+
+    /** Physical pump number (FCC-mapped). Required for DOMS and Radix. */
+    val pumpNumber: Int,
+
+    /** Nozzle number when FCC needs it (DOMS). */
+    val nozzleNumber: Int? = null,
+
+    /**
+     * FCC-assigned correlation ID from the original pre-auth.
+     * Required for Petronite (OrderId) and Radix (RADIX-TOKEN-xxx).
+     */
+    val fccCorrelationId: String? = null,
+)
+
 // ---------------------------------------------------------------------------
 // Normalization result — sealed outcome of IFccAdapter.normalize()
 // ---------------------------------------------------------------------------
@@ -194,6 +220,9 @@ data class AgentFccConfig(
 
     val ingestionMode: IngestionMode,
     val pullIntervalSeconds: Int,
+
+    /** Site identifier (e.g. "TZ-DAR-001"). Used in dedup keys and envelope metadata. */
+    val siteCode: String = "",
 
     /** Maps raw FCC product codes → canonical product codes. */
     val productCodeMapping: Map<String, String>,
@@ -257,4 +286,24 @@ data class AgentFccConfig(
 
     /** Petronite: OAuth2 token endpoint URL. */
     val oauthTokenEndpoint: String? = null,
+
+    // ── Advatec EFD fields ──────────────────────────────────────────────────
+
+    /** Advatec: Device host address (default "127.0.0.1" — Advatec runs on localhost). */
+    val advatecDeviceAddress: String? = null,
+
+    /** Advatec: Device HTTP port (default 5560). */
+    val advatecDevicePort: Int? = null,
+
+    /** Advatec: Port for the local webhook listener that receives Receipt callbacks. */
+    val advatecWebhookListenerPort: Int? = null,
+
+    /** Advatec: Shared token for webhook URL authentication. */
+    @Sensitive val advatecWebhookToken: String? = null,
+
+    /** Advatec: TRA-registered EFD serial number for validation (e.g., "10TZ101807"). */
+    val advatecEfdSerialNumber: String? = null,
+
+    /** Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL). */
+    val advatecCustIdType: Int? = null,
 )

@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.sync
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import java.time.Instant
@@ -83,27 +83,27 @@ class PreAuthCloudForwardWorker(
      */
     suspend fun forwardUnsyncedPreAuths() {
         val dao = preAuthDao ?: run {
-            Log.d(TAG, "forwardUnsyncedPreAuths() skipped — preAuthDao not wired")
+            AppLogger.d(TAG, "forwardUnsyncedPreAuths() skipped — preAuthDao not wired")
             return
         }
         val client = cloudApiClient ?: run {
-            Log.d(TAG, "forwardUnsyncedPreAuths() skipped — cloudApiClient not wired")
+            AppLogger.d(TAG, "forwardUnsyncedPreAuths() skipped — cloudApiClient not wired")
             return
         }
         val provider = tokenProvider ?: run {
-            Log.d(TAG, "forwardUnsyncedPreAuths() skipped — tokenProvider not wired")
+            AppLogger.d(TAG, "forwardUnsyncedPreAuths() skipped — tokenProvider not wired")
             return
         }
 
         if (provider.isDecommissioned()) {
-            Log.w(TAG, "forwardUnsyncedPreAuths() skipped — device decommissioned")
+            AppLogger.w(TAG, "forwardUnsyncedPreAuths() skipped — device decommissioned")
             return
         }
 
         // M-08: Circuit breaker check
         if (!circuitBreaker.allowRequest()) {
             val waitMs = circuitBreaker.remainingBackoffMs()
-            Log.d(TAG, "forwardUnsyncedPreAuths() skipped — circuit breaker (state=${circuitBreaker.state}, ${waitMs}ms remaining)")
+            AppLogger.d(TAG, "forwardUnsyncedPreAuths() skipped — circuit breaker (state=${circuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
@@ -111,14 +111,14 @@ class PreAuthCloudForwardWorker(
         if (unsynced.isEmpty()) {
             // H-02 fix: reset when no unsynced records so new records forward immediately
             circuitBreaker.recordSuccess()
-            Log.d(TAG, "forwardUnsyncedPreAuths() — no unsynced pre-auth records, circuit breaker reset")
+            AppLogger.d(TAG, "forwardUnsyncedPreAuths() — no unsynced pre-auth records, circuit breaker reset")
             return
         }
 
-        Log.i(TAG, "Forwarding ${unsynced.size} unsynced pre-auth records to cloud")
+        AppLogger.i(TAG, "Forwarding ${unsynced.size} unsynced pre-auth records to cloud")
 
         val token = provider.getAccessToken() ?: run {
-            Log.w(TAG, "forwardUnsyncedPreAuths() skipped — no access token available")
+            AppLogger.w(TAG, "forwardUnsyncedPreAuths() skipped — no access token available")
             return
         }
 
@@ -126,7 +126,7 @@ class PreAuthCloudForwardWorker(
             if (record.unitPrice == null) {
                 val attemptNow = Instant.now().toString()
                 dao.recordCloudSyncFailure(record.id, attemptNow)
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Skipping pre-auth ${record.odooOrderId} cloud forward: unitPrice is missing " +
                         "for a legacy local record.",
@@ -140,23 +140,23 @@ class PreAuthCloudForwardWorker(
                     val attemptNow = Instant.now().toString()
                     dao.markCloudSynced(record.id, attemptNow)
                     circuitBreaker.recordSuccess()
-                    Log.i(TAG, "Pre-auth ${record.odooOrderId} forwarded to cloud")
+                    AppLogger.i(TAG, "Pre-auth ${record.odooOrderId} forwarded to cloud")
                 }
 
                 is ForwardAttemptResult.RateLimited -> {
                     val retryAfter = result.retryAfterSeconds
                     if (retryAfter != null) {
                         circuitBreaker.setBackoffSeconds(retryAfter)
-                        Log.w(TAG, "Pre-auth forward rate limited (429); backing off for ${retryAfter}s")
+                        AppLogger.w(TAG, "Pre-auth forward rate limited (429); backing off for ${retryAfter}s")
                     } else {
                         val backoffMs = circuitBreaker.recordFailure()
-                        Log.w(TAG, "Pre-auth forward rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
+                        AppLogger.w(TAG, "Pre-auth forward rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
                     }
                     return
                 }
 
                 is ForwardAttemptResult.Decommissioned -> {
-                    Log.e(TAG, "DEVICE DECOMMISSIONED during pre-auth forward. All sync stopped.")
+                    AppLogger.e(TAG, "DEVICE DECOMMISSIONED during pre-auth forward. All sync stopped.")
                     provider.markDecommissioned()
                     return
                 }
@@ -165,7 +165,7 @@ class PreAuthCloudForwardWorker(
                     val attemptNow = Instant.now().toString()
                     dao.recordCloudSyncFailure(record.id, attemptNow)
                     val backoffMs = circuitBreaker.recordFailure()
-                    Log.w(
+                    AppLogger.w(
                         TAG,
                         "Pre-auth forward failed (failure #${circuitBreaker.consecutiveFailureCount}, " +
                             "state=${circuitBreaker.state}); next retry after ${backoffMs}ms. " +
@@ -198,22 +198,22 @@ class PreAuthCloudForwardWorker(
                 ForwardAttemptResult.Success
 
             is CloudPreAuthForwardResult.Unauthorized -> {
-                Log.i(TAG, "Pre-auth forward returned 401 — attempting token refresh")
+                AppLogger.i(TAG, "Pre-auth forward returned 401 — attempting token refresh")
                 val refreshed = provider.refreshAccessToken()
                 if (!refreshed) {
-                    Log.e(TAG, "Token refresh failed during pre-auth forward")
+                    AppLogger.e(TAG, "Token refresh failed during pre-auth forward")
                     return ForwardAttemptResult.TransportFailure(
                         "401 Unauthorized — token refresh failed",
                     )
                 }
                 val freshToken = provider.getAccessToken()
                 if (freshToken == null) {
-                    Log.e(TAG, "Token refresh succeeded but getAccessToken() returned null")
+                    AppLogger.e(TAG, "Token refresh succeeded but getAccessToken() returned null")
                     return ForwardAttemptResult.TransportFailure(
                         "401 Unauthorized — no token after refresh",
                     )
                 }
-                Log.i(TAG, "Token refreshed; retrying pre-auth forward")
+                AppLogger.i(TAG, "Token refreshed; retrying pre-auth forward")
                 when (val retryResult = client.forwardPreAuth(request, freshToken)) {
                     is CloudPreAuthForwardResult.Success ->
                         ForwardAttemptResult.Success

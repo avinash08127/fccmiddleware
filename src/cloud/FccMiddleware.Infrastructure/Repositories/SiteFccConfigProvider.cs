@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Models.Adapter;
@@ -99,14 +101,63 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             })
             .ToListAsync(ct);
 
+        // M-11: Use HMAC-based comparison so the check is constant-time regardless
+        // of input length. FixedTimeEquals short-circuits on different-length spans,
+        // leaking the valid secret's length via timing analysis.
         var match = candidates.FirstOrDefault(c =>
-            CryptographicOperations.FixedTimeEquals(
-                System.Text.Encoding.UTF8.GetBytes(c.WebhookSecret!),
-                System.Text.Encoding.UTF8.GetBytes(webhookSecret)));
+            ConstantTimeSecretEquals(c.WebhookSecret!, webhookSecret));
 
         if (match is null)
         {
             _logger.LogWarning("No active Petronite FccConfig matched the provided webhook secret");
+            return null;
+        }
+
+        return (BuildSiteFccConfig(match), match.LegalEntityId);
+    }
+
+    /// <inheritdoc />
+    public async Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByAdvatecWebhookTokenAsync(
+        string webhookToken,
+        CancellationToken ct = default)
+    {
+        // Load all active Advatec configs that have a webhook token set.
+        // We use constant-time comparison in memory to avoid timing attacks.
+        var candidates = await _dbContext.FccConfigs
+            .IgnoreQueryFilters()
+            .Where(cfg => cfg.IsActive
+                && cfg.FccVendor == FccVendor.ADVATEC
+                && cfg.AdvatecWebhookToken != null)
+            .Select(cfg => new FccConfigProjection
+            {
+                SiteCode = cfg.Site.SiteCode,
+                FccVendor = cfg.FccVendor,
+                ConnectionProtocol = cfg.ConnectionProtocol,
+                HostAddress = cfg.HostAddress,
+                Port = cfg.Port,
+                IngestionMethod = cfg.IngestionMethod,
+                PullIntervalSeconds = cfg.PullIntervalSeconds,
+                LegalEntityId = cfg.Site.LegalEntityId,
+                CurrencyCode = cfg.LegalEntity.CurrencyCode,
+                DefaultTimezone = cfg.LegalEntity.DefaultTimezone,
+                SharedSecret = cfg.SharedSecret,
+                UsnCode = cfg.UsnCode,
+                AuthPort = cfg.AuthPort,
+                ClientId = cfg.ClientId,
+                ClientSecret = cfg.ClientSecret,
+                WebhookSecret = cfg.WebhookSecret,
+                OAuthTokenEndpoint = cfg.OAuthTokenEndpoint,
+                AdvatecWebhookToken = cfg.AdvatecWebhookToken,
+            })
+            .ToListAsync(ct);
+
+        // M-11: Same HMAC-based constant-time comparison for Advatec tokens
+        var match = candidates.FirstOrDefault(c =>
+            ConstantTimeSecretEquals(c.AdvatecWebhookToken!, webhookToken));
+
+        if (match is null)
+        {
+            _logger.LogWarning("No active Advatec FccConfig matched the provided webhook token");
             return null;
         }
 
@@ -139,6 +190,21 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
                 ClientSecret = cfg.ClientSecret,
                 WebhookSecret = cfg.WebhookSecret,
                 OAuthTokenEndpoint = cfg.OAuthTokenEndpoint,
+                // H-14: Project Advatec fields (previously missing from shared projection)
+                AdvatecWebhookToken = cfg.AdvatecWebhookToken,
+                AdvatecDevicePort = cfg.AdvatecDevicePort,
+                AdvatecEfdSerialNumber = cfg.AdvatecEfdSerialNumber,
+                AdvatecCustIdType = cfg.AdvatecCustIdType,
+                // M-14: Project DOMS/Radix vendor fields
+                JplPort = cfg.JplPort,
+                DppPorts = cfg.DppPorts,
+                FcAccessCode = cfg.FcAccessCode,
+                DomsCountryCode = cfg.DomsCountryCode,
+                PosVersionId = cfg.PosVersionId,
+                HeartbeatIntervalSeconds = cfg.HeartbeatIntervalSeconds,
+                ReconnectBackoffMaxSeconds = cfg.ReconnectBackoffMaxSeconds,
+                ConfiguredPumps = cfg.ConfiguredPumps,
+                FccPumpAddressMapJson = cfg.FccPumpAddressMap,
             })
             .FirstOrDefaultAsync(ct);
     }
@@ -165,7 +231,56 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             ClientSecret = row.ClientSecret,
             WebhookSecret = row.WebhookSecret,
             OAuthTokenEndpoint = row.OAuthTokenEndpoint,
+            // H-14: Advatec vendor-specific fields
+            AdvatecWebhookToken = row.AdvatecWebhookToken,
+            AdvatecDevicePort = row.AdvatecDevicePort,
+            AdvatecEfdSerialNumber = row.AdvatecEfdSerialNumber,
+            AdvatecCustIdType = row.AdvatecCustIdType,
+            // M-14: DOMS/Radix vendor-specific fields
+            JplPort = row.JplPort,
+            DppPorts = row.DppPorts,
+            FcAccessCode = row.FcAccessCode,
+            DomsCountryCode = row.DomsCountryCode,
+            PosVersionId = row.PosVersionId,
+            HeartbeatIntervalSeconds = row.HeartbeatIntervalSeconds,
+            ReconnectBackoffMaxSeconds = row.ReconnectBackoffMaxSeconds,
+            ConfiguredPumps = row.ConfiguredPumps,
+            FccPumpAddressMap = ParsePumpAddressMap(row.FccPumpAddressMapJson),
         };
+
+    /// <summary>
+    /// M-14: Deserializes the FccPumpAddressMap JSON string into a typed dictionary.
+    /// Returns null if the JSON is empty or malformed (fallback to offset-based pump resolution).
+    /// </summary>
+    private static IReadOnlyDictionary<int, RadixPumpAddress>? ParsePumpAddressMap(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<int, RadixPumpAddress>>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// M-11: HMAC-based constant-time comparison. CryptographicOperations.FixedTimeEquals
+    /// short-circuits on different-length spans, leaking the valid secret's length.
+    /// By HMAC-hashing both inputs with the same key, we always compare fixed-length
+    /// (32-byte) digests, eliminating the length side-channel.
+    /// </summary>
+    private static bool ConstantTimeSecretEquals(string stored, string provided)
+    {
+        var key = new byte[32]; // zeroed key is fine — we only need equal-length digests
+        using var hmac1 = new HMACSHA256(key);
+        using var hmac2 = new HMACSHA256(key);
+        var hash1 = hmac1.ComputeHash(Encoding.UTF8.GetBytes(stored));
+        var hash2 = hmac2.ComputeHash(Encoding.UTF8.GetBytes(provided));
+        return CryptographicOperations.FixedTimeEquals(hash1, hash2);
+    }
 
     private sealed class FccConfigProjection
     {
@@ -186,5 +301,19 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
         public string? ClientSecret { get; init; }
         public string? WebhookSecret { get; init; }
         public string? OAuthTokenEndpoint { get; init; }
+        public string? AdvatecWebhookToken { get; init; }
+        public int? AdvatecDevicePort { get; init; }
+        public string? AdvatecEfdSerialNumber { get; init; }
+        public int? AdvatecCustIdType { get; init; }
+        // M-14: DOMS/Radix vendor fields
+        public int? JplPort { get; init; }
+        public string? DppPorts { get; init; }
+        public string? FcAccessCode { get; init; }
+        public string? DomsCountryCode { get; init; }
+        public string? PosVersionId { get; init; }
+        public int HeartbeatIntervalSeconds { get; init; }
+        public int? ReconnectBackoffMaxSeconds { get; init; }
+        public string? ConfiguredPumps { get; init; }
+        public string? FccPumpAddressMapJson { get; init; }
     }
 }

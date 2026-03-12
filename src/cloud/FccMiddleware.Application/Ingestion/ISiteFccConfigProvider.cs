@@ -35,4 +35,13 @@ public interface ISiteFccConfigProvider
     Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByWebhookSecretAsync(
         string webhookSecret,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Looks up an active Advatec FCC configuration by webhook token.
+    /// Used for Advatec Receipt webhook ingestion where the caller proves identity via X-Webhook-Token.
+    /// Returns null when no active Advatec FccConfig matches the given token.
+    /// </summary>
+    Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByAdvatecWebhookTokenAsync(
+        string webhookToken,
+        CancellationToken ct = default);
 }

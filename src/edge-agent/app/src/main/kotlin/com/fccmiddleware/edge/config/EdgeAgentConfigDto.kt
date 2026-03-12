@@ -32,6 +32,7 @@ data class EdgeAgentConfigDto(
     val localApi: LocalApiDto,
     val telemetry: TelemetryDto,
     val fiscalization: FiscalizationDto,
+    val websocket: WebSocketDto = WebSocketDto(),
     val mappings: MappingsDto,
     val rollout: RolloutDto,
 )
@@ -149,9 +150,29 @@ data class TelemetryDto(
 @Serializable
 data class FiscalizationDto(
     val mode: String,
+    /** Fiscal device vendor (e.g. "ADVATEC"). Used to select the IFiscalizationService implementation. */
+    val vendor: String? = null,
     val taxAuthorityEndpoint: String? = null,
     val requireCustomerTaxId: Boolean = false,
     val fiscalReceiptRequired: Boolean = false,
+)
+
+@Serializable
+data class WebSocketDto(
+    /** Whether the WebSocket server is enabled. */
+    val enabled: Boolean = false,
+    /** Port the WebSocket server listens on (legacy default: 8443). */
+    val port: Int = 8443,
+    /** Whether to use TLS (WSS). Requires a certificate to be configured. */
+    val useTls: Boolean = false,
+    /** Bind address for the WebSocket server. */
+    val bindAddress: String = "0.0.0.0",
+    /** Maximum concurrent WebSocket connections. */
+    val maxConnections: Int = 10,
+    /** Interval in seconds for per-connection pump status broadcasts. */
+    val pumpStatusBroadcastIntervalSeconds: Int = 3,
+    /** Whether LAN WebSocket connections require an API key. */
+    val requireApiKeyForLan: Boolean = false,
 )
 
 @Serializable
@@ -202,7 +223,9 @@ object EdgeAgentConfigJson {
 
 fun EdgeAgentConfigDto.requiresFccRuntime(): Boolean = site.isActive && fcc.enabled
 
-fun EdgeAgentConfigDto.toAgentFccConfig(): AgentFccConfig {
+fun EdgeAgentConfigDto.toAgentFccConfig(
+    overrideManager: LocalOverrideManager? = null,
+): AgentFccConfig {
     val vendor = requireNotNull(fcc.vendor) { "fcc.vendor is required when FCC is enabled" }
     val protocol = requireNotNull(fcc.connectionProtocol) {
         "fcc.connectionProtocol is required when FCC is enabled"
@@ -214,7 +237,7 @@ fun EdgeAgentConfigDto.toAgentFccConfig(): AgentFccConfig {
         ?.let { IngestionMode.valueOf(it.uppercase()) }
         ?: IngestionMode.CLOUD_DIRECT
 
-    return AgentFccConfig(
+    val baseConfig = AgentFccConfig(
         fccVendor = FccVendor.valueOf(vendor.uppercase()),
         connectionProtocol = protocol,
         hostAddress = host,
@@ -225,6 +248,7 @@ fun EdgeAgentConfigDto.toAgentFccConfig(): AgentFccConfig {
             ?: fcc.catchUpPullIntervalSeconds
             ?: fcc.hybridCatchUpIntervalSeconds
             ?: 30,
+        siteCode = identity.siteCode,
         productCodeMapping = mappings.products
             .filter { it.active }
             .associate { it.fccProductCode to it.canonicalProductCode },
@@ -232,6 +256,15 @@ fun EdgeAgentConfigDto.toAgentFccConfig(): AgentFccConfig {
         currencyCode = identity.currencyCode,
         pumpNumberOffset = mappings.pumpNumberOffset,
         heartbeatIntervalSeconds = fcc.heartbeatIntervalSeconds,
+    )
+
+    if (overrideManager == null || !overrideManager.hasAnyOverrides()) return baseConfig
+
+    return baseConfig.copy(
+        hostAddress = overrideManager.fccHost ?: baseConfig.hostAddress,
+        port = overrideManager.fccPort ?: baseConfig.port,
+        authCredential = overrideManager.fccCredential ?: baseConfig.authCredential,
+        jplPort = overrideManager.jplPort ?: baseConfig.jplPort,
     )
 }
 

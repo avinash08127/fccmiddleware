@@ -26,7 +26,21 @@ public sealed class DeviceActiveCheckMiddleware
             if (Guid.TryParse(sub, out var deviceId))
             {
                 var device = await db.FindAgentByIdAsync(deviceId, context.RequestAborted);
-                if (device is not null && !device.IsActive)
+
+                // H-12: Also reject when device is not found in the database.
+                // A valid JWT with a deleted/non-existent device ID must not pass through.
+                if (device is null)
+                {
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    await context.Response.WriteAsJsonAsync(new
+                    {
+                        errorCode = "DEVICE_NOT_FOUND",
+                        message = "Device not found. It may have been deleted.",
+                    });
+                    return;
+                }
+
+                if (!device.IsActive)
                 {
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     await context.Response.WriteAsJsonAsync(new

@@ -1,3 +1,4 @@
+using FccDesktopAgent.Core.Adapter.Advatec;
 using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Adapter.Doms;
 using FccDesktopAgent.Core.Adapter.Petronite;
@@ -21,6 +22,12 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
     private PetroniteAdapter? _cachedPetroniteAdapter;
     private string? _cachedPetroniteFingerprint;
     private readonly object _petroniteLock = new();
+
+    // Advatec adapter is stateful (webhook listener for Receipt callbacks).
+    // Cache a single instance per config fingerprint so state survives across poll cycles.
+    private AdvatecAdapter? _cachedAdvatecAdapter;
+    private string? _cachedAdvatecFingerprint;
+    private readonly object _advatecLock = new();
 
     public FccAdapterFactory(IHttpClientFactory httpFactory, ILoggerFactory loggerFactory)
     {
@@ -48,8 +55,7 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
             pumpNumberOffset: config.PumpNumberOffset,
             productCodeMapping: config.ProductCodeMapping),
         FccVendor.Petronite => GetOrCreatePetroniteAdapter(config),
-        FccVendor.Advatec => throw new NotSupportedException(
-            "Advatec adapter is not supported on desktop"),
+        FccVendor.Advatec => GetOrCreateAdvatecAdapter(config),
         _ => throw new ArgumentException($"Unknown FCC vendor: {vendor}", nameof(vendor))
     };
 
@@ -96,6 +102,28 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
             oauthClient,
             nozzleResolver,
             _loggerFactory);
+    }
+
+    /// <summary>
+    /// Returns a cached Advatec adapter if the config hasn't changed, or creates
+    /// a new one. Advatec adapters are stateful — they will own the webhook listener
+    /// for Receipt callbacks — so they must survive across poll cycles.
+    /// </summary>
+    private AdvatecAdapter GetOrCreateAdvatecAdapter(FccConnectionConfig config)
+    {
+        var fingerprint = $"{config.AdvatecDeviceAddress}|{config.AdvatecDevicePort}|{config.AdvatecWebhookToken}|{config.AdvatecWebhookListenerPort}";
+
+        lock (_advatecLock)
+        {
+            if (_cachedAdvatecAdapter is not null && _cachedAdvatecFingerprint == fingerprint)
+                return _cachedAdvatecAdapter;
+
+            _cachedAdvatecAdapter = new AdvatecAdapter(
+                config,
+                _loggerFactory);
+            _cachedAdvatecFingerprint = fingerprint;
+            return _cachedAdvatecAdapter;
+        }
     }
 
     private DomsJplAdapter CreateDomsJplAdapter(FccConnectionConfig config)

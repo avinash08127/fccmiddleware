@@ -24,7 +24,26 @@ import {
 } from '@azure/msal-angular';
 import { providePrimeNG } from 'primeng/config';
 import Lara from '@primeuix/themes/lara';
+import { definePreset } from '@primeuix/themes';
 import { MessageService } from 'primeng/api';
+
+const PumaEnergyTheme = definePreset(Lara, {
+    semantic: {
+        primary: {
+            50: '{red.50}',
+            100: '{red.100}',
+            200: '{red.200}',
+            300: '{red.300}',
+            400: '{red.400}',
+            500: '{red.500}',
+            600: '{red.600}',
+            700: '{red.700}',
+            800: '{red.800}',
+            900: '{red.900}',
+            950: '{red.950}',
+        },
+    },
+});
 
 import { routes } from './app.routes';
 import { apiInterceptor } from './core/interceptors/api.interceptor';
@@ -54,10 +73,10 @@ export const appConfig: ApplicationConfig = {
     MsalBroadcastService,
     providePortalAuth(),
 
-    // PrimeNG — Lara Light theme
+    // PrimeNG — Lara Light theme with Puma Energy Red primary
     providePrimeNG({
       theme: {
-        preset: Lara,
+        preset: PumaEnergyTheme,
         options: { prefix: 'p', darkModeSelector: '.dark-mode', cssLayer: false },
       },
     }),

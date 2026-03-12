@@ -208,6 +208,13 @@ export interface FccConfig {
   clientSecret: string | null;
   webhookSecret: string | null;
   oauthTokenEndpoint: string | null;
+
+  // ── Advatec TRA fiscal device fields ──────────────────────────────────
+  advatecDevicePort: number | null;
+  advatecWebhookListenerPort: number | null;
+  advatecWebhookToken: string | null;
+  advatecEfdSerialNumber: string | null;
+  advatecCustIdType: number | null;
 }
 
 // ── SiteConfig sub-types ──────────────────────────────────────────────────────
@@ -244,6 +251,7 @@ export interface SiteConfigSync {
   maxReplayBackoffSeconds: number;
   initialReplayBackoffSeconds: number;
   maxRecordsPerUploadWindow: number;
+  environment?: string;
 }
 
 export interface SiteConfigBuffer {

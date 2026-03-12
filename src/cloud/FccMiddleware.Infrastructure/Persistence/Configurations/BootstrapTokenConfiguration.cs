@@ -26,6 +26,7 @@ internal sealed class BootstrapTokenConfiguration : IEntityTypeConfiguration<Boo
         builder.Property(e => e.UsedAt).HasColumnName("used_at");
         builder.Property(e => e.UsedByDeviceId).HasColumnName("used_by_device_id");
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();
+        builder.Property(e => e.Environment).HasColumnName("environment").HasMaxLength(50);
 
         builder.HasOne(e => e.LegalEntity)
             .WithMany()

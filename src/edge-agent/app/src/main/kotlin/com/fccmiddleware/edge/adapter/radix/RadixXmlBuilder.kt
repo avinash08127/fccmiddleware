@@ -281,16 +281,16 @@ object RadixXmlBuilder {
             append("    <PRESET_VOLUME>").append(params.presetVolume).append("</PRESET_VOLUME>\n")
             append("    <PRESET_AMOUNT>").append(params.presetAmount).append("</PRESET_AMOUNT>\n")
             params.customerName?.let {
-                append("    <CUSTNAME>").append(it).append("</CUSTNAME>\n")
+                append("    <CUSTNAME>").append(escapeXml(it)).append("</CUSTNAME>\n")
             }
             params.customerIdType?.let {
-                append("    <CUSTIDTYPE>").append(it).append("</CUSTIDTYPE>\n")
+                append("    <CUSTIDTYPE>").append(escapeXml(it.toString())).append("</CUSTIDTYPE>\n")
             }
             params.customerId?.let {
-                append("    <CUSTID>").append(it).append("</CUSTID>\n")
+                append("    <CUSTID>").append(escapeXml(it)).append("</CUSTID>\n")
             }
             params.mobileNumber?.let {
-                append("    <MOBILENUM>").append(it).append("</MOBILENUM>\n")
+                append("    <MOBILENUM>").append(escapeXml(it)).append("</MOBILENUM>\n")
             }
             params.discountValue?.let {
                 append("    <DISC_VALUE>").append(it).append("</DISC_VALUE>\n")
@@ -301,6 +301,20 @@ object RadixXmlBuilder {
             append("    <TOKEN>").append(params.token).append("</TOKEN>\n")
             append("</AUTH_DATA>")
         }.toString()
+    }
+
+    /**
+     * Escapes XML special characters in user-provided string values.
+     *
+     * Order matters: `&` must be replaced first to avoid double-encoding.
+     */
+    private fun escapeXml(value: String): String {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
     }
 
     /**

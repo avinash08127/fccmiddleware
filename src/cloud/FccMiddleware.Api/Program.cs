@@ -8,6 +8,7 @@ using FccMiddleware.Application.MasterData;
 using FccMiddleware.Application.PreAuth;
 using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Application.Registration;
+using FccMiddleware.Application.DiagnosticLogs;
 using FccMiddleware.Application.Telemetry;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Domain.Enums;
@@ -214,8 +215,11 @@ try
                     "SystemAdmin",
                     "SystemAdministrator")));
 
+        // H-13: Pin to JWT Bearer scheme so HMAC-authenticated clients with
+        // matching "site"/"lei" claims cannot satisfy this policy.
         opts.AddPolicy("EdgeAgentDevice", policy =>
             policy
+                .AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme)
                 .RequireAuthenticatedUser()
                 .RequireClaim("site")
                 .RequireClaim("lei"));
@@ -304,6 +308,19 @@ try
         sp => sp.GetRequiredService<FccMiddleware.Infrastructure.Persistence.TenantContext>());
     builder.Services.AddScoped<PortalAccessResolver>();
 
+    // ── Infrastructure: Field-level encryption for database secrets ──────────
+    builder.Services.AddSingleton<FccMiddleware.Application.Common.IFieldEncryptor>(sp =>
+    {
+        var config = sp.GetRequiredService<IConfiguration>();
+        var hexKey = config["FieldEncryption:Key"]
+            ?? throw new InvalidOperationException(
+                "FieldEncryption:Key is required. Set a 64-character hex string (32 bytes) in configuration or environment.");
+        var keyBytes = Convert.FromHexString(hexKey);
+        return new FccMiddleware.Infrastructure.Security.AesGcmFieldEncryptor(
+            keyBytes,
+            sp.GetRequiredService<ILoggerFactory>().CreateLogger<FccMiddleware.Infrastructure.Security.AesGcmFieldEncryptor>());
+    });
+
     // ── Infrastructure: PostgreSQL (EF Core) ──────────────────────────────────
     builder.Services.AddDbContext<FccMiddlewareDbContext>((sp, opts) =>
         opts.UseNpgsql(
@@ -319,6 +336,7 @@ try
     builder.Services.AddScoped<IRegistrationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IAgentConfigDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<ITelemetryDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IDiagnosticLogsDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IPreAuthDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IReconciliationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddSingleton<IObservabilityMetrics, CloudWatchEmfMetricSink>();
@@ -367,6 +385,7 @@ try
 
     // Emit one structured-JSON log line per HTTP request
     app.UseMiddleware<CorrelationIdMiddleware>();
+    app.UseMiddleware<GlobalExceptionHandlerMiddleware>();
     app.UseSerilogRequestLogging(opts =>
     {
         opts.EnrichDiagnosticContext = (diag, httpContext) =>

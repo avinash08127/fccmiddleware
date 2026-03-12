@@ -468,3 +468,20 @@ sealed class CloudTelemetryResult {
     /** Network or non-2xx/401/403 failure. */
     data class TransportError(val message: String) : CloudTelemetryResult()
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostic log upload — POST /api/v1/agent/diagnostic-logs
+// ---------------------------------------------------------------------------
+
+/**
+ * Request payload for uploading diagnostic log entries (WARN/ERROR/FATAL).
+ * Max 200 entries per batch. Only uploaded when config.telemetry.includeDiagnosticsLogs is true.
+ */
+@Serializable
+data class DiagnosticLogUploadRequest(
+    val deviceId: String,
+    val siteCode: String,
+    val legalEntityId: String,
+    val uploadedAtUtc: String,
+    val logEntries: List<String>,
+)

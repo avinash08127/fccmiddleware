@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.petronite
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.request.header
@@ -61,7 +61,7 @@ class PetroniteOAuthClient(
             cachedToken = response.accessToken
             tokenExpiresAtMillis = System.currentTimeMillis() + (response.expiresIn * 1000L)
 
-            Log.d(TAG, "OAuth token acquired (expires in ${response.expiresIn}s)")
+            AppLogger.d(TAG, "OAuth token acquired (expires in ${response.expiresIn}s)")
             return response.accessToken
         }
     }
@@ -74,7 +74,7 @@ class PetroniteOAuthClient(
         mutex.withLock {
             cachedToken = null
             tokenExpiresAtMillis = 0L
-            Log.d(TAG, "OAuth token invalidated")
+            AppLogger.d(TAG, "OAuth token invalidated")
         }
     }
 
@@ -105,7 +105,7 @@ class PetroniteOAuthClient(
 
             if (response.status != HttpStatusCode.OK) {
                 val statusCode = response.status.value
-                Log.w(TAG, "OAuth token request failed: HTTP $statusCode -- $body")
+                AppLogger.w(TAG, "OAuth token request failed: HTTP $statusCode -- $body")
                 throw PetroniteHttpException(
                     message = "Petronite OAuth token request returned HTTP $statusCode",
                     statusCode = statusCode,

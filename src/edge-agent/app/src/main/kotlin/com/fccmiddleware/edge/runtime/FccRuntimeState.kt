@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.runtime
 
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
+import java.io.Closeable
 
 /**
  * Shared runtime holder for the currently resolved FCC adapter and config.
@@ -19,14 +20,20 @@ class FccRuntimeState {
         private set
 
     fun wire(adapter: IFccAdapter, config: AgentFccConfig) {
+        closeCurrentAdapter()
         this.adapter = adapter
         this.config = config
     }
 
     fun clear() {
-        adapter = null
+        closeCurrentAdapter()
         config = null
     }
 
     fun isWired(): Boolean = adapter != null && config != null
+
+    private fun closeCurrentAdapter() {
+        (adapter as? Closeable)?.close()
+        adapter = null
+    }
 }

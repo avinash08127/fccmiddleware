@@ -36,10 +36,13 @@ public sealed class RadixPushListener : IDisposable
     private HttpListener? _httpListener;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
-    private volatile bool _isRunning;
+    private int _isRunning;
 
     /// <summary>Thread-safe queue of raw XML payloads received from the FDC.</summary>
     private readonly ConcurrentQueue<PushedTransactionPayload> _incomingQueue = new();
+
+    /// <summary>Atomic counter tracking queue size to avoid TOCTOU race on size check + enqueue.</summary>
+    private int _queueCount;
 
     /// <summary>RESP_CODE for unsolicited push transactions from the FDC.</summary>
     public const int RespCodeUnsolicited = 30;
@@ -48,7 +51,7 @@ public sealed class RadixPushListener : IDisposable
     public const int MaxQueueSize = 10_000;
 
     /// <summary>Whether the listener is currently accepting connections.</summary>
-    public bool IsRunning => _isRunning;
+    public bool IsRunning => Volatile.Read(ref _isRunning) == 1;
 
     /// <summary>Number of transactions currently queued and not yet drained by the adapter.</summary>
     public int QueueSize => _incomingQueue.Count;
@@ -81,7 +84,7 @@ public sealed class RadixPushListener : IDisposable
     /// <returns>true if the listener started (or was already running), false on bind failure.</returns>
     public async Task<bool> StartAsync()
     {
-        if (_isRunning) return true;
+        if (Interlocked.Exchange(ref _isRunning, 1) == 1) return true;
 
         try
         {
@@ -89,7 +92,6 @@ public sealed class RadixPushListener : IDisposable
             _httpListener = new HttpListener();
             _httpListener.Prefixes.Add($"http://+:{_listenPort}/");
             _httpListener.Start();
-            _isRunning = true;
 
             _listenTask = Task.Run(() => ListenLoopAsync(_cts.Token), _cts.Token);
 
@@ -98,34 +100,20 @@ public sealed class RadixPushListener : IDisposable
         }
         catch (HttpListenerException ex)
         {
-            _logger.LogError(ex, "RadixPushListener failed to start on port {Port}: {Message}",
-                _listenPort, ex.Message);
-
-            // Fallback: try localhost-only binding
-            try
-            {
-                _httpListener?.Close();
-                _httpListener = new HttpListener();
-                _httpListener.Prefixes.Add($"http://localhost:{_listenPort}/");
-                _httpListener.Start();
-                _isRunning = true;
-
-                _listenTask = Task.Run(() => ListenLoopAsync(_cts!.Token), _cts!.Token);
-
-                _logger.LogWarning("RadixPushListener started on localhost:{Port} (fallback)", _listenPort);
-                return true;
-            }
-            catch (Exception fallbackEx)
-            {
-                _logger.LogError(fallbackEx, "RadixPushListener fallback also failed on port {Port}", _listenPort);
-                _isRunning = false;
-                return false;
-            }
+            _logger.LogError(ex,
+                "RadixPushListener failed to bind http://+:{Port}/. " +
+                "The FDC cannot reach a localhost-only listener — push mode will not work. " +
+                "Ensure the URL ACL is configured: netsh http add urlacl url=http://+:{Port}/ user=Everyone",
+                _listenPort, _listenPort);
+            Interlocked.Exchange(ref _isRunning, 0);
+            _cts?.Dispose();
+            _cts = null;
+            return false;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "RadixPushListener failed to start: {Message}", ex.Message);
-            _isRunning = false;
+            Interlocked.Exchange(ref _isRunning, 0);
             return false;
         }
     }
@@ -137,8 +125,7 @@ public sealed class RadixPushListener : IDisposable
     /// </summary>
     public async Task StopAsync()
     {
-        if (!_isRunning) return;
-        _isRunning = false;
+        if (Interlocked.Exchange(ref _isRunning, 0) == 0) return;
 
         try
         {
@@ -185,6 +172,7 @@ public sealed class RadixPushListener : IDisposable
 
             // Clear queue
             while (_incomingQueue.TryDequeue(out _)) { }
+            Interlocked.Exchange(ref _queueCount, 0);
         }
     }
 
@@ -205,6 +193,7 @@ public sealed class RadixPushListener : IDisposable
             if (!_incomingQueue.TryDequeue(out var item))
                 break;
 
+            Interlocked.Decrement(ref _queueCount);
             result.Add(item);
         }
 
@@ -350,9 +339,14 @@ public sealed class RadixPushListener : IDisposable
                 }
             }
 
-            // Step 6: Enqueue for adapter processing (with back-pressure guard)
-            if (_incomingQueue.Count >= MaxQueueSize)
+            // Step 6: Enqueue for adapter processing (with back-pressure guard).
+            // Use atomic increment-then-check to avoid TOCTOU race between
+            // concurrent push requests that could each pass a size check
+            // before any of them enqueue.
+            var newCount = Interlocked.Increment(ref _queueCount);
+            if (newCount > MaxQueueSize)
             {
+                Interlocked.Decrement(ref _queueCount);
                 _logger.LogWarning("RadixPushListener: queue full ({MaxSize}) — dropping transaction", MaxQueueSize);
                 await SendResponseAsync(response, HttpStatusCode.ServiceUnavailable,
                     BuildErrorResponse("Queue full")).ConfigureAwait(false);
@@ -364,8 +358,7 @@ public sealed class RadixPushListener : IDisposable
                 ReceivedAt: DateTimeOffset.UtcNow);
 
             _incomingQueue.Enqueue(pushed);
-            _logger.LogDebug("RadixPushListener: enqueued pushed transaction (queue size={QueueSize})",
-                _incomingQueue.Count);
+            _logger.LogDebug("RadixPushListener: enqueued pushed transaction (queue size={QueueSize})", newCount);
 
             // Step 7: Return XML ACK to FDC
             await SendResponseAsync(response, HttpStatusCode.OK, BuildAckResponse()).ConfigureAwait(false);
@@ -411,20 +404,13 @@ public sealed class RadixPushListener : IDisposable
     /// Builds the XML ACK response sent back to the FDC after a successful push.
     ///
     /// The FDC expects a HOST_REQ-style acknowledgment with CMD_CODE=201
-    /// to confirm the transaction was received.
+    /// to confirm the transaction was received. Delegates to
+    /// <see cref="RadixXmlBuilder.BuildTransactionAck"/> to include a proper
+    /// SHA-1 signature, matching the pull-mode ACK format.
     /// </summary>
-    private static string BuildAckResponse()
+    private string BuildAckResponse()
     {
-        var sb = new StringBuilder();
-        sb.Append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        sb.Append("<HOST_REQ>\n");
-        sb.Append("<REQ>\n");
-        sb.Append("    <CMD_CODE>201</CMD_CODE>\n");
-        sb.Append("    <CMD_NAME>SUCCESS</CMD_NAME>\n");
-        sb.Append("    <TOKEN>0</TOKEN>\n");
-        sb.Append("</REQ>\n");
-        sb.Append("</HOST_REQ>");
-        return sb.ToString();
+        return RadixXmlBuilder.BuildTransactionAck(_expectedUsnCode, token: 0, _sharedSecret);
     }
 
     /// <summary>
@@ -438,10 +424,20 @@ public sealed class RadixPushListener : IDisposable
         sb.Append("<REQ>\n");
         sb.Append("    <CMD_CODE>255</CMD_CODE>\n");
         sb.Append("    <CMD_NAME>ERROR</CMD_NAME>\n");
-        sb.Append("    <MSG>").Append(message).Append("</MSG>\n");
+        sb.Append("    <MSG>").Append(EscapeXml(message)).Append("</MSG>\n");
         sb.Append("</REQ>\n");
         sb.Append("</HOST_REQ>");
         return sb.ToString();
+    }
+
+    private static string EscapeXml(string value)
+    {
+        return value
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;")
+            .Replace("\"", "&quot;")
+            .Replace("'", "&apos;");
     }
 
     // =====================================================================
@@ -451,10 +447,13 @@ public sealed class RadixPushListener : IDisposable
     /// <summary>
     /// Disposes the listener. Calls <see cref="StopAsync"/> synchronously.
     /// Prefer <see cref="StopAsync"/> for clean async shutdown.
+    ///
+    /// Uses Task.Run to avoid deadlocking when called from a thread with a
+    /// SynchronizationContext (e.g., Avalonia UI thread).
     /// </summary>
     public void Dispose()
     {
-        StopAsync().GetAwaiter().GetResult();
+        Task.Run(() => StopAsync()).GetAwaiter().GetResult();
     }
 }
 

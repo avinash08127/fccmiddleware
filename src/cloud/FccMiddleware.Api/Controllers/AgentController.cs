@@ -1,20 +1,24 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Transactions;
 using FccMiddleware.Api.Infrastructure;
+using FccMiddleware.Api.Portal;
 using FccMiddleware.Application.AgentConfig;
+using FccMiddleware.Application.DiagnosticLogs;
 using FccMiddleware.Application.Observability;
 using FccMiddleware.Application.Registration;
 using FccMiddleware.Application.Telemetry;
 using FccMiddleware.Contracts.Agent;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Config;
+using FccMiddleware.Contracts.DiagnosticLogs;
 using FccMiddleware.Contracts.Registration;
 using FccMiddleware.Contracts.Telemetry;
 using FccMiddleware.Domain.Models;
+using FccMiddleware.Infrastructure.Persistence;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using System.Security.Claims;
 
@@ -36,17 +40,23 @@ public sealed class AgentController : ControllerBase
     private readonly ILogger<AgentController> _logger;
     private readonly IConfiguration _configuration;
     private readonly IObservabilityMetrics _metrics;
+    private readonly FccMiddlewareDbContext _dbContext;
+    private readonly PortalAccessResolver _accessResolver;
 
     public AgentController(
         IMediator mediator,
         ILogger<AgentController> logger,
         IConfiguration configuration,
-        IObservabilityMetrics metrics)
+        IObservabilityMetrics metrics,
+        FccMiddlewareDbContext dbContext,
+        PortalAccessResolver accessResolver)
     {
         _mediator = mediator;
         _logger = logger;
         _configuration = configuration;
         _metrics = metrics;
+        _dbContext = dbContext;
+        _accessResolver = accessResolver;
     }
 
     /// <summary>
@@ -61,11 +71,18 @@ public sealed class AgentController : ControllerBase
         [FromBody] GenerateBootstrapTokenRequest request,
         CancellationToken cancellationToken)
     {
+        var access = _accessResolver.Resolve(User);
+        if (!access.IsValid)
+            return Unauthorized();
+        if (!access.CanAccess(request.LegalEntityId))
+            return Forbid();
+
         var command = new GenerateBootstrapTokenCommand
         {
             SiteCode = request.SiteCode,
             LegalEntityId = request.LegalEntityId,
-            CreatedBy = User.Identity?.Name ?? "system"
+            CreatedBy = User.Identity?.Name ?? "system",
+            Environment = request.Environment
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -100,6 +117,22 @@ public sealed class AgentController : ControllerBase
         Guid tokenId,
         CancellationToken cancellationToken)
     {
+        var access = _accessResolver.Resolve(User);
+        if (!access.IsValid)
+            return Unauthorized();
+
+        var token = await _dbContext.BootstrapTokens
+            .AsNoTracking()
+            .Where(t => t.Id == tokenId)
+            .Select(t => new { t.LegalEntityId })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (token is null)
+            return NotFound(BuildError("TOKEN_NOT_FOUND", $"Bootstrap token '{tokenId}' not found."));
+
+        if (!access.CanAccess(token.LegalEntityId))
+            return Forbid();
+
         var command = new RevokeBootstrapTokenCommand
         {
             TokenId = tokenId,
@@ -163,11 +196,11 @@ public sealed class AgentController : ControllerBase
             ReplacePreviousAgent = request.ReplacePreviousAgent
         };
 
-        // BUG-023: Wrap registration + config assembly in a transaction so the bootstrap
-        // token is not consumed if config assembly fails. Without this, a config failure
-        // leaves the device registered with token USED but the client receives HTTP 500
-        // and cannot retry (token is single-use).
-        using var txScope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+        // Wrap registration + config assembly in an explicit EF Core transaction so the
+        // bootstrap token is not consumed if config assembly fails. Uses Database.BeginTransactionAsync
+        // instead of System.Transactions.TransactionScope because Npgsql 7+ does not enlist in
+        // ambient transactions by default (requires Enlist=true in connection string).
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
 
         var result = await _mediator.Send(command, cancellationToken);
 
@@ -185,8 +218,7 @@ public sealed class AgentController : ControllerBase
                     Conflict(BuildError(result.Error.Code, result.Error.Message)),
                 "SITE_NOT_FOUND" or "SITE_MISMATCH" =>
                     BadRequest(BuildError(result.Error.Code, result.Error.Message)),
-                _ => StatusCode(StatusCodes.Status500InternalServerError,
-                    BuildError("INTERNAL.UNEXPECTED", result.Error.Message, retryable: true))
+                _ => LogInternalError(result.Error.Code, result.Error.Message)
             };
         }
 
@@ -206,7 +238,7 @@ public sealed class AgentController : ControllerBase
                 value.SiteCode,
                 siteConfigResult.Error?.Code ?? "CONFIG_UNAVAILABLE");
 
-            // Transaction rolls back — registration and token consumption are reverted.
+            // Transaction rolls back on dispose — registration and token consumption are reverted.
             // The device can retry with the same bootstrap token.
             return StatusCode(StatusCodes.Status500InternalServerError,
                 BuildError(
@@ -216,7 +248,7 @@ public sealed class AgentController : ControllerBase
         }
 
         // Both registration and config assembly succeeded — commit the transaction.
-        txScope.Complete();
+        await transaction.CommitAsync(cancellationToken);
 
         return StatusCode(StatusCodes.Status201Created, new DeviceRegistrationApiResponse
         {
@@ -281,6 +313,23 @@ public sealed class AgentController : ControllerBase
         Guid deviceId,
         CancellationToken cancellationToken)
     {
+        var access = _accessResolver.Resolve(User);
+        if (!access.IsValid)
+            return Unauthorized();
+
+        var device = await _dbContext.AgentRegistrations
+            .AsNoTracking()
+            .IgnoreQueryFilters()
+            .Where(a => a.Id == deviceId)
+            .Select(a => new { a.LegalEntityId })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (device is null)
+            return NotFound(BuildError("DEVICE_NOT_FOUND", $"Device '{deviceId}' not found."));
+
+        if (!access.CanAccess(device.LegalEntityId))
+            return Forbid();
+
         var command = new DecommissionDeviceCommand
         {
             DeviceId = deviceId
@@ -294,8 +343,7 @@ public sealed class AgentController : ControllerBase
             {
                 "DEVICE_NOT_FOUND" => NotFound(BuildError(result.Error.Code, result.Error.Message)),
                 "DEVICE_ALREADY_DECOMMISSIONED" => Conflict(BuildError(result.Error.Code, result.Error.Message)),
-                _ => StatusCode(StatusCodes.Status500InternalServerError,
-                    BuildError("INTERNAL.UNEXPECTED", result.Error.Message, retryable: true))
+                _ => LogInternalError(result.Error.Code, result.Error.Message)
             };
         }
 
@@ -360,8 +408,7 @@ public sealed class AgentController : ControllerBase
                     NotFound(BuildError(result.Error.Code, result.Error.Message)),
                 "SITE_MISMATCH" =>
                     Unauthorized(BuildError(result.Error.Code, result.Error.Message)),
-                _ => StatusCode(StatusCodes.Status500InternalServerError,
-                    BuildError("INTERNAL.UNEXPECTED", result.Error.Message, retryable: true))
+                _ => LogInternalError(result.Error.Code, result.Error.Message)
             };
         }
 
@@ -418,8 +465,7 @@ public sealed class AgentController : ControllerBase
                 "INVALID_AGENT_VERSION" => BadRequest(BuildError(result.Error.Code, result.Error.Message)),
                 "VERSION_CONFIG_INVALID" => StatusCode(StatusCodes.Status500InternalServerError,
                     BuildError(result.Error.Code, result.Error.Message, retryable: true)),
-                _ => StatusCode(StatusCodes.Status500InternalServerError,
-                    BuildError("INTERNAL.UNEXPECTED", result.Error.Message, retryable: true))
+                _ => LogInternalError(result.Error.Code, result.Error.Message)
             };
         }
 
@@ -485,8 +531,7 @@ public sealed class AgentController : ControllerBase
             {
                 "DEVICE_NOT_FOUND" => NotFound(BuildError(result.Error.Code, result.Error.Message)),
                 "SITE_MISMATCH" => Unauthorized(BuildError(result.Error.Code, result.Error.Message)),
-                _ => StatusCode(StatusCodes.Status500InternalServerError,
-                    BuildError("INTERNAL.UNEXPECTED", result.Error.Message, retryable: true))
+                _ => LogInternalError(result.Error.Code, result.Error.Message)
             };
         }
 
@@ -494,6 +539,113 @@ public sealed class AgentController : ControllerBase
         RecordTelemetryMetrics(request);
 
         return NoContent();
+    }
+
+    /// <summary>
+    /// Accepts diagnostic log entries (WARN/ERROR) from a registered Edge Agent.
+    /// </summary>
+    [HttpPost("api/v1/agent/diagnostic-logs")]
+    [Authorize(Policy = "EdgeAgentDevice")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> SubmitDiagnosticLogs(
+        [FromBody] DiagnosticLogUploadRequest request,
+        CancellationToken cancellationToken)
+    {
+        var deviceIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+        var siteCodeClaim = User.FindFirstValue("site");
+        var leiClaim = User.FindFirstValue("lei");
+
+        if (deviceIdClaim is null || siteCodeClaim is null || leiClaim is null
+            || !Guid.TryParse(deviceIdClaim, out var deviceId)
+            || !Guid.TryParse(leiClaim, out var legalEntityId))
+        {
+            return Unauthorized(BuildError("INVALID_TOKEN_CLAIMS",
+                "Device JWT is missing required claims (sub, site, lei)."));
+        }
+
+        if (request.DeviceId != deviceId
+            || !string.Equals(request.SiteCode, siteCodeClaim, StringComparison.Ordinal)
+            || request.LegalEntityId != legalEntityId)
+        {
+            return Unauthorized(BuildError("SITE_MISMATCH",
+                "Diagnostic log payload identity does not match the authenticated device token."));
+        }
+
+        var result = await _mediator.Send(new SubmitDiagnosticLogsCommand
+        {
+            DeviceId = deviceId,
+            SiteCode = siteCodeClaim,
+            LegalEntityId = legalEntityId,
+            UploadedAtUtc = request.UploadedAtUtc,
+            LogEntries = request.LogEntries,
+        }, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error!.Code switch
+            {
+                "DEVICE_NOT_FOUND" => NotFound(BuildError(result.Error.Code, result.Error.Message)),
+                "SITE_MISMATCH" => Unauthorized(BuildError(result.Error.Code, result.Error.Message)),
+                _ => LogInternalError(result.Error.Code, result.Error.Message)
+            };
+        }
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Returns recent diagnostic log batches for a device. Used by the portal.
+    /// </summary>
+    [HttpGet("api/v1/agents/{deviceId}/diagnostic-logs")]
+    [Authorize(Policy = "PortalUser")]
+    [ProducesResponseType(typeof(GetDiagnosticLogsResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDiagnosticLogs(
+        Guid deviceId,
+        [FromQuery] int maxBatches = 10,
+        CancellationToken cancellationToken = default)
+    {
+        var access = _accessResolver.Resolve(User);
+        if (!access.IsValid)
+            return Unauthorized();
+
+        var device = await _dbContext.AgentRegistrations
+            .AsNoTracking()
+            .IgnoreQueryFilters()
+            .Where(a => a.Id == deviceId)
+            .Select(a => new { a.LegalEntityId })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (device is null)
+            return NotFound(BuildError("DEVICE_NOT_FOUND", $"Device '{deviceId}' not found."));
+
+        if (!access.CanAccess(device.LegalEntityId))
+            return Forbid();
+
+        var result = await _mediator.Send(new GetDiagnosticLogsQuery
+        {
+            DeviceId = deviceId,
+            MaxBatches = maxBatches,
+        }, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return NotFound(BuildError(result.Error!.Code, result.Error.Message));
+        }
+
+        var value = result.Value!;
+        return Ok(new GetDiagnosticLogsResponse
+        {
+            DeviceId = value.DeviceId,
+            Batches = value.Batches.Select(b => new DiagnosticLogBatch
+            {
+                Id = b.Id,
+                UploadedAtUtc = b.UploadedAtUtc,
+                LogEntries = b.LogEntries,
+            }).ToList()
+        });
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -619,6 +771,17 @@ public sealed class AgentController : ControllerBase
         {
             _metrics.RecordApplicationError("EDGE.CLOUD_AUTH", "/api/v1/agent/telemetry", request.ErrorCounts.CloudAuthErrors);
         }
+    }
+
+    /// <summary>
+    /// M-13: Logs internal error details server-side and returns a safe generic 500 response.
+    /// Prevents leaking database column names, constraint names, or stack traces to clients.
+    /// </summary>
+    private IActionResult LogInternalError(string errorCode, string errorMessage)
+    {
+        _logger.LogError("Unhandled application error: {ErrorCode} — {ErrorMessage}", errorCode, errorMessage);
+        return StatusCode(StatusCodes.Status500InternalServerError,
+            BuildError("INTERNAL.UNEXPECTED", "An unexpected error occurred. Please retry or contact support.", retryable: true));
     }
 
     private ErrorResponse BuildError(

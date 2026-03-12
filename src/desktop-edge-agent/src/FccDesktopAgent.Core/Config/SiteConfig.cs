@@ -56,6 +56,18 @@ public sealed class SiteConfigFcc
 
     /// <summary>Petronite: local HTTP port for the webhook listener (default 8090).</summary>
     public int? WebhookListenerPort { get; set; }
+
+    // ── Advatec EFD fields ──────────────────────────────────────────────────
+    /// <summary>Advatec: Device HTTP port (default 5560).</summary>
+    public int? AdvatecDevicePort { get; set; }
+    /// <summary>Advatec: Port for the local webhook listener that receives Receipt callbacks (default 8091).</summary>
+    public int? AdvatecWebhookListenerPort { get; set; }
+    /// <summary>Advatec: Shared token for webhook URL authentication.</summary>
+    public string? AdvatecWebhookToken { get; set; }
+    /// <summary>Advatec: TRA-registered EFD serial number (e.g., "10TZ101807").</summary>
+    public string? AdvatecEfdSerialNumber { get; set; }
+    /// <summary>Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL).</summary>
+    public int? AdvatecCustIdType { get; set; }
 }
 
 public sealed class SiteConfigSync
@@ -101,6 +113,8 @@ public sealed class SiteConfigTelemetry
 public sealed class SiteConfigFiscalization
 {
     public string? Mode { get; set; }
+    /// <summary>Fiscal device vendor (e.g. "ADVATEC"). Used to select the <see cref="Adapter.Common.IFiscalizationService"/> implementation.</summary>
+    public string? Vendor { get; set; }
     public string? TaxAuthorityEndpoint { get; set; }
     public bool RequireCustomerTaxId { get; set; }
     public bool FiscalReceiptRequired { get; set; }
@@ -111,7 +125,16 @@ public sealed class SiteConfigMappings
     public int PumpNumberOffset { get; set; }
     public int PriceDecimalPlaces { get; set; } = 2;
     public string VolumeUnit { get; set; } = "LITRE";
+    public List<SiteConfigProductMapping> Products { get; set; } = [];
     public List<SiteConfigNozzleMapping> Nozzles { get; set; } = [];
+}
+
+public sealed class SiteConfigProductMapping
+{
+    public string FccProductCode { get; set; } = string.Empty;
+    public string CanonicalProductCode { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public bool Active { get; set; } = true;
 }
 
 public sealed class SiteConfigNozzleMapping

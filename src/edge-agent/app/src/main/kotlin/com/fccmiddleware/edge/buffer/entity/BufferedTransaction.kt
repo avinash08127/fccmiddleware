@@ -114,6 +114,22 @@ data class BufferedTransaction(
     @ColumnInfo(name = "last_upload_error")
     val lastUploadError: String?,
 
+    // ── WebSocket backward-compat fields (Odoo POS cart workflow) ──────────
+    @ColumnInfo(name = "order_uuid")
+    val orderUuid: String? = null,
+
+    @ColumnInfo(name = "odoo_order_id")
+    val odooOrderId: String? = null,
+
+    @ColumnInfo(name = "add_to_cart", defaultValue = "0")
+    val addToCart: Boolean = false,
+
+    @ColumnInfo(name = "payment_id")
+    val paymentId: String? = null,
+
+    @ColumnInfo(name = "is_discard", defaultValue = "0")
+    val isDiscard: Boolean = false,
+
     @ColumnInfo(name = "schema_version")
     val schemaVersion: Int = 1,
 

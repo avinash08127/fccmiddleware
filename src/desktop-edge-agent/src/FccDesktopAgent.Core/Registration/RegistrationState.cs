@@ -18,4 +18,13 @@ public sealed class RegistrationState
     public string DeviceModel { get; set; } = string.Empty;
     public string OsVersion { get; set; } = string.Empty;
     public string AgentVersion { get; set; } = string.Empty;
+
+    /// <summary>Cloud environment key (e.g. "PRODUCTION", "STAGING"). Null for legacy/custom URL registrations.</summary>
+    public string? Environment { get; set; }
+
+    /// <summary>
+    /// M-04: Shallow clone. All properties are value types or immutable strings,
+    /// so MemberwiseClone produces a safe independent copy.
+    /// </summary>
+    internal RegistrationState Clone() => (RegistrationState)MemberwiseClone();
 }

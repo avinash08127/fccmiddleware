@@ -21,6 +21,7 @@ using VirtualLab.Infrastructure.Auth;
 using VirtualLab.Infrastructure.Diagnostics;
 using VirtualLab.Infrastructure.DomsJpl;
 using VirtualLab.Infrastructure.FccProfiles;
+using VirtualLab.Infrastructure.AdvatecSimulator;
 using VirtualLab.Infrastructure.PetroniteSimulator;
 using VirtualLab.Infrastructure.RadixSimulator;
 using VirtualLab.Infrastructure.Persistence;
@@ -240,6 +241,7 @@ app.MapVirtualLabManagementEndpoints();
 app.MapDomsJplManagementEndpoints();
 app.MapRadixManagementEndpoints();
 app.MapPetroniteManagementEndpoints();
+app.MapAdvatecManagementEndpoints();
 
 app.MapGet("/api/fcc-profiles", async (IFccProfileService profileService, CancellationToken cancellationToken) =>
 {

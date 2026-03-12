@@ -174,7 +174,7 @@ public sealed class CadenceController : BackgroundService
             }
             else
             {
-                _logger.LogDebug("FCC poll tick {Tick}: ingestion orchestrator not registered (placeholder)", _tick);
+                _logger.LogDebug("FCC poll tick {Tick}: ingestion orchestrator not registered in DI — skipping", _tick);
             }
         }
         else if (!snapshot.IsFccUp)
@@ -201,7 +201,7 @@ public sealed class CadenceController : BackgroundService
             }
             else
             {
-                _logger.LogDebug("Cloud upload tick {Tick}: cloud sync service not registered (placeholder)", _tick);
+                _logger.LogDebug("Cloud upload tick {Tick}: cloud sync service not registered in DI — skipping", _tick);
             }
 
             // ── SYNCED_TO_ODOO Status Poll ────────────────────────────────────
@@ -225,7 +225,7 @@ public sealed class CadenceController : BackgroundService
                 }
                 else
                 {
-                    _logger.LogDebug("SYNCED_TO_ODOO poll tick {Tick}: poller not registered (placeholder)", _tick);
+                    _logger.LogDebug("SYNCED_TO_ODOO poll tick {Tick}: poller not registered in DI — skipping", _tick);
                 }
             }
 
@@ -249,7 +249,7 @@ public sealed class CadenceController : BackgroundService
                 }
                 else
                 {
-                    _logger.LogDebug("Config poll tick {Tick}: config poller not registered (placeholder)", _tick);
+                    _logger.LogDebug("Config poll tick {Tick}: config poller not registered in DI — skipping", _tick);
                 }
             }
 
@@ -273,7 +273,7 @@ public sealed class CadenceController : BackgroundService
                 }
                 else
                 {
-                    _logger.LogDebug("Telemetry report tick {Tick}: reporter not registered (placeholder)", _tick);
+                    _logger.LogDebug("Telemetry report tick {Tick}: telemetry reporter not registered in DI — skipping", _tick);
                 }
             }
         }
@@ -442,14 +442,15 @@ public sealed class CadenceController : BackgroundService
     }
 
     /// <summary>
-    /// SYNCED_TO_ODOO status poll runs every N ticks, where N = cloudSyncInterval / cadenceInterval.
+    /// H-07: SYNCED_TO_ODOO status poll runs every N ticks based on StatusPollIntervalSeconds / cadenceInterval.
+    /// Previously used CloudSyncIntervalSeconds for both numerator and denominator, so every=1 always.
     /// Coalesced with the cloud-capable cycle (architecture rule #10).
     /// </summary>
     private bool IsSyncedToOdooPollTick(AgentConfiguration config)
     {
-        var cadence = Math.Max(1, config.CloudSyncIntervalSeconds);
-        var tickIntervalSeconds = Math.Max(1, config.CloudSyncIntervalSeconds);
-        var every = Math.Max(1, cadence / tickIntervalSeconds);
+        var cadenceSeconds = Math.Max(1, config.CloudSyncIntervalSeconds);
+        var statusPollInterval = Math.Max(30, config.StatusPollIntervalSeconds);
+        var every = Math.Max(1, statusPollInterval / cadenceSeconds);
         return _tick % every == 0;
     }
 

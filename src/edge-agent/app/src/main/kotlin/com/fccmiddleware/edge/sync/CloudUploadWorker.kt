@@ -1,6 +1,8 @@
 package com.fccmiddleware.edge.sync
 
-import android.util.Log
+import com.fccmiddleware.edge.config.ConfigManager
+import com.fccmiddleware.edge.logging.AppLogger
+import com.fccmiddleware.edge.logging.StructuredFileLogger
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
@@ -66,6 +68,8 @@ class CloudUploadWorker(
     private val tokenProvider: DeviceTokenProvider? = null,
     val config: CloudUploadWorkerConfig = CloudUploadWorkerConfig(),
     private val telemetryReporter: TelemetryReporter? = null,
+    private val fileLogger: StructuredFileLogger? = null,
+    private val configManager: ConfigManager? = null,
 ) {
 
     companion object {
@@ -112,27 +116,27 @@ class CloudUploadWorker(
      */
     suspend fun uploadPendingBatch() {
         val bm = bufferManager ?: run {
-            Log.d(TAG, "uploadPendingBatch() skipped — bufferManager not wired")
+            AppLogger.d(TAG, "uploadPendingBatch() skipped — bufferManager not wired")
             return
         }
         val client = cloudApiClient ?: run {
-            Log.d(TAG, "uploadPendingBatch() skipped — cloudApiClient not wired")
+            AppLogger.d(TAG, "uploadPendingBatch() skipped — cloudApiClient not wired")
             return
         }
         val provider = tokenProvider ?: run {
-            Log.d(TAG, "uploadPendingBatch() skipped — tokenProvider not wired")
+            AppLogger.d(TAG, "uploadPendingBatch() skipped — tokenProvider not wired")
             return
         }
 
         if (provider.isDecommissioned()) {
-            Log.w(TAG, "uploadPendingBatch() skipped — device decommissioned; no further sync")
+            AppLogger.w(TAG, "uploadPendingBatch() skipped — device decommissioned; no further sync")
             return
         }
 
         // M-08: Circuit breaker check — skip if backoff active or circuit is OPEN
         if (!uploadCircuitBreaker.allowRequest()) {
             val waitMs = uploadCircuitBreaker.remainingBackoffMs()
-            Log.d(TAG, "uploadPendingBatch() skipped — circuit breaker (state=${uploadCircuitBreaker.state}, ${waitMs}ms remaining)")
+            AppLogger.d(TAG, "uploadPendingBatch() skipped — circuit breaker (state=${uploadCircuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
@@ -141,19 +145,19 @@ class CloudUploadWorker(
         if (batch.isEmpty()) {
             // H-02 fix: reset backoff when buffer drains so new records upload immediately
             uploadCircuitBreaker.recordSuccess()
-            Log.d(TAG, "uploadPendingBatch() — no PENDING records, circuit breaker reset")
+            AppLogger.d(TAG, "uploadPendingBatch() — no PENDING records, circuit breaker reset")
             return
         }
 
-        Log.i(TAG, "Starting upload batch: ${batch.size} records")
+        AppLogger.i(TAG, "Starting upload batch: ${batch.size} records")
 
         val token = provider.getAccessToken() ?: run {
             // H-05: Re-check decommission status — if device was decommissioned between
             // the initial check and getAccessToken(), a null token is expected and permanent.
             if (provider.isDecommissioned()) {
-                Log.w(TAG, "uploadPendingBatch() skipped — device decommissioned (detected on token fetch)")
+                AppLogger.w(TAG, "uploadPendingBatch() skipped — device decommissioned (detected on token fetch)")
             } else {
-                Log.w(TAG, "uploadPendingBatch() skipped — no access token available (not provisioned)")
+                AppLogger.w(TAG, "uploadPendingBatch() skipped — no access token available (not provisioned)")
             }
             return
         }
@@ -199,48 +203,48 @@ class CloudUploadWorker(
      */
     suspend fun pollSyncedToOdooStatus() {
         val bm = bufferManager ?: run {
-            Log.d(TAG, "pollSyncedToOdooStatus() skipped — bufferManager not wired")
+            AppLogger.d(TAG, "pollSyncedToOdooStatus() skipped — bufferManager not wired")
             return
         }
         val client = cloudApiClient ?: run {
-            Log.d(TAG, "pollSyncedToOdooStatus() skipped — cloudApiClient not wired")
+            AppLogger.d(TAG, "pollSyncedToOdooStatus() skipped — cloudApiClient not wired")
             return
         }
         val provider = tokenProvider ?: run {
-            Log.d(TAG, "pollSyncedToOdooStatus() skipped — tokenProvider not wired")
+            AppLogger.d(TAG, "pollSyncedToOdooStatus() skipped — tokenProvider not wired")
             return
         }
 
         if (provider.isDecommissioned()) {
-            Log.w(TAG, "pollSyncedToOdooStatus() skipped — device decommissioned")
+            AppLogger.w(TAG, "pollSyncedToOdooStatus() skipped — device decommissioned")
             return
         }
 
         // M-08: Circuit breaker check
         if (!statusPollCircuitBreaker.allowRequest()) {
             val waitMs = statusPollCircuitBreaker.remainingBackoffMs()
-            Log.d(TAG, "pollSyncedToOdooStatus() skipped — circuit breaker (state=${statusPollCircuitBreaker.state}, ${waitMs}ms remaining)")
+            AppLogger.d(TAG, "pollSyncedToOdooStatus() skipped — circuit breaker (state=${statusPollCircuitBreaker.state}, ${waitMs}ms remaining)")
             return
         }
 
         val uploadedIds = bm.getUploadedFccTransactionIds(CLOUD_MAX_BATCH_SIZE)
         if (uploadedIds.isEmpty()) {
-            Log.d(TAG, "pollSyncedToOdooStatus() — no UPLOADED records to check")
+            AppLogger.d(TAG, "pollSyncedToOdooStatus() — no UPLOADED records to check")
             return
         }
 
         val token = provider.getAccessToken() ?: run {
             if (provider.isDecommissioned()) {
-                Log.w(TAG, "pollSyncedToOdooStatus() skipped — device decommissioned (detected on token fetch)")
+                AppLogger.w(TAG, "pollSyncedToOdooStatus() skipped — device decommissioned (detected on token fetch)")
             } else {
-                Log.w(TAG, "pollSyncedToOdooStatus() skipped — no access token available")
+                AppLogger.w(TAG, "pollSyncedToOdooStatus() skipped — no access token available")
             }
             return
         }
 
         val since = getStatusPollSince()
         val pollStartedAt = Instant.now().toString()
-        Log.i(
+        AppLogger.i(
             TAG,
             "Polling synced-to-Odoo status for ${uploadedIds.size} UPLOADED records since $since",
         )
@@ -263,38 +267,38 @@ class CloudUploadWorker(
      */
     suspend fun reportTelemetry() {
         val reporter = telemetryReporter ?: run {
-            Log.d(TAG, "reportTelemetry() skipped — telemetryReporter not wired")
+            AppLogger.d(TAG, "reportTelemetry() skipped — telemetryReporter not wired")
             return
         }
         val client = cloudApiClient ?: run {
-            Log.d(TAG, "reportTelemetry() skipped — cloudApiClient not wired")
+            AppLogger.d(TAG, "reportTelemetry() skipped — cloudApiClient not wired")
             return
         }
         val provider = tokenProvider ?: run {
-            Log.d(TAG, "reportTelemetry() skipped — tokenProvider not wired")
+            AppLogger.d(TAG, "reportTelemetry() skipped — tokenProvider not wired")
             return
         }
 
         if (provider.isDecommissioned()) {
-            Log.w(TAG, "reportTelemetry() skipped — device decommissioned")
+            AppLogger.w(TAG, "reportTelemetry() skipped — device decommissioned")
             return
         }
 
         val payload = reporter.buildPayload() ?: run {
-            Log.d(TAG, "reportTelemetry() skipped — payload could not be assembled")
+            AppLogger.d(TAG, "reportTelemetry() skipped — payload could not be assembled")
             return
         }
 
         val token = provider.getAccessToken() ?: run {
             if (provider.isDecommissioned()) {
-                Log.w(TAG, "reportTelemetry() skipped — device decommissioned (detected on token fetch)")
+                AppLogger.w(TAG, "reportTelemetry() skipped — device decommissioned (detected on token fetch)")
             } else {
-                Log.w(TAG, "reportTelemetry() skipped — no access token available")
+                AppLogger.w(TAG, "reportTelemetry() skipped — no access token available")
             }
             return
         }
 
-        Log.d(TAG, "Submitting telemetry (seq=${payload.sequenceNumber})")
+        AppLogger.d(TAG, "Submitting telemetry (seq=${payload.sequenceNumber})")
 
         try {
             when (val result = client.submitTelemetry(payload, token)) {
@@ -302,12 +306,12 @@ class CloudUploadWorker(
                     // M-05: Use atomic snapshot+reset so no increments are lost between
                     // the read in buildPayload() and the reset here.
                     reporter.snapshotAndResetErrorCounts()
-                    Log.i(TAG, "Telemetry submitted (seq=${payload.sequenceNumber})")
+                    AppLogger.i(TAG, "Telemetry submitted (seq=${payload.sequenceNumber})")
                 }
 
                 is CloudTelemetryResult.Unauthorized -> {
                     // Attempt one token refresh and retry
-                    Log.i(TAG, "Telemetry returned 401 — attempting token refresh")
+                    AppLogger.i(TAG, "Telemetry returned 401 — attempting token refresh")
                     val refreshed = provider.refreshAccessToken()
                     if (refreshed) {
                         val freshToken = provider.getAccessToken()
@@ -315,35 +319,83 @@ class CloudUploadWorker(
                             when (client.submitTelemetry(payload, freshToken)) {
                                 is CloudTelemetryResult.Success -> {
                                     reporter.snapshotAndResetErrorCounts()
-                                    Log.i(TAG, "Telemetry submitted after token refresh (seq=${payload.sequenceNumber})")
+                                    AppLogger.i(TAG, "Telemetry submitted after token refresh (seq=${payload.sequenceNumber})")
                                 }
                                 else -> {
                                     reporter.cloudAuthErrors.incrementAndGet()
-                                    Log.w(TAG, "Telemetry retry failed after token refresh")
+                                    AppLogger.w(TAG, "Telemetry retry failed after token refresh")
                                 }
                             }
                         }
                     } else {
                         reporter.cloudAuthErrors.incrementAndGet()
-                        Log.w(TAG, "Telemetry token refresh failed")
+                        AppLogger.w(TAG, "Telemetry token refresh failed")
                     }
                 }
 
                 is CloudTelemetryResult.RateLimited -> {
-                    Log.w(TAG, "Telemetry rate limited (429); retryAfter=${result.retryAfterSeconds}s — discarding payload")
+                    AppLogger.w(TAG, "Telemetry rate limited (429); retryAfter=${result.retryAfterSeconds}s — discarding payload")
                 }
 
                 is CloudTelemetryResult.Forbidden -> {
                     reporter.cloudAuthErrors.incrementAndGet()
-                    Log.w(TAG, "Telemetry forbidden: ${result.errorCode}")
+                    AppLogger.w(TAG, "Telemetry forbidden: ${result.errorCode}")
                 }
 
                 is CloudTelemetryResult.TransportError -> {
-                    Log.w(TAG, "Telemetry submission failed: ${result.message}")
+                    AppLogger.w(TAG, "Telemetry submission failed: ${result.message}")
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Telemetry submission exception", e)
+            AppLogger.e(TAG, "Telemetry submission exception", e)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3B: Diagnostic log upload
+    // -------------------------------------------------------------------------
+
+    /**
+     * Upload recent WARN/ERROR log entries to cloud when config enables it.
+     *
+     * Only fires when [TelemetryDto.includeDiagnosticsLogs] is true.
+     * Reads from [StructuredFileLogger], max 200 entries, fire-and-forget.
+     */
+    suspend fun reportDiagnosticLogs() {
+        val logger = fileLogger ?: return
+        val client = cloudApiClient ?: return
+        val provider = tokenProvider ?: return
+        val cfg = configManager?.config?.value ?: return
+
+        if (!cfg.telemetry.includeDiagnosticsLogs) return
+        if (provider.isDecommissioned()) return
+
+        val entries = logger.getRecentDiagnosticEntries(200)
+        if (entries.isEmpty()) return
+
+        val token = provider.getAccessToken() ?: return
+
+        val request = DiagnosticLogUploadRequest(
+            deviceId = cfg.identity.deviceId,
+            siteCode = cfg.identity.siteCode,
+            legalEntityId = cfg.identity.legalEntityId,
+            uploadedAtUtc = Instant.now().toString(),
+            logEntries = entries,
+        )
+
+        try {
+            when (val result = client.submitDiagnosticLogs(request, token)) {
+                is CloudDiagnosticLogResult.Success ->
+                    AppLogger.i(TAG, "Diagnostic logs uploaded: ${entries.size} entries")
+                is CloudDiagnosticLogResult.Unauthorized ->
+                    AppLogger.w(TAG, "Diagnostic log upload returned 401")
+                is CloudDiagnosticLogResult.Forbidden ->
+                    AppLogger.w(TAG, "Diagnostic log upload forbidden: ${result.errorCode}")
+                is CloudDiagnosticLogResult.TransportError ->
+                    AppLogger.w(TAG, "Diagnostic log upload failed: ${result.message}")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Diagnostic log upload exception: ${e.message}")
         }
     }
 
@@ -368,20 +420,20 @@ class CloudUploadWorker(
             is CloudStatusPollResult.Success -> StatusPollAttemptResult.Success(result.response)
 
             is CloudStatusPollResult.Unauthorized -> {
-                Log.i(TAG, "Status poll returned 401 — attempting token refresh")
+                AppLogger.i(TAG, "Status poll returned 401 — attempting token refresh")
                 val refreshed = provider.refreshAccessToken()
                 if (!refreshed) {
-                    Log.e(TAG, "Token refresh failed during status poll")
+                    AppLogger.e(TAG, "Token refresh failed during status poll")
                     return StatusPollAttemptResult.TransportFailure("401 Unauthorized — token refresh failed")
                 }
                 val freshToken = provider.getAccessToken()
                 if (freshToken == null) {
                     // M-04: Critical state bug — refresh reported success but token store is empty/corrupt
-                    Log.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
+                    AppLogger.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
                     telemetryReporter?.cloudAuthErrors?.incrementAndGet()
                     return StatusPollAttemptResult.TransportFailure("CRITICAL: token store inconsistency — refresh succeeded but no token available")
                 }
-                Log.i(TAG, "Token refreshed; retrying status poll")
+                AppLogger.i(TAG, "Token refreshed; retrying status poll")
                 when (val retryResult = client.getSyncedStatus(since, freshToken)) {
                     is CloudStatusPollResult.Success -> StatusPollAttemptResult.Success(retryResult.response)
                     is CloudStatusPollResult.Unauthorized ->
@@ -433,11 +485,11 @@ class CloudUploadWorker(
 
                 if (syncedIds.isNotEmpty()) {
                     bm.markSyncedToOdoo(syncedIds)
-                    Log.i(TAG, "Marked ${syncedIds.size} records SYNCED_TO_ODOO")
+                    AppLogger.i(TAG, "Marked ${syncedIds.size} records SYNCED_TO_ODOO")
                 }
 
                 if (unmatchedCloudIds > 0) {
-                    Log.d(
+                    AppLogger.d(
                         TAG,
                         "Status poll returned $unmatchedCloudIds synced FCC ID(s) that are no longer " +
                             "locally UPLOADED; ignoring them.",
@@ -445,7 +497,7 @@ class CloudUploadWorker(
                 }
 
                 if (syncedIds.isEmpty()) {
-                    Log.d(TAG, "Status poll returned no actionable entries")
+                    AppLogger.d(TAG, "Status poll returned no actionable entries")
                 }
 
                 // M-03: Write SyncState before resetting circuit breaker (same rationale as upload)
@@ -453,7 +505,7 @@ class CloudUploadWorker(
                 if (dbWriteSucceeded) {
                     statusPollCircuitBreaker.recordSuccess()
                 } else {
-                    Log.w(TAG, "SyncState write failed after successful status poll; circuit breaker NOT reset")
+                    AppLogger.w(TAG, "SyncState write failed after successful status poll; circuit breaker NOT reset")
                 }
             }
 
@@ -461,15 +513,15 @@ class CloudUploadWorker(
                 val retryAfter = result.retryAfterSeconds
                 if (retryAfter != null) {
                     statusPollCircuitBreaker.setBackoffSeconds(retryAfter)
-                    Log.w(TAG, "Status poll rate limited (429); backing off for ${retryAfter}s")
+                    AppLogger.w(TAG, "Status poll rate limited (429); backing off for ${retryAfter}s")
                 } else {
                     val backoffMs = statusPollCircuitBreaker.recordFailure()
-                    Log.w(TAG, "Status poll rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
+                    AppLogger.w(TAG, "Status poll rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
                 }
             }
 
             is StatusPollAttemptResult.Decommissioned -> {
-                Log.e(
+                AppLogger.e(
                     TAG,
                     "DEVICE DECOMMISSIONED during status poll. All cloud sync permanently stopped.",
                 )
@@ -478,7 +530,7 @@ class CloudUploadWorker(
 
             is StatusPollAttemptResult.TransportFailure -> {
                 val backoffMs = statusPollCircuitBreaker.recordFailure()
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Status poll failed (failure #${statusPollCircuitBreaker.consecutiveFailureCount}, " +
                         "state=${statusPollCircuitBreaker.state}); next retry after ${backoffMs}ms. " +
@@ -505,7 +557,7 @@ class CloudUploadWorker(
             dao.upsert(updated)
             true
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to update lastStatusPollAt in SyncState", e)
+            AppLogger.e(TAG, "Failed to update lastStatusPollAt in SyncState", e)
             false
         }
     }
@@ -534,10 +586,10 @@ class CloudUploadWorker(
 
             is CloudUploadResult.Unauthorized -> {
                 // Attempt one token refresh then retry
-                Log.i(TAG, "Upload returned 401 — attempting token refresh")
+                AppLogger.i(TAG, "Upload returned 401 — attempting token refresh")
                 val refreshed = provider.refreshAccessToken()
                 if (!refreshed) {
-                    Log.e(TAG, "Token refresh failed")
+                    AppLogger.e(TAG, "Token refresh failed")
                     return UploadAttemptResult.TransportFailure("401 Unauthorized — token refresh failed")
                 }
                 val freshToken = provider.getAccessToken()
@@ -545,11 +597,11 @@ class CloudUploadWorker(
                     // M-04: This is a critical internal state bug — refresh reported success but
                     // the token store is empty/corrupt. Escalate via telemetry and do NOT apply
                     // transport backoff since the problem is local, not network-related.
-                    Log.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
+                    AppLogger.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
                     telemetryReporter?.cloudAuthErrors?.incrementAndGet()
                     return UploadAttemptResult.TransportFailure("CRITICAL: token store inconsistency — refresh succeeded but no token available")
                 }
-                Log.i(TAG, "Token refreshed; retrying upload batch")
+                AppLogger.i(TAG, "Token refreshed; retrying upload batch")
                 when (val retryResult = client.uploadBatch(request, freshToken)) {
                     is CloudUploadResult.Success -> UploadAttemptResult.Success(retryResult.response)
                     is CloudUploadResult.Unauthorized ->
@@ -601,7 +653,7 @@ class CloudUploadWorker(
                     effectiveBatchSize = config.uploadBatchSize
                 } else {
                     // DB write failed — keep backoff active so the next tick retries the write.
-                    Log.w(TAG, "SyncState write failed after successful upload; circuit breaker NOT reset")
+                    AppLogger.w(TAG, "SyncState write failed after successful upload; circuit breaker NOT reset")
                 }
             }
 
@@ -611,17 +663,17 @@ class CloudUploadWorker(
                 val retryAfter = result.retryAfterSeconds
                 if (retryAfter != null) {
                     uploadCircuitBreaker.setBackoffSeconds(retryAfter)
-                    Log.w(TAG, "Rate limited (429); backing off for ${retryAfter}s (Retry-After header)")
+                    AppLogger.w(TAG, "Rate limited (429); backing off for ${retryAfter}s (Retry-After header)")
                 } else {
                     val backoffMs = uploadCircuitBreaker.recordFailure()
-                    Log.w(TAG, "Rate limited (429); no Retry-After header, using backoff ${backoffMs}ms")
+                    AppLogger.w(TAG, "Rate limited (429); no Retry-After header, using backoff ${backoffMs}ms")
                 }
             }
 
             is UploadAttemptResult.PayloadTooLarge -> {
                 // M-15: Halve the effective batch size (floor: 1) and retry on next tick.
                 val newSize = (effectiveBatchSize / 2).coerceAtLeast(1)
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Payload too large (413); reducing batch size from $effectiveBatchSize to $newSize",
                 )
@@ -631,7 +683,7 @@ class CloudUploadWorker(
 
             is UploadAttemptResult.Decommissioned -> {
                 // Permanent stop — log at error level so diagnostics surface this immediately
-                Log.e(
+                AppLogger.e(
                     TAG,
                     "DEVICE DECOMMISSIONED by cloud. All cloud sync permanently stopped. " +
                         "Re-provisioning is required.",
@@ -642,7 +694,7 @@ class CloudUploadWorker(
 
             is UploadAttemptResult.TransportFailure -> {
                 val backoffMs = uploadCircuitBreaker.recordFailure()
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Batch upload failed (failure #${uploadCircuitBreaker.consecutiveFailureCount}, " +
                         "state=${uploadCircuitBreaker.state}); next retry after ${backoffMs}ms. " +
@@ -691,7 +743,7 @@ class CloudUploadWorker(
             val local = batchByFccId[result.fccTransactionId]
             if (local == null) {
                 unmatchedCount++
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Cloud returned result for fccTransactionId='${result.fccTransactionId}' " +
                         "which does not match any record in the local batch. " +
@@ -711,7 +763,7 @@ class CloudUploadWorker(
                 }
 
                 else -> {
-                    Log.w(
+                    AppLogger.w(
                         TAG,
                         "Cloud returned unknown outcome '${result.outcome}' for " +
                             "fccTransactionId='${result.fccTransactionId}'. Record left PENDING.",
@@ -721,7 +773,7 @@ class CloudUploadWorker(
         }
 
         if (unmatchedCount > 0) {
-            Log.e(
+            AppLogger.e(
                 TAG,
                 "$unmatchedCount cloud response result(s) did not match any local batch record. " +
                     "Batch had ${batch.size} records, response had ${response.results.size} results. " +
@@ -732,13 +784,13 @@ class CloudUploadWorker(
 
         if (uploadedIds.isNotEmpty()) {
             bm.markUploaded(uploadedIds)
-            Log.i(TAG, "Marked ${uploadedIds.size} records UPLOADED")
+            AppLogger.i(TAG, "Marked ${uploadedIds.size} records UPLOADED")
         }
 
         if (rejectedPairs.isNotEmpty()) {
             val attemptAt = Instant.now().toString()
             for ((tx, error) in rejectedPairs) {
-                Log.w(TAG, "Record ${tx.fccTransactionId} REJECTED by cloud: $error")
+                AppLogger.w(TAG, "Record ${tx.fccTransactionId} REJECTED by cloud: $error")
                 bm.recordUploadFailure(
                     id = tx.id,
                     attempts = tx.uploadAttempts + 1,
@@ -748,7 +800,7 @@ class CloudUploadWorker(
             }
         }
 
-        Log.i(
+        AppLogger.i(
             TAG,
             "Upload response processed: accepted=${response.acceptedCount} " +
                 "duplicate=${response.duplicateCount} rejected=${response.rejectedCount}",
@@ -820,7 +872,7 @@ class CloudUploadWorker(
             dao.upsert(updated)
             true
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to update lastUploadAt in SyncState", e)
+            AppLogger.e(TAG, "Failed to update lastUploadAt in SyncState", e)
             false
         }
     }

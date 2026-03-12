@@ -73,5 +73,9 @@ interface DeviceTokenProvider {
      * Stores the device token and refresh token after initial provisioning.
      * Called by [ProvisioningActivity] on successful registration.
      */
-    fun storeTokens(deviceToken: String, refreshToken: String)
+    /**
+     * Returns true if both tokens were encrypted and persisted successfully.
+     * Returns false if Keystore encryption failed for either token.
+     */
+    fun storeTokens(deviceToken: String, refreshToken: String): Boolean
 }

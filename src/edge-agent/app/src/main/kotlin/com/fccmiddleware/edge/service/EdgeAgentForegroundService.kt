@@ -6,16 +6,20 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.api.LocalApiServer
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
+import com.fccmiddleware.edge.config.LocalOverrideManager
 import com.fccmiddleware.edge.config.requiresFccRuntime
 import com.fccmiddleware.edge.config.toAgentFccConfig
 import com.fccmiddleware.edge.config.toLocalApiServerConfig
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.connectivity.NetworkBinder
+import com.fccmiddleware.edge.logging.LogLevel
+import com.fccmiddleware.edge.logging.StructuredFileLogger
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.runtime.CadenceController
@@ -23,6 +27,8 @@ import com.fccmiddleware.edge.runtime.FccRuntimeState
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
+import com.fccmiddleware.edge.websocket.OdooWebSocketServer
+import com.fccmiddleware.edge.ui.DecommissionedActivity
 import com.fccmiddleware.edge.ui.ProvisioningActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,6 +68,10 @@ class EdgeAgentForegroundService : Service() {
     private val ingestionOrchestrator: IngestionOrchestrator by inject()
     private val preAuthHandler: PreAuthHandler by inject()
     private val tokenProvider: DeviceTokenProvider by inject()
+    private val fileLogger: StructuredFileLogger by inject()
+    private val localOverrideManager: LocalOverrideManager by inject()
+    private val networkBinder: NetworkBinder by inject()
+    private val odooWebSocketServer: OdooWebSocketServer by inject()
 
     @Volatile
     private var lastAppliedConfigVersion: Int? = null
@@ -75,13 +85,17 @@ class EdgeAgentForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        Log.i(TAG, "EdgeAgentForegroundService created")
+        AppLogger.i(TAG, "EdgeAgentForegroundService created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
-        Log.i(TAG, "EdgeAgentForegroundService started in foreground")
+        AppLogger.i(TAG, "EdgeAgentForegroundService started in foreground")
+
+        // Start network binder first so WiFi/mobile state flows are populated
+        // before connectivity probes begin.
+        networkBinder.start()
 
         // Start connectivity probes immediately (initializes in FULLY_OFFLINE per spec)
         connectivityManager.start()
@@ -96,7 +110,18 @@ class EdgeAgentForegroundService : Service() {
                 configureBootstrapRuntime()
             }
 
+            // Wire the reconnect callback so settings changes rebuild the adapter with overrides
+            cadenceController.onFccReconnectRequested = {
+                val cfg = configManager.config.value
+                if (cfg != null) {
+                    applyRuntimeConfig(cfg, "settings-override-reconnect")
+                } else {
+                    AppLogger.w(TAG, "FCC reconnect requested but no config available")
+                }
+            }
+
             localApiServer.start()
+            odooWebSocketServer.start()
             cadenceController.start()
             observeConfigForRuntimeUpdates()
         }
@@ -107,15 +132,23 @@ class EdgeAgentForegroundService : Service() {
             monitorReprovisioningState()
         }
 
+        // H-03: Monitor for decommissioned state so the running service stops
+        // promptly instead of waiting for a full app relaunch.
+        serviceScope.launch {
+            monitorDecommissionedState()
+        }
+
         return START_STICKY
     }
 
     override fun onDestroy() {
         cadenceController.stop()
         connectivityManager.stop()
+        networkBinder.stop()
         localApiServer.stop()
+        odooWebSocketServer.stop()
         serviceScope.cancel()
-        Log.i(TAG, "EdgeAgentForegroundService destroyed")
+        AppLogger.i(TAG, "EdgeAgentForegroundService destroyed")
         super.onDestroy()
     }
 
@@ -137,11 +170,18 @@ class EdgeAgentForegroundService : Service() {
             siteCode = encryptedPrefs.siteCode ?: "UNPROVISIONED",
             agentVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0",
         )
-        Log.i(TAG, "Bootstrap runtime configured without site config")
+        AppLogger.i(TAG, "Bootstrap runtime configured without site config")
     }
 
     private fun applyRuntimeConfig(siteConfig: EdgeAgentConfigDto, source: String): Boolean {
         val agentVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0"
+
+        // Phase 4: Wire log level from config to file logger
+        val newLogLevel = LogLevel.fromString(siteConfig.telemetry.logLevel)
+        if (fileLogger.minLevel != newLogLevel) {
+            AppLogger.i(TAG, "Log level changed: ${fileLogger.minLevel} -> $newLogLevel (from config v${siteConfig.configVersion})")
+            fileLogger.updateLogLevel(newLogLevel)
+        }
 
         cloudApiClient.updateBaseUrl(siteConfig.sync.cloudBaseUrl)
         encryptedPrefs.cloudBaseUrl = siteConfig.sync.cloudBaseUrl
@@ -153,18 +193,31 @@ class EdgeAgentForegroundService : Service() {
             agentVersion = agentVersion,
         )
 
+        // WebSocket server: reconfigure from site config
+        odooWebSocketServer.wireSiteCode(siteConfig.identity.siteCode)
+        odooWebSocketServer.reconfigure(siteConfig.websocket)
+
         if (!siteConfig.requiresFccRuntime()) {
             clearFccRuntime()
             lastAppliedConfigVersion = siteConfig.configVersion
-            Log.i(TAG, "Applied config v${siteConfig.configVersion} from $source without FCC runtime")
+            AppLogger.i(TAG, "Applied config v${siteConfig.configVersion} from $source without FCC runtime")
             return true
         }
 
         val agentFccConfig = try {
-            siteConfig.toAgentFccConfig()
+            siteConfig.toAgentFccConfig(overrideManager = localOverrideManager)
         } catch (e: Exception) {
             return failRuntimeReadiness(
                 "Config v${siteConfig.configVersion} from $source cannot build AgentFccConfig: ${e.message}",
+            )
+        }
+
+        // Log when local overrides are active so technicians can verify their changes
+        if (localOverrideManager.hasAnyOverrides()) {
+            AppLogger.i(
+                TAG,
+                "FCC config override active: host=${agentFccConfig.hostAddress}, port=${agentFccConfig.port} " +
+                    "(cloud default: host=${siteConfig.fcc.hostAddress}, port=${siteConfig.fcc.port})",
             )
         }
 
@@ -180,13 +233,14 @@ class EdgeAgentForegroundService : Service() {
         ingestionOrchestrator.wireRuntime(adapter, agentFccConfig)
         preAuthHandler.wireFccAdapter(adapter)
         localApiServer.wireFccAdapter(adapter)
+        odooWebSocketServer.wireFccAdapter(adapter)
         cadenceController.updateFccAdapter(adapter)
 
         encryptedPrefs.fccHost = agentFccConfig.hostAddress
         encryptedPrefs.fccPort = agentFccConfig.port
         lastAppliedConfigVersion = siteConfig.configVersion
 
-        Log.i(
+        AppLogger.i(
             TAG,
             "Applied config v${siteConfig.configVersion} from $source with FCC runtime " +
                 "vendor=${agentFccConfig.fccVendor} host=${agentFccConfig.hostAddress}:${agentFccConfig.port}",
@@ -199,6 +253,7 @@ class EdgeAgentForegroundService : Service() {
         ingestionOrchestrator.wireRuntime(adapter = null, config = null)
         preAuthHandler.wireFccAdapter(null)
         localApiServer.wireFccAdapter(null)
+        odooWebSocketServer.wireFccAdapter(null)
         cadenceController.updateFccAdapter(null)
     }
 
@@ -211,10 +266,30 @@ class EdgeAgentForegroundService : Service() {
         while (true) {
             delay(10_000L) // Check every 10 seconds
             if (tokenProvider.isReprovisioningRequired()) {
-                Log.w(TAG, "Re-provisioning required — stopping service and navigating to provisioning")
+                AppLogger.w(TAG, "Re-provisioning required — stopping service and navigating to provisioning")
                 cadenceController.stop()
                 localApiServer.stop()
                 navigateToProvisioning()
+                stopSelf()
+                return
+            }
+        }
+    }
+
+    /**
+     * H-03: Periodically checks if the device has been decommissioned.
+     * When detected, stops all background work and navigates to DecommissionedActivity
+     * so the user sees the decommission screen immediately, without needing a full app relaunch.
+     */
+    private suspend fun monitorDecommissionedState() {
+        while (true) {
+            delay(10_000L) // Check every 10 seconds
+            if (tokenProvider.isDecommissioned()) {
+                AppLogger.w(TAG, "Device decommissioned — stopping service and navigating to decommissioned screen")
+                cadenceController.stop()
+                connectivityManager.stop()
+                localApiServer.stop()
+                navigateToDecommissioned()
                 stopSelf()
                 return
             }
@@ -232,11 +307,21 @@ class EdgeAgentForegroundService : Service() {
         startActivity(intent)
     }
 
-    private fun failRuntimeReadiness(reason: String): Boolean {
-        Log.e(TAG, "Runtime readiness failure: $reason")
-        if (encryptedPrefs.isRegistered) {
-            stopSelf()
+    private fun navigateToDecommissioned() {
+        val intent = Intent(this, DecommissionedActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
+        startActivity(intent)
+    }
+
+    /**
+     * H-05: Instead of calling stopSelf() (which triggers an infinite restart loop
+     * due to START_STICKY), fall back to degraded mode: clear the FCC runtime but
+     * keep the service alive so config polling can deliver a corrected config push.
+     */
+    private fun failRuntimeReadiness(reason: String): Boolean {
+        AppLogger.e(TAG, "Runtime readiness failure — entering degraded mode: $reason")
+        clearFccRuntime()
         return false
     }
 

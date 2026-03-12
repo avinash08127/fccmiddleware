@@ -1,13 +1,18 @@
 package com.fccmiddleware.edge.ingestion
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
+import com.fccmiddleware.edge.adapter.common.CanonicalTransaction
 import com.fccmiddleware.edge.adapter.common.FetchCursor
+import com.fccmiddleware.edge.adapter.common.FiscalizationContext
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
+import com.fccmiddleware.edge.adapter.common.IFiscalizationService
 import com.fccmiddleware.edge.adapter.common.IngestionMode
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
+import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.buffer.entity.SyncState
+import com.fccmiddleware.edge.config.FiscalizationDto
 import android.os.SystemClock
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -55,6 +60,8 @@ class IngestionOrchestrator(
     private val bufferManager: TransactionBufferManager? = null,
     /** Nullable until Room DB is available. Polls are no-ops until set. */
     private val syncStateDao: SyncStateDao? = null,
+    /** Nullable until Room DB is available. Used for fiscal receipt updates (ADV-7.3). */
+    private val transactionDao: TransactionBufferDao? = null,
     config: AgentFccConfig? = null,
 ) {
     /** Late-bound: wired when FCC config becomes available after startup. */
@@ -65,9 +72,27 @@ class IngestionOrchestrator(
     @Volatile
     internal var config: AgentFccConfig? = config
 
+    // ── Fiscalization (ADV-7.3) ───────────────────────────────────────────────
+    // Late-bound: wired when site config indicates fiscalizationMode = FCC_DIRECT + vendor = ADVATEC.
+
+    @Volatile
+    internal var fiscalizationService: IFiscalizationService? = null
+
+    @Volatile
+    internal var fiscalizationConfig: FiscalizationDto? = null
+
     internal fun wireRuntime(adapter: IFccAdapter?, config: AgentFccConfig?) {
         this.adapter = adapter
         this.config = config
+    }
+
+    /**
+     * Wires the fiscalization service and config (ADV-7.3).
+     * Called by the runtime when site config indicates post-dispense fiscalization is needed.
+     */
+    internal fun wireFiscalization(service: IFiscalizationService?, fiscConfig: FiscalizationDto?) {
+        this.fiscalizationService = service
+        this.fiscalizationConfig = fiscConfig
     }
 
     companion object {
@@ -129,11 +154,11 @@ class IngestionOrchestrator(
      */
     suspend fun poll() {
         val fccAdapter = adapter ?: run {
-            Log.d(TAG, "poll() skipped — adapter not wired")
+            AppLogger.d(TAG, "poll() skipped — adapter not wired")
             return
         }
         val fccConfig = config ?: run {
-            Log.d(TAG, "poll() skipped — config not available")
+            AppLogger.d(TAG, "poll() skipped — config not available")
             return
         }
 
@@ -144,7 +169,7 @@ class IngestionOrchestrator(
                     val nowMonotonic = SystemClock.elapsedRealtime()
                     val elapsedMs = nowMonotonic - last
                     if (elapsedMs < CLOUD_DIRECT_MIN_POLL_INTERVAL_MS) {
-                        Log.d(
+                        AppLogger.d(
                             TAG,
                             "CLOUD_DIRECT: skipping scheduled poll " +
                                 "(${elapsedMs}ms elapsed, min=${CLOUD_DIRECT_MIN_POLL_INTERVAL_MS}ms)",
@@ -180,14 +205,14 @@ class IngestionOrchestrator(
      */
     suspend fun pollNow(pumpNumber: Int? = null): PollResult? {
         val fccAdapter = adapter ?: run {
-            Log.d(TAG, "pollNow(pumpNumber=$pumpNumber) skipped — adapter not wired")
+            AppLogger.d(TAG, "pollNow(pumpNumber=$pumpNumber) skipped — adapter not wired")
             return null
         }
         val fccConfig = config ?: run {
-            Log.d(TAG, "pollNow(pumpNumber=$pumpNumber) skipped — config not available")
+            AppLogger.d(TAG, "pollNow(pumpNumber=$pumpNumber) skipped — config not available")
             return null
         }
-        Log.i(TAG, "Manual FCC pull triggered (pumpNumber=$pumpNumber, mode=${fccConfig.ingestionMode})")
+        AppLogger.i(TAG, "Manual FCC pull triggered (pumpNumber=$pumpNumber, mode=${fccConfig.ingestionMode})")
         return pollMutex.withLock {
             doPoll(fccAdapter, fccConfig, pumpNumber, isManual = true)
         }
@@ -209,7 +234,7 @@ class IngestionOrchestrator(
         val initialSyncState = try {
             dao.get()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to read SyncState; aborting poll", e)
+            AppLogger.e(TAG, "Failed to read SyncState; aborting poll", e)
             return PollResult(0, 0, 0, false)
         }
 
@@ -220,9 +245,18 @@ class IngestionOrchestrator(
         var lastBatchHasMore = false
         var cursorAdvanced = false
 
+        // ADV-7.3: Collect newly buffered transactions for post-dispense fiscalization.
+        val fiscService = fiscalizationService
+        val fiscConfig = fiscalizationConfig
+        val shouldFiscalize = fiscService != null
+            && fiscConfig != null
+            && fiscConfig.mode.equals("FCC_DIRECT", ignoreCase = true)
+            && fiscConfig.vendor.equals("ADVATEC", ignoreCase = true)
+        val txsToFiscalize = if (shouldFiscalize) mutableListOf<CanonicalTransaction>() else null
+
         try {
             do {
-                Log.d(
+                AppLogger.d(
                     TAG,
                     "Fetching from FCC: mode=${fccConfig.ingestionMode} " +
                         "cycle=${fetchCycles + 1} manual=$isManual cursor=$cursor",
@@ -232,7 +266,15 @@ class IngestionOrchestrator(
 
                 for (tx in batch.transactions) {
                     val inserted = bm.bufferTransaction(tx)
-                    if (inserted) newCount++ else skippedCount++
+                    if (inserted) {
+                        newCount++
+                        // ADV-7.3: Queue for fiscalization if no fiscal receipt yet.
+                        if (txsToFiscalize != null && tx.fiscalReceiptNumber.isNullOrEmpty()) {
+                            txsToFiscalize.add(tx)
+                        }
+                    } else {
+                        skippedCount++
+                    }
                 }
 
                 // Advance the persisted cursor after each successful batch
@@ -260,7 +302,7 @@ class IngestionOrchestrator(
                         // Non-fatal: cursor will not advance; next poll may re-fetch the same batch.
                         // Cloud and local dedup ensure no duplicates are stored.
                         // Break out of the fetch loop since we can't safely advance.
-                        Log.e(TAG, "Failed to persist cursor; stopping poll cycle to prevent data loss", e)
+                        AppLogger.e(TAG, "Failed to persist cursor; stopping poll cycle to prevent data loss", e)
                         break
                     }
                 }
@@ -270,20 +312,57 @@ class IngestionOrchestrator(
             } while (lastBatchHasMore && fetchCycles < MAX_FETCH_CYCLES)
 
             if (lastBatchHasMore && fetchCycles >= MAX_FETCH_CYCLES) {
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "MAX_FETCH_CYCLES ($MAX_FETCH_CYCLES) reached; remaining transactions " +
                         "deferred to next poll cycle",
                 )
             }
 
-            Log.i(
+            AppLogger.i(
                 TAG,
                 "Poll complete: mode=${fccConfig.ingestionMode} manual=$isManual " +
                     "fetchCycles=$fetchCycles new=$newCount skipped=$skippedCount",
             )
         } catch (e: Exception) {
-            Log.e(TAG, "FCC poll failed after $fetchCycles cycle(s)", e)
+            AppLogger.e(TAG, "FCC poll failed after $fetchCycles cycle(s)", e)
+        }
+
+        // ── ADV-7.3: Post-dispense fiscalization ──────────────────────────────
+        // After all transactions are safely buffered, attempt fiscalization for each.
+        // Non-blocking: fiscalization failure does NOT block transaction ingestion.
+        if (!txsToFiscalize.isNullOrEmpty() && fiscService != null) {
+            AppLogger.i(TAG, "Fiscalization: processing ${txsToFiscalize.size} newly buffered transaction(s)")
+            val txDao = transactionDao
+
+            for (tx in txsToFiscalize) {
+                try {
+                    val context = FiscalizationContext(
+                        customerTaxId = null,
+                        customerName = null,
+                        customerIdType = null,
+                        paymentType = "CASH",
+                    )
+                    val result = fiscService.submitForFiscalization(tx, context)
+
+                    if (result.success && !result.receiptCode.isNullOrEmpty()) {
+                        txDao?.updateFiscalReceipt(tx.id, result.receiptCode, Instant.now().toString())
+                        AppLogger.i(
+                            TAG,
+                            "Fiscalization: receipt attached to tx ${tx.id} — ReceiptCode=${result.receiptCode}",
+                        )
+                    } else {
+                        AppLogger.w(
+                            TAG,
+                            "Fiscalization: failed for tx ${tx.id} — ${result.errorMessage} (non-fatal)",
+                        )
+                    }
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Fiscalization: error for tx ${tx.id} (non-fatal): ${e.message}")
+                }
+            }
         }
 
         return PollResult(newCount, skippedCount, fetchCycles, cursorAdvanced)
@@ -305,7 +384,7 @@ class IngestionOrchestrator(
         val stored = syncState?.lastFccCursor
         return when {
             stored == null -> {
-                Log.i(TAG, "No prior cursor — starting full catch-up")
+                AppLogger.i(TAG, "No prior cursor — starting full catch-up")
                 FetchCursor(limit = FETCH_BATCH_SIZE)
             }
             stored.startsWith(CURSOR_TOKEN_PREFIX) -> FetchCursor(

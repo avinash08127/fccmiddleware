@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.sync
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
@@ -72,7 +72,7 @@ class CircuitBreaker(
                 val elapsed = now.toEpochMilli() - openedAt.toEpochMilli()
                 if (elapsed >= halfOpenAfterMs) {
                     state = State.HALF_OPEN
-                    Log.i(TAG, "[$name] Circuit OPEN → HALF_OPEN (probing)")
+                    AppLogger.i(TAG, "[$name] Circuit OPEN → HALF_OPEN (probing)")
                     true
                 } else {
                     false
@@ -86,7 +86,7 @@ class CircuitBreaker(
     /** Record a successful call — resets the circuit to CLOSED. */
     suspend fun recordSuccess() = mutex.withLock {
         if (state != State.CLOSED || consecutiveFailureCount > 0) {
-            Log.i(TAG, "[$name] Circuit → CLOSED (success after $consecutiveFailureCount failures)")
+            AppLogger.i(TAG, "[$name] Circuit → CLOSED (success after $consecutiveFailureCount failures)")
         }
         consecutiveFailureCount = 0
         nextRetryAt = Instant.EPOCH
@@ -102,7 +102,7 @@ class CircuitBreaker(
         if (consecutiveFailureCount >= openThreshold && state != State.OPEN) {
             state = State.OPEN
             openedAt = Instant.now()
-            Log.e(
+            AppLogger.e(
                 TAG,
                 "[$name] Circuit OPEN after $consecutiveFailureCount consecutive failures. " +
                     "All requests blocked until connectivity recovery or half-open probe in ${halfOpenAfterMs / 1000}s.",
@@ -111,7 +111,7 @@ class CircuitBreaker(
             // Probe failed — reopen
             state = State.OPEN
             openedAt = Instant.now()
-            Log.w(TAG, "[$name] Half-open probe failed — circuit re-opened")
+            AppLogger.w(TAG, "[$name] Half-open probe failed — circuit re-opened")
         }
         backoffMs
     }
@@ -122,7 +122,7 @@ class CircuitBreaker(
      */
     suspend fun resetOnConnectivityRecovery() = mutex.withLock {
         if (state != State.CLOSED || consecutiveFailureCount > 0) {
-            Log.i(
+            AppLogger.i(
                 TAG,
                 "[$name] Circuit reset on connectivity recovery " +
                     "(was ${state.name}, failures=$consecutiveFailureCount)",
@@ -139,7 +139,7 @@ class CircuitBreaker(
      */
     suspend fun setBackoffSeconds(seconds: Long) = mutex.withLock {
         nextRetryAt = Instant.now().plusSeconds(seconds)
-        Log.i(TAG, "[$name] Explicit backoff set: ${seconds}s (no failure count increment)")
+        AppLogger.i(TAG, "[$name] Explicit backoff set: ${seconds}s (no failure count increment)")
     }
 
     /** Remaining backoff millis, or 0 if none. For logging/diagnostics. */

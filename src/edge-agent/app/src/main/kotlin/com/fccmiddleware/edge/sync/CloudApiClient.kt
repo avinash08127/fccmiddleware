@@ -1,7 +1,10 @@
 package com.fccmiddleware.edge.sync
 
-import android.util.Log
+import com.fccmiddleware.edge.config.CloudEnvironments
+import com.fccmiddleware.edge.logging.AppLogger
+import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import io.ktor.client.HttpClient
+import java.util.UUID
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -75,6 +78,17 @@ sealed class CloudUploadResult {
 
     /** Network or non-2xx/401/403/429/413 failure. Retry on next cadence tick. */
     data class TransportError(val message: String) : CloudUploadResult()
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic log upload result type
+// ---------------------------------------------------------------------------
+
+sealed class CloudDiagnosticLogResult {
+    data object Success : CloudDiagnosticLogResult()
+    data object Unauthorized : CloudDiagnosticLogResult()
+    data class Forbidden(val errorCode: String?) : CloudDiagnosticLogResult()
+    data class TransportError(val message: String) : CloudDiagnosticLogResult()
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +209,17 @@ interface CloudApiClient {
     ): CloudVersionCheckResult
 
     /**
+     * Upload diagnostic log entries (WARN/ERROR) to POST /api/v1/agent/diagnostic-logs.
+     *
+     * Only called when config `telemetry.includeDiagnosticsLogs` is true.
+     * Max 200 entries per batch. Fire-and-forget: failures are silently discarded.
+     */
+    suspend fun submitDiagnosticLogs(
+        request: DiagnosticLogUploadRequest,
+        bearerToken: String,
+    ): CloudDiagnosticLogResult
+
+    /**
      * Update the cloud base URL at runtime.
      *
      * Called after device registration to replace the stub "not-yet-provisioned" URL
@@ -220,8 +245,30 @@ interface CloudApiClient {
  */
 class HttpCloudApiClient(
     @Volatile private var cloudBaseUrl: String,
-    private val httpClient: HttpClient,
+    @Volatile private var httpClient: HttpClient,
+    private val encryptedPrefsManager: EncryptedPrefsManager? = null,
+    private val certificatePins: List<String> = emptyList(),
+    private val socketFactory: javax.net.SocketFactory? = null,
 ) : CloudApiClient {
+
+    init {
+        cloudBaseUrl = resolveBaseUrl(cloudBaseUrl)
+    }
+
+    /**
+     * Resolve the effective base URL. If an environment key is stored in
+     * [EncryptedPrefsManager], resolve from [CloudEnvironments]; otherwise
+     * fall back to the explicit URL.
+     */
+    private fun resolveBaseUrl(explicitUrl: String): String {
+        val env = encryptedPrefsManager?.environment
+        val resolved = if (env != null) CloudEnvironments.resolve(env) else null
+        if (resolved != null) {
+            AppLogger.i(TAG, "Resolved base URL from environment '$env'")
+            return resolved.trimEnd('/')
+        }
+        return explicitUrl.trimEnd('/')
+    }
 
     override suspend fun checkVersion(
         agentVersion: String,
@@ -246,9 +293,26 @@ class HttpCloudApiClient(
         }
     }
 
+    /**
+     * M-02: When the hostname changes, rebuild the OkHttp client so certificate pins
+     * are applied to the new hostname. Without this, a URL change to a different host
+     * causes SSL handshake failures because the pinner remains bound to the old hostname.
+     */
     override fun updateBaseUrl(newBaseUrl: String) {
-        Log.i(TAG, "Updating cloud base URL")
-        cloudBaseUrl = newBaseUrl.trimEnd('/')
+        val resolved = resolveBaseUrl(newBaseUrl)
+        val oldHost = extractHostname(cloudBaseUrl)
+        val newHost = extractHostname(resolved)
+
+        cloudBaseUrl = resolved
+
+        if (certificatePins.isNotEmpty() && oldHost != null && newHost != null && oldHost != newHost) {
+            AppLogger.i(TAG, "Hostname changed ($oldHost -> $newHost) — rebuilding HTTP client with new pins")
+            val oldClient = httpClient
+            httpClient = buildKtorClient(certificatePins, resolved, socketFactory)
+            oldClient.close()
+        } else {
+            AppLogger.i(TAG, "Updating cloud base URL (hostname unchanged or no pins)")
+        }
     }
 
     override suspend fun uploadBatch(
@@ -504,6 +568,34 @@ class HttpCloudApiClient(
         }
     }
 
+    override suspend fun submitDiagnosticLogs(
+        request: DiagnosticLogUploadRequest,
+        bearerToken: String,
+    ): CloudDiagnosticLogResult {
+        return try {
+            val response = httpClient.post("$cloudBaseUrl/api/v1/agent/diagnostic-logs") {
+                contentType(ContentType.Application.Json)
+                bearerAuth(bearerToken)
+                setBody(request)
+            }
+            when (response.status) {
+                HttpStatusCode.NoContent, HttpStatusCode.OK -> CloudDiagnosticLogResult.Success
+                HttpStatusCode.Unauthorized -> CloudDiagnosticLogResult.Unauthorized
+                HttpStatusCode.Forbidden -> {
+                    val errorCode = try {
+                        response.body<CloudErrorResponse>().errorCode
+                    } catch (_: Exception) { null }
+                    CloudDiagnosticLogResult.Forbidden(errorCode)
+                }
+                else -> CloudDiagnosticLogResult.TransportError(
+                    "HTTP ${response.status.value}: ${response.status.description}",
+                )
+            }
+        } catch (e: Exception) {
+            CloudDiagnosticLogResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
+
     companion object {
         private const val TAG = "HttpCloudApiClient"
 
@@ -525,10 +617,35 @@ class HttpCloudApiClient(
         fun create(
             cloudBaseUrl: String,
             certificatePins: List<String> = emptyList(),
+            encryptedPrefsManager: EncryptedPrefsManager? = null,
+            socketFactory: javax.net.SocketFactory? = null,
         ): HttpCloudApiClient {
-            val client = HttpClient(OkHttp) {
+            val client = buildKtorClient(certificatePins, cloudBaseUrl, socketFactory)
+            return HttpCloudApiClient(cloudBaseUrl, client, encryptedPrefsManager, certificatePins, socketFactory)
+        }
+
+        /**
+         * M-02: Extracted so updateBaseUrl can rebuild the client with new pins
+         * when the hostname changes at runtime.
+         */
+        internal fun buildKtorClient(
+            certificatePins: List<String>,
+            cloudBaseUrl: String,
+            socketFactory: javax.net.SocketFactory? = null,
+        ): HttpClient {
+            return HttpClient(OkHttp) {
                 engine {
-                    if (certificatePins.isNotEmpty()) {
+                    // Phase 5: Attach X-Correlation-Id to every outbound request
+                    addInterceptor { chain ->
+                        val correlationId = AppLogger.correlationId ?: UUID.randomUUID().toString()
+                        val request = chain.request().newBuilder()
+                            .header("X-Correlation-Id", correlationId)
+                            .build()
+                        chain.proceed(request)
+                    }
+
+                    // Build certificate pinner if pins are configured
+                    val certPinner = if (certificatePins.isNotEmpty()) {
                         // M-07: Fail-fast if hostname cannot be extracted. Silently disabling
                         // pinning on a malformed URL is a security degradation that must not
                         // go unnoticed — it is better to crash at startup than to send
@@ -543,11 +660,19 @@ class HttpCloudApiClient(
                         for (pin in certificatePins) {
                             pinnerBuilder.add(hostname, pin)
                         }
-                        val pinner = pinnerBuilder.build()
-                        config {
-                            certificatePinner(pinner)
+                        AppLogger.i(TAG, "Certificate pinning enabled for $hostname with ${certificatePins.size} pin(s)")
+                        pinnerBuilder.build()
+                    } else null
+
+                    // Apply socket factory (for network binding) and cert pinner
+                    // in a single config block — Ktor OkHttp engine only keeps the last one.
+                    config {
+                        if (socketFactory != null) {
+                            socketFactory(socketFactory)
                         }
-                        Log.i(TAG, "Certificate pinning enabled for $hostname with ${certificatePins.size} pin(s)")
+                        if (certPinner != null) {
+                            certificatePinner(certPinner)
+                        }
                     }
                 }
                 install(ContentNegotiation) {
@@ -559,7 +684,6 @@ class HttpCloudApiClient(
                     )
                 }
             }
-            return HttpCloudApiClient(cloudBaseUrl, client)
         }
 
         /**

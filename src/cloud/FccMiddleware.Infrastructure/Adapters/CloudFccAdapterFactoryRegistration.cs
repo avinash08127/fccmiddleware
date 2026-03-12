@@ -1,3 +1,4 @@
+using FccMiddleware.Adapter.Advatec;
 using FccMiddleware.Adapter.Doms;
 using FccMiddleware.Adapter.Petronite;
 using FccMiddleware.Adapter.Radix;
@@ -19,6 +20,7 @@ public static class CloudFccAdapterFactoryRegistration
         FccVendor.DOMS,
         FccVendor.RADIX,
         FccVendor.PETRONITE,
+        FccVendor.ADVATEC,
     };
 
     public static bool IsSupported(FccVendor vendor) => SupportedVendors.Contains(vendor);
@@ -59,5 +61,7 @@ public static class CloudFccAdapterFactoryRegistration
             };
 
             registry[FccVendor.PETRONITE] = cfg => new PetroniteCloudAdapter(cfg);
+
+            registry[FccVendor.ADVATEC] = cfg => new AdvatecCloudAdapter(cfg);
         });
 }

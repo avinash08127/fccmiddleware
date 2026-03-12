@@ -60,7 +60,8 @@ public sealed class GenerateBootstrapTokenHandler
             Status = ProvisioningTokenStatus.ACTIVE,
             CreatedBy = request.CreatedBy,
             ExpiresAt = expiresAt,
-            CreatedAt = now
+            CreatedAt = now,
+            Environment = request.Environment
         };
 
         _db.AddBootstrapToken(token);
@@ -85,6 +86,19 @@ public sealed class GenerateBootstrapTokenHandler
         });
 
         await _db.SaveChangesAsync(cancellationToken);
+
+        // L-06: Re-check active count after save to detect TOCTOU race.
+        // Two concurrent requests can both pass the initial check; this secondary
+        // check detects and logs when the limit was exceeded by a race.
+        var postSaveCount = await _db.CountActiveBootstrapTokensForSiteAsync(
+            request.SiteCode, request.LegalEntityId, cancellationToken);
+        if (postSaveCount > MaxActiveTokensPerSite)
+        {
+            _logger.LogWarning(
+                "Bootstrap token limit exceeded due to concurrent insertion for site {SiteCode} " +
+                "(count={Count}, limit={Limit}). Token was created but limit is soft-breached.",
+                request.SiteCode, postSaveCount, MaxActiveTokensPerSite);
+        }
 
         _logger.LogInformation("Bootstrap token generated for site {SiteCode}, expires at {ExpiresAt}",
             request.SiteCode, expiresAt);

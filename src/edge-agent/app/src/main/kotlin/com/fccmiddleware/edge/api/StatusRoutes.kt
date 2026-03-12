@@ -3,6 +3,7 @@ package com.fccmiddleware.edge.api
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respond
@@ -20,6 +21,7 @@ fun Routing.statusRoutes(
     connectivityManager: ConnectivityManager,
     transactionDao: TransactionBufferDao,
     syncStateDao: SyncStateDao,
+    configManager: ConfigManager,
     agentVersion: String,
     deviceId: String,
     siteCode: String,
@@ -66,7 +68,7 @@ fun Routing.statusRoutes(
                 bufferDepth = bufferDepth,
                 syncLagSeconds = syncLagSeconds,
                 lastSuccessfulSyncUtc = lastSyncUtc,
-                configVersion = null, // TODO (EA-2.x): wire ConfigManager version
+                configVersion = configManager.currentConfigVersion,
                 agentVersion = agentVersion,
                 uptimeSeconds = uptimeSeconds,
                 reportedAtUtc = Instant.now().toString(),

@@ -1,6 +1,10 @@
+using FccDesktopAgent.Core.Buffer;
+using FccDesktopAgent.Core.Config;
+using FccDesktopAgent.Core.Connectivity;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Options;
 
 namespace FccDesktopAgent.Api.Endpoints;
 
@@ -11,6 +15,8 @@ namespace FccDesktopAgent.Api.Endpoints;
 internal static class StatusEndpoints
 {
     private static readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+    private static readonly string _agentVersion =
+        typeof(StatusEndpoints).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
 
     internal static IEndpointRouteBuilder MapStatusEndpoints(this IEndpointRouteBuilder app)
     {
@@ -18,24 +24,42 @@ internal static class StatusEndpoints
             .WithTags("Status");
 
         // GET /api/v1/status — agent operational status
-        // Returns 200 with placeholder values. DEA-2.x: inject IConnectivityMonitor + buffer stats.
-        group.MapGet("/", () =>
-            Results.Ok(new
+        group.MapGet("/", async (
+            IConnectivityMonitor connectivity,
+            IOptions<AgentConfiguration> config,
+            IConfigManager configManager,
+            TransactionBufferManager buffer,
+            CancellationToken ct) =>
+        {
+            var cfg = config.Value;
+            var snapshot = connectivity.Current;
+            var stats = await buffer.GetBufferStatsAsync(ct);
+
+            var syncLagSeconds = stats.OldestPendingAtUtc.HasValue
+                ? (int?)(DateTimeOffset.UtcNow - stats.OldestPendingAtUtc.Value).TotalSeconds
+                : null;
+
+            var fccHeartbeatAgeSeconds = connectivity.LastFccSuccessAtUtc.HasValue
+                ? (int?)(DateTimeOffset.UtcNow - connectivity.LastFccSuccessAtUtc.Value).TotalSeconds
+                : null;
+
+            return Results.Ok(new
             {
-                deviceId = "00000000-0000-0000-0000-000000000000",
-                siteCode = "UNPROVISIONED",
-                connectivityState = "FULLY_OFFLINE",
-                fccReachable = false,
-                fccHeartbeatAgeSeconds = (int?)null,
-                bufferDepth = 0,
-                syncLagSeconds = (int?)null,
+                deviceId = cfg.DeviceId,
+                siteCode = cfg.SiteId,
+                connectivityState = snapshot.State,
+                fccReachable = snapshot.IsFccUp,
+                fccHeartbeatAgeSeconds,
+                bufferDepth = stats.Pending,
+                syncLagSeconds,
                 lastSuccessfulSyncUtc = (DateTimeOffset?)null,
-                configVersion = (int?)null,
-                agentVersion = "0.1.0",
+                configVersion = configManager.CurrentConfigVersion,
+                agentVersion = _agentVersion,
                 uptimeSeconds = (int)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds,
                 reportedAtUtc = DateTimeOffset.UtcNow
-            }))
-            .WithName("getAgentStatus");
+            });
+        })
+        .WithName("getAgentStatus");
 
         return app;
     }

@@ -26,4 +26,22 @@ public interface IRegistrationManager
     /// Unlike decommission, re-provisioning can restore the device with a new bootstrap token.
     /// </summary>
     Task MarkReprovisioningRequiredAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Raised when the device is marked as decommissioned (e.g. cloud returns 403 DEVICE_DECOMMISSIONED).
+    /// GUI layers subscribe to this to show the decommission alert / dead-end window.
+    /// </summary>
+    event EventHandler? DeviceDecommissioned;
+
+    /// <summary>
+    /// M-10: Raised when the device requires re-provisioning (refresh token expired).
+    /// GUI layers subscribe to show a re-provisioning prompt or restart the app.
+    /// </summary>
+    event EventHandler? ReprovisioningRequired;
+
+    /// <summary>
+    /// Syncs site equipment data from the cloud config to a local JSON file.
+    /// Called after successful registration when the site config is available.
+    /// </summary>
+    void SyncSiteData(Config.SiteConfig config);
 }

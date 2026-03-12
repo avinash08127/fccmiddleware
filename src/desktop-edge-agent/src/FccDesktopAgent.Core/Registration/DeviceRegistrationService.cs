@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using FccDesktopAgent.Core.Config;
+using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.Sync;
 using Microsoft.Extensions.Logging;
 
@@ -44,6 +45,16 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
         string cloudBaseUrl, DeviceRegistrationRequest request, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cloudBaseUrl);
+
+        // H-09: Enforce HTTPS to prevent provisioning token and device tokens
+        // from being transmitted in cleartext. Allows HTTP only for localhost.
+        if (!CloudUrlGuard.IsSecure(cloudBaseUrl))
+        {
+            _logger.LogWarning("Registration rejected — cloud URL must use HTTPS: {Url}", cloudBaseUrl);
+            return new RegistrationResult.Rejected(
+                RegistrationErrorCode.Unknown,
+                "Cloud URL must use HTTPS. HTTP is only allowed for localhost development.");
+        }
 
         var url = $"{cloudBaseUrl.TrimEnd('/')}{RegisterPath}";
         _logger.LogInformation("Registering device at {Url} for site {SiteCode}", url, request.SiteCode);
@@ -129,6 +140,17 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
                 : "bootstrap-1";
             await _configManager.ApplyConfigAsync(result.SiteConfig, configJson, configVersion, ct);
             _logger.LogInformation("Bootstrap site config applied (version {Version})", configVersion);
+
+            // M-09: Sync equipment data immediately so the local API has pump/nozzle
+            // info before the first config poll (potentially 60+ seconds away).
+            try
+            {
+                _registrationManager.SyncSiteData(result.SiteConfig);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Site data sync failed after registration — will populate on first config poll");
+            }
         }
 
         _logger.LogInformation(

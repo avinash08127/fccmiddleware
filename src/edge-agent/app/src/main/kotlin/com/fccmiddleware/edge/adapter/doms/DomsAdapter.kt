@@ -28,6 +28,10 @@ class DomsAdapter(private val config: AgentFccConfig) : IFccAdapter {
         throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }
 
+    override suspend fun cancelPreAuth(command: CancelPreAuthCommand): Boolean {
+        throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
+    }
+
     override suspend fun getPumpStatus(): List<PumpStatus> {
         throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }

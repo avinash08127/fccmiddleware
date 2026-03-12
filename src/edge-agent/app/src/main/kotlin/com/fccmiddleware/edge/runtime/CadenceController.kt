@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.runtime
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
 import com.fccmiddleware.edge.adapter.common.IFccConnectionLifecycle
@@ -95,6 +95,15 @@ class CadenceController(
     @Volatile
     internal var versionCompatible: Boolean = true
 
+    /**
+     * Callback invoked when FCC reconnect is requested (e.g., after settings change).
+     * The service wires this to rebuild the adapter with current config + local overrides.
+     * When set, [requestFccReconnect] delegates to this callback for a full adapter rebuild
+     * rather than just disconnecting/reconnecting the existing adapter instance.
+     */
+    @Volatile
+    var onFccReconnectRequested: (suspend () -> Unit)? = null
+
     /** Late-bound: wired when FCC config becomes available after startup. */
     @Volatile
     internal var fccAdapter: IFccAdapter? = fccAdapter
@@ -113,9 +122,9 @@ class CadenceController(
                 try {
                     previousLifecycle.setEventListener(null)
                     previousLifecycle.disconnect()
-                    Log.i(TAG, "Disconnected previous FCC runtime")
+                    AppLogger.i(TAG, "Disconnected previous FCC runtime")
                 } catch (e: Exception) {
-                    Log.w(TAG, "Failed to disconnect previous FCC runtime: ${e.message}")
+                    AppLogger.w(TAG, "Failed to disconnect previous FCC runtime: ${e.message}")
                 }
             }
 
@@ -123,9 +132,9 @@ class CadenceController(
                 try {
                     nextLifecycle.setEventListener(fccEventListener)
                     nextLifecycle.connect()
-                    Log.i(TAG, "Connected updated FCC runtime")
+                    AppLogger.i(TAG, "Connected updated FCC runtime")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to connect updated FCC runtime: ${e.message}")
+                    AppLogger.e(TAG, "Failed to connect updated FCC runtime: ${e.message}")
                     launch { attemptReconnect() }
                 }
             }
@@ -145,20 +154,20 @@ class CadenceController(
     /** Event listener that bridges unsolicited FCC events into the cadence controller. */
     private val fccEventListener = object : IFccEventListener {
         override fun onPumpStatusChanged(pumpNumber: Int, newState: PumpState, fccStatusCode: String?) {
-            Log.d(TAG, "FCC pump $pumpNumber status -> $newState (fccCode=$fccStatusCode)")
+            AppLogger.d(TAG, "FCC pump $pumpNumber status -> $newState (fccCode=$fccStatusCode)")
         }
 
         override fun onTransactionAvailable(notification: TransactionNotification) {
-            Log.i(TAG, "FCC transaction available: fp=${notification.fpId}, idx=${notification.transactionBufferIndex}")
+            AppLogger.i(TAG, "FCC transaction available: fp=${notification.fpId}, idx=${notification.transactionBufferIndex}")
             triggerImmediateFccPoll()
         }
 
         override fun onFuellingUpdate(pumpNumber: Int, volumeMicrolitres: Long, amountMinorUnits: Long) {
-            Log.d(TAG, "FCC fuelling update: pump=$pumpNumber, vol=$volumeMicrolitres µL, amt=$amountMinorUnits")
+            AppLogger.d(TAG, "FCC fuelling update: pump=$pumpNumber, vol=$volumeMicrolitres µL, amt=$amountMinorUnits")
         }
 
         override fun onConnectionLost(reason: String) {
-            Log.w(TAG, "FCC connection lost: $reason — marking unreachable, scheduling reconnect")
+            AppLogger.w(TAG, "FCC connection lost: $reason — marking unreachable, scheduling reconnect")
             scope.launch { attemptReconnect() }
         }
     }
@@ -204,9 +213,9 @@ class CadenceController(
                 try {
                     lifecycle.setEventListener(fccEventListener)
                     lifecycle.connect()
-                    Log.i(TAG, "FCC persistent connection established")
+                    AppLogger.i(TAG, "FCC persistent connection established")
                 } catch (e: Exception) {
-                    Log.e(TAG, "FCC persistent connection failed on startup — will retry: ${e.message}")
+                    AppLogger.e(TAG, "FCC persistent connection failed on startup — will retry: ${e.message}")
                     launch { attemptReconnect() }
                 }
             }
@@ -216,7 +225,7 @@ class CadenceController(
             // Main scheduled cadence loop
             runCadenceLoop()
         }
-        Log.i(TAG, "CadenceController started (persistentConnection=${connectionLifecycle != null})")
+        AppLogger.i(TAG, "CadenceController started (persistentConnection=${connectionLifecycle != null})")
     }
 
     fun stop() {
@@ -228,13 +237,13 @@ class CadenceController(
                 try {
                     lifecycle.setEventListener(null)
                     lifecycle.disconnect()
-                    Log.i(TAG, "FCC persistent connection closed")
+                    AppLogger.i(TAG, "FCC persistent connection closed")
                 } catch (e: Exception) {
-                    Log.w(TAG, "Error during FCC disconnect: ${e.message}")
+                    AppLogger.w(TAG, "Error during FCC disconnect: ${e.message}")
                 }
             }
         }
-        Log.i(TAG, "CadenceController stopped")
+        AppLogger.i(TAG, "CadenceController stopped")
     }
 
     /**
@@ -248,10 +257,56 @@ class CadenceController(
         scope.launch {
             val state = connectivityManager.state.value
             if (state.canPollFcc()) {
-                Log.i(TAG, "Immediate FCC poll triggered (state=$state)")
+                AppLogger.i(TAG, "Immediate FCC poll triggered (state=$state)")
                 ingestionOrchestrator.poll()
             } else {
-                Log.w(TAG, "Immediate FCC poll requested but FCC not reachable (state=$state)")
+                AppLogger.w(TAG, "Immediate FCC poll requested but FCC not reachable (state=$state)")
+            }
+        }
+    }
+
+    /**
+     * Request FCC adapter disconnect and reconnect with current config (including local overrides).
+     * Called from SettingsActivity after saving new override values.
+     *
+     * When [onFccReconnectRequested] is wired (by the service), this triggers a full adapter
+     * rebuild with the current config + local overrides, ensuring the new connection parameters
+     * are actually used. Otherwise falls back to a simple disconnect/reconnect of the same adapter.
+     */
+    fun requestFccReconnect() {
+        scope.launch {
+            AppLogger.i(TAG, "FCC reconnect requested (settings changed)")
+
+            // Prefer full adapter rebuild (picks up new override values)
+            val rebuildCallback = onFccReconnectRequested
+            if (rebuildCallback != null) {
+                AppLogger.i(TAG, "Rebuilding FCC adapter with current config + overrides")
+                rebuildCallback()
+                return@launch
+            }
+
+            // Fallback: simple disconnect/reconnect of the existing adapter instance
+            val lifecycle = connectionLifecycle
+            if (lifecycle == null) {
+                AppLogger.w(TAG, "requestFccReconnect: no persistent connection lifecycle — skipping")
+                return@launch
+            }
+
+            try {
+                lifecycle.setEventListener(null)
+                lifecycle.disconnect()
+                AppLogger.i(TAG, "FCC disconnected for reconnect")
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Error disconnecting FCC for reconnect: ${e.message}")
+            }
+
+            try {
+                lifecycle.setEventListener(fccEventListener)
+                lifecycle.connect()
+                AppLogger.i(TAG, "FCC reconnected with updated config")
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "FCC reconnect failed — scheduling retry: ${e.message}")
+                launch { attemptReconnect() }
             }
         }
     }
@@ -266,10 +321,10 @@ class CadenceController(
         scope.launch {
             val state = connectivityManager.state.value
             if (state.hasInternet()) {
-                Log.i(TAG, "Immediate replay triggered (state=$state)")
+                AppLogger.i(TAG, "Immediate replay triggered (state=$state)")
                 cloudUploadWorker.uploadPendingBatch()
             } else {
-                Log.w(TAG, "Immediate replay requested but internet not reachable (state=$state)")
+                AppLogger.w(TAG, "Immediate replay requested but internet not reachable (state=$state)")
             }
         }
     }
@@ -282,7 +337,7 @@ class CadenceController(
     internal fun onTransition(from: ConnectivityState, to: ConnectivityState) {
         when (to) {
             ConnectivityState.FULLY_ONLINE -> {
-                Log.i(TAG, "→ FULLY_ONLINE: triggering immediate replay + SYNCED_TO_ODOO sync + pre-auth forward")
+                AppLogger.i(TAG, "→ FULLY_ONLINE: triggering immediate replay + SYNCED_TO_ODOO sync + pre-auth forward")
                 scope.launch {
                     // M-08: Reset circuit breakers on internet recovery so workers retry immediately
                     cloudUploadWorker.uploadCircuitBreaker.resetOnConnectivityRecovery()
@@ -297,10 +352,11 @@ class CadenceController(
                     cloudUploadWorker.pollSyncedToOdooStatus()
                     // Telemetry piggybacks on this recovery cycle
                     cloudUploadWorker.reportTelemetry()
+                    cloudUploadWorker.reportDiagnosticLogs()
                 }
             }
             ConnectivityState.FCC_UNREACHABLE -> {
-                Log.i(TAG, "→ FCC_UNREACHABLE: FCC poller suspended; cloud workers continue")
+                AppLogger.i(TAG, "→ FCC_UNREACHABLE: FCC poller suspended; cloud workers continue")
                 scope.launch {
                     // Internet came up (from FULLY_OFFLINE or INTERNET_DOWN) — reset cloud circuit breakers
                     if (!from.hasInternet()) {
@@ -312,10 +368,10 @@ class CadenceController(
                 }
             }
             ConnectivityState.INTERNET_DOWN -> {
-                Log.i(TAG, "→ INTERNET_DOWN: cloud upload suspended (next tick will skip cloud ops)")
+                AppLogger.i(TAG, "→ INTERNET_DOWN: cloud upload suspended (next tick will skip cloud ops)")
             }
             ConnectivityState.FULLY_OFFLINE -> {
-                Log.i(TAG, "→ FULLY_OFFLINE: all cloud+FCC workers suspended; local API continues")
+                AppLogger.i(TAG, "→ FULLY_OFFLINE: all cloud+FCC workers suspended; local API continues")
             }
         }
     }
@@ -349,7 +405,7 @@ class CadenceController(
             tickCount = (tickCount + 1) % tickModulus
 
             val interval = computeInterval(state, backlogDepth)
-            Log.d(TAG, "Tick $tickCount done (state=$state, backlog=$backlogDepth, next=${interval}ms)")
+            AppLogger.d(TAG, "Tick $tickCount done (state=$state, backlog=$backlogDepth, next=${interval}ms)")
             delay(interval)
         }
     }
@@ -365,17 +421,17 @@ class CadenceController(
 
     private suspend fun runTick(state: ConnectivityState, backlogDepth: Int) {
         if (isDecommissioned()) {
-            Log.w(TAG, "runTick() skipped — device decommissioned")
+            AppLogger.w(TAG, "runTick() skipped — device decommissioned")
             return
         }
 
         if (isReprovisioningRequired()) {
-            Log.w(TAG, "runTick() skipped — re-provisioning required (refresh token expired)")
+            AppLogger.w(TAG, "runTick() skipped — re-provisioning required (refresh token expired)")
             return
         }
 
         if (!versionCompatible) {
-            Log.w(TAG, "runTick() — FCC communication disabled (agent version below minimum). " +
+            AppLogger.w(TAG, "runTick() — FCC communication disabled (agent version below minimum). " +
                 "Cloud operations continue for telemetry and config updates.")
             // Allow cloud operations (upload existing buffer, config poll, telemetry)
             // but skip FCC polling to prevent data format mismatches.
@@ -384,6 +440,7 @@ class CadenceController(
                 if (isDecommissioned()) return
                 if (tickCount % config.telemetryTickFrequency == 0L) {
                     cloudUploadWorker.reportTelemetry()
+                    cloudUploadWorker.reportDiagnosticLogs()
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
                     configPollWorker?.pollConfig()
@@ -407,6 +464,7 @@ class CadenceController(
                 if (tickCount % config.telemetryTickFrequency == 0L) {
                     // Telemetry piggybacks on a successful cloud cycle
                     cloudUploadWorker.reportTelemetry()
+                    cloudUploadWorker.reportDiagnosticLogs()
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
                     configPollWorker?.pollConfig()
@@ -470,15 +528,15 @@ class CadenceController(
         while (currentCoroutineContext().isActive && !lifecycle.isConnected) {
             attempt++
             val backoffMs = (1_000L * (1L shl attempt.coerceAtMost(6))).coerceAtMost(maxBackoffMs)
-            Log.i(TAG, "FCC reconnect attempt $attempt in ${backoffMs}ms")
+            AppLogger.i(TAG, "FCC reconnect attempt $attempt in ${backoffMs}ms")
             delay(backoffMs)
 
             try {
                 lifecycle.connect()
-                Log.i(TAG, "FCC reconnect succeeded on attempt $attempt")
+                AppLogger.i(TAG, "FCC reconnect succeeded on attempt $attempt")
                 return
             } catch (e: Exception) {
-                Log.w(TAG, "FCC reconnect attempt $attempt failed: ${e.message}")
+                AppLogger.w(TAG, "FCC reconnect attempt $attempt failed: ${e.message}")
             }
         }
     }
@@ -502,11 +560,11 @@ class CadenceController(
 
         val token = tp.getAccessToken()
         if (token == null) {
-            Log.w(TAG, "Version check skipped: no device token available (not yet registered)")
+            AppLogger.w(TAG, "Version check skipped: no device token available (not yet registered)")
             return
         }
 
-        Log.i(TAG, "Performing startup version check (agentVersion=$version)")
+        AppLogger.i(TAG, "Performing startup version check (agentVersion=$version)")
         val result = client.checkVersion(version, token)
 
         when (result) {
@@ -515,7 +573,7 @@ class CadenceController(
             }
             is CloudVersionCheckResult.Unauthorized -> {
                 // Token may be expired; try refresh once
-                Log.d(TAG, "Version check received 401; refreshing token and retrying")
+                AppLogger.d(TAG, "Version check received 401; refreshing token and retrying")
                 val refreshed = tp.refreshAccessToken()
                 if (refreshed) {
                     val newToken = tp.getAccessToken()
@@ -524,15 +582,15 @@ class CadenceController(
                         if (retryResult is CloudVersionCheckResult.Success) {
                             handleVersionCheckResponse(retryResult.response, version)
                         } else {
-                            Log.w(TAG, "Version check failed after token refresh — allowing FCC (fail-open)")
+                            AppLogger.w(TAG, "Version check failed after token refresh — allowing FCC (fail-open)")
                         }
                     }
                 } else {
-                    Log.w(TAG, "Version check skipped: token refresh failed — allowing FCC (fail-open)")
+                    AppLogger.w(TAG, "Version check skipped: token refresh failed — allowing FCC (fail-open)")
                 }
             }
             is CloudVersionCheckResult.TransportError -> {
-                Log.w(TAG, "Version check failed: ${result.message} — allowing FCC (fail-open)")
+                AppLogger.w(TAG, "Version check failed: ${result.message} — allowing FCC (fail-open)")
             }
         }
     }
@@ -540,7 +598,7 @@ class CadenceController(
     private fun handleVersionCheckResponse(resp: com.fccmiddleware.edge.sync.VersionCheckResponse, version: String) {
         if (!resp.compatible) {
             versionCompatible = false
-            Log.e(
+            AppLogger.e(
                 TAG,
                 "VERSION INCOMPATIBLE: agent version $version is below minimum " +
                     "${resp.minimumVersion}. FCC communication DISABLED to prevent " +
@@ -550,14 +608,14 @@ class CadenceController(
         } else {
             versionCompatible = true
             if (resp.updateAvailable) {
-                Log.i(
+                AppLogger.i(
                     TAG,
                     "Version check passed (compatible). Update available: " +
                         "${resp.latestVersion}" +
                         (resp.releaseNotes?.let { " — $it" } ?: ""),
                 )
             } else {
-                Log.i(TAG, "Version check passed (compatible, up to date)")
+                AppLogger.i(TAG, "Version check passed (compatible, up to date)")
             }
         }
     }

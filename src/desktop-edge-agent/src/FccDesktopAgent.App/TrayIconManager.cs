@@ -37,7 +37,7 @@ internal sealed class TrayIconManager : IDisposable
 
         _trayIcon = new TrayIcon
         {
-            ToolTipText = "FCC Desktop Agent — Starting...",
+            ToolTipText = "Puma Energy FCC Agent — Starting...",
             IsVisible = true
         };
 
@@ -112,11 +112,11 @@ internal sealed class TrayIconManager : IDisposable
     {
         _trayIcon.ToolTipText = state switch
         {
-            ConnectivityState.FullyOnline     => "FCC Desktop Agent — Online",
-            ConnectivityState.InternetDown    => "FCC Desktop Agent — Internet Down",
-            ConnectivityState.FccUnreachable  => "FCC Desktop Agent — FCC Unreachable",
-            ConnectivityState.FullyOffline    => "FCC Desktop Agent — Offline",
-            _                                 => "FCC Desktop Agent"
+            ConnectivityState.FullyOnline     => "Puma Energy FCC Agent — Online",
+            ConnectivityState.InternetDown    => "Puma Energy FCC Agent — Internet Down",
+            ConnectivityState.FccUnreachable  => "Puma Energy FCC Agent — FCC Unreachable",
+            ConnectivityState.FullyOffline    => "Puma Energy FCC Agent — Offline",
+            _                                 => "Puma Energy FCC Agent"
         };
     }
 

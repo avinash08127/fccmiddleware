@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -5,6 +6,7 @@ using Avalonia.Markup.Xaml;
 using FccDesktopAgent.App.Views;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Connectivity;
+using FccDesktopAgent.Core.Registration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -26,24 +28,39 @@ public sealed partial class App : Application
             // Prevent auto-exit when the last window is closed — tray keeps the app alive
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
-            switch (AgentAppContext.Mode)
+            var splash = new SplashWindow();
+            desktop.MainWindow = splash;
+
+            var timer = new Avalonia.Threading.DispatcherTimer
             {
-                case StartupMode.Decommissioned:
-                    InitializeDecommissionedMode(desktop);
-                    break;
+                Interval = TimeSpan.FromSeconds(2)
+            };
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
 
-                case StartupMode.Provisioning:
-                    InitializeProvisioningMode(desktop);
-                    break;
+                switch (AgentAppContext.Mode)
+                {
+                    case StartupMode.Decommissioned:
+                        InitializeDecommissionedMode(desktop);
+                        break;
 
-                case StartupMode.Normal:
-                default:
-                    InitializeNormalMode(desktop);
-                    break;
-            }
+                    case StartupMode.Provisioning:
+                        InitializeProvisioningMode(desktop);
+                        break;
 
-            // Handle clean-up when desktop lifetime exits
-            desktop.Exit += (_, _) => _trayIconManager?.Dispose();
+                    case StartupMode.Normal:
+                    default:
+                        InitializeNormalMode(desktop);
+                        break;
+                }
+
+                splash.Close();
+
+                // Handle clean-up when desktop lifetime exits
+                desktop.Exit += (_, _) => _trayIconManager?.Dispose();
+            };
+            timer.Start();
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -54,7 +71,10 @@ public sealed partial class App : Application
         // Dead-end window — no tray icon, no background services
         var window = new DecommissionedWindow();
         desktop.MainWindow = window;
-        // Allow exit when this window closes
+        // M-07: Show the decommissioned window BEFORE changing ShutdownMode.
+        // If ShutdownMode is set to OnLastWindowClose before the new window is visible,
+        // closing the splash (the only visible window) triggers premature app shutdown.
+        window.Show();
         desktop.ShutdownMode = ShutdownMode.OnLastWindowClose;
     }
 
@@ -125,7 +145,31 @@ public sealed partial class App : Application
 
         _trayIconManager.RestartAgentRequested += (_, _) =>
         {
-            logger.LogWarning("Agent restart requested via tray — not yet implemented (DEA-2.x)");
+            logger.LogInformation("Agent restart requested via tray");
+            try
+            {
+                var exePath = Environment.ProcessPath;
+                if (exePath is not null)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = exePath,
+                        UseShellExecute = true,
+                    });
+                }
+                else
+                {
+                    logger.LogWarning("Cannot restart: unable to determine process path");
+                    return;
+                }
+
+                mainWindow.ForceClose();
+                desktop.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to restart agent");
+            }
         };
 
         _trayIconManager.ExitRequested += (_, _) =>
@@ -133,5 +177,58 @@ public sealed partial class App : Application
             mainWindow.ForceClose();
             desktop.Shutdown();
         };
+
+        // DEA-3.x: Subscribe to decommission events from cloud sync workers.
+        // When the cloud returns DEVICE_DECOMMISSIONED, transition the GUI to the dead-end window.
+        var registrationManager = services?.GetService<IRegistrationManager>();
+        if (registrationManager is not null)
+        {
+            registrationManager.DeviceDecommissioned += (_, _) =>
+            {
+                logger.LogWarning("Device decommissioned — transitioning to decommission screen");
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    _trayIconManager?.Dispose();
+                    _trayIconManager = null;
+
+                    var decommissionedWindow = new DecommissionedWindow();
+                    desktop.MainWindow = decommissionedWindow;
+                    desktop.ShutdownMode = ShutdownMode.OnLastWindowClose;
+                    decommissionedWindow.Show();
+
+                    mainWindow.ForceClose();
+                });
+            };
+
+            // M-10: Subscribe to re-provisioning events so the user sees a prompt
+            // instead of the agent silently halting uploads with no indication.
+            registrationManager.ReprovisioningRequired += (_, _) =>
+            {
+                logger.LogWarning("Re-provisioning required — restarting into provisioning mode");
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    _trayIconManager?.Dispose();
+                    _trayIconManager = null;
+
+                    var provisioningWindow = new ProvisioningWindow();
+                    desktop.MainWindow = provisioningWindow;
+                    provisioningWindow.Show();
+
+                    provisioningWindow.RegistrationCompleted += (_, _) =>
+                    {
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                        {
+                            var newMainWindow = new MainWindow();
+                            desktop.MainWindow = newMainWindow;
+                            newMainWindow.Show();
+                            SetupTrayIcon(desktop, newMainWindow);
+                            provisioningWindow.Close();
+                        });
+                    };
+
+                    mainWindow.ForceClose();
+                });
+            };
+        }
     }
 }

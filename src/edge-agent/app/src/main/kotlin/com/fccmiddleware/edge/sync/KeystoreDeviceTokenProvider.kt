@@ -1,7 +1,7 @@
 package com.fccmiddleware.edge.sync
 
 import android.util.Base64
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.security.KeystoreManager
 import kotlinx.coroutines.sync.Mutex
@@ -71,7 +71,7 @@ class KeystoreDeviceTokenProvider(
             val encrypted = Base64.decode(blob, Base64.NO_WRAP)
             keystoreManager.retrieveSecret(KeystoreManager.ALIAS_DEVICE_JWT, encrypted)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to retrieve access token from Keystore", e)
+            AppLogger.e(TAG, "Failed to retrieve access token from Keystore", e)
             null
         }
     }
@@ -87,28 +87,32 @@ class KeystoreDeviceTokenProvider(
         // This is safe because storeTokens() atomically rotates both tokens.
 
         if (decommissionedCached || encryptedPrefs.isDecommissioned) {
-            Log.w(TAG, "Device is decommissioned — cannot refresh token")
+            AppLogger.w(TAG, "Device is decommissioned — cannot refresh token")
             return@withLock false
         }
 
         val client = cloudApiClient ?: run {
-            Log.w(TAG, "CloudApiClient not available — cannot refresh token")
+            AppLogger.w(TAG, "CloudApiClient not available — cannot refresh token")
             return@withLock false
         }
 
         val currentRefreshToken = getRefreshToken() ?: run {
-            Log.w(TAG, "No refresh token available — cannot refresh")
+            AppLogger.w(TAG, "No refresh token available — cannot refresh")
             return@withLock false
         }
 
         when (val result = client.refreshToken(currentRefreshToken)) {
             is CloudTokenRefreshResult.Success -> {
-                storeTokens(result.response.deviceToken, result.response.refreshToken)
-                Log.i(TAG, "Token refreshed successfully, expires=${result.response.tokenExpiresAt}")
+                val stored = storeTokens(result.response.deviceToken, result.response.refreshToken)
+                if (!stored) {
+                    AppLogger.e(TAG, "Token refresh succeeded but failed to store new tokens in Keystore")
+                    return@withLock false
+                }
+                AppLogger.i(TAG, "Token refreshed successfully, expires=${result.response.tokenExpiresAt}")
                 true
             }
             is CloudTokenRefreshResult.Unauthorized -> {
-                Log.w(TAG, "Refresh token expired or revoked — re-provisioning required")
+                AppLogger.w(TAG, "Refresh token expired or revoked — re-provisioning required")
                 markReprovisioningRequired()
                 false
             }
@@ -116,11 +120,11 @@ class KeystoreDeviceTokenProvider(
                 if (result.errorCode == "DEVICE_DECOMMISSIONED") {
                     markDecommissioned()
                 }
-                Log.w(TAG, "Token refresh forbidden: ${result.errorCode}")
+                AppLogger.w(TAG, "Token refresh forbidden: ${result.errorCode}")
                 false
             }
             is CloudTokenRefreshResult.TransportError -> {
-                Log.w(TAG, "Token refresh transport error: ${result.message}")
+                AppLogger.w(TAG, "Token refresh transport error: ${result.message}")
                 false
             }
         }
@@ -139,7 +143,7 @@ class KeystoreDeviceTokenProvider(
         // then persist to SharedPreferences for crash recovery.
         decommissionedCached = true
         encryptedPrefs.isDecommissioned = true
-        Log.w(TAG, "Device marked as decommissioned — all sync stopped")
+        AppLogger.w(TAG, "Device marked as decommissioned — all sync stopped")
     }
 
     override fun isReprovisioningRequired(): Boolean {
@@ -152,11 +156,14 @@ class KeystoreDeviceTokenProvider(
     override fun markReprovisioningRequired() {
         // Set volatile flag FIRST for immediate visibility, then persist.
         reprovisioningCached = true
-        encryptedPrefs.isReprovisioningRequired = true
-        // Clear registration so LauncherActivity routes to ProvisioningActivity
-        // on next app startup.
-        encryptedPrefs.isRegistered = false
-        Log.w(TAG, "Device marked as requiring re-provisioning — refresh token expired")
+        // M-03: Write both flags in a single atomic commit() to prevent a partial
+        // state where isReprovisioningRequired=true but isRegistered is still true
+        // (if the process is killed between two separate writes).
+        encryptedPrefs.setReprovisioningAndUnregister()
+        // H-02: Clear old Keystore keys — the tokens are expired/revoked and should not
+        // remain on disk. Prevents stale identity data from persisting across re-provisioning.
+        keystoreManager.clearAll()
+        AppLogger.w(TAG, "Device marked as requiring re-provisioning — refresh token expired, keys cleared")
     }
 
     /**
@@ -164,20 +171,24 @@ class KeystoreDeviceTokenProvider(
      * Encrypts each token with its dedicated Keystore key and persists the
      * Base64-encoded ciphertext in EncryptedSharedPreferences.
      */
-    fun storeTokens(deviceToken: String, refreshToken: String) {
+    override fun storeTokens(deviceToken: String, refreshToken: String): Boolean {
         val deviceEncrypted = keystoreManager.storeSecret(KeystoreManager.ALIAS_DEVICE_JWT, deviceToken)
         if (deviceEncrypted != null) {
             encryptedPrefs.storeDeviceTokenBlob(Base64.encodeToString(deviceEncrypted, Base64.NO_WRAP))
         } else {
-            Log.e(TAG, "Failed to encrypt device token")
+            AppLogger.e(TAG, "Failed to encrypt device token — Keystore may be unavailable")
+            return false
         }
 
         val refreshEncrypted = keystoreManager.storeSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, refreshToken)
         if (refreshEncrypted != null) {
             encryptedPrefs.storeRefreshTokenBlob(Base64.encodeToString(refreshEncrypted, Base64.NO_WRAP))
         } else {
-            Log.e(TAG, "Failed to encrypt refresh token")
+            AppLogger.e(TAG, "Failed to encrypt refresh token — Keystore may be unavailable")
+            return false
         }
+
+        return true
     }
 
     private fun getRefreshToken(): String? {
@@ -186,7 +197,7 @@ class KeystoreDeviceTokenProvider(
             val encrypted = Base64.decode(blob, Base64.NO_WRAP)
             keystoreManager.retrieveSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, encrypted)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to retrieve refresh token from Keystore", e)
+            AppLogger.e(TAG, "Failed to retrieve refresh token from Keystore", e)
             null
         }
     }

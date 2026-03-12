@@ -262,32 +262,40 @@ object RadixXmlParser {
 
     private fun parseTrnElement(doc: Document): RadixTransactionData? {
         val trn = firstElement(doc, "TRN") ?: return null
-        if (!trn.hasAttributes()) return null
+        if (!trn.hasAttributes() && !trn.hasChildNodes()) return null
+
+        // Try attribute first, fall back to child element text.
+        // Some Radix firmware versions use child elements instead of attributes.
+        fun field(name: String): String {
+            val attrVal = trn.getAttribute(name)
+            if (!attrVal.isNullOrEmpty()) return attrVal
+            return childText(trn, name)
+        }
 
         return RadixTransactionData(
-            amo = trn.attr("AMO"),
-            efdId = trn.attr("EFD_ID"),
-            fdcDate = trn.attr("FDC_DATE"),
-            fdcTime = trn.attr("FDC_TIME"),
-            fdcName = trn.attr("FDC_NAME"),
-            fdcNum = trn.attr("FDC_NUM"),
-            fdcProd = trn.attr("FDC_PROD"),
-            fdcProdName = trn.attr("FDC_PROD_NAME"),
-            fdcSaveNum = trn.attr("FDC_SAVE_NUM"),
-            fdcTank = trn.attr("FDC_TANK"),
-            fp = trn.attr("FP"),
-            noz = trn.attr("NOZ"),
-            price = trn.attr("PRICE"),
-            pumpAddr = trn.attr("PUMP_ADDR"),
-            rdgDate = trn.attr("RDG_DATE"),
-            rdgTime = trn.attr("RDG_TIME"),
-            rdgId = trn.attr("RDG_ID"),
-            rdgIndex = trn.attr("RDG_INDEX"),
-            rdgProd = trn.attr("RDG_PROD"),
-            rdgSaveNum = trn.attr("RDG_SAVE_NUM"),
-            regId = trn.attr("REG_ID"),
-            roundType = trn.attr("ROUND_TYPE"),
-            vol = trn.attr("VOL"),
+            amo = field("AMO"),
+            efdId = field("EFD_ID"),
+            fdcDate = field("FDC_DATE"),
+            fdcTime = field("FDC_TIME"),
+            fdcName = field("FDC_NAME"),
+            fdcNum = field("FDC_NUM"),
+            fdcProd = field("FDC_PROD"),
+            fdcProdName = field("FDC_PROD_NAME"),
+            fdcSaveNum = field("FDC_SAVE_NUM"),
+            fdcTank = field("FDC_TANK"),
+            fp = field("FP"),
+            noz = field("NOZ"),
+            price = field("PRICE"),
+            pumpAddr = field("PUMP_ADDR"),
+            rdgDate = field("RDG_DATE"),
+            rdgTime = field("RDG_TIME"),
+            rdgId = field("RDG_ID"),
+            rdgIndex = field("RDG_INDEX"),
+            rdgProd = field("RDG_PROD"),
+            rdgSaveNum = field("RDG_SAVE_NUM"),
+            regId = field("REG_ID"),
+            roundType = field("ROUND_TYPE"),
+            vol = field("VOL"),
         )
     }
 

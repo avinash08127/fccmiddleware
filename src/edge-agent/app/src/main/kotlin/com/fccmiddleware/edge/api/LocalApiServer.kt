@@ -1,9 +1,10 @@
 package com.fccmiddleware.edge.api
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.preauth.PreAuthHandler
@@ -51,6 +52,7 @@ class LocalApiServer(
     private val syncStateDao: SyncStateDao,
     private val connectivityManager: ConnectivityManager,
     private val preAuthHandler: PreAuthHandler,
+    private val configManager: ConfigManager,
     fccAdapter: IFccAdapter? = null,
     private val serviceScope: CoroutineScope,
     private val ingestionOrchestrator: IngestionOrchestrator? = null,
@@ -118,6 +120,7 @@ class LocalApiServer(
     fun start() {
         server?.stop(1_000, 2_000)
         server = embeddedServer(CIO, port = config.port, host = config.bindAddress) {
+            configureCorrelationId()
             configureContentNegotiation()
             configureLanApiKeyAuth()
             configureRateLimiting()
@@ -125,18 +128,31 @@ class LocalApiServer(
             configureRouting()
         }.also {
             it.start(wait = false)
-            Log.i(tag, "Local API server started on ${config.bindAddress}:${config.port} (lanApi=${config.enableLanApi})")
+            AppLogger.i(tag, "Local API server started on ${config.bindAddress}:${config.port} (lanApi=${config.enableLanApi})")
         }
     }
 
     fun stop() {
         server?.stop(1_000, 2_000)
-        Log.i(tag, "Local API server stopped")
+        AppLogger.i(tag, "Local API server stopped")
     }
 
     // -------------------------------------------------------------------------
     // Ktor configuration
     // -------------------------------------------------------------------------
+
+    /**
+     * Phase 5: Extract X-Correlation-Id from incoming requests, set on AppLogger
+     * so all downstream logging and outbound cloud API calls carry the same ID.
+     */
+    private fun Application.configureCorrelationId() {
+        intercept(io.ktor.server.application.ApplicationCallPipeline.Setup) {
+            val incomingId = call.request.headers["X-Correlation-Id"]
+            val correlationId = incomingId ?: UUID.randomUUID().toString()
+            AppLogger.correlationId = correlationId
+            call.response.headers.append("X-Correlation-Id", correlationId)
+        }
+    }
 
     private fun Application.configureContentNegotiation() {
         install(ContentNegotiation) {
@@ -155,7 +171,7 @@ class LocalApiServer(
         if (storedKey == null) {
             // LAN mode requested but no API key configured — reject ALL non-localhost
             // requests to prevent unauthenticated access from the local network.
-            Log.e(tag, "LAN API enabled but lanApiKey is null — all LAN requests will be rejected")
+            AppLogger.e(tag, "LAN API enabled but lanApiKey is null — all LAN requests will be rejected")
             install(LanApiBlockPlugin)
             return
         }
@@ -175,7 +191,7 @@ class LocalApiServer(
     private fun Application.configureStatusPages() {
         install(StatusPages) {
             exception<Throwable> { call, cause ->
-                Log.e(tag, "Unhandled error in local API", cause)
+                AppLogger.e(tag, "Unhandled error in local API", cause)
                 call.respond(
                     HttpStatusCode.InternalServerError,
                     ErrorResponse(
@@ -209,6 +225,7 @@ class LocalApiServer(
                 connectivityManager = connectivityManager,
                 transactionDao = transactionDao,
                 syncStateDao = syncStateDao,
+                configManager = configManager,
                 agentVersion = agentVersion,
                 deviceId = deviceId,
                 siteCode = siteCode,

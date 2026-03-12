@@ -93,6 +93,19 @@ public sealed record FccConnectionConfig(
     string? OAuthTokenEndpoint = null,
     /// <summary>Petronite: HTTP port for the local webhook listener that receives transaction callbacks (default 8090).</summary>
     int? WebhookListenerPort = null,
+    // ── Advatec EFD fields ──────────────────────────────────────────────────
+    /// <summary>Advatec: Device host address (default "127.0.0.1" — Advatec runs on localhost).</summary>
+    string? AdvatecDeviceAddress = null,
+    /// <summary>Advatec: Device HTTP port (default 5560).</summary>
+    int? AdvatecDevicePort = null,
+    /// <summary>Advatec: Port for the local webhook listener that receives Receipt callbacks (default 8091).</summary>
+    int? AdvatecWebhookListenerPort = null,
+    /// <summary>Advatec: Shared token for webhook URL authentication.</summary>
+    [property: SensitiveData] string? AdvatecWebhookToken = null,
+    /// <summary>Advatec: TRA-registered EFD serial number for validation (e.g., "10TZ101807").</summary>
+    string? AdvatecEfdSerialNumber = null,
+    /// <summary>Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL).</summary>
+    int? AdvatecCustIdType = null,
     /// <summary>Resolved legal entity identifier used by normalization and correlation flows.</summary>
     string? LegalEntityId = null,
     /// <summary>Resolved ISO 4217 currency code for the site.</summary>

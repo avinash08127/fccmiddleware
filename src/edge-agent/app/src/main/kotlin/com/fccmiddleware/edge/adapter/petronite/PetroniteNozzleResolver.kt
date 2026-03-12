@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.petronite
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -114,7 +114,7 @@ class PetroniteNozzleResolver(
                 }
 
                 if (response.status != HttpStatusCode.OK) {
-                    Log.w(TAG, "GET /nozzles/assigned returned HTTP ${response.status.value}")
+                    AppLogger.w(TAG, "GET /nozzles/assigned returned HTTP ${response.status.value}")
                     return
                 }
 
@@ -134,11 +134,11 @@ class PetroniteNozzleResolver(
                 lastAssignments = assignments
                 lastRefreshedAtMillis = System.currentTimeMillis()
 
-                Log.i(TAG, "Nozzle resolver refreshed: ${assignments.size} nozzle(s) mapped")
+                AppLogger.i(TAG, "Nozzle resolver refreshed: ${assignments.size} nozzle(s) mapped")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "Nozzle resolver refresh failed: ${e::class.simpleName}: ${e.message}")
+                AppLogger.w(TAG, "Nozzle resolver refresh failed: ${e::class.simpleName}: ${e.message}")
                 // Keep the existing snapshot on failure.
             }
         }

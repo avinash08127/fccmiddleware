@@ -1,3 +1,4 @@
+using FccDesktopAgent.Core.Adapter.Common;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -17,22 +18,35 @@ internal static class PumpStatusEndpoints
             .WithTags("PumpStatus");
 
         // GET /api/v1/pump-status — live pump statuses with optional pumpNumber filter
-        // DEA-2.x: inject IFccAdapter with single-flight guard and stale cache
-        group.MapGet("/", (int? pumpNumber) =>
-            NotImplemented("GET /api/v1/pump-status"))
-            .WithName("getPumpStatus");
+        group.MapGet("/", async (
+            int? pumpNumber,
+            IPumpStatusService pumpStatusService,
+            CancellationToken ct) =>
+        {
+            var result = await pumpStatusService.GetPumpStatusAsync(pumpNumber, ct);
+
+            if (result.Source == "unavailable")
+            {
+                return Results.Json(
+                    new
+                    {
+                        errorCode = "FCC_UNAVAILABLE",
+                        message = "FCC is unreachable and no cached pump status is available",
+                        timestamp = DateTimeOffset.UtcNow
+                    },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            return Results.Ok(new
+            {
+                pumps = result.Pumps,
+                source = result.Source,
+                cachedAtUtc = result.CachedAtUtc,
+                observedAtUtc = result.ObservedAtUtc,
+            });
+        })
+        .WithName("getPumpStatus");
 
         return app;
     }
-
-    private static IResult NotImplemented(string endpoint) =>
-        Results.Json(
-            new
-            {
-                errorCode = "NOT_IMPLEMENTED",
-                message = $"{endpoint} is not yet implemented",
-                traceId = (string?)null,
-                timestamp = DateTimeOffset.UtcNow
-            },
-            statusCode: StatusCodes.Status501NotImplemented);
 }

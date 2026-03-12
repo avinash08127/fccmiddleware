@@ -1,0 +1,26 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="FccDesktopAgent.App.Views.SplashWindow"
+        Title="Puma Energy FCC Agent"
+        Width="420"
+        Height="360"
+        CanResize="False"
+        WindowStartupLocation="CenterScreen"
+        SystemDecorations="None"
+        Background="White">
+
+  <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12">
+    <Image Source="/Assets/AppIcon.png"
+           Width="160" Height="160"
+           HorizontalAlignment="Center" />
+    <TextBlock Text="Puma Energy"
+               FontSize="26" FontWeight="Bold"
+               Foreground="#E30613"
+               HorizontalAlignment="Center" />
+    <TextBlock Text="FCC Desktop Agent"
+               FontSize="14"
+               Foreground="#666666"
+               HorizontalAlignment="Center" />
+  </StackPanel>
+
+</Window>

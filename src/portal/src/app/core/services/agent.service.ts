@@ -41,4 +41,21 @@ export class AgentService {
       params: { limit: limit.toString() },
     });
   }
+
+  getAgentDiagnosticLogs(id: string, maxBatches = 10): Observable<DiagnosticLogsResponse> {
+    return this.http.get<DiagnosticLogsResponse>(`/api/v1/agents/${id}/diagnostic-logs`, {
+      params: { maxBatches: maxBatches.toString() },
+    });
+  }
+}
+
+export interface DiagnosticLogsResponse {
+  deviceId: string;
+  batches: DiagnosticLogBatch[];
+}
+
+export interface DiagnosticLogBatch {
+  id: string;
+  uploadedAtUtc: string;
+  logEntries: string[];
 }

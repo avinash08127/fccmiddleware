@@ -149,6 +149,21 @@ public sealed class TransactionsController : ControllerBase
 
         var (siteConfig, _) = siteResult.Value;
 
+        // M-12: Reject if SharedSecret is not configured — without it the endpoint
+        // is effectively unauthenticated since USN codes are small integers (1-999999).
+        if (string.IsNullOrEmpty(siteConfig.SharedSecret))
+        {
+            _logger.LogWarning(
+                "Radix site {SiteCode} (USN {UsnCode}) has no SharedSecret configured — rejecting unauthenticated push",
+                siteConfig.SiteCode, usnCode);
+            return new ContentResult
+            {
+                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>SITE_NOT_CONFIGURED</ERROR_CODE></RESP>",
+                ContentType = "text/xml",
+                StatusCode = StatusCodes.Status401Unauthorized
+            };
+        }
+
         // ── Read raw XML body ─────────────────────────────────────────────────
         using var reader = new StreamReader(Request.Body, leaveOpen: true);
         var rawXml = await reader.ReadToEndAsync(cancellationToken);
@@ -277,6 +292,99 @@ public sealed class TransactionsController : ControllerBase
         }
 
         _metrics.RecordIngestionSuccess("petronite-webhook", siteConfig.SiteCode, "PETRONITE");
+
+        return Ok(new
+        {
+            status = "ACCEPTED",
+            transactionId = result.Value.TransactionId
+        });
+    }
+
+    /// <summary>
+    /// Accepts Advatec Receipt webhook events (push-only ingestion).
+    /// Validates the webhook token via the X-Webhook-Token header (or ?token= query parameter),
+    /// then feeds the Receipt payload into the standard ingest pipeline.
+    /// Always returns 200 to avoid potential retries (Advatec retry behaviour unknown — AQ-7).
+    /// </summary>
+    [HttpPost("/api/v1/ingest/advatec/webhook")]
+    [AllowAnonymous] // Auth is via X-Webhook-Token constant-time comparison
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> IngestAdvatecWebhook(CancellationToken cancellationToken)
+    {
+        // ── Validate webhook token header or query parameter ──────────────────
+        var tokenValue = Request.Headers.TryGetValue("X-Webhook-Token", out var tokenHeader)
+            ? tokenHeader.FirstOrDefault()
+            : null;
+
+        // Fallback: check ?token= query parameter (Advatec may configure webhook URL with token param)
+        if (string.IsNullOrWhiteSpace(tokenValue))
+        {
+            tokenValue = Request.Query["token"].FirstOrDefault();
+        }
+
+        if (string.IsNullOrWhiteSpace(tokenValue))
+        {
+            return Unauthorized(BuildError(
+                "UNAUTHORIZED.MISSING_WEBHOOK_TOKEN",
+                "X-Webhook-Token header or ?token= query parameter is required."));
+        }
+
+        // ── Lookup site by Advatec webhook token (constant-time comparison) ──
+        var siteResult = await _siteFccConfigProvider.GetByAdvatecWebhookTokenAsync(tokenValue, cancellationToken);
+        if (siteResult is null)
+        {
+            return Unauthorized(BuildError(
+                "UNAUTHORIZED.INVALID_WEBHOOK_TOKEN",
+                "No site configuration matches the provided Advatec webhook token."));
+        }
+
+        var (siteConfig, _) = siteResult.Value;
+
+        // ── Read raw JSON body ────────────────────────────────────────────────
+        using var reader = new StreamReader(Request.Body, leaveOpen: true);
+        var rawJson = await reader.ReadToEndAsync(cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(rawJson))
+        {
+            // Return 200 to avoid potential retries for empty payloads
+            return Ok(new { status = "IGNORED", reason = "Empty payload" });
+        }
+
+        // ── Feed into standard ingest pipeline ────────────────────────────────
+        var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
+
+        var command = new IngestTransactionCommand
+        {
+            FccVendor = FccVendor.ADVATEC,
+            SiteCode = siteConfig.SiteCode,
+            CapturedAt = DateTimeOffset.UtcNow,
+            RawPayload = rawJson,
+            ContentType = "application/json",
+            CorrelationId = correlationId
+        };
+
+        var result = await _mediator.Send(command, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            _metrics.RecordIngestionFailure(
+                "advatec-webhook", result.Error!.Code, siteConfig.SiteCode, "ADVATEC");
+
+            _logger.LogWarning(
+                "Advatec webhook ingestion failed for site {SiteCode}: {ErrorCode} — {Message}",
+                siteConfig.SiteCode, result.Error.Code, result.Error.Message);
+
+            // Return 200 anyway — webhook best practice: don't trigger retries for validation errors
+            return Ok(new { status = "REJECTED", errorCode = result.Error.Code });
+        }
+
+        if (result.Value!.IsDuplicate)
+        {
+            return Ok(new { status = "DUPLICATE" });
+        }
+
+        _metrics.RecordIngestionSuccess("advatec-webhook", siteConfig.SiteCode, "ADVATEC");
 
         return Ok(new
         {

@@ -18,10 +18,15 @@
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   }
 
-  &__logo-text {
-    font-size: 1.125rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
+  &__logo-img {
+    height: 28px;
+    display: block;
+  }
+
+  &__logo-subtitle {
+    font-size: 11px;
+    opacity: 0.6;
+    margin-top: 6px;
   }
 
   &__nav {
@@ -49,7 +54,7 @@
     }
 
     &--active {
-      background: var(--p-primary-500, #6366f1);
+      background: var(--p-primary-500, #E30613);
       color: #fff;
     }
   }
@@ -93,7 +98,7 @@
     width: 32px;
     height: 32px;
     font-size: 0.875rem;
-    background: var(--p-primary-500, #6366f1);
+    background: var(--p-primary-500, #E30613);
   }
 
   &__user-info {

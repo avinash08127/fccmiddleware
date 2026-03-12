@@ -113,6 +113,21 @@ public sealed record SiteFccConfig
 
     /// <summary>Petronite: OAuth2 token endpoint URL.</summary>
     public string? OAuthTokenEndpoint { get; init; }
+
+    // ── Advatec EFD fields ──────────────────────────────────────────────────
+
+    /// <summary>Advatec: Device HTTP port (default 5560).</summary>
+    public int? AdvatecDevicePort { get; init; }
+
+    /// <summary>Advatec: Shared token for webhook URL authentication.</summary>
+    [Sensitive]
+    public string? AdvatecWebhookToken { get; init; }
+
+    /// <summary>Advatec: TRA-registered EFD serial number for validation (e.g., "10TZ101807").</summary>
+    public string? AdvatecEfdSerialNumber { get; init; }
+
+    /// <summary>Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL).</summary>
+    public int? AdvatecCustIdType { get; init; }
 }
 
 /// <summary>Radix pump addressing: maps to the (PUMP_ADDR, FP) pair in the Radix protocol.</summary>

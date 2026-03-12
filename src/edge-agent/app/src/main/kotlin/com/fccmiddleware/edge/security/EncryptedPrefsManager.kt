@@ -2,9 +2,9 @@ package com.fccmiddleware.edge.security
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKeys
+import androidx.security.crypto.MasterKey
 
 /**
  * EncryptedPrefsManager — wraps EncryptedSharedPreferences for secure storage
@@ -43,17 +43,20 @@ class EncryptedPrefsManager(context: Context) {
         const val KEY_REFRESH_TOKEN_ENCRYPTED = "refresh_token_enc"
         const val KEY_RUNTIME_CERTIFICATE_PINS = "runtime_certificate_pins"
         const val KEY_REPROVISIONING_REQUIRED = "reprovisioning_required"
+        const val KEY_ENVIRONMENT = "environment"
     }
 
     // No fallback to regular SharedPreferences — storing sensitive identity data
     // (device tokens, site binding) unencrypted is a security violation.
     // If EncryptedSharedPreferences fails, the agent cannot operate safely.
     private val prefs: SharedPreferences = run {
-        val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
         EncryptedSharedPreferences.create(
-            PREFS_FILE,
-            masterKeyAlias,
             context,
+            PREFS_FILE,
+            masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
@@ -103,11 +106,28 @@ class EncryptedPrefsManager(context: Context) {
      * True if the refresh token has expired and the device needs re-provisioning.
      * Uses commit() (synchronous) for the same crash-safety reasons as [isDecommissioned].
      */
+    /** Cloud environment key (e.g. "PRODUCTION", "STAGING"). Null for v1 QR / legacy registrations. */
+    var environment: String?
+        get() = prefs.getString(KEY_ENVIRONMENT, null)
+        set(value) = prefs.edit().putString(KEY_ENVIRONMENT, value).apply()
+
     var isReprovisioningRequired: Boolean
         get() = prefs.getBoolean(KEY_REPROVISIONING_REQUIRED, false)
         set(value) {
             prefs.edit().putBoolean(KEY_REPROVISIONING_REQUIRED, value).commit()
         }
+
+    /**
+     * M-03: Atomically set isReprovisioningRequired=true and isRegistered=false
+     * in a single synchronous commit(). Prevents partial state if the process
+     * is killed between two separate writes.
+     */
+    fun setReprovisioningAndUnregister() {
+        prefs.edit()
+            .putBoolean(KEY_REPROVISIONING_REQUIRED, true)
+            .putBoolean(KEY_IS_REGISTERED, false)
+            .commit()
+    }
 
     // ---- Encrypted token blobs (Keystore-encrypted, stored as Base64) ----
 
@@ -135,6 +155,7 @@ class EncryptedPrefsManager(context: Context) {
         siteCode: String,
         legalEntityId: String,
         cloudBaseUrl: String,
+        environment: String? = null,
     ) {
         // Use commit() (synchronous) instead of apply() (async) to ensure registration
         // data is durably persisted before the foreground service starts. An async apply()
@@ -144,11 +165,12 @@ class EncryptedPrefsManager(context: Context) {
             .putString(KEY_SITE_CODE, siteCode)
             .putString(KEY_LEGAL_ENTITY_ID, legalEntityId)
             .putString(KEY_CLOUD_BASE_URL, cloudBaseUrl)
+            .putString(KEY_ENVIRONMENT, environment)
             .putBoolean(KEY_IS_REGISTERED, true)
             .putBoolean(KEY_IS_DECOMMISSIONED, false)
             .putBoolean(KEY_REPROVISIONING_REQUIRED, false)
             .commit()
-        Log.i(TAG, "Registration data saved for site=$siteCode")
+        AppLogger.i(TAG, "Registration data saved for site=$siteCode env=${environment ?: "none"}")
     }
 
     // ---- Runtime certificate pins (from SiteConfig) ----
@@ -177,6 +199,6 @@ class EncryptedPrefsManager(context: Context) {
      */
     fun clearAll() {
         prefs.edit().clear().apply()
-        Log.i(TAG, "All encrypted prefs cleared")
+        AppLogger.i(TAG, "All encrypted prefs cleared")
     }
 }

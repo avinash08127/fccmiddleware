@@ -16,7 +16,10 @@ public sealed partial class ProvisioningWindow : Window
     private readonly IDeviceRegistrationService? _registrationService;
     private readonly IRegistrationManager? _registrationManager;
     private readonly IConfigManager? _configManager;
+    private readonly IHttpClientFactory? _httpClientFactory;
     private readonly ILogger<ProvisioningWindow>? _logger;
+
+    private static readonly List<string> EnvDisplayItems = BuildEnvDisplayItems();
 
     private int _currentStep = 1;
     private bool _isCodeMethod = true;
@@ -25,7 +28,14 @@ public sealed partial class ProvisioningWindow : Window
     private string _resolvedFccHost = string.Empty;
     private int _resolvedFccPort;
     private string _resolvedDeviceId = string.Empty;
+    private string _resolvedEnvironment = string.Empty;
     private string _apiKey = string.Empty;
+
+    // M-05: Named reference for the "Continue Anyway" handler so it can be properly removed.
+    private EventHandler<RoutedEventArgs>? _continueAnywayHandler;
+
+    // M-08: Cancellation source for in-flight registration calls so users can go back.
+    private CancellationTokenSource? _registrationCts;
 
     /// <summary>Raised after a successful registration. App.axaml.cs listens to trigger host start + MainWindow.</summary>
     public event EventHandler? RegistrationCompleted;
@@ -38,7 +48,14 @@ public sealed partial class ProvisioningWindow : Window
         _registrationService = services?.GetService<IDeviceRegistrationService>();
         _registrationManager = services?.GetService<IRegistrationManager>();
         _configManager = services?.GetService<IConfigManager>();
+        _httpClientFactory = services?.GetService<IHttpClientFactory>();
         _logger = services?.GetService<ILogger<ProvisioningWindow>>();
+
+        // Populate environment combo boxes
+        EnvComboBox.ItemsSource = EnvDisplayItems;
+        EnvComboBox.SelectedIndex = 0;
+        ManualEnvComboBox.ItemsSource = EnvDisplayItems;
+        ManualEnvComboBox.SelectedIndex = 0;
     }
 
     // ── Step Navigation ─────────────────────────────────────────────────────
@@ -159,6 +176,7 @@ public sealed partial class ProvisioningWindow : Window
         var cloudUrl = CloudUrlBox.Text?.Trim();
         var siteCode = SiteCodeBox.Text?.Trim();
         var token = TokenBox.Text?.Trim();
+        var selectedEnv = GetEnvironmentKey(EnvComboBox.SelectedIndex);
 
         if (string.IsNullOrWhiteSpace(cloudUrl))
         {
@@ -186,6 +204,11 @@ public sealed partial class ProvisioningWindow : Window
         NextButton.Content = "Registering...";
         ShowRegStatus("Contacting cloud server...", isError: false);
 
+        // M-08: 30-second timeout prevents indefinite UI freeze on unresponsive servers.
+        _registrationCts?.Cancel();
+        _registrationCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var ct = _registrationCts.Token;
+
         try
         {
             var request = DeviceInfoProvider.BuildRequest(
@@ -193,7 +216,7 @@ public sealed partial class ProvisioningWindow : Window
                 siteCode: siteCode,
                 replacePreviousAgent: ReplaceCheck.IsChecked == true);
 
-            var result = await _registrationService.RegisterAsync(cloudUrl, request);
+            var result = await _registrationService.RegisterAsync(cloudUrl, request, ct);
 
             switch (result)
             {
@@ -204,6 +227,15 @@ public sealed partial class ProvisioningWindow : Window
                     _resolvedCloudUrl = cloudUrl;
                     _resolvedSiteCode = siteCode;
                     _resolvedDeviceId = success.Response.DeviceId;
+                    _resolvedEnvironment = selectedEnv ?? string.Empty;
+
+                    // Patch environment into persisted registration state
+                    if (selectedEnv is not null && _registrationManager is not null)
+                    {
+                        var state = _registrationManager.LoadState();
+                        state.Environment = selectedEnv;
+                        await _registrationManager.SaveStateAsync(state);
+                    }
 
                     // Extract FCC details from bootstrap config
                     var siteConfig = success.Response.SiteConfig;
@@ -211,6 +243,13 @@ public sealed partial class ProvisioningWindow : Window
                     {
                         _resolvedFccHost = siteConfig.Fcc.HostAddress ?? string.Empty;
                         _resolvedFccPort = siteConfig.Fcc.Port ?? 8080;
+                    }
+
+                    // M-09: Sync equipment data so local API has pump/nozzle info immediately
+                    if (siteConfig is not null && _registrationManager is not null)
+                    {
+                        try { _registrationManager.SyncSiteData(siteConfig); }
+                        catch (Exception ex) { _logger?.LogWarning(ex, "Site data sync failed — will populate on first config poll"); }
                     }
 
                     GoToStep(3);
@@ -232,6 +271,13 @@ public sealed partial class ProvisioningWindow : Window
                     break;
             }
         }
+        catch (OperationCanceledException)
+        {
+            ShowRegStatus("Registration timed out. Check connectivity and try again.", isError: true);
+            NextButton.IsEnabled = true;
+            BackButton.IsEnabled = true;
+            NextButton.Content = "Register";
+        }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Unexpected error during registration");
@@ -249,6 +295,7 @@ public sealed partial class ProvisioningWindow : Window
         var fccHost = ManualFccHostBox.Text?.Trim();
         var fccPortText = ManualFccPortBox.Text?.Trim();
         var manualToken = ManualTokenBox.Text?.Trim();
+        var selectedEnv = GetEnvironmentKey(ManualEnvComboBox.SelectedIndex);
 
         if (string.IsNullOrWhiteSpace(cloudUrl))
         {
@@ -283,6 +330,7 @@ public sealed partial class ProvisioningWindow : Window
         _resolvedSiteCode = siteCode;
         _resolvedFccHost = fccHost;
         _resolvedFccPort = fccPort;
+        _resolvedEnvironment = selectedEnv ?? string.Empty;
 
         // If a provisioning token was provided, perform cloud registration
         // instead of generating a local-only device ID.
@@ -317,6 +365,11 @@ public sealed partial class ProvisioningWindow : Window
         NextButton.Content = "Registering...";
         ShowManualStatus("Contacting cloud server...", isError: false);
 
+        // M-08: 30-second timeout for manual-token registration path
+        _registrationCts?.Cancel();
+        _registrationCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var ct = _registrationCts.Token;
+
         try
         {
             var request = DeviceInfoProvider.BuildRequest(
@@ -324,7 +377,7 @@ public sealed partial class ProvisioningWindow : Window
                 siteCode: siteCode,
                 replacePreviousAgent: false);
 
-            var result = await _registrationService.RegisterAsync(cloudUrl, request);
+            var result = await _registrationService.RegisterAsync(cloudUrl, request, ct);
 
             switch (result)
             {
@@ -348,6 +401,21 @@ public sealed partial class ProvisioningWindow : Window
                     // (DeviceRegistrationService.RegisterAsync already persisted state).
                     _isCodeMethod = true;
 
+                    // Patch environment into persisted registration state
+                    if (!string.IsNullOrEmpty(_resolvedEnvironment) && _registrationManager is not null)
+                    {
+                        var regState = _registrationManager.LoadState();
+                        regState.Environment = _resolvedEnvironment;
+                        await _registrationManager.SaveStateAsync(regState);
+                    }
+
+                    // M-09: Sync equipment data so local API has pump/nozzle info immediately
+                    if (siteConfig is not null && _registrationManager is not null)
+                    {
+                        try { _registrationManager.SyncSiteData(siteConfig); }
+                        catch (Exception ex) { _logger?.LogWarning(ex, "Site data sync failed — will populate on first config poll"); }
+                    }
+
                     GoToStep(3);
                     break;
 
@@ -366,6 +434,13 @@ public sealed partial class ProvisioningWindow : Window
                     NextButton.Content = "Next";
                     break;
             }
+        }
+        catch (OperationCanceledException)
+        {
+            ShowManualStatus("Registration timed out. Check connectivity and try again.", isError: true);
+            NextButton.IsEnabled = true;
+            BackButton.IsEnabled = true;
+            NextButton.Content = "Next";
         }
         catch (Exception ex)
         {
@@ -392,10 +467,13 @@ public sealed partial class ProvisioningWindow : Window
         bool cloudOk = false;
         bool fccOk = false;
 
-        // Test cloud connectivity
+        // M-06: Use the DI-registered "cloud" named client so the connection test
+        // respects certificate pinning. Falls back to a raw HttpClient if DI is unavailable.
         try
         {
-            using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            using var httpClient = _httpClientFactory?.CreateClient("cloud")
+                ?? new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
             var response = await httpClient.GetAsync($"{_resolvedCloudUrl.TrimEnd('/')}/health");
             cloudOk = response.IsSuccessStatusCode;
 
@@ -471,14 +549,22 @@ public sealed partial class ProvisioningWindow : Window
             NextButton.IsEnabled = true;
             BackButton.IsEnabled = true;
             NextButton.Content = "Continue Anyway";
+            // M-05: Remove the previous "Continue Anyway" handler (if any) and
+            // the permanent handler before attaching a new one-shot handler.
+            // The old code removed OnNextClicked inside the lambda (already detached)
+            // instead of the anonymous handler itself, causing handler accumulation.
             NextButton.Click -= OnNextClicked;
-            NextButton.Click += (_, _) =>
+            if (_continueAnywayHandler is not null)
+                NextButton.Click -= _continueAnywayHandler;
+            _continueAnywayHandler = (_, _) =>
             {
-                NextButton.Click -= OnNextClicked; // Clean up temp handler
+                NextButton.Click -= _continueAnywayHandler;
                 NextButton.Click += OnNextClicked;
+                _continueAnywayHandler = null;
                 PopulateSuccessSummary();
                 GoToStep(4);
             };
+            NextButton.Click += _continueAnywayHandler;
         }
         else
         {
@@ -571,7 +657,11 @@ public sealed partial class ProvisioningWindow : Window
                     IsRegistered = true,
                     DeviceId = _resolvedDeviceId,
                     SiteCode = _resolvedSiteCode,
+                    // L-02: Explicitly set LegalEntityId (empty for offline manual config;
+                    // will be populated on first cloud config poll).
+                    LegalEntityId = string.Empty,
                     CloudBaseUrl = _resolvedCloudUrl,
+                    Environment = string.IsNullOrEmpty(_resolvedEnvironment) ? null : _resolvedEnvironment,
                     RegisteredAt = DateTimeOffset.UtcNow,
                     DeviceModel = Environment.MachineName,
                     OsVersion = Environment.OSVersion.VersionString,
@@ -613,6 +703,52 @@ public sealed partial class ProvisioningWindow : Window
             _logger?.LogError(ex, "Failed to start agent host");
             NextButton.IsEnabled = true;
             NextButton.Content = "Retry Launch";
+        }
+    }
+
+    // ── Environment Combo Box ────────────────────────────────────────────────
+
+    private static List<string> BuildEnvDisplayItems()
+    {
+        var items = CloudEnvironments.DisplayNames.ToList();
+        items.Add("Custom (enter URL)");
+        return items;
+    }
+
+    /// <summary>
+    /// Resolves the environment key from the selected combo box index.
+    /// Returns <c>null</c> for the "Custom" option.
+    /// </summary>
+    private static string? GetEnvironmentKey(int selectedIndex)
+    {
+        if (selectedIndex < 0 || selectedIndex >= CloudEnvironments.Keys.Count)
+            return null;
+        return CloudEnvironments.Keys[selectedIndex];
+    }
+
+    private void OnEnvSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        ApplyEnvSelection(EnvComboBox.SelectedIndex, CloudUrlBox);
+    }
+
+    private void OnManualEnvSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        ApplyEnvSelection(ManualEnvComboBox.SelectedIndex, ManualCloudUrlBox);
+    }
+
+    private static void ApplyEnvSelection(int selectedIndex, TextBox urlBox)
+    {
+        var envKey = GetEnvironmentKey(selectedIndex);
+        var resolved = envKey is not null ? CloudEnvironments.Resolve(envKey) : null;
+
+        if (resolved is not null)
+        {
+            urlBox.Text = resolved;
+            urlBox.IsReadOnly = true;
+        }
+        else
+        {
+            urlBox.IsReadOnly = false;
         }
     }
 

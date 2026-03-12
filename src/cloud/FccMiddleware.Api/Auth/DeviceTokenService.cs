@@ -28,7 +28,22 @@ public sealed class DeviceTokenService : IDeviceTokenService
         var issuer = jwtSection["Issuer"] ?? DeviceJwtOptions.DefaultIssuer;
         var audience = jwtSection["Audience"] ?? DeviceJwtOptions.DefaultAudience;
 
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey));
+        if (string.IsNullOrWhiteSpace(signingKey))
+        {
+            throw new InvalidOperationException(
+                "DeviceJwt:SigningKey is not configured. Cannot generate device tokens without a signing key. " +
+                "Ensure the signing key is provisioned via environment variables or a secrets manager.");
+        }
+
+        var keyBytes = Encoding.UTF8.GetBytes(signingKey);
+        if (keyBytes.Length < 32)
+        {
+            throw new InvalidOperationException(
+                $"DeviceJwt:SigningKey is too short ({keyBytes.Length} bytes). " +
+                "HMAC-SHA256 requires a key of at least 256 bits (32 bytes).");
+        }
+
+        var key = new SymmetricSecurityKey(keyBytes);
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
         var now = DateTimeOffset.UtcNow;

@@ -14,7 +14,7 @@ import { TagModule } from 'primeng/tag';
 import { TableModule } from 'primeng/table';
 import { SkeletonModule } from 'primeng/skeleton';
 
-import { AgentService } from '../../core/services/agent.service';
+import { AgentService, DiagnosticLogBatch } from '../../core/services/agent.service';
 import {
   AgentAuditEvent,
   AgentRegistration,
@@ -125,6 +125,10 @@ interface TimelineEvent {
               <p class="page-subtitle">
                 Device: <code>{{ registration()!.deviceId }}</code>
                 &nbsp;&bull;&nbsp; Registered {{ registration()!.registeredAt | utcDate:'mediumDate' }}
+                @if (registration()!.environment) {
+                  &nbsp;&bull;&nbsp;
+                  <span class="env-badge">{{ registration()!.environment }}</span>
+                }
               </p>
             }
           </div>
@@ -191,6 +195,12 @@ interface TimelineEvent {
               <span class="stat-label">Device Model</span>
               <span>{{ telemetry()!.device.deviceModel }}</span>
             </div>
+            @if (registration()?.environment) {
+              <div class="stat-row">
+                <span class="stat-label">Environment</span>
+                <span class="env-badge">{{ registration()!.environment }}</span>
+              </div>
+            }
           </p-card>
 
           <!-- FCC Connection Card -->
@@ -402,11 +412,55 @@ interface TimelineEvent {
             </p-table>
           }
         </p-card>
+
+        <!-- ── Diagnostic Logs (from remote upload) ─── -->
+        <p-card header="Diagnostic Logs (Remote)" styleClass="diag-logs-card">
+          @if (diagnosticLogs().length === 0) {
+            <app-empty-state
+              icon="pi-file"
+              title="No diagnostic logs"
+              description="No diagnostic log batches uploaded from this device. Enable includeDiagnosticsLogs in config."
+            />
+          } @else {
+            @for (batch of diagnosticLogs(); track batch.id) {
+              <div class="diag-batch">
+                <div class="diag-batch-header">
+                  <strong>Batch {{ batch.id | slice:0:8 }}</strong>
+                  <span class="text-muted"> uploaded {{ batch.uploadedAtUtc | utcDate:'short' }}</span>
+                  <span class="text-muted"> ({{ batch.logEntries.length }} entries)</span>
+                </div>
+                <pre class="diag-log-entries">{{ batch.logEntries.join('\n') }}</pre>
+              </div>
+            }
+          }
+          <p-button
+            label="Refresh Logs"
+            icon="pi pi-refresh"
+            severity="secondary"
+            [text]="true"
+            (onClick)="loadDiagnosticLogs()"
+          />
+        </p-card>
       }
     </div>
   `,
   styles: [`
     :host { display: block; padding: 1.5rem; }
+
+    .diag-batch { margin-bottom: 1rem; }
+    .diag-batch-header { margin-bottom: 0.25rem; font-size: 0.85rem; }
+    .diag-log-entries {
+      background: #f8f9fa;
+      border: 1px solid #e9ecef;
+      border-radius: 4px;
+      padding: 0.5rem;
+      font-size: 0.72rem;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .text-muted { color: var(--p-text-muted-color, #64748b); }
 
     .page-header {
       display: flex;
@@ -577,6 +631,17 @@ interface TimelineEvent {
     }
 
     /* ── Utilities ──────────────────────────── */
+    .env-badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: var(--p-surface-100, #f1f5f9);
+      color: var(--p-text-muted-color, #475569);
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+    }
     code { font-family: monospace; font-size: 0.78rem; }
     .text-success { color: #16a34a; display: inline-flex; align-items: center; gap: 0.25rem; }
     .text-danger  { color: #dc2626; display: inline-flex; align-items: center; gap: 0.25rem; }
@@ -595,6 +660,7 @@ export class AgentDetailComponent implements OnInit {
   readonly registration  = signal<AgentRegistration | null>(null);
   readonly telemetry     = signal<AgentTelemetry | null>(null);
   readonly events        = signal<AgentAuditEvent[]>([]);
+  readonly diagnosticLogs = signal<DiagnosticLogBatch[]>([]);
   readonly loading       = signal(true);
   readonly error         = signal(false);
 
@@ -645,6 +711,7 @@ export class AgentDetailComponent implements OnInit {
         this.telemetry.set(data.telemetry);
         this.events.set(data.events);
         this.loading.set(false);
+        this.loadDiagnosticLogs();
       });
 
     // Initial load + auto-refresh every 30 seconds
@@ -660,6 +727,14 @@ export class AgentDetailComponent implements OnInit {
 
   goBack(): void {
     this.router.navigate(['/agents']);
+  }
+
+  loadDiagnosticLogs(): void {
+    this.agentService.getAgentDiagnosticLogs(this.agentId)
+      .pipe(catchError(() => EMPTY))
+      .subscribe((response) => {
+        this.diagnosticLogs.set(response.batches);
+      });
   }
 
   // ── Template helpers ─────────────────────────────────────────────────────

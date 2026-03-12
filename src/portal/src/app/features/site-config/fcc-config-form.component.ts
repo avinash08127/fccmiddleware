@@ -42,6 +42,11 @@ export type FccConfigDraft = Pick<
   | 'clientSecret'
   | 'webhookSecret'
   | 'oauthTokenEndpoint'
+  | 'advatecDevicePort'
+  | 'advatecWebhookListenerPort'
+  | 'advatecWebhookToken'
+  | 'advatecEfdSerialNumber'
+  | 'advatecCustIdType'
 >;
 
 @Component({
@@ -380,6 +385,71 @@ export type FccConfigDraft = Pick<
             </div>
           </div>
         }
+
+        <!-- ── Advatec vendor-specific fields ───────────────────────────── -->
+        @if (draft.vendor === 'ADVATEC') {
+          <div class="vendor-section">
+            <h4 class="vendor-section-title">Advatec TRA Fiscal Device Configuration</h4>
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="fcc-advatec-device-port">Device Port</label>
+                <p-inputnumber
+                  inputId="fcc-advatec-device-port"
+                  [(ngModel)]="draft.advatecDevicePort"
+                  [min]="1" [max]="65535"
+                  [showButtons]="false" [useGrouping]="false"
+                  placeholder="5560"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label for="fcc-advatec-webhook-port">Webhook Listener Port</label>
+                <p-inputnumber
+                  inputId="fcc-advatec-webhook-port"
+                  [(ngModel)]="draft.advatecWebhookListenerPort"
+                  [min]="1" [max]="65535"
+                  [showButtons]="false" [useGrouping]="false"
+                  placeholder="8091"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label for="fcc-advatec-webhook-token">Webhook Token</label>
+                <input pInputText type="password"
+                  id="fcc-advatec-webhook-token"
+                  [(ngModel)]="draft.advatecWebhookToken"
+                  placeholder="Shared token for webhook auth"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label for="fcc-advatec-efd-serial">EFD Serial Number</label>
+                <input pInputText
+                  id="fcc-advatec-efd-serial"
+                  [(ngModel)]="draft.advatecEfdSerialNumber"
+                  placeholder="e.g. 10TZ101807"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label for="fcc-advatec-cust-id-type">Default CustIdType</label>
+                <p-inputnumber
+                  inputId="fcc-advatec-cust-id-type"
+                  [(ngModel)]="draft.advatecCustIdType"
+                  [min]="1" [max]="7"
+                  [showButtons]="false" [useGrouping]="false"
+                  placeholder="1 (TIN)"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+            </div>
+          </div>
+        }
       }
     </p-card>
   `,
@@ -529,6 +599,12 @@ export class FccConfigFormComponent implements OnChanges {
         clientSecret: this.fccConfig.clientSecret,
         webhookSecret: this.fccConfig.webhookSecret,
         oauthTokenEndpoint: this.fccConfig.oauthTokenEndpoint,
+        // Advatec fields
+        advatecDevicePort: this.fccConfig.advatecDevicePort,
+        advatecWebhookListenerPort: this.fccConfig.advatecWebhookListenerPort,
+        advatecWebhookToken: this.fccConfig.advatecWebhookToken,
+        advatecEfdSerialNumber: this.fccConfig.advatecEfdSerialNumber,
+        advatecCustIdType: this.fccConfig.advatecCustIdType,
       };
     }
   }

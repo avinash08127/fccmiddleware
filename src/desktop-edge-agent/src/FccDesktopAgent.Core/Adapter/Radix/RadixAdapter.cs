@@ -40,19 +40,38 @@ public sealed class RadixAdapter : IFccAdapter
 
     // ── Internal state ──────────────────────────────────────────────────────
 
-    /// <summary>Sequential token counter (0-65535), wraps at 65536. Thread-safe via Interlocked.</summary>
-    private int _tokenCounter;
+    /// <summary>Sequential token counter (1-65535), wraps at 65536. Thread-safe via Interlocked. Starts at 1 because TOKEN=0 means "Normal Order" (no pre-auth) in the Radix protocol.</summary>
+    private int _tokenCounter = 1;
 
     /// <summary>
     /// Cached current FCC transaction transfer mode.
     ///   -1 = unknown (not yet set or reset after connectivity loss)
-    ///    0 = ON_DEMAND (pull mode)
-    ///    1 = UNSOLICITED (push mode)
+    ///    0 = OFF (transaction transfer disabled)
+    ///    1 = ON_DEMAND (pull mode)
+    ///    2 = UNSOLICITED (push mode)
     /// </summary>
     private volatile int _currentMode = ModeUnknown;
 
     /// <summary>Active pre-auth entries keyed by TOKEN for later transaction correlation.</summary>
     private readonly ConcurrentDictionary<int, ActivePreAuth> _activePreAuths = new();
+
+    /// <summary>
+    /// Purges pre-auth entries older than <see cref="PreAuthTtl"/> to prevent memory leaks.
+    /// Called during each fetch cycle. Entries can become stale when the FCC goes offline,
+    /// the customer walks away, or a dispense never occurs.
+    /// </summary>
+    private void PurgeStalePreAuths()
+    {
+        var cutoff = DateTimeOffset.UtcNow - PreAuthTtl;
+        foreach (var kvp in _activePreAuths)
+        {
+            if (kvp.Value.CreatedAt < cutoff)
+            {
+                if (_activePreAuths.TryRemove(kvp.Key, out _))
+                    _logger.LogDebug("Purged stale pre-auth: token={Token}, age > {TtlMinutes}m", kvp.Key, PreAuthTtl.TotalMinutes);
+            }
+        }
+    }
 
     // ── Pump address maps (lazy-parsed from config JSON) ────────────────────
 
@@ -174,6 +193,8 @@ public sealed class RadixAdapter : IFccAdapter
     /// </remarks>
     public async Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken ct)
     {
+        PurgeStalePreAuths();
+
         var limit = Math.Clamp(cursor.MaxCount, 1, MaxFetchLimit);
         var records = new List<RawPayloadEnvelope>();
 
@@ -383,6 +404,12 @@ public sealed class RadixAdapter : IFccAdapter
             throw new InvalidOperationException($"Invalid amount value: '{trn.Amo}'");
         }
         var amountMinorUnits = (long)Math.Round(amoDecimal * CurrencyDecimalFactor, 0, MidpointRounding.AwayFromZero);
+
+        if (volumeMicrolitres < 0)
+            throw new InvalidOperationException($"Volume must not be negative: '{trn.Vol}'");
+
+        if (amountMinorUnits < 0)
+            throw new InvalidOperationException($"Amount must not be negative: '{trn.Amo}'");
 
         // --- Unit price: decimal string -> minor units per litre via decimal ---
         long unitPriceMinorPerLitre = 0;
@@ -902,7 +929,7 @@ public sealed class RadixAdapter : IFccAdapter
     // Private — Token counter
     // =====================================================================
 
-    /// <summary>Generates the next sequential token (0-65535), wrapping at 65536. Thread-safe.</summary>
+    /// <summary>Generates the next sequential token (1-65535), wrapping around and skipping 0. Thread-safe.</summary>
     private int NextToken()
     {
         // Interlocked compare-and-swap loop for thread-safe wrap-around
@@ -910,6 +937,7 @@ public sealed class RadixAdapter : IFccAdapter
         {
             var current = Volatile.Read(ref _tokenCounter);
             var next = (current + 1) % TokenWrap;
+            if (next == 0) next = 1; // Skip 0 — TOKEN=0 means "Normal Order" (no pre-auth)
             if (Interlocked.CompareExchange(ref _tokenCounter, next, current) == current)
                 return current;
         }
@@ -1057,7 +1085,7 @@ public sealed class RadixAdapter : IFccAdapter
             var localStr = $"{fdcDate}T{fdcTime}";
             var localDateTime = DateTime.Parse(localStr, System.Globalization.CultureInfo.InvariantCulture);
 
-            var tz = TimeZoneInfo.FindSystemTimeZoneById(_timezone);
+            var tz = ResolveTimeZone(_timezone);
             var utcOffset = tz.GetUtcOffset(localDateTime);
             var dto = new DateTimeOffset(localDateTime, utcOffset);
             var utcDto = dto.ToUniversalTime();
@@ -1070,6 +1098,27 @@ public sealed class RadixAdapter : IFccAdapter
                 fdcDate, fdcTime, ex.Message);
             var now = DateTimeOffset.UtcNow;
             return (now, now);
+        }
+    }
+
+    /// <summary>
+    /// Resolves a TimeZoneInfo from an IANA or Windows timezone ID.
+    /// On Windows without ICU, FindSystemTimeZoneById may not recognize IANA IDs
+    /// (e.g. "Africa/Dar_es_Salaam"). This method falls back to converting the
+    /// IANA ID to a Windows ID via TryConvertIanaIdToWindowsId.
+    /// </summary>
+    private static TimeZoneInfo ResolveTimeZone(string timezoneId)
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById(timezoneId);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            // IANA ID not recognized — try converting to Windows ID
+            if (TimeZoneInfo.TryConvertIanaIdToWindowsId(timezoneId, out var windowsId))
+                return TimeZoneInfo.FindSystemTimeZoneById(windowsId);
+            throw;
         }
     }
 
@@ -1174,6 +1223,9 @@ public sealed class RadixAdapter : IFccAdapter
     /// <summary>Hard timeout for pre-auth requests (10 seconds).</summary>
     public static readonly TimeSpan PreAuthTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>TTL for pre-auth entries: entries older than this are purged to prevent memory leaks.</summary>
+    public static readonly TimeSpan PreAuthTtl = TimeSpan.FromMinutes(30);
+
     /// <summary>Maximum number of transactions to fetch in a single batch.</summary>
     public const int MaxFetchLimit = 200;
 
@@ -1214,8 +1266,8 @@ public sealed class RadixAdapter : IFccAdapter
     /// <summary>Mode not yet known or reset after connectivity loss.</summary>
     public const int ModeUnknown = -1;
 
-    /// <summary>ON_DEMAND (pull) mode — host requests transactions.</summary>
-    public const int ModeOnDemand = 0;
+    /// <summary>ON_DEMAND (pull) mode — host requests transactions. Radix protocol MODE=1.</summary>
+    public const int ModeOnDemand = 1;
 
     /// <summary>UNSOLICITED (push) mode — FDC posts transactions to the listener.</summary>
     public const int ModeUnsolicited = 2;

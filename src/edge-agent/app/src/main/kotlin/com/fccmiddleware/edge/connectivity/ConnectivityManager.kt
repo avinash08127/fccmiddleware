@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.connectivity
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.buffer.dao.AuditLogDao
 import com.fccmiddleware.edge.buffer.entity.AuditLog
@@ -32,7 +32,12 @@ import kotlin.random.Random
  * Notifies [ConnectivityTransitionListener] for worker side-effect triggers.
  *
  * Architecture rule: probes are injectable lambdas for testability — the caller
- * wires the real HTTP and FCC adapter calls.
+ * wires the real HTTP and FCC adapter calls. Network binding (WiFi for FCC,
+ * mobile/cloud for internet) is applied at the probe lambda level, not inside
+ * this class, so unit tests can supply simple stubs without Android dependencies.
+ *
+ * When [networkBinder] is provided, each probe loop logs which physical network
+ * it is running over (WiFi vs mobile) for diagnostics.
  */
 class ConnectivityManager(
     /** suspend () -> Boolean: true = internet reachable; wraps HTTP GET /health with 5s timeout */
@@ -43,6 +48,8 @@ class ConnectivityManager(
     private val listener: ConnectivityTransitionListener? = null,
     private val scope: CoroutineScope,
     val config: ProbeConfig = ProbeConfig(),
+    /** Optional — used only for logging which physical network each probe runs over. */
+    private val networkBinder: NetworkBinder? = null,
 ) {
     data class ProbeConfig(
         val probeIntervalMs: Long = 30_000L,
@@ -89,12 +96,12 @@ class ConnectivityManager(
             launch { runInternetProbeLoop() }
             launch { runFccProbeLoop() }
         }
-        Log.i(TAG, "ConnectivityManager started (initial state = FULLY_OFFLINE)")
+        AppLogger.i(TAG, "ConnectivityManager started (initial state = FULLY_OFFLINE)")
     }
 
     fun stop() {
         probeJobs?.cancel()
-        Log.i(TAG, "ConnectivityManager stopped")
+        AppLogger.i(TAG, "ConnectivityManager stopped")
     }
 
     // -------------------------------------------------------------------------
@@ -103,6 +110,7 @@ class ConnectivityManager(
 
     private suspend fun runInternetProbeLoop() {
         while (currentCoroutineContext().isActive) {
+            logProbeNetwork(isInternet = true)
             val success = runProbeWithTimeout { internetProbe() }
             lastInternetProbeMs = System.currentTimeMillis()
             processProbeResult(isInternet = true, success = success)
@@ -116,6 +124,7 @@ class ConnectivityManager(
 
     private suspend fun runFccProbeLoop() {
         while (currentCoroutineContext().isActive) {
+            logProbeNetwork(isInternet = false)
             val success = runProbeWithTimeout { fccProbe() }
             lastFccProbeMs = System.currentTimeMillis()
             if (success) lastFccSuccessMs = System.currentTimeMillis()
@@ -187,7 +196,7 @@ class ConnectivityManager(
         if (newState == prevState) return
 
         _state.value = newState
-        Log.i(TAG, "State transition: $prevState → $newState")
+        AppLogger.i(TAG, "State transition: $prevState → $newState")
 
         // Write audit log — suspend OK here (called from probe coroutine, not UI)
         val now = Instant.now().toString()
@@ -201,7 +210,7 @@ class ConnectivityManager(
                 )
             )
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to write connectivity audit log: ${e.message}")
+            AppLogger.w(TAG, "Failed to write connectivity audit log: ${e.message}")
         }
 
         listener?.onTransition(prevState, newState)
@@ -225,11 +234,43 @@ class ConnectivityManager(
     // Helpers
     // -------------------------------------------------------------------------
 
+    /**
+     * Log which physical network a probe will use. Debug-level to avoid log spam
+     * on every 30s tick; promoted to info on first probe or when the network changes.
+     */
+    private var lastInternetNetworkId: String? = null
+    private var lastFccNetworkId: String? = null
+
+    private fun logProbeNetwork(isInternet: Boolean) {
+        val binder = networkBinder ?: return
+        if (isInternet) {
+            val network = binder.cloudNetwork.value
+            val id = network?.toString() ?: "default-routing"
+            val source = when {
+                network == null -> "no bound network"
+                network == binder.mobileNetwork.value -> "mobile"
+                network == binder.wifiNetwork.value -> "WiFi (mobile unavailable)"
+                else -> "unknown"
+            }
+            if (id != lastInternetNetworkId) {
+                AppLogger.i(TAG, "Internet probe network: $source [$id]")
+                lastInternetNetworkId = id
+            }
+        } else {
+            val network = binder.wifiNetwork.value
+            val id = network?.toString() ?: "default-routing"
+            if (id != lastFccNetworkId) {
+                AppLogger.i(TAG, "FCC probe network: ${if (network != null) "WiFi" else "no WiFi"} [$id]")
+                lastFccNetworkId = id
+            }
+        }
+    }
+
     private suspend fun runProbeWithTimeout(probe: suspend () -> Boolean): Boolean {
         return try {
             withTimeoutOrNull(config.probeTimeoutMs) { probe() } ?: false
         } catch (e: Exception) {
-            Log.d(TAG, "Probe exception: ${e.javaClass.simpleName}: ${e.message}")
+            AppLogger.d(TAG, "Probe exception: ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }

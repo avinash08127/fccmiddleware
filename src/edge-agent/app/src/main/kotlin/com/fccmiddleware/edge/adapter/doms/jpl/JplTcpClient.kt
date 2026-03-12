@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.doms.jpl
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -31,6 +31,9 @@ class JplTcpClient(
     private val scope: CoroutineScope,
     private val connectTimeoutMs: Long = 10_000L,
     private val responseTimeoutMs: Long = 15_000L,
+    /** Optional callback invoked on the raw socket before connect().
+     *  Used by Android to bind the socket to a specific network (e.g. WiFi for FCC traffic). */
+    private val socketBinder: ((Socket) -> Unit)? = null,
 ) {
     companion object {
         private const val TAG = "JplTcpClient"
@@ -76,6 +79,18 @@ class JplTcpClient(
         disconnect() // Clean up any previous connection
 
         val sock = Socket()
+
+        // Bind socket to a specific network (e.g. WiFi) before connecting.
+        // Must happen before connect() per Android Network.bindSocket() contract.
+        if (socketBinder != null) {
+            try {
+                socketBinder.invoke(sock)
+                AppLogger.d(TAG, "Socket bound to designated network for FCC connection")
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Failed to bind FCC socket to network: ${e.message}")
+            }
+        }
+
         sock.connect(InetSocketAddress(host, port), connectTimeoutMs.toInt())
         sock.soTimeout = 0 // Non-blocking read loop uses coroutine cancellation
         sock.tcpNoDelay = true
@@ -86,7 +101,7 @@ class JplTcpClient(
         connected.set(true)
         lastReceivedAt.set(System.currentTimeMillis())
 
-        Log.i(TAG, "Connected to $host:$port")
+        AppLogger.i(TAG, "Connected to $host:$port")
 
         // Start read loop
         readLoopJob = scope.launch(Dispatchers.IO) { readLoop() }
@@ -182,7 +197,7 @@ class JplTcpClient(
                 }
 
                 if (bytesRead == -1) {
-                    Log.w(TAG, "TCP read returned -1 (EOF)")
+                    AppLogger.w(TAG, "TCP read returned -1 (EOF)")
                     break
                 }
 
@@ -194,11 +209,11 @@ class JplTcpClient(
         } catch (e: CancellationException) {
             throw e // Propagate cancellation
         } catch (e: Exception) {
-            Log.e(TAG, "Read loop error: ${e.message}")
+            AppLogger.e(TAG, "Read loop error: ${e.message}")
         }
 
         if (connected.getAndSet(false)) {
-            Log.w(TAG, "Connection lost")
+            AppLogger.w(TAG, "Connection lost")
             pendingResponses.values.forEach { it.completeExceptionally(java.io.IOException("Connection lost")) }
             pendingResponses.clear()
             onDisconnected?.invoke("TCP read loop ended")
@@ -234,7 +249,7 @@ class JplTcpClient(
                     return remaining // Wait for more data
                 }
                 is DecodeResult.Error -> {
-                    Log.w(TAG, "Frame decode error: ${result.message}")
+                    AppLogger.w(TAG, "Frame decode error: ${result.message}")
                     remaining = remaining.copyOfRange(
                         min(result.bytesConsumed.coerceAtLeast(1), remaining.size),
                         remaining.size
@@ -264,7 +279,7 @@ class JplTcpClient(
                 onUnsolicitedMessage?.invoke(message)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse JPL message: ${e.message}")
+            AppLogger.e(TAG, "Failed to parse JPL message: ${e.message}")
         }
     }
 }

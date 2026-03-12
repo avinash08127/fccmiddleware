@@ -1,7 +1,7 @@
 package com.fccmiddleware.edge.config
 
 import android.util.Base64
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
 import com.fccmiddleware.edge.buffer.entity.AgentConfig
 import com.fccmiddleware.edge.security.KeystoreManager
@@ -51,24 +51,24 @@ class ConfigManager(
     suspend fun loadFromLocal() {
         try {
             val stored = agentConfigDao.get() ?: run {
-                Log.i(TAG, "No stored config found — awaiting first cloud config push")
+                AppLogger.i(TAG, "No stored config found — awaiting first cloud config push")
                 return
             }
             // M-13: Decrypt config if KeystoreManager is available and data appears encrypted
             val configJsonPlain = decryptConfigJson(stored.configJson)
             if (configJsonPlain == null) {
-                Log.e(TAG, "Config integrity check failed — stored config may be tampered. Awaiting fresh config from cloud.")
+                AppLogger.e(TAG, "Config integrity check failed — stored config may be tampered. Awaiting fresh config from cloud.")
                 return
             }
             val parsed = EdgeAgentConfigJson.decode(configJsonPlain)
             _config.value = parsed
-            Log.i(
+            AppLogger.i(
                 TAG,
                 "Loaded config from local: version=${parsed.configVersion}, " +
                     "configId=${parsed.configId}",
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load config from local storage", e)
+            AppLogger.e(TAG, "Failed to load config from local storage", e)
         }
     }
 
@@ -81,7 +81,7 @@ class ConfigManager(
         // 1. Schema version compatibility check
         val majorVersion = newConfig.schemaVersion.substringBefore(".")
         if (majorVersion != SUPPORTED_MAJOR_VERSION) {
-            Log.w(
+            AppLogger.w(
                 TAG,
                 "Incompatible schema version: ${newConfig.schemaVersion} " +
                     "(supported major: $SUPPORTED_MAJOR_VERSION)",
@@ -92,7 +92,7 @@ class ConfigManager(
         // 2. Config version ordering — only apply if strictly greater
         val currentVersion = _config.value?.configVersion
         if (currentVersion != null && newConfig.configVersion <= currentVersion) {
-            Log.d(
+            AppLogger.d(
                 TAG,
                 "Config version ${newConfig.configVersion} <= current $currentVersion — skipping",
             )
@@ -102,7 +102,7 @@ class ConfigManager(
         // 3. Numeric field bounds validation
         val boundsViolations = validateNumericBounds(newConfig)
         if (boundsViolations.isNotEmpty()) {
-            Log.e(
+            AppLogger.e(
                 TAG,
                 "Config rejected — numeric fields out of bounds: $boundsViolations",
             )
@@ -112,7 +112,7 @@ class ConfigManager(
         // 3b. M-16: URL security validation — cloudBaseUrl must use HTTPS
         val urlViolations = validateUrls(newConfig)
         if (urlViolations.isNotEmpty()) {
-            Log.e(
+            AppLogger.e(
                 TAG,
                 "Config rejected — URL security violations: $urlViolations",
             )
@@ -121,13 +121,13 @@ class ConfigManager(
 
         val runtimeViolations = validateRuntimePrerequisites(newConfig)
         if (runtimeViolations.isNotEmpty()) {
-            Log.e(TAG, "Config rejected — runtime prerequisites missing: $runtimeViolations")
+            AppLogger.e(TAG, "Config rejected — runtime prerequisites missing: $runtimeViolations")
             return ConfigApplyResult.Rejected("INCOMPLETE_RUNTIME_CONFIGURATION")
         }
 
         val fccSupportViolation = validateFccSupport(newConfig)
         if (fccSupportViolation != null) {
-            Log.e(TAG, "Config rejected — unsupported FCC configuration: $fccSupportViolation")
+            AppLogger.e(TAG, "Config rejected — unsupported FCC configuration: $fccSupportViolation")
             return ConfigApplyResult.Rejected("UNSUPPORTED_FCC_CONFIGURATION")
         }
 
@@ -136,7 +136,7 @@ class ConfigManager(
         if (current != null) {
             val violations = checkProvisioningFields(current, newConfig)
             if (violations.isNotEmpty()) {
-                Log.e(
+                AppLogger.e(
                     TAG,
                     "REPROVISION_REQUIRED: provisioning-only fields changed: $violations",
                 )
@@ -146,7 +146,7 @@ class ConfigManager(
             // 5. Detect restart-required field changes
             val restartFields = detectRestartRequiredChanges(current, newConfig)
             if (restartFields.isNotEmpty()) {
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Restart-required fields changed: $restartFields. " +
                         "Config stored; service restart needed to apply these changes.",
@@ -166,7 +166,7 @@ class ConfigManager(
             )
             agentConfigDao.upsert(entity)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to persist config to Room", e)
+            AppLogger.e(TAG, "Failed to persist config to Room", e)
             return ConfigApplyResult.Rejected("PERSISTENCE_FAILURE")
         }
 
@@ -179,7 +179,7 @@ class ConfigManager(
             val currentPins = encryptedPrefsManager.runtimeCertificatePins
             if (currentPins != newConfig.sync.certificatePins) {
                 encryptedPrefsManager.runtimeCertificatePins = newConfig.sync.certificatePins
-                Log.i(
+                AppLogger.i(
                     TAG,
                     "Runtime certificate pins updated from SiteConfig " +
                         "(${newConfig.sync.certificatePins.size} pin(s)). " +
@@ -188,7 +188,7 @@ class ConfigManager(
             }
         }
 
-        Log.i(
+        AppLogger.i(
             TAG,
             "Config applied: version=${newConfig.configVersion}, configId=${newConfig.configId}",
         )
@@ -398,7 +398,7 @@ class ConfigManager(
         val ks = keystoreManager ?: return rawJson
         val encrypted = ks.storeSecret(KeystoreManager.ALIAS_CONFIG_INTEGRITY, rawJson)
         if (encrypted == null) {
-            Log.w(TAG, "Config encryption failed — persisting raw JSON (integrity not protected)")
+            AppLogger.w(TAG, "Config encryption failed — persisting raw JSON (integrity not protected)")
             return rawJson
         }
         // Prefix with "ENC:" so loadFromLocal can distinguish encrypted from plaintext
@@ -413,17 +413,17 @@ class ConfigManager(
     private fun decryptConfigJson(storedValue: String): String? {
         if (!storedValue.startsWith("ENC:")) {
             // Legacy plaintext config — accept it but log a warning
-            Log.w(TAG, "Stored config is not encrypted — accepting legacy plaintext")
+            AppLogger.w(TAG, "Stored config is not encrypted — accepting legacy plaintext")
             return storedValue
         }
         val ks = keystoreManager ?: run {
-            Log.w(TAG, "Encrypted config found but KeystoreManager not available — cannot decrypt")
+            AppLogger.w(TAG, "Encrypted config found but KeystoreManager not available — cannot decrypt")
             return null
         }
         val encrypted = try {
             Base64.decode(storedValue.removePrefix("ENC:"), Base64.NO_WRAP)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to Base64-decode encrypted config", e)
+            AppLogger.e(TAG, "Failed to Base64-decode encrypted config", e)
             return null
         }
         return ks.retrieveSecret(KeystoreManager.ALIAS_CONFIG_INTEGRITY, encrypted)

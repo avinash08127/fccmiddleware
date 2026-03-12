@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.petronite
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.*
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -141,7 +141,7 @@ class PetroniteAdapter(
                 nozzleNumber = canonical.nozzleNumber
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Nozzle reverse-map failed for '${tx.nozzleId}', using webhook values: ${e.message}")
+            AppLogger.d(TAG, "Nozzle reverse-map failed for '${tx.nozzleId}', using webhook values: ${e.message}")
         }
 
         // --- Volume: litres -> microlitres via BigDecimal ---
@@ -223,9 +223,9 @@ class PetroniteAdapter(
                 correlationId = preAuth.orderId
                 odooOrderId = preAuth.odooOrderId
                 preAuthId = preAuth.preAuthId
-                Log.i(TAG, "Correlated transaction ${tx.orderId} with pre-auth (OdooOrderId=$odooOrderId)")
+                AppLogger.i(TAG, "Correlated transaction ${tx.orderId} with pre-auth (OdooOrderId=$odooOrderId)")
             } else {
-                Log.w(TAG, "PUMA_ORDER transaction ${tx.orderId} has no matching active pre-auth")
+                AppLogger.w(TAG, "PUMA_ORDER transaction ${tx.orderId} has no matching active pre-auth")
                 // Still set correlationId to OrderId for traceability
                 correlationId = tx.orderId
             }
@@ -320,7 +320,7 @@ class PetroniteAdapter(
                     )
                 }
 
-                Log.i(TAG, "Order created: OrderId=${createResponse.orderId}, Status=${createResponse.status} " +
+                AppLogger.i(TAG, "Order created: OrderId=${createResponse.orderId}, Status=${createResponse.status} " +
                     "(pump ${command.pumpNumber})")
 
                 // Step 2: Authorize pump.
@@ -344,7 +344,7 @@ class PetroniteAdapter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Pre-auth failed (pump ${command.pumpNumber}): ${e::class.simpleName}: ${e.message}")
+            AppLogger.w(TAG, "Pre-auth failed (pump ${command.pumpNumber}): ${e::class.simpleName}: ${e.message}")
             PreAuthResult(
                 status = PreAuthResultStatus.ERROR,
                 message = "Pre-auth failed: ${e::class.simpleName}: ${e.message}",
@@ -385,7 +385,7 @@ class PetroniteAdapter(
         // Handle 400 (nozzle not lifted) -> DECLINED.
         if (response.status == HttpStatusCode.BadRequest) {
             val errorBody = response.bodyAsText()
-            Log.w(TAG, "Authorize returned 400 for OrderId=$orderId: $errorBody")
+            AppLogger.w(TAG, "Authorize returned 400 for OrderId=$orderId: $errorBody")
 
             val errorResponse = tryDeserialize<PetroniteErrorResponse>(errorBody)
             return PreAuthResult(
@@ -430,7 +430,7 @@ class PetroniteAdapter(
             )
             activePreAuths[authResponse.orderId] = activePreAuth
 
-            Log.i(TAG, "Pump authorized: OrderId=${authResponse.orderId}, " +
+            AppLogger.i(TAG, "Pump authorized: OrderId=${authResponse.orderId}, " +
                 "AuthCode=${authResponse.authorizationCode} (pump ${command.pumpNumber})")
         }
 
@@ -443,8 +443,21 @@ class PetroniteAdapter(
     }
 
     // -----------------------------------------------------------------------
-    // cancelPreAuth (PN-3.3) -- Petronite-specific, not on IFccAdapter
+    // IFccAdapter — cancelPreAuth (PN-3.3)
     // -----------------------------------------------------------------------
+
+    /**
+     * Cancel a pre-authorization via the IFccAdapter interface.
+     * Delegates to the Petronite-specific cancel using fccCorrelationId (OrderId).
+     */
+    override suspend fun cancelPreAuth(command: CancelPreAuthCommand): Boolean {
+        val correlationId = command.fccCorrelationId
+        if (correlationId.isNullOrBlank()) {
+            AppLogger.w(TAG, "Cannot cancel pre-auth: fccCorrelationId is required for Petronite")
+            return false
+        }
+        return cancelPreAuthByOrderId(correlationId)
+    }
 
     /**
      * Cancels a pre-authorization by posting to /{orderId}/cancel.
@@ -454,7 +467,7 @@ class PetroniteAdapter(
      * @param fccCorrelationId The Petronite OrderId to cancel.
      * @return true if cancel succeeded or was idempotent (404), false otherwise.
      */
-    suspend fun cancelPreAuth(fccCorrelationId: String): Boolean {
+    suspend fun cancelPreAuthByOrderId(fccCorrelationId: String): Boolean {
         return try {
             // Always remove from active map, regardless of API outcome.
             activePreAuths.remove(fccCorrelationId)
@@ -467,7 +480,7 @@ class PetroniteAdapter(
             }
 
             if (response.status.value in 200..299) {
-                Log.i(TAG, "Pre-auth cancelled: OrderId=$fccCorrelationId")
+                AppLogger.i(TAG, "Pre-auth cancelled: OrderId=$fccCorrelationId")
                 return true
             }
 
@@ -479,23 +492,23 @@ class PetroniteAdapter(
                     header("Authorization", "Bearer $retryToken")
                 }
                 if (response.status.value in 200..299) {
-                    Log.i(TAG, "Pre-auth cancelled (after 401 retry): OrderId=$fccCorrelationId")
+                    AppLogger.i(TAG, "Pre-auth cancelled (after 401 retry): OrderId=$fccCorrelationId")
                     return true
                 }
             }
 
             // 404 = order not found or already terminal -- treat as idempotent success.
             if (response.status == HttpStatusCode.NotFound) {
-                Log.d(TAG, "Cancel returned 404 for $fccCorrelationId (already cancelled or not found)")
+                AppLogger.d(TAG, "Cancel returned 404 for $fccCorrelationId (already cancelled or not found)")
                 return true
             }
 
-            Log.w(TAG, "Cancel pre-auth returned HTTP ${response.status.value} for $fccCorrelationId")
+            AppLogger.w(TAG, "Cancel pre-auth returned HTTP ${response.status.value} for $fccCorrelationId")
             false
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Cancel pre-auth error for $fccCorrelationId: ${e::class.simpleName}: ${e.message}")
+            AppLogger.w(TAG, "Cancel pre-auth error for $fccCorrelationId: ${e::class.simpleName}: ${e.message}")
             false
         }
     }
@@ -516,17 +529,17 @@ class PetroniteAdapter(
                 if (success) return@withTimeout true
 
                 // Retry once after invalidating the token (handles 401).
-                Log.d(TAG, "Heartbeat failed, invalidating token and retrying")
+                AppLogger.d(TAG, "Heartbeat failed, invalidating token and retrying")
                 oauthClient.invalidateToken()
                 tryHeartbeatOnce()
             }
         } catch (e: TimeoutCancellationException) {
-            Log.d(TAG, "Heartbeat timed out after ${HEARTBEAT_TIMEOUT_MS}ms")
+            AppLogger.d(TAG, "Heartbeat timed out after ${HEARTBEAT_TIMEOUT_MS}ms")
             false
         } catch (e: CancellationException) {
             throw e // Preserve structured concurrency cancellation
         } catch (e: Exception) {
-            Log.d(TAG, "Heartbeat failed: ${e::class.simpleName}: ${e.message}")
+            AppLogger.d(TAG, "Heartbeat failed: ${e::class.simpleName}: ${e.message}")
             false
         }
     }
@@ -547,7 +560,7 @@ class PetroniteAdapter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.d(TAG, "Heartbeat attempt failed: ${e::class.simpleName}: ${e.message}")
+            AppLogger.d(TAG, "Heartbeat attempt failed: ${e::class.simpleName}: ${e.message}")
             false
         }
     }
@@ -593,7 +606,7 @@ class PetroniteAdapter(
 
                 result.add(
                     PumpStatus(
-                        siteCode = config.hostAddress,
+                        siteCode = config.siteCode,
                         pumpNumber = nozzle.pumpNumber,
                         nozzleNumber = nozzle.nozzleNumber,
                         state = state,
@@ -612,7 +625,7 @@ class PetroniteAdapter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "getPumpStatus failed, returning empty list: ${e::class.simpleName}: ${e.message}")
+            AppLogger.w(TAG, "getPumpStatus failed, returning empty list: ${e::class.simpleName}: ${e.message}")
             emptyList()
         }
     }
@@ -630,28 +643,28 @@ class PetroniteAdapter(
      * Non-fatal: logs errors and continues. Call this during service startup.
      */
     suspend fun reconcileOnStartup() {
-        Log.i(TAG, "Startup reconciliation: fetching pending orders...")
+        AppLogger.i(TAG, "Startup reconciliation: fetching pending orders...")
 
         val pendingOrders: List<PetronitePendingOrder>
         try {
             pendingOrders = getWithAuthRetry("/direct-authorize-requests/pending")
                 ?: run {
-                    Log.i(TAG, "Startup reconciliation: no pending orders (null response)")
+                    AppLogger.i(TAG, "Startup reconciliation: no pending orders (null response)")
                     return
                 }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Startup reconciliation: failed to fetch pending orders, skipping: ${e.message}")
+            AppLogger.w(TAG, "Startup reconciliation: failed to fetch pending orders, skipping: ${e.message}")
             return
         }
 
         if (pendingOrders.isEmpty()) {
-            Log.i(TAG, "Startup reconciliation: no pending orders found")
+            AppLogger.i(TAG, "Startup reconciliation: no pending orders found")
             return
         }
 
-        Log.i(TAG, "Startup reconciliation: found ${pendingOrders.size} pending order(s)")
+        AppLogger.i(TAG, "Startup reconciliation: found ${pendingOrders.size} pending order(s)")
 
         val nowMillis = System.currentTimeMillis()
         var cancelled = 0
@@ -664,9 +677,9 @@ class PetroniteAdapter(
 
                 if (ageMillis > STALE_ORDER_THRESHOLD_MS) {
                     // Stale order: auto-cancel.
-                    Log.i(TAG, "Reconciliation: cancelling stale order ${order.orderId} " +
+                    AppLogger.i(TAG, "Reconciliation: cancelling stale order ${order.orderId} " +
                         "(created at ${order.createdAt})")
-                    cancelPreAuth(order.orderId)
+                    cancelPreAuthByOrderId(order.orderId)
                     cancelled++
                 } else {
                     // Recent order: re-adopt into active pre-auth map.
@@ -675,7 +688,7 @@ class PetroniteAdapter(
                         val canonical = nozzleResolver.resolveCanonical(order.nozzleId)
                         pumpNumber = canonical.pumpNumber
                     } catch (e: Exception) {
-                        Log.d(TAG, "Reconciliation: could not resolve nozzle ${order.nozzleId}: ${e.message}")
+                        AppLogger.d(TAG, "Reconciliation: could not resolve nozzle ${order.nozzleId}: ${e.message}")
                     }
 
                     val activePreAuth = ActivePreAuth(
@@ -689,17 +702,17 @@ class PetroniteAdapter(
                     activePreAuths[order.orderId] = activePreAuth
                     adopted++
 
-                    Log.i(TAG, "Reconciliation: re-adopted order ${order.orderId} " +
+                    AppLogger.i(TAG, "Reconciliation: re-adopted order ${order.orderId} " +
                         "(created at ${order.createdAt}, pump $pumpNumber)")
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "Reconciliation: error processing order ${order.orderId}, skipping: ${e.message}")
+                AppLogger.w(TAG, "Reconciliation: error processing order ${order.orderId}, skipping: ${e.message}")
             }
         }
 
-        Log.i(TAG, "Startup reconciliation complete: $cancelled cancelled, $adopted adopted")
+        AppLogger.i(TAG, "Startup reconciliation complete: $cancelled cancelled, $adopted adopted")
     }
 
     // -----------------------------------------------------------------------
@@ -747,7 +760,7 @@ class PetroniteAdapter(
         return try {
             json.decodeFromString<T>(responseBody)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to deserialize response from $path: ${e.message}")
+            AppLogger.w(TAG, "Failed to deserialize response from $path: ${e.message}")
             null
         }
     }
@@ -786,7 +799,7 @@ class PetroniteAdapter(
         return try {
             json.decodeFromString<T>(responseBody)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to deserialize response from $path: ${e.message}")
+            AppLogger.w(TAG, "Failed to deserialize response from $path: ${e.message}")
             null
         }
     }
@@ -821,7 +834,7 @@ class PetroniteAdapter(
                 // Try parsing as Instant directly (e.g. "2024-01-15T10:30:00Z")
                 Instant.parse(timestamp).toString()
             } catch (e2: Exception) {
-                Log.d(TAG, "Failed to parse timestamp '$timestamp': ${e2.message}")
+                AppLogger.d(TAG, "Failed to parse timestamp '$timestamp': ${e2.message}")
                 null
             }
         }

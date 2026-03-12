@@ -1,7 +1,7 @@
 package com.fccmiddleware.edge.buffer
 
 import android.content.Context
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.AuditLogDao
 import com.fccmiddleware.edge.buffer.entity.AuditLog
 import kotlinx.coroutines.Dispatchers
@@ -53,11 +53,11 @@ open class IntegrityChecker(
         val issues = readIntegrityCheck()
 
         if (issues.size == 1 && issues[0].trim().equals(PRAGMA_OK, ignoreCase = true)) {
-            Log.d(TAG, "Database integrity check passed")
+            AppLogger.d(TAG, "Database integrity check passed")
             return@withContext IntegrityCheckResult.Healthy
         }
 
-        Log.e(TAG, "Database corruption detected (${issues.size} issues): ${issues.joinToString("; ")}")
+        AppLogger.e(TAG, "Database corruption detected (${issues.size} issues): ${issues.joinToString("; ")}")
 
         // Best-effort: write audit log before closing the DB (may fail on severely corrupt DBs)
         tryWriteCorruptionAuditLog(issues)
@@ -83,7 +83,7 @@ open class IntegrityChecker(
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "PRAGMA integrity_check threw: ${e.message}")
+                AppLogger.e(TAG, "PRAGMA integrity_check threw: ${e.message}")
                 results.add("PRAGMA_EXCEPTION: ${e.message}")
             }
             results
@@ -101,7 +101,7 @@ open class IntegrityChecker(
             )
         } catch (e: Exception) {
             // Audit log write may fail if the DB is severely corrupt — log to logcat only
-            Log.w(TAG, "Could not write corruption audit log: ${e.message}")
+            AppLogger.w(TAG, "Could not write corruption audit log: ${e.message}")
         }
     }
 
@@ -121,14 +121,14 @@ open class IntegrityChecker(
                 File("${dbFile.path}-wal").delete()
                 File("${dbFile.path}-shm").delete()
 
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Corrupt database backed up to ${backupFile.absolutePath} and deleted for recreation"
                 )
                 backupFile.absolutePath
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to back up corrupt database", e)
+            AppLogger.e(TAG, "Failed to back up corrupt database", e)
             null
         }
     }

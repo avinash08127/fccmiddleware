@@ -1,6 +1,7 @@
 export interface GenerateBootstrapTokenRequest {
   siteCode: string;
   legalEntityId: string;
+  environment?: string;
 }
 
 export interface GenerateBootstrapTokenResponse {

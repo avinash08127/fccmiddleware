@@ -247,33 +247,39 @@ public static class RadixXmlParser
     private static RadixTransactionData? ParseTrnElement(XDocument doc)
     {
         var trn = doc.Descendants("TRN").FirstOrDefault();
-        if (trn is null || !trn.HasAttributes)
+        if (trn is null)
+            return null;
+        if (!trn.HasAttributes && !trn.HasElements)
             return null;
 
+        // Try attribute first, fall back to child element text.
+        // Some Radix firmware versions use child elements instead of attributes.
+        string Field(string name) => Attr(trn, name) is { Length: > 0 } v ? v : ChildText(trn, name);
+
         return new RadixTransactionData(
-            Amo: Attr(trn, "AMO"),
-            EfdId: Attr(trn, "EFD_ID"),
-            FdcDate: Attr(trn, "FDC_DATE"),
-            FdcTime: Attr(trn, "FDC_TIME"),
-            FdcName: Attr(trn, "FDC_NAME"),
-            FdcNum: Attr(trn, "FDC_NUM"),
-            FdcProd: Attr(trn, "FDC_PROD"),
-            FdcProdName: Attr(trn, "FDC_PROD_NAME"),
-            FdcSaveNum: Attr(trn, "FDC_SAVE_NUM"),
-            FdcTank: Attr(trn, "FDC_TANK"),
-            Fp: Attr(trn, "FP"),
-            Noz: Attr(trn, "NOZ"),
-            Price: Attr(trn, "PRICE"),
-            PumpAddr: Attr(trn, "PUMP_ADDR"),
-            RdgDate: Attr(trn, "RDG_DATE"),
-            RdgTime: Attr(trn, "RDG_TIME"),
-            RdgId: Attr(trn, "RDG_ID"),
-            RdgIndex: Attr(trn, "RDG_INDEX"),
-            RdgProd: Attr(trn, "RDG_PROD"),
-            RdgSaveNum: Attr(trn, "RDG_SAVE_NUM"),
-            RegId: Attr(trn, "REG_ID"),
-            RoundType: Attr(trn, "ROUND_TYPE"),
-            Vol: Attr(trn, "VOL"));
+            Amo: Field("AMO"),
+            EfdId: Field("EFD_ID"),
+            FdcDate: Field("FDC_DATE"),
+            FdcTime: Field("FDC_TIME"),
+            FdcName: Field("FDC_NAME"),
+            FdcNum: Field("FDC_NUM"),
+            FdcProd: Field("FDC_PROD"),
+            FdcProdName: Field("FDC_PROD_NAME"),
+            FdcSaveNum: Field("FDC_SAVE_NUM"),
+            FdcTank: Field("FDC_TANK"),
+            Fp: Field("FP"),
+            Noz: Field("NOZ"),
+            Price: Field("PRICE"),
+            PumpAddr: Field("PUMP_ADDR"),
+            RdgDate: Field("RDG_DATE"),
+            RdgTime: Field("RDG_TIME"),
+            RdgId: Field("RDG_ID"),
+            RdgIndex: Field("RDG_INDEX"),
+            RdgProd: Field("RDG_PROD"),
+            RdgSaveNum: Field("RDG_SAVE_NUM"),
+            RegId: Field("REG_ID"),
+            RoundType: Field("ROUND_TYPE"),
+            Vol: Field("VOL"));
     }
 
     private static RadixRfidCardData? ParseRfidCardElement(XDocument doc)

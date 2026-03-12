@@ -112,7 +112,9 @@ public sealed class RadixCloudAdapter : IFccAdapter
     private CanonicalTransaction NormalizeFromXml(RawPayloadEnvelope rawPayload)
     {
         var doc = XDocument.Parse(rawPayload.Payload);
-        var trnElement = doc.Root?.Element("TRN")
+
+        // TRN is nested inside <FDC_RESP><TABLE><ANS><TRN .../>> — use Descendants
+        var trnElement = doc.Descendants("TRN").FirstOrDefault()
             ?? throw new InvalidOperationException("Radix XML missing TRN element.");
 
         var dto = RadixTransactionDto.FromXml(trnElement);
@@ -135,31 +137,35 @@ public sealed class RadixCloudAdapter : IFccAdapter
         {
             var doc = XDocument.Parse(payload);
 
-            // Validate signature if shared secret is configured
+            // Validate signature if shared secret is configured.
+            // Radix signs the <TABLE>...</TABLE> element: SHA1(<TABLE>...</TABLE> + secret).
+            // We must extract the raw <TABLE> content (preserving exact whitespace) from the
+            // original string, not from the parsed DOM, to match the character-exact hash.
             if (!string.IsNullOrEmpty(_config.SharedSecret))
             {
-                var signatureElement = doc.Root?.Element("SIGNATURE")
-                    ?? doc.Root?.Element("TRN")?.Parent?.Element("SIGNATURE");
+                var tableContent = ExtractRawElement(payload, "TABLE");
+                var signatureText = ExtractRawElementText(payload, "SIGNATURE");
 
-                if (signatureElement != null)
+                if (tableContent != null && signatureText != null)
                 {
-                    var signatureContent = GetContentWithoutSignature(doc);
                     if (!RadixSignatureHelper.ValidateSignature(
-                        signatureElement.Value, signatureContent, _config.SharedSecret))
+                        signatureText, tableContent, _config.SharedSecret))
                     {
                         return ValidationResult.Fail("INVALID_SIGNATURE", "Radix XML signature validation failed.");
                     }
                 }
             }
 
-            var trn = doc.Root?.Element("TRN");
+            // TRN is nested inside <FDC_RESP><TABLE><ANS><TRN .../>> — use Descendants.
+            // Radix sends TRN fields as XML attributes, not child elements.
+            var trn = doc.Descendants("TRN").FirstOrDefault();
             if (trn == null)
                 return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Radix XML missing TRN element.");
 
-            if (string.IsNullOrWhiteSpace(trn.Element("FDC_NUM")?.Value))
+            if (string.IsNullOrWhiteSpace(trn.Attribute("FDC_NUM")?.Value))
                 return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Radix TRN missing FDC_NUM.");
 
-            if (string.IsNullOrWhiteSpace(trn.Element("FDC_SAVE_NUM")?.Value))
+            if (string.IsNullOrWhiteSpace(trn.Attribute("FDC_SAVE_NUM")?.Value))
                 return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Radix TRN missing FDC_SAVE_NUM.");
 
             return ValidationResult.Ok();
@@ -245,8 +251,8 @@ public sealed class RadixCloudAdapter : IFccAdapter
                     return kvp.Key;
             }
         }
-        // Fallback: use FP as pump number with offset
-        return fp - _config.PumpNumberOffset;
+        // Fallback: use PUMP_ADDR + offset (consistent with edge agent fallback logic)
+        return pumpAddr + _config.PumpNumberOffset;
     }
 
     private DateTimeOffset ParseRadixTimestamp(string timestamp)
@@ -266,19 +272,44 @@ public sealed class RadixCloudAdapter : IFccAdapter
 
     private static decimal GetCurrencyFactor(string currencyCode)
     {
-        // Most currencies have 2 decimal places (100 minor units per major)
-        return currencyCode.ToUpperInvariant() switch
-        {
-            "KWD" or "BHD" or "OMR" => 1000m,  // 3 decimal places
-            "JPY" or "KRW" => 1m,               // 0 decimal places
-            _ => 100m                            // 2 decimal places (default)
-        };
+        // Edge agents always normalize with factor 100. The cloud adapter must use
+        // the same factor to avoid double-normalization or factor mismatch when
+        // raw XML arrives via CLOUD_DIRECT mode.
+        return 100m;
     }
 
-    private static string GetContentWithoutSignature(XDocument doc)
+    /// <summary>
+    /// Extracts raw element text including its tags from the XML string.
+    /// Returns the substring from &lt;tagName through &lt;/tagName&gt; inclusive,
+    /// preserving exact whitespace for signature validation.
+    /// </summary>
+    private static string? ExtractRawElement(string xml, string tagName)
     {
-        var clone = new XDocument(doc);
-        clone.Root?.Element("SIGNATURE")?.Remove();
-        return clone.Root?.ToString(SaveOptions.DisableFormatting) ?? "";
+        var openTag = $"<{tagName}";
+        var closeTag = $"</{tagName}>";
+        var startIdx = xml.IndexOf(openTag, StringComparison.Ordinal);
+        if (startIdx < 0) return null;
+
+        var endIdx = xml.IndexOf(closeTag, startIdx, StringComparison.Ordinal);
+        if (endIdx < 0) return null;
+
+        return xml.Substring(startIdx, endIdx - startIdx + closeTag.Length);
+    }
+
+    /// <summary>
+    /// Extracts the text content between &lt;tagName&gt; and &lt;/tagName&gt;,
+    /// trimming whitespace.
+    /// </summary>
+    private static string? ExtractRawElementText(string xml, string tagName)
+    {
+        var openTag = $"<{tagName}>";
+        var closeTag = $"</{tagName}>";
+        var startIdx = xml.IndexOf(openTag, StringComparison.Ordinal);
+        if (startIdx < 0) return null;
+
+        var endIdx = xml.IndexOf(closeTag, startIdx, StringComparison.Ordinal);
+        if (endIdx < 0) return null;
+
+        return xml.Substring(startIdx + openTag.Length, endIdx - startIdx - openTag.Length).Trim();
     }
 }

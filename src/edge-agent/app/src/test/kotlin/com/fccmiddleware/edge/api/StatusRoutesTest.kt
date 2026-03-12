@@ -4,6 +4,7 @@ import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.buffer.entity.SyncState
+import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
@@ -44,6 +45,7 @@ class StatusRoutesTest {
     private lateinit var mockConnectivityManager: ConnectivityManager
     private lateinit var mockTransactionDao: TransactionBufferDao
     private lateinit var mockSyncStateDao: SyncStateDao
+    private lateinit var mockConfigManager: ConfigManager
 
     @Before
     fun setUp() {
@@ -56,6 +58,9 @@ class StatusRoutesTest {
 
         mockSyncStateDao = mockk()
         coEvery { mockSyncStateDao.get() } returns null
+
+        mockConfigManager = mockk()
+        every { mockConfigManager.currentConfigVersion } returns null
     }
 
     // -------------------------------------------------------------------------
@@ -191,6 +196,7 @@ class StatusRoutesTest {
                     connectivityManager = mockConnectivityManager,
                     transactionDao = mockTransactionDao,
                     syncStateDao = mockSyncStateDao,
+                    configManager = mockConfigManager,
                     agentVersion = "1.0.0-test",
                     deviceId = "test-device-id",
                     siteCode = "TEST_SITE",

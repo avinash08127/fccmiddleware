@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.radix
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.*
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -18,6 +18,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+import java.io.Closeable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -44,18 +45,18 @@ import java.util.concurrent.atomic.AtomicInteger
 class RadixAdapter(
     private val config: AgentFccConfig,
     private val httpClient: HttpClient = HttpClient(OkHttp),
-) : IFccAdapter {
+) : IFccAdapter, Closeable {
 
     // -----------------------------------------------------------------------
     // Token counter — shared across heartbeat, fetch, and pre-auth
     // -----------------------------------------------------------------------
 
-    /** Sequential token counter (0-65535, wraps at 65536). Thread-safe. */
-    private val tokenCounter = AtomicInteger(0)
+    /** Sequential token counter (1-65535, wraps at 65536). Thread-safe. Starts at 1 because TOKEN=0 means "Normal Order" (no pre-auth) in the Radix protocol. */
+    private val tokenCounter = AtomicInteger(1)
 
-    /** Generates the next sequential token (0-65535), wrapping at 65536. Thread-safe. */
+    /** Generates the next sequential token (1-65535), wrapping around and skipping 0. Thread-safe. */
     private fun nextToken(): Int {
-        return tokenCounter.getAndUpdate { (it + 1) % TOKEN_WRAP }
+        return tokenCounter.getAndUpdate { val next = (it + 1) % TOKEN_WRAP; if (next == 0) 1 else next }
     }
 
     // -----------------------------------------------------------------------
@@ -65,8 +66,8 @@ class RadixAdapter(
     /**
      * Cached current FCC transaction transfer mode.
      *   -1 = unknown (not yet set or reset after connectivity loss)
-     *    0 = ON_DEMAND (pull mode)
-     *    1 = OFF
+     *    0 = OFF (transaction transfer disabled)
+     *    1 = ON_DEMAND (pull mode)
      *    2 = UNSOLICITED (push mode)
      */
     @Volatile
@@ -100,22 +101,22 @@ class RadixAdapter(
                 is RadixParseResult.Success -> {
                     if (parseResult.value.respCode == RESP_CODE_SUCCESS) {
                         currentMode = mode
-                        Log.d(TAG, "Mode changed to $mode")
+                        AppLogger.d(TAG, "Mode changed to $mode")
                         true
                     } else {
-                        Log.w(TAG, "Mode change failed: RESP_CODE=${parseResult.value.respCode}")
+                        AppLogger.w(TAG, "Mode change failed: RESP_CODE=${parseResult.value.respCode}")
                         false
                     }
                 }
                 is RadixParseResult.Error -> {
-                    Log.w(TAG, "Mode change parse error: ${parseResult.message}")
+                    AppLogger.w(TAG, "Mode change parse error: ${parseResult.message}")
                     false
                 }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "Mode change failed: ${e::class.simpleName}: ${e.message}")
+            AppLogger.w(TAG, "Mode change failed: ${e::class.simpleName}: ${e.message}")
             resetModeState()
             false
         }
@@ -166,14 +167,14 @@ class RadixAdapter(
         // Start the HTTP server if not already running
         if (!listener.isRunning) {
             if (!listener.start()) {
-                Log.w(TAG, "Failed to start push listener on port $pushListenerPort")
+                AppLogger.w(TAG, "Failed to start push listener on port $pushListenerPort")
                 return false
             }
         }
 
         // Set FDC to UNSOLICITED mode
         if (!ensureMode(MODE_UNSOLICITED)) {
-            Log.w(TAG, "Failed to set UNSOLICITED mode on FDC")
+            AppLogger.w(TAG, "Failed to set UNSOLICITED mode on FDC")
             return false
         }
 
@@ -189,6 +190,22 @@ class RadixAdapter(
         radixPushListener?.stop()
         radixPushListener = null
         resetModeState()
+    }
+
+    /**
+     * Releases all resources held by this adapter: stops the push listener
+     * and closes the HTTP client (connection pool + dispatcher threads).
+     *
+     * Must be called when the adapter is replaced or the service shuts down
+     * to prevent thread/connection leaks on Android.
+     */
+    override fun close() {
+        stopPushListener()
+        try {
+            httpClient.close()
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error closing HttpClient: ${e.message}")
+        }
     }
 
     /**
@@ -210,7 +227,7 @@ class RadixAdapter(
             try {
                 val rawEnvelope = RawPayloadEnvelope(
                     vendor = FccVendor.RADIX,
-                    siteCode = config.hostAddress,
+                    siteCode = config.siteCode,
                     receivedAtUtc = item.receivedAt.toString(),
                     contentType = "text/xml",
                     payload = item.rawXml,
@@ -226,13 +243,13 @@ class RadixAdapter(
                         )
                     }
                     is NormalizationResult.Failure -> {
-                        Log.w(TAG, "collectPushedTransactions: normalization failed: ${normResult.errorCode} — ${normResult.message}")
+                        AppLogger.w(TAG, "collectPushedTransactions: normalization failed: ${normResult.errorCode} — ${normResult.message}")
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "collectPushedTransactions: error processing pushed transaction: ${e.message}")
+                AppLogger.w(TAG, "collectPushedTransactions: error processing pushed transaction: ${e.message}")
             }
         }
 
@@ -245,6 +262,23 @@ class RadixAdapter(
 
     /** Active pre-auth entries keyed by TOKEN for later transaction correlation. */
     private val activePreAuths = ConcurrentHashMap<Int, PreAuthEntry>()
+
+    /**
+     * Purges pre-auth entries older than [PREAUTH_TTL_MINUTES] to prevent memory leaks.
+     * Called during each fetch cycle. Entries can become stale when the FCC goes offline,
+     * the customer walks away, or a dispense never occurs.
+     */
+    private fun purgeStalePreAuths() {
+        val cutoff = Instant.now().minusSeconds(PREAUTH_TTL_MINUTES * 60)
+        val iterator = activePreAuths.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.value.createdAt.isBefore(cutoff)) {
+                iterator.remove()
+                AppLogger.d(TAG, "Purged stale pre-auth: token=${entry.key}, age > ${PREAUTH_TTL_MINUTES}m")
+            }
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Pump address mapping
@@ -291,7 +325,7 @@ class RadixAdapter(
         try {
             ZoneId.of(config.timezone)
         } catch (e: Exception) {
-            Log.w(TAG, "Invalid timezone '${config.timezone}', falling back to UTC")
+            AppLogger.w(TAG, "Invalid timezone '${config.timezone}', falling back to UTC")
             ZoneId.of("UTC")
         }
     }
@@ -333,25 +367,25 @@ class RadixAdapter(
                 when (val parseResult = RadixXmlParser.parseProductResponse(responseBody)) {
                     is RadixParseResult.Success -> {
                         if (parseResult.value.respCode == RESP_CODE_SIGNATURE_ERROR) {
-                            Log.w(TAG, "Heartbeat: signature error (RESP_CODE=251) — check sharedSecret configuration")
+                            AppLogger.w(TAG, "Heartbeat: signature error (RESP_CODE=251) — check sharedSecret configuration")
                             false
                         } else {
                             parseResult.value.respCode == RESP_CODE_SUCCESS
                         }
                     }
                     is RadixParseResult.Error -> {
-                        Log.w(TAG, "Heartbeat: failed to parse response: ${parseResult.message}")
+                        AppLogger.w(TAG, "Heartbeat: failed to parse response: ${parseResult.message}")
                         false
                     }
                 }
             }
         } catch (e: TimeoutCancellationException) {
-            Log.d(TAG, "Heartbeat: timeout after ${HEARTBEAT_TIMEOUT_MS}ms")
+            AppLogger.d(TAG, "Heartbeat: timeout after ${HEARTBEAT_TIMEOUT_MS}ms")
             false
         } catch (e: CancellationException) {
             throw e // Preserve structured concurrency cancellation
         } catch (e: Exception) {
-            Log.d(TAG, "Heartbeat: ${e::class.simpleName}: ${e.message}")
+            AppLogger.d(TAG, "Heartbeat: ${e::class.simpleName}: ${e.message}")
             resetModeState()
             false
         }
@@ -385,17 +419,20 @@ class RadixAdapter(
      * Push transactions are ACKed by the listener's HTTP response.
      */
     override suspend fun fetchTransactions(cursor: FetchCursor): TransactionBatch {
+        purgeStalePreAuths()
+
         val limit = cursor.limit.coerceIn(1, MAX_FETCH_LIMIT)
         val transactions = mutableListOf<CanonicalTransaction>()
 
         try {
-            // Determine ingestion strategy from config
-            val isPushCapable = config.ingestionMode == IngestionMode.BUFFER_ALWAYS
+            // Determine ingestion strategy from config — aligned with .NET adapter
+            // which checks ConnectionProtocol == "PUSH"
+            val isPushCapable = config.connectionProtocol.equals("PUSH", ignoreCase = true)
 
             if (isPushCapable) {
                 // PUSH/HYBRID mode — start listener and set UNSOLICITED mode
                 if (!ensurePushListenerRunning()) {
-                    Log.w(TAG, "fetchTransactions: push listener startup failed, falling back to pull")
+                    AppLogger.w(TAG, "fetchTransactions: push listener startup failed, falling back to pull")
                     return fetchTransactionsPull(limit)
                 }
 
@@ -415,7 +452,7 @@ class RadixAdapter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "fetchTransactions: ${e::class.simpleName}: ${e.message}")
+            AppLogger.w(TAG, "fetchTransactions: ${e::class.simpleName}: ${e.message}")
             resetModeState()
             return TransactionBatch(
                 transactions = transactions,
@@ -435,7 +472,7 @@ class RadixAdapter(
 
         // Step 1: Ensure ON_DEMAND mode
         if (!ensureMode(MODE_ON_DEMAND)) {
-            Log.w(TAG, "fetchTransactionsPull: failed to set ON_DEMAND mode")
+            AppLogger.w(TAG, "fetchTransactionsPull: failed to set ON_DEMAND mode")
             return TransactionBatch(
                 transactions = emptyList(),
                 hasMore = false,
@@ -444,87 +481,100 @@ class RadixAdapter(
 
         // Step 2: FIFO drain loop
         for (i in 0 until limit) {
-            val token = nextToken()
-            val tokenStr = token.toString()
+            try {
+                val token = nextToken()
+                val tokenStr = token.toString()
 
-            // Send CMD_CODE=10 — request next transaction
-            val requestBody = RadixXmlBuilder.buildTransactionRequest(tokenStr, sharedSecret)
-            val headers = RadixXmlBuilder.buildHttpHeaders(usnCode, RadixXmlBuilder.OPERATION_TRANSACTION)
-            val url = "http://${config.hostAddress}:$transactionPort"
+                // Send CMD_CODE=10 — request next transaction
+                val requestBody = RadixXmlBuilder.buildTransactionRequest(tokenStr, sharedSecret)
+                val headers = RadixXmlBuilder.buildHttpHeaders(usnCode, RadixXmlBuilder.OPERATION_TRANSACTION)
+                val url = "http://${config.hostAddress}:$transactionPort"
 
-            val response = httpClient.post(url) {
-                headers.forEach { (key, value) -> header(key, value) }
-                setBody(requestBody)
-            }
+                val response = httpClient.post(url) {
+                    headers.forEach { (key, value) -> header(key, value) }
+                    setBody(requestBody)
+                }
 
-            val responseBody = response.bodyAsText()
-            val parseResult = RadixXmlParser.parseTransactionResponse(responseBody)
+                val responseBody = response.bodyAsText()
+                val parseResult = RadixXmlParser.parseTransactionResponse(responseBody)
 
-            when (parseResult) {
-                is RadixParseResult.Success -> {
-                    val txnResp = parseResult.value
+                when (parseResult) {
+                    is RadixParseResult.Success -> {
+                        val txnResp = parseResult.value
 
-                    when (txnResp.respCode) {
-                        RESP_CODE_SUCCESS -> {
-                            // Transaction available — parse and normalize
-                            val trn = txnResp.transaction
-                            if (trn != null) {
-                                val rawEnvelope = RawPayloadEnvelope(
-                                    vendor = FccVendor.RADIX,
-                                    siteCode = config.hostAddress,
-                                    receivedAtUtc = Instant.now().toString(),
-                                    contentType = "text/xml",
-                                    payload = responseBody,
-                                )
+                        when (txnResp.respCode) {
+                            RESP_CODE_SUCCESS -> {
+                                // Transaction available — parse and normalize
+                                val trn = txnResp.transaction
+                                if (trn != null) {
+                                    val rawEnvelope = RawPayloadEnvelope(
+                                        vendor = FccVendor.RADIX,
+                                        siteCode = config.siteCode,
+                                        receivedAtUtc = Instant.now().toString(),
+                                        contentType = "text/xml",
+                                        payload = responseBody,
+                                    )
 
-                                when (val normResult = normalize(rawEnvelope)) {
-                                    is NormalizationResult.Success -> {
-                                        transactions.add(normResult.transaction)
-                                    }
-                                    is NormalizationResult.Failure -> {
-                                        Log.w(TAG, "fetchTransactions: normalization failed: ${normResult.errorCode} — ${normResult.message}")
+                                    when (val normResult = normalize(rawEnvelope)) {
+                                        is NormalizationResult.Success -> {
+                                            transactions.add(normResult.transaction)
+                                        }
+                                        is NormalizationResult.Failure -> {
+                                            AppLogger.w(TAG, "fetchTransactions: normalization failed: ${normResult.errorCode} — ${normResult.message}")
+                                        }
                                     }
                                 }
-                            }
 
-                            // ACK with CMD_CODE=201 to dequeue from FCC FIFO
-                            val ackBody = RadixXmlBuilder.buildTransactionAck(tokenStr, sharedSecret)
-                            httpClient.post(url) {
-                                headers.forEach { (key, value) -> header(key, value) }
-                                setBody(ackBody)
+                                // ACK with CMD_CODE=201 to dequeue from FCC FIFO
+                                val ackBody = RadixXmlBuilder.buildTransactionAck(tokenStr, sharedSecret)
+                                httpClient.post(url) {
+                                    headers.forEach { (key, value) -> header(key, value) }
+                                    setBody(ackBody)
+                                }
                             }
-                        }
-                        RESP_CODE_FIFO_EMPTY -> {
-                            // FIFO empty — no more transactions
-                            Log.d(TAG, "fetchTransactions: FIFO empty after ${transactions.size} transactions")
-                            return TransactionBatch(
-                                transactions = transactions,
-                                hasMore = false,
-                            )
-                        }
-                        RESP_CODE_SIGNATURE_ERROR -> {
-                            Log.w(TAG, "fetchTransactions: signature error (RESP_CODE=251) — check sharedSecret")
-                            return TransactionBatch(
-                                transactions = transactions,
-                                hasMore = false,
-                            )
-                        }
-                        else -> {
-                            Log.w(TAG, "fetchTransactions: unexpected RESP_CODE=${txnResp.respCode}: ${txnResp.respMsg}")
-                            return TransactionBatch(
-                                transactions = transactions,
-                                hasMore = false,
-                            )
+                            RESP_CODE_FIFO_EMPTY -> {
+                                // FIFO empty — no more transactions
+                                AppLogger.d(TAG, "fetchTransactions: FIFO empty after ${transactions.size} transactions")
+                                return TransactionBatch(
+                                    transactions = transactions,
+                                    hasMore = false,
+                                )
+                            }
+                            RESP_CODE_SIGNATURE_ERROR -> {
+                                AppLogger.w(TAG, "fetchTransactions: signature error (RESP_CODE=251) — check sharedSecret")
+                                return TransactionBatch(
+                                    transactions = transactions,
+                                    hasMore = false,
+                                )
+                            }
+                            else -> {
+                                AppLogger.w(TAG, "fetchTransactions: unexpected RESP_CODE=${txnResp.respCode}: ${txnResp.respMsg}")
+                                return TransactionBatch(
+                                    transactions = transactions,
+                                    hasMore = false,
+                                )
+                            }
                         }
                     }
+                    is RadixParseResult.Error -> {
+                        AppLogger.w(TAG, "fetchTransactions: parse error: ${parseResult.message}")
+                        return TransactionBatch(
+                            transactions = transactions,
+                            hasMore = false,
+                        )
+                    }
                 }
-                is RadixParseResult.Error -> {
-                    Log.w(TAG, "fetchTransactions: parse error: ${parseResult.message}")
-                    return TransactionBatch(
-                        transactions = transactions,
-                        hasMore = false,
-                    )
-                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Network or other transient error mid-batch — return transactions
+                // collected so far rather than losing them all.
+                AppLogger.w(TAG, "fetchTransactionsPull: error on iteration ${i + 1}, " +
+                    "returning ${transactions.size} transactions collected so far: ${e.message}")
+                return TransactionBatch(
+                    transactions = transactions,
+                    hasMore = false,
+                )
             }
         }
 
@@ -649,6 +699,22 @@ class RadixAdapter(
             return NormalizationResult.Failure(
                 errorCode = "MALFORMED_FIELD",
                 message = "Invalid amount value: '${trn.amo}'",
+                fieldName = "AMO",
+            )
+        }
+
+        if (volumeMicrolitres < 0) {
+            return NormalizationResult.Failure(
+                errorCode = "MALFORMED_FIELD",
+                message = "Volume must not be negative: '${trn.vol}'",
+                fieldName = "VOL",
+            )
+        }
+
+        if (amountMinorUnits < 0) {
+            return NormalizationResult.Failure(
+                errorCode = "MALFORMED_FIELD",
+                message = "Amount must not be negative: '${trn.amo}'",
                 fieldName = "AMO",
             )
         }
@@ -906,6 +972,78 @@ class RadixAdapter(
     }
 
     // -----------------------------------------------------------------------
+    // IFccAdapter — cancelPreAuth
+    // -----------------------------------------------------------------------
+
+    /**
+     * Cancels an active pre-authorization on the Radix FCC.
+     *
+     * Sends AUTH_DATA with AUTH=FALSE to the auth port. Uses the pump address mapping
+     * to resolve the pump. If a TOKEN is available from fccCorrelationId (format
+     * "RADIX-TOKEN-xxx"), it is included; otherwise a fresh token is generated.
+     *
+     * Idempotent: if the pre-auth is already cancelled or dispensed, the FCC
+     * returns a non-zero ACKCODE but the pump is not in an authorized state.
+     */
+    override suspend fun cancelPreAuth(command: CancelPreAuthCommand): Boolean {
+        return try {
+            withTimeout(PREAUTH_TIMEOUT_MS) {
+                val pumpEntry = pumpAddressMap[command.pumpNumber]
+                if (pumpEntry == null) {
+                    AppLogger.w(TAG, "Cancel pre-auth: pump ${command.pumpNumber} not in fccPumpAddressMap")
+                    return@withTimeout false
+                }
+
+                // Extract token from correlationId if available (format: "RADIX-TOKEN-123")
+                val token = command.fccCorrelationId
+                    ?.removePrefix("RADIX-TOKEN-")
+                    ?.toIntOrNull()
+                    ?.also { activePreAuths.remove(it) }
+
+                val tokenStr = (token ?: nextToken()).toString()
+
+                val requestBody = RadixXmlBuilder.buildPreAuthCancelRequest(
+                    pump = pumpEntry.pumpAddr,
+                    fp = pumpEntry.fp,
+                    token = tokenStr,
+                    secret = sharedSecret,
+                )
+                val headers = RadixXmlBuilder.buildHttpHeaders(usnCode, RadixXmlBuilder.OPERATION_AUTHORIZE)
+                val url = "http://${config.hostAddress}:$authPort"
+
+                val response = httpClient.post(url) {
+                    headers.forEach { (key, value) -> header(key, value) }
+                    setBody(requestBody)
+                }
+
+                val responseBody = response.bodyAsText()
+                val parseResult = RadixXmlParser.parseAuthResponse(responseBody)
+
+                when (parseResult) {
+                    is RadixParseResult.Success -> {
+                        // ACKCODE 0 = success; any other code means the pump was not
+                        // in an authorized state — treat as idempotent success.
+                        AppLogger.i(TAG, "Cancel pre-auth ACKCODE=${parseResult.value.ackCode} " +
+                            "for pump=${command.pumpNumber}")
+                        true
+                    }
+                    is RadixParseResult.Error -> {
+                        AppLogger.w(TAG, "Cancel pre-auth parse error for pump=${command.pumpNumber}: " +
+                            parseResult.message)
+                        false
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Cancel pre-auth failed for pump=${command.pumpNumber}: " +
+                "${e::class.simpleName}: ${e.message}")
+            false
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // IFccAdapter — getPumpStatus
     // -----------------------------------------------------------------------
 
@@ -986,82 +1124,21 @@ class RadixAdapter(
 
         return try {
             val result = mutableMapOf<Int, PumpAddressEntry>()
-            // Simple JSON parsing without external library dependency.
-            // Format: { "key": { "pumpAddr": N, "fp": N }, ... }
-            val trimmed = json.trim()
-            if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return emptyMap()
-
-            // Remove outer braces
-            val inner = trimmed.substring(1, trimmed.length - 1).trim()
-            if (inner.isEmpty()) return emptyMap()
-
-            // Split by top-level entries: "key": { ... }
-            // Use a simple state machine to handle nested braces
-            var depth = 0
-            var start = 0
-            val entries = mutableListOf<String>()
-            for (i in inner.indices) {
-                when (inner[i]) {
-                    '{' -> depth++
-                    '}' -> {
-                        depth--
-                        if (depth == 0) {
-                            entries.add(inner.substring(start, i + 1).trim())
-                            start = i + 1
-                            // Skip comma
-                            while (start < inner.length && (inner[start] == ',' || inner[start].isWhitespace())) {
-                                start++
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (entry in entries) {
-                // "1": { "pumpAddr": 0, "fp": 0 }
-                val colonIdx = entry.indexOf(':')
-                if (colonIdx < 0) continue
-
-                val keyStr = entry.substring(0, colonIdx).trim().removeSurrounding("\"")
-                val pumpNumber = keyStr.toIntOrNull() ?: continue
-
-                val objStr = entry.substring(colonIdx + 1).trim()
-                val pumpAddr = extractJsonInt(objStr, "pumpAddr")
-                val fp = extractJsonInt(objStr, "fp")
-
-                if (pumpAddr != null && fp != null) {
+            val root = org.json.JSONObject(json)
+            for (key in root.keys()) {
+                val pumpNumber = key.toIntOrNull() ?: continue
+                val obj = root.getJSONObject(key)
+                val pumpAddr = obj.optInt("pumpAddr", -1)
+                val fp = obj.optInt("fp", -1)
+                if (pumpAddr >= 0 && fp >= 0) {
                     result[pumpNumber] = PumpAddressEntry(pumpAddr, fp)
                 }
             }
-
             result
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse fccPumpAddressMap: ${e.message}")
+            AppLogger.w(TAG, "Failed to parse fccPumpAddressMap: ${e.message}")
             emptyMap()
         }
-    }
-
-    /**
-     * Extracts an integer value for a given key from a simple JSON object string.
-     * E.g., from `{ "pumpAddr": 0, "fp": 1 }` extracts 0 for key "pumpAddr".
-     */
-    private fun extractJsonInt(json: String, key: String): Int? {
-        // Look for "key" : N or "key": N
-        val patterns = listOf("\"$key\":", "\"$key\" :")
-        for (pattern in patterns) {
-            val idx = json.indexOf(pattern)
-            if (idx >= 0) {
-                val valueStart = idx + pattern.length
-                val valueStr = json.substring(valueStart).trim()
-                val sb = StringBuilder()
-                for (c in valueStr) {
-                    if (c.isDigit() || c == '-') sb.append(c)
-                    else break
-                }
-                return sb.toString().toIntOrNull()
-            }
-        }
-        return null
     }
 
     // -----------------------------------------------------------------------
@@ -1125,8 +1202,8 @@ class RadixAdapter(
         /** Mode not yet known or reset. */
         const val MODE_UNKNOWN = -1
 
-        /** ON_DEMAND (pull) mode — host requests transactions. */
-        const val MODE_ON_DEMAND = 0
+        /** ON_DEMAND (pull) mode — host requests transactions. Radix protocol MODE=1. */
+        const val MODE_ON_DEMAND = 1
 
         /** UNSOLICITED (push) mode — FDC posts transactions to the listener. */
         const val MODE_UNSOLICITED = 2
@@ -1136,6 +1213,9 @@ class RadixAdapter(
 
         /** Volume conversion factor: 1 litre = 1,000,000 microlitres. */
         private val MICROLITRES_PER_LITRE = BigDecimal(1_000_000)
+
+        /** TTL for pre-auth entries: entries older than this are purged to prevent memory leaks. */
+        private const val PREAUTH_TTL_MINUTES = 30L
     }
 }
 

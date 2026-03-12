@@ -1,0 +1,161 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FccDesktopAgent.App.Views.SettingsPanel">
+
+  <ScrollViewer Padding="24">
+    <StackPanel Spacing="16">
+
+      <!-- Header -->
+      <TextBlock Text="FCC Connection Overrides" FontSize="22" FontWeight="SemiBold" />
+      <TextBlock Text="Override cloud-delivered FCC connection parameters for on-site testing. Leave fields empty to use cloud defaults."
+                 FontSize="12" Opacity="0.6" TextWrapping="Wrap" />
+
+      <!-- Override active banner -->
+      <Border x:Name="OverrideBanner"
+              IsVisible="False"
+              Background="#DBEAFE"
+              CornerRadius="6"
+              Padding="12">
+        <TextBlock Text="Local overrides are active. The adapter is using locally configured values instead of cloud defaults."
+                   Foreground="#1D4ED8"
+                   FontSize="13"
+                   TextWrapping="Wrap" />
+      </Border>
+
+      <!-- Cloud defaults (read-only) -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Cloud Defaults" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#E5E7EB" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Read-Only" FontSize="10" Foreground="#6B7280" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*" RowDefinitions="Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Cloud FCC Host" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CloudHost" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="2">
+              <TextBlock Text="Cloud FCC Port" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CloudPort" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Cloud API Routes (read-only) -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Cloud API Routes" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#E5E7EB" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Read-Only" FontSize="10" Foreground="#6B7280" />
+            </Border>
+          </Grid>
+          <StackPanel Spacing="6" Margin="0,4,0,0">
+            <StackPanel Spacing="1">
+              <TextBlock Text="Registration" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteRegistration" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Config Poll" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteConfigPoll" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Token Refresh" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteTokenRefresh" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Transaction Upload" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteTransactionUpload" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Synced Status" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteSyncedStatus" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Pre-Auth Forward" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RoutePreAuth" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Telemetry" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteTelemetry" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Diagnostic Logs" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteDiagnosticLogs" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Spacing="1">
+              <TextBlock Text="Version Check" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="RouteVersionCheck" FontSize="11" FontFamily="Consolas" Opacity="0.8" TextWrapping="Wrap" />
+            </StackPanel>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- Local overrides (editable) -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Local Overrides" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#FEF3C7" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Editable" FontSize="10" Foreground="#92400E" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2" Margin="0,0,8,8">
+              <TextBlock Text="FCC Host / IP" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="OverrideFccHost" Watermark="e.g. 192.168.1.100" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="0" Grid.Column="1" Spacing="2" Margin="0,0,0,8">
+              <TextBlock Text="FCC Port" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="OverrideFccPort" Watermark="e.g. 8080" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="JPL Port (DOMS TCP)" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="OverrideJplPort" Watermark="Leave empty for cloud default" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Grid.Column="1" Spacing="2">
+              <TextBlock Text="WebSocket Port (Radix)" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="OverrideWsPort" Watermark="Leave empty for cloud default" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Actions -->
+      <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+        <Button x:Name="SaveButton"
+                Content="Save &amp; Reconnect"
+                Padding="16,8"
+                FontSize="13"
+                Click="OnSaveClicked" />
+        <Button x:Name="ResetButton"
+                Grid.Column="1"
+                Content="Reset to Cloud Defaults"
+                Padding="16,8"
+                FontSize="13"
+                Margin="8,0,0,0"
+                Click="OnResetClicked" />
+        <TextBlock x:Name="FeedbackText"
+                   Grid.Column="3"
+                   Text=""
+                   FontSize="12"
+                   Opacity="0.6"
+                   VerticalAlignment="Center" />
+      </Grid>
+
+      <!-- Bottom spacing -->
+      <Border Height="20" />
+
+    </StackPanel>
+  </ScrollViewer>
+
+</UserControl>

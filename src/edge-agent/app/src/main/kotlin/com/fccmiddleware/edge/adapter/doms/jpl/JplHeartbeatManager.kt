@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.doms.jpl
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import kotlinx.coroutines.*
 
 /**
@@ -34,7 +34,7 @@ class JplHeartbeatManager(
         heartbeatJob = scope.launch {
             runHeartbeatLoop()
         }
-        Log.i(TAG, "Heartbeat started (interval=${intervalSeconds}s)")
+        AppLogger.i(TAG, "Heartbeat started (interval=${intervalSeconds}s)")
     }
 
     /** Stop the periodic heartbeat loop. */
@@ -51,14 +51,14 @@ class JplHeartbeatManager(
             delay(intervalMs)
 
             if (!tcpClient.isConnected) {
-                Log.d(TAG, "TCP not connected, skipping heartbeat")
+                AppLogger.d(TAG, "TCP not connected, skipping heartbeat")
                 continue
             }
 
             // Check for dead connection
             val timeSinceLastReceived = System.currentTimeMillis() - tcpClient.lastReceivedTimestamp
             if (timeSinceLastReceived > deadThresholdMs) {
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "Dead connection detected: no frames received for ${timeSinceLastReceived}ms " +
                         "(threshold=${deadThresholdMs}ms)"
@@ -70,9 +70,9 @@ class JplHeartbeatManager(
             // Send heartbeat
             try {
                 tcpClient.sendHeartbeat()
-                Log.d(TAG, "Heartbeat sent")
+                AppLogger.d(TAG, "Heartbeat sent")
             } catch (e: Exception) {
-                Log.w(TAG, "Heartbeat send failed: ${e.message}")
+                AppLogger.w(TAG, "Heartbeat send failed: ${e.message}")
             }
         }
     }

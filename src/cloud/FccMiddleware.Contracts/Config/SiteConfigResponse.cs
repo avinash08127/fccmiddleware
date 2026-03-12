@@ -105,6 +105,9 @@ public sealed record SyncDto
     /// Per security spec §5.3: 30-day overlap window for graceful rotation.
     /// </summary>
     public string[]? CertificatePins { get; init; }
+
+    /// <summary>Cloud environment key (e.g. "PRODUCTION", "STAGING"). Null if not set.</summary>
+    public string? Environment { get; init; }
 }
 
 public sealed record BufferDto

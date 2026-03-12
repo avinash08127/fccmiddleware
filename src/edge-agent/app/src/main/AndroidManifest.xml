@@ -4,16 +4,20 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <uses-feature android:name="android.hardware.camera" android:required="true" />
+    <!-- M-01: required=false — manual provisioning works without a camera -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:name=".FccEdgeApplication"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.FccEdgeAgent">
@@ -33,16 +37,22 @@
             </intent-filter>
         </receiver>
 
-        <!-- Launcher activity — routes to Provisioning or Diagnostics based on registration state -->
+        <!-- Splash screen — app entry point with Puma Energy branding -->
         <activity
-            android:name=".ui.LauncherActivity"
+            android:name=".ui.SplashActivity"
             android:exported="true"
-            android:theme="@style/Theme.FccEdgeAgent">
+            android:theme="@style/Theme.FccEdgeAgent.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Launcher activity — routes to Provisioning or Diagnostics based on registration state -->
+        <activity
+            android:name=".ui.LauncherActivity"
+            android:exported="false"
+            android:theme="@style/Theme.FccEdgeAgent" />
 
         <!-- QR code provisioning screen — shown on first launch -->
         <activity
@@ -54,9 +64,25 @@
             android:name=".ui.DiagnosticsActivity"
             android:exported="false" />
 
+        <!-- FCC connection settings — local override management -->
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false" />
+
         <!-- Device decommissioned screen — dead-end after 403 DEVICE_DECOMMISSIONED -->
         <activity
             android:name=".ui.DecommissionedActivity"
             android:exported="false" />
+
+        <!-- FileProvider for sharing log zip files via share sheet -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
     </application>
 </manifest>

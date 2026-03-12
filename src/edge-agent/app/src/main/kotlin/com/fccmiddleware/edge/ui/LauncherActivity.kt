@@ -2,7 +2,7 @@ package com.fccmiddleware.edge.ui
 
 import android.content.Intent
 import android.os.Bundle
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import androidx.appcompat.app.AppCompatActivity
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.service.EdgeAgentForegroundService
@@ -31,16 +31,16 @@ class LauncherActivity : AppCompatActivity() {
 
         val target = when {
             encryptedPrefs.isDecommissioned -> {
-                Log.i(TAG, "Device is decommissioned — showing decommissioned screen")
+                AppLogger.i(TAG, "Device is decommissioned — showing decommissioned screen")
                 Intent(this, DecommissionedActivity::class.java)
             }
             encryptedPrefs.isRegistered -> {
-                Log.i(TAG, "Device is registered — starting service and showing diagnostics")
+                AppLogger.i(TAG, "Device is registered — starting service and showing diagnostics")
                 startForegroundService(Intent(this, EdgeAgentForegroundService::class.java))
                 Intent(this, DiagnosticsActivity::class.java)
             }
             else -> {
-                Log.i(TAG, "Device not registered — showing provisioning screen")
+                AppLogger.i(TAG, "Device not registered — showing provisioning screen")
                 Intent(this, ProvisioningActivity::class.java)
             }
         }

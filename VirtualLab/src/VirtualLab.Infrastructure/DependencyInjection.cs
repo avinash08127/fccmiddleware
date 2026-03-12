@@ -20,6 +20,7 @@ using VirtualLab.Infrastructure.Management;
 using VirtualLab.Infrastructure.Persistence;
 using VirtualLab.Infrastructure.Persistence.Seed;
 using VirtualLab.Infrastructure.Diagnostics;
+using VirtualLab.Infrastructure.AdvatecSimulator;
 using VirtualLab.Infrastructure.PetroniteSimulator;
 using VirtualLab.Infrastructure.PreAuth;
 using VirtualLab.Infrastructure.RadixSimulator;
@@ -139,6 +140,13 @@ public static class DependencyInjection
         services.AddSingleton<PetroniteSimulatorService>();
         services.AddHostedService(sp => sp.GetRequiredService<PetroniteSimulatorService>());
         services.AddHttpClient("PetroniteSimulator", client => client.Timeout = TimeSpan.FromSeconds(10));
+
+        // Advatec EFD simulator (ADV-5.1)
+        services.Configure<AdvatecSimulatorOptions>(configuration.GetSection(AdvatecSimulatorOptions.SectionName));
+        services.AddSingleton<AdvatecSimulatorState>();
+        services.AddSingleton<AdvatecSimulatorService>();
+        services.AddHostedService(sp => sp.GetRequiredService<AdvatecSimulatorService>());
+        services.AddHttpClient("AdvatecSimulator", client => client.Timeout = TimeSpan.FromSeconds(10));
 
         return services;
     }

@@ -13,6 +13,7 @@ internal static class DesktopFccRuntimeConfiguration
         FccVendor.Doms,
         FccVendor.Radix,
         FccVendor.Petronite,
+        FccVendor.Advatec,
     };
 
     public static bool IsSupported(FccVendor vendor) => SupportedVendors.Contains(vendor);
@@ -36,7 +37,9 @@ internal static class DesktopFccRuntimeConfiguration
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(config.Fcc.HostAddress) || config.Fcc.Port is null or <= 0)
+        // Advatec uses localhost:5560 by default — hostAddress/port are optional.
+        if (vendor != FccVendor.Advatec
+            && (string.IsNullOrWhiteSpace(config.Fcc.HostAddress) || config.Fcc.Port is null or <= 0))
         {
             error = "Enabled FCC config must specify hostAddress and port.";
             return false;
@@ -61,7 +64,8 @@ internal static class DesktopFccRuntimeConfiguration
         AgentConfiguration agentConfig,
         SiteConfig? siteConfig,
         TimeSpan requestTimeout,
-        string? expectedSiteCode = null)
+        string? expectedSiteCode = null,
+        LocalOverrideManager? overrideManager = null)
     {
         if (siteConfig?.Fcc?.Enabled == true
             && TryParseVendor(siteConfig.Fcc.Vendor, out var configuredVendor)
@@ -82,7 +86,7 @@ internal static class DesktopFccRuntimeConfiguration
         if (string.IsNullOrWhiteSpace(siteCode))
             throw new InvalidOperationException("FCC siteCode is not configured.");
 
-        var baseUrl = ResolveBaseUrl(agentConfig, fccSection);
+        var baseUrl = ResolveBaseUrl(vendor, agentConfig, fccSection, overrideManager);
         var productCodeMapping = siteConfig?.Mappings?.Nozzles
             ?.Where(item => !string.IsNullOrWhiteSpace(item.ProductCode))
             .GroupBy(item => item.ProductCode, StringComparer.OrdinalIgnoreCase)
@@ -92,13 +96,24 @@ internal static class DesktopFccRuntimeConfiguration
         int? webhookListenerPort = fccSection?.WebhookListenerPort
             ?? (agentConfig.PetroniteWebhookListenerPort > 0 ? agentConfig.PetroniteWebhookListenerPort : null);
 
+        // Advatec: resolve device address/port and webhook fields from cloud config.
+        var advatecDeviceAddress = fccSection?.HostAddress ?? "127.0.0.1";
+        var advatecDevicePort = fccSection?.AdvatecDevicePort ?? fccSection?.Port ?? 5560;
+        var advatecWebhookListenerPort = fccSection?.AdvatecWebhookListenerPort;
+        var advatecWebhookToken = fccSection?.AdvatecWebhookToken;
+        var advatecEfdSerialNumber = fccSection?.AdvatecEfdSerialNumber;
+        var advatecCustIdType = fccSection?.AdvatecCustIdType;
+
+        // Apply JPL port override if set
+        var resolvedJplPort = overrideManager?.GetEffectiveJplPort(fccSection?.Port) ?? fccSection?.Port;
+
         var connectionConfig = new FccConnectionConfig(
             BaseUrl: baseUrl,
             ApiKey: agentConfig.FccApiKey,
             RequestTimeout: requestTimeout,
             SiteCode: siteCode,
             ConnectionProtocol: fccSection?.ConnectionProtocol,
-            JplPort: fccSection?.Port,
+            JplPort: resolvedJplPort,
             AuthPort: fccSection?.Port,
             HeartbeatIntervalSeconds: fccSection?.HeartbeatIntervalSeconds,
             LegalEntityId: siteConfig?.Identity?.LegalEntityId,
@@ -106,7 +121,13 @@ internal static class DesktopFccRuntimeConfiguration
             Timezone: siteConfig?.Site?.Timezone,
             PumpNumberOffset: siteConfig?.Mappings?.PumpNumberOffset ?? 0,
             ProductCodeMapping: productCodeMapping,
-            WebhookListenerPort: webhookListenerPort);
+            WebhookListenerPort: webhookListenerPort,
+            AdvatecDeviceAddress: advatecDeviceAddress,
+            AdvatecDevicePort: advatecDevicePort,
+            AdvatecWebhookListenerPort: advatecWebhookListenerPort,
+            AdvatecWebhookToken: advatecWebhookToken,
+            AdvatecEfdSerialNumber: advatecEfdSerialNumber,
+            AdvatecCustIdType: advatecCustIdType);
 
         return new ResolvedFccRuntimeConfiguration(vendor, connectionConfig);
     }
@@ -125,13 +146,21 @@ internal static class DesktopFccRuntimeConfiguration
         return agentConfig.FccVendor;
     }
 
-    private static string ResolveBaseUrl(AgentConfiguration agentConfig, SiteConfigFcc? fccSection)
+    private static string ResolveBaseUrl(FccVendor vendor, AgentConfiguration agentConfig, SiteConfigFcc? fccSection, LocalOverrideManager? overrideManager = null)
     {
-        if (!string.IsNullOrWhiteSpace(fccSection?.HostAddress) && fccSection.Port is > 0)
-            return $"http://{fccSection.HostAddress}:{fccSection.Port.Value}";
+        // Apply local overrides first — they take precedence over cloud config
+        var host = overrideManager?.GetEffectiveFccHost(fccSection?.HostAddress ?? "") ?? fccSection?.HostAddress;
+        var port = overrideManager?.GetEffectiveFccPort(fccSection?.Port ?? 0) ?? fccSection?.Port;
+
+        if (!string.IsNullOrWhiteSpace(host) && port is > 0)
+            return $"http://{host}:{port}";
 
         if (!string.IsNullOrWhiteSpace(agentConfig.FccBaseUrl))
-            return agentConfig.FccBaseUrl;
+            return agentConfig.GetEffectiveFccBaseUrl(overrideManager);
+
+        // Advatec runs on localhost:5560 by default — base URL is not required from config.
+        if (vendor == FccVendor.Advatec)
+            return $"http://127.0.0.1:{fccSection?.AdvatecDevicePort ?? 5560}";
 
         throw new InvalidOperationException("FCC base URL is not configured.");
     }

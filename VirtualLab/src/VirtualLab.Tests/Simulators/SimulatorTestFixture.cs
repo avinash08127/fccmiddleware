@@ -66,6 +66,7 @@ public sealed class SimulatorTestFixture : IAsyncLifetime
         await Client.PostAsync("/api/doms-jpl/reset", null);
         await Client.PostAsync("/api/radix/reset", null);
         await Client.PostAsync("/api/petronite/reset", null);
+        await Client.PostAsync("/api/advatec/reset", null);
     }
 }
 

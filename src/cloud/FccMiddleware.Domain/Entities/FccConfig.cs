@@ -51,6 +51,12 @@ public class FccConfig
     public string? WebhookSecret { get; set; }
     public string? OAuthTokenEndpoint { get; set; }
 
+    // ── Advatec EFD fields ──────────────────────────────────────────────────
+    public int? AdvatecDevicePort { get; set; }
+    public string? AdvatecWebhookToken { get; set; }
+    public string? AdvatecEfdSerialNumber { get; set; }
+    public int? AdvatecCustIdType { get; set; }
+
     // Navigation properties
     public Site Site { get; set; } = null!;
     public LegalEntity LegalEntity { get; set; } = null!;

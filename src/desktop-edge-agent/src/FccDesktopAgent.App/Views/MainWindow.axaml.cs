@@ -20,6 +20,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private readonly IConnectivityMonitor? _connectivity;
     private readonly IServiceProvider? _services;
     private readonly Timer _statusTimer;
+    private readonly CancellationTokenSource _disposeCts = new();
 
     // Lazy-created pages — kept alive for the window's lifetime
     private DashboardPage? _dashboardPage;
@@ -27,6 +28,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private PreAuthPage? _preAuthPage;
     private ConfigurationPage? _configurationPage;
     private LogsPage? _logsPage;
+    private SettingsPanel? _settingsPanel;
 
     public MainWindow()
     {
@@ -114,6 +116,7 @@ public sealed partial class MainWindow : Window, IDisposable
             "PreAuth" => _preAuthPage ??= new PreAuthPage(),
             "Configuration" => _configurationPage ??= new ConfigurationPage(),
             "Logs" => _logsPage ??= new LogsPage(),
+            "Settings" => _settingsPanel ??= new SettingsPanel(),
             _ => _dashboardPage ??= new DashboardPage()
         };
     }
@@ -126,7 +129,8 @@ public sealed partial class MainWindow : Window, IDisposable
             (NavTransactions, "Transactions"),
             (NavPreAuth, "PreAuth"),
             (NavConfiguration, "Configuration"),
-            (NavLogs, "Logs")
+            (NavLogs, "Logs"),
+            (NavSettings, "Settings")
         };
 
         foreach (var (btn, tag) in buttons)
@@ -173,7 +177,8 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private async Task RefreshStatusBarAsync()
     {
-        if (_services is null) return;
+        // L-03: Guard against timer callbacks arriving after Dispose
+        if (_services is null || _disposeCts.IsCancellationRequested) return;
 
         try
         {
@@ -252,9 +257,13 @@ public sealed partial class MainWindow : Window, IDisposable
 
     public void Dispose()
     {
+        // L-03: Signal cancellation before disposing the timer so in-flight
+        // callbacks see the flag and bail out before touching disposed resources.
+        _disposeCts.Cancel();
         if (_connectivity is not null)
             _connectivity.StateChanged -= OnConnectivityChanged;
         _statusTimer.Dispose();
+        _disposeCts.Dispose();
         (_dashboardPage as IDisposable)?.Dispose();
         (_transactionsPage as IDisposable)?.Dispose();
         (_configurationPage as IDisposable)?.Dispose();

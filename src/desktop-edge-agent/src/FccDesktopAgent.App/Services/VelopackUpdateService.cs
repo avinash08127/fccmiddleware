@@ -29,7 +29,12 @@ internal sealed class VelopackUpdateService : IUpdateService
         {
             try
             {
-                var mgr = new UpdateManager(new SimpleWebSource("https://placeholder"));
+                // IsInstalled is a local filesystem check — the URL is not contacted.
+                // Use the configured URL when available; otherwise a descriptive fallback.
+                var url = _config.CurrentValue.UpdateUrl;
+                var source = new SimpleWebSource(
+                    !string.IsNullOrWhiteSpace(url) ? url : "https://updates.not-configured");
+                var mgr = new UpdateManager(source);
                 return mgr.IsInstalled;
             }
             catch

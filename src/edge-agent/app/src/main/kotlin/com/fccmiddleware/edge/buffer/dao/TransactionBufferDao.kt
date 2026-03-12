@@ -279,4 +279,102 @@ interface TransactionBufferDao {
         "LIMIT :limit OFFSET :offset"
     )
     suspend fun getForLocalApiByPumpSince(pumpNumber: Int, since: String, limit: Int, offset: Int): List<BufferedTransaction>
+
+    // ── WebSocket backward-compat queries (Odoo POS cart workflow) ─────────
+
+    /**
+     * Unsynced transactions for the WebSocket "latest" mode.
+     * Returns records NOT marked as SYNCED_TO_ODOO, with optional filters.
+     */
+    @Query(
+        "SELECT * FROM buffered_transactions " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED') " +
+        "AND (:pumpNumber IS NULL OR pump_number = :pumpNumber) " +
+        "AND (:nozzleNumber IS NULL OR nozzle_number = :nozzleNumber) " +
+        "AND (:attendant IS NULL OR attendant_id = :attendant) " +
+        "AND (:since IS NULL OR created_at >= :since) " +
+        "ORDER BY completed_at DESC " +
+        "LIMIT 200"
+    )
+    suspend fun getUnsyncedForWs(
+        pumpNumber: Int?,
+        nozzleNumber: Int?,
+        attendant: String?,
+        since: String?,
+    ): List<BufferedTransaction>
+
+    /**
+     * All transactions for the WebSocket "all" mode.
+     */
+    @Query(
+        "SELECT * FROM buffered_transactions " +
+        "ORDER BY completed_at DESC " +
+        "LIMIT 500"
+    )
+    suspend fun getAllForWs(): List<BufferedTransaction>
+
+    /**
+     * Update Odoo cart fields on a transaction (WebSocket manager_update / attendant_update).
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "order_uuid = COALESCE(:orderUuid, order_uuid), " +
+        "odoo_order_id = COALESCE(:odooOrderId, odoo_order_id), " +
+        "payment_id = COALESCE(:paymentId, payment_id), " +
+        "updated_at = :now " +
+        "WHERE fcc_transaction_id = :transactionId"
+    )
+    suspend fun updateOdooFields(
+        transactionId: String,
+        orderUuid: String?,
+        odooOrderId: String?,
+        paymentId: String?,
+        now: String,
+    )
+
+    /**
+     * Update add_to_cart flag and optional payment_id (WebSocket attendant_update).
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "add_to_cart = :addToCart, " +
+        "payment_id = COALESCE(:paymentId, payment_id), " +
+        "updated_at = :now " +
+        "WHERE fcc_transaction_id = :transactionId"
+    )
+    suspend fun updateAddToCart(
+        transactionId: String,
+        addToCart: Boolean,
+        paymentId: String?,
+        now: String,
+    )
+
+    /**
+     * Mark a transaction as discarded (WebSocket manager_manual_update).
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "is_discard = 1, " +
+        "updated_at = :now " +
+        "WHERE fcc_transaction_id = :transactionId"
+    )
+    suspend fun markDiscarded(transactionId: String, now: String)
+
+    /**
+     * Look up a transaction by FCC transaction ID (for WebSocket update broadcasts).
+     */
+    @Query("SELECT * FROM buffered_transactions WHERE fcc_transaction_id = :fccTransactionId LIMIT 1")
+    suspend fun getByFccTransactionId(fccTransactionId: String): BufferedTransaction?
+
+    /**
+     * Update the fiscal receipt number on a buffered transaction (ADV-7.3).
+     * Called after successful post-dispense fiscalization via [IFiscalizationService].
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "fiscal_receipt_number = :receiptCode, " +
+        "updated_at = :now " +
+        "WHERE id = :id"
+    )
+    suspend fun updateFiscalReceipt(id: String, receiptCode: String, now: String)
 }

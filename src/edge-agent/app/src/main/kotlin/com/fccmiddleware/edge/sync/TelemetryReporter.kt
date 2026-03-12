@@ -7,7 +7,7 @@ import android.os.BatteryManager
 import android.os.Environment
 import android.os.StatFs
 import android.os.SystemClock
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
@@ -89,7 +89,7 @@ class TelemetryReporter(
                 counts.bufferWriteErrors > 0 || counts.adapterNormalizationErrors > 0 ||
                 counts.preAuthErrors > 0
             if (hasErrors) {
-                Log.w(
+                AppLogger.w(
                     TAG,
                     "buildPayload() — no config loaded; unreported error counters: " +
                         "fcc=${counts.fccConnectionErrors} upload=${counts.cloudUploadErrors} " +
@@ -98,7 +98,7 @@ class TelemetryReporter(
                         "preAuth=${counts.preAuthErrors}",
                 )
             } else {
-                Log.d(TAG, "buildPayload() — no config loaded, skipping telemetry")
+                AppLogger.d(TAG, "buildPayload() — no config loaded, skipping telemetry")
             }
             return null
         }
@@ -235,7 +235,7 @@ class TelemetryReporter(
         val statusCounts = try {
             transactionDao.countByStatus()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to query buffer status counts", e)
+            AppLogger.e(TAG, "Failed to query buffer status counts", e)
             emptyList()
         }
 
@@ -249,7 +249,7 @@ class TelemetryReporter(
         val oldestPendingAtUtc = try {
             transactionDao.oldestPendingCreatedAt()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to query oldest pending timestamp", e)
+            AppLogger.e(TAG, "Failed to query oldest pending timestamp", e)
             null
         }
 
@@ -282,7 +282,7 @@ class TelemetryReporter(
         val syncState = try {
             syncStateDao.get()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to read SyncState", e)
+            AppLogger.e(TAG, "Failed to read SyncState", e)
             null
         }
 
@@ -349,7 +349,7 @@ class TelemetryReporter(
             val now = Instant.now().toString()
             syncStateDao.incrementAndGetTelemetrySequence(now)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to increment telemetry sequence number", e)
+            AppLogger.e(TAG, "Failed to increment telemetry sequence number", e)
             1L
         }
     }

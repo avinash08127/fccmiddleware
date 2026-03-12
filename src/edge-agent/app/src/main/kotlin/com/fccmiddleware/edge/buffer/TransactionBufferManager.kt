@@ -1,7 +1,7 @@
 package com.fccmiddleware.edge.buffer
 
 import android.database.sqlite.SQLiteFullException
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.CanonicalTransaction
 import com.fccmiddleware.edge.adapter.common.SyncStatus
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
@@ -48,15 +48,15 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
             val rowId = dao.insert(entity)
             rowId != -1L
         } catch (e: SQLiteFullException) {
-            Log.e(TAG, "SQLITE_FULL on insert — attempting emergency cleanup", e)
+            AppLogger.e(TAG, "SQLITE_FULL on insert — attempting emergency cleanup", e)
             emergencyCleanup()
             // Retry once after cleanup
             val retryRowId = dao.insert(entity)
             if (retryRowId == -1L) {
-                Log.w(TAG, "Insert was a duplicate after emergency cleanup")
+                AppLogger.w(TAG, "Insert was a duplicate after emergency cleanup")
                 false
             } else {
-                Log.i(TAG, "Insert succeeded after emergency cleanup")
+                AppLogger.i(TAG, "Insert succeeded after emergency cleanup")
                 true
             }
         }
@@ -70,14 +70,14 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
     private suspend fun emergencyCleanup() {
         try {
             val archivedDeleted = dao.deleteOldestArchived(EMERGENCY_CLEANUP_BATCH)
-            Log.w(TAG, "Emergency cleanup: deleted $archivedDeleted ARCHIVED records")
+            AppLogger.w(TAG, "Emergency cleanup: deleted $archivedDeleted ARCHIVED records")
 
             if (archivedDeleted < EMERGENCY_CLEANUP_BATCH) {
                 val syncedDeleted = dao.deleteOldestSynced(EMERGENCY_CLEANUP_BATCH - archivedDeleted)
-                Log.w(TAG, "Emergency cleanup: deleted $syncedDeleted SYNCED_TO_ODOO records")
+                AppLogger.w(TAG, "Emergency cleanup: deleted $syncedDeleted SYNCED_TO_ODOO records")
             }
         } catch (cleanupError: Exception) {
-            Log.e(TAG, "Emergency cleanup itself failed — database may be corrupted", cleanupError)
+            AppLogger.e(TAG, "Emergency cleanup itself failed — database may be corrupted", cleanupError)
         }
     }
 

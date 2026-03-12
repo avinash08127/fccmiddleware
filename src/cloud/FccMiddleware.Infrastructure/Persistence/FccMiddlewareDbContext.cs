@@ -1,4 +1,6 @@
 using FccMiddleware.Application.AgentConfig;
+using FccMiddleware.Application.Common;
+using FccMiddleware.Application.DiagnosticLogs;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
 using FccMiddleware.Application.PreAuth;
@@ -10,6 +12,7 @@ using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Infrastructure.Deduplication;
+using FccMiddleware.Infrastructure.Security;
 using Microsoft.EntityFrameworkCore;
 
 namespace FccMiddleware.Infrastructure.Persistence;
@@ -27,16 +30,19 @@ namespace FccMiddleware.Infrastructure.Persistence;
 ///
 /// Outbox: <see cref="OutboxMessage"/> uses a bigint GENERATED ALWAYS AS IDENTITY column.
 /// </summary>
-public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext, IRegistrationDbContext, IAgentConfigDbContext, ITelemetryDbContext, IPreAuthDbContext, IReconciliationDbContext
+public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicationDbContext, IPollTransactionsDbContext, IAcknowledgeTransactionsDbContext, IMasterDataSyncDbContext, IRegistrationDbContext, IAgentConfigDbContext, ITelemetryDbContext, IDiagnosticLogsDbContext, IPreAuthDbContext, IReconciliationDbContext
 {
     private readonly ICurrentTenantProvider _tenantProvider;
+    private readonly IFieldEncryptor? _fieldEncryptor;
 
     public FccMiddlewareDbContext(
         DbContextOptions<FccMiddlewareDbContext> options,
-        ICurrentTenantProvider tenantProvider)
+        ICurrentTenantProvider tenantProvider,
+        IFieldEncryptor? fieldEncryptor = null)
         : base(options)
     {
         _tenantProvider = tenantProvider;
+        _fieldEncryptor = fieldEncryptor;
     }
 
     // -------------------------------------------------------------------------
@@ -62,6 +68,7 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     public DbSet<FccConfig> FccConfigs => Set<FccConfig>();
     public DbSet<AgentRegistration> AgentRegistrations => Set<AgentRegistration>();
     public DbSet<AgentTelemetrySnapshot> AgentTelemetrySnapshots => Set<AgentTelemetrySnapshot>();
+    public DbSet<AgentDiagnosticLog> DiagnosticLogs => Set<AgentDiagnosticLog>();
     public DbSet<PortalSettings> PortalSettings => Set<PortalSettings>();
     public DbSet<LegalEntitySettingsOverride> LegalEntitySettingsOverrides => Set<LegalEntitySettingsOverride>();
     public DbSet<DeadLetterItem> DeadLetterItems => Set<DeadLetterItem>();
@@ -90,6 +97,22 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
 
         // Apply all IEntityTypeConfiguration<T> from this assembly (Infrastructure).
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(FccMiddlewareDbContext).Assembly);
+
+        // -------------------------------------------------------------------------
+        // At-rest encryption for sensitive FccConfig fields.
+        // Value converters transparently encrypt on write and decrypt on read.
+        // Legacy plaintext values are returned as-is until re-saved (incremental migration).
+        // -------------------------------------------------------------------------
+        if (_fieldEncryptor is not null)
+        {
+            var converter = new EncryptedFieldConverter(_fieldEncryptor);
+            var fccConfig = modelBuilder.Entity<FccConfig>();
+            fccConfig.Property(e => e.SharedSecret).HasConversion(converter);
+            fccConfig.Property(e => e.FcAccessCode).HasConversion(converter);
+            fccConfig.Property(e => e.ClientSecret).HasConversion(converter);
+            fccConfig.Property(e => e.WebhookSecret).HasConversion(converter);
+            fccConfig.Property(e => e.AdvatecWebhookToken).HasConversion(converter);
+        }
 
         // -------------------------------------------------------------------------
         // Multi-tenancy: global query filters on LegalEntityId.
@@ -510,6 +533,25 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
 
     void ITelemetryDbContext.AddTelemetrySnapshot(AgentTelemetrySnapshot snapshot) =>
         AgentTelemetrySnapshots.Add(snapshot);
+
+    // -------------------------------------------------------------------------
+    // IDiagnosticLogsDbContext implementation
+    // -------------------------------------------------------------------------
+
+    async Task<AgentRegistration?> IDiagnosticLogsDbContext.FindAgentByDeviceIdAsync(Guid deviceId) =>
+        await Set<AgentRegistration>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(a => a.Id == deviceId);
+
+    void IDiagnosticLogsDbContext.AddDiagnosticLog(AgentDiagnosticLog log) =>
+        DiagnosticLogs.Add(log);
+
+    async Task<List<AgentDiagnosticLog>> IDiagnosticLogsDbContext.GetRecentDiagnosticLogsAsync(
+        Guid deviceId, int maxBatches) =>
+        await Set<AgentDiagnosticLog>()
+            .Where(l => l.DeviceId == deviceId)
+            .OrderByDescending(l => l.UploadedAtUtc)
+            .Take(maxBatches)
+            .ToListAsync();
 
     // -------------------------------------------------------------------------
     // IPreAuthDbContext implementation

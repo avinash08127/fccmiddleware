@@ -190,7 +190,6 @@ public sealed class CloudUploadWorker : ICloudSyncService
             _logger.LogCritical(
                 "DEVICE_DECOMMISSIONED received from cloud. All cloud sync halted. " +
                 "Agent restart required to re-enable. Reason: {Reason}", ex.Message);
-            // TODO DEA-3.x: surface to GUI alert / diagnostics dashboard
             return 0;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

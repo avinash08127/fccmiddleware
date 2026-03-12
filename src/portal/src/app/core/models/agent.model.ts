@@ -28,6 +28,7 @@ export interface AgentRegistration {
   status: AgentRegistrationStatus;
   registeredAt: string;
   lastSeenAt: string | null;
+  environment?: string;
 }
 
 export interface DeviceRegistrationRequest {

@@ -65,13 +65,25 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
     /// The FCC adapter is resolved optionally — connectivity manager starts before
     /// the FCC adapter is fully configured.
     /// </summary>
+    /// <remarks>
+    /// H-10: The internet probe resolves CloudBaseUrl at probe time via IOptionsMonitor
+    /// instead of capturing the (potentially empty) value at construction time.
+    /// IOptions&lt;T&gt; caches its value after first resolution; if resolved before registration,
+    /// CloudBaseUrl would be permanently empty, causing "Internet Down" forever.
+    /// </remarks>
     public ConnectivityManager(
         IHttpClientFactory httpFactory,
         IServiceProvider services,
         IOptions<AgentConfiguration> config,
         ILogger<ConnectivityManager> logger)
         : this(
-            ct => PingCloudAsync(httpFactory, config.Value.CloudBaseUrl, ct),
+            ct =>
+            {
+                var monitor = (IOptionsMonitor<AgentConfiguration>?)services.GetService(
+                    typeof(IOptionsMonitor<AgentConfiguration>));
+                var cloudBaseUrl = monitor?.CurrentValue.CloudBaseUrl ?? config.Value.CloudBaseUrl;
+                return PingCloudAsync(httpFactory, cloudBaseUrl, ct);
+            },
             ct => ProbeFccAsync(services, ct),
             config,
             logger)

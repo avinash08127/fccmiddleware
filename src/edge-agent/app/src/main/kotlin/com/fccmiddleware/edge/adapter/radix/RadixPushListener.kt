@@ -1,6 +1,6 @@
 package com.fccmiddleware.edge.adapter.radix
 
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.cio.CIO
@@ -15,6 +15,7 @@ import kotlinx.coroutines.CancellationException
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Radix unsolicited push listener (RX-5.1).
@@ -58,6 +59,9 @@ class RadixPushListener(
     /** Thread-safe queue of raw XML payloads received from the FDC. */
     private val incomingQueue = ConcurrentLinkedQueue<PushedTransaction>()
 
+    /** Atomic counter tracking queue size to avoid TOCTOU race on size check + enqueue. */
+    private val queueCount = AtomicInteger(0)
+
     /** Whether the listener is currently running. */
     private val running = AtomicBoolean(false)
 
@@ -86,7 +90,7 @@ class RadixPushListener(
      */
     fun start(): Boolean {
         if (running.getAndSet(true)) {
-            Log.d(TAG, "Already running on port $listenPort")
+            AppLogger.d(TAG, "Already running on port $listenPort")
             return true
         }
 
@@ -100,10 +104,10 @@ class RadixPushListener(
             }
             srv.start(wait = false)
             server = srv
-            Log.i(TAG, "Started on port $listenPort")
+            AppLogger.i(TAG, "Started on port $listenPort")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start on port $listenPort: ${e.message}")
+            AppLogger.e(TAG, "Failed to start on port $listenPort: ${e.message}")
             running.set(false)
             false
         }
@@ -122,12 +126,13 @@ class RadixPushListener(
 
         try {
             server?.stop(gracePeriodMillis = 1000, timeoutMillis = 2000)
-            Log.i(TAG, "Stopped")
+            AppLogger.i(TAG, "Stopped")
         } catch (e: Exception) {
-            Log.w(TAG, "Error during shutdown: ${e.message}")
+            AppLogger.w(TAG, "Error during shutdown: ${e.message}")
         } finally {
             server = null
             incomingQueue.clear()
+            queueCount.set(0)
         }
     }
 
@@ -144,6 +149,7 @@ class RadixPushListener(
         val result = mutableListOf<PushedTransaction>()
         repeat(maxCount) {
             val item = incomingQueue.poll() ?: return result
+            queueCount.decrementAndGet()
             result.add(item)
         }
         return result
@@ -172,7 +178,7 @@ class RadixPushListener(
             // Step 1: Read raw XML body
             val rawXml = call.receiveText()
             if (rawXml.isBlank()) {
-                Log.w(TAG, "Received empty body")
+                AppLogger.w(TAG, "Received empty body")
                 call.respondText(
                     buildErrorResponse("Empty request body"),
                     ContentType.Application.Xml,
@@ -184,7 +190,7 @@ class RadixPushListener(
             // Step 2: Validate USN-Code header
             val usnHeader = call.request.header("USN-Code")?.trim()?.toIntOrNull()
             if (usnHeader == null || usnHeader != expectedUsnCode) {
-                Log.w(TAG, "USN-Code mismatch: expected=$expectedUsnCode, received=$usnHeader")
+                AppLogger.w(TAG, "USN-Code mismatch: expected=$expectedUsnCode, received=$usnHeader")
                 call.respondText(
                     buildErrorResponse("Invalid USN-Code"),
                     ContentType.Application.Xml,
@@ -197,7 +203,7 @@ class RadixPushListener(
             val parseResult = RadixXmlParser.parseTransactionResponse(rawXml)
             when (parseResult) {
                 is RadixParseResult.Error -> {
-                    Log.w(TAG, "Failed to parse pushed XML: ${parseResult.message}")
+                    AppLogger.w(TAG, "Failed to parse pushed XML: ${parseResult.message}")
                     call.respondText(
                         buildErrorResponse("Invalid XML"),
                         ContentType.Application.Xml,
@@ -208,7 +214,7 @@ class RadixPushListener(
                 is RadixParseResult.Success -> {
                     val resp = parseResult.value
                     if (resp.respCode != RESP_CODE_UNSOLICITED && resp.respCode != RadixAdapter.RESP_CODE_SUCCESS) {
-                        Log.w(TAG, "Unexpected RESP_CODE=${resp.respCode} in pushed transaction")
+                        AppLogger.w(TAG, "Unexpected RESP_CODE=${resp.respCode} in pushed transaction")
                         call.respondText(
                             buildErrorResponse("Unexpected RESP_CODE"),
                             ContentType.Application.Xml,
@@ -218,7 +224,7 @@ class RadixPushListener(
                     }
 
                     if (resp.transaction == null) {
-                        Log.w(TAG, "No TRN element in pushed transaction (RESP_CODE=${resp.respCode})")
+                        AppLogger.w(TAG, "No TRN element in pushed transaction (RESP_CODE=${resp.respCode})")
                         call.respondText(
                             buildErrorResponse("Missing TRN element"),
                             ContentType.Application.Xml,
@@ -233,7 +239,7 @@ class RadixPushListener(
             if (sharedSecret.isNotBlank()) {
                 val signatureValid = RadixXmlParser.validateTransactionResponseSignature(rawXml, sharedSecret)
                 if (!signatureValid) {
-                    Log.w(TAG, "Signature validation failed for pushed transaction")
+                    AppLogger.w(TAG, "Signature validation failed for pushed transaction")
                     call.respondText(
                         buildErrorResponse("Signature validation failed"),
                         ContentType.Application.Xml,
@@ -243,9 +249,14 @@ class RadixPushListener(
                 }
             }
 
-            // Step 5: Enqueue for adapter processing (with back-pressure guard)
-            if (incomingQueue.size >= MAX_QUEUE_SIZE) {
-                Log.w(TAG, "Queue full ($MAX_QUEUE_SIZE) — dropping transaction")
+            // Step 5: Enqueue for adapter processing (with back-pressure guard).
+            // Use atomic increment-then-check to avoid TOCTOU race between
+            // concurrent push requests that could each pass a size check
+            // before any of them enqueue.
+            val newCount = queueCount.incrementAndGet()
+            if (newCount > MAX_QUEUE_SIZE) {
+                queueCount.decrementAndGet()
+                AppLogger.w(TAG, "Queue full ($MAX_QUEUE_SIZE) — dropping transaction")
                 call.respondText(
                     buildErrorResponse("Queue full"),
                     ContentType.Application.Xml,
@@ -259,7 +270,7 @@ class RadixPushListener(
                 receivedAt = Instant.now(),
             )
             incomingQueue.add(pushed)
-            Log.d(TAG, "Enqueued pushed transaction (queue size=${incomingQueue.size})")
+            AppLogger.d(TAG, "Enqueued pushed transaction (queue size=$newCount)")
 
             // Step 6: Return XML ACK to FDC
             call.respondText(
@@ -270,7 +281,7 @@ class RadixPushListener(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling push request: ${e::class.simpleName}: ${e.message}")
+            AppLogger.e(TAG, "Error handling push request: ${e::class.simpleName}: ${e.message}")
             try {
                 call.respondText(
                     buildErrorResponse("Internal error"),
@@ -291,20 +302,12 @@ class RadixPushListener(
      * Builds the XML ACK response sent back to the FDC after a successful push.
      *
      * The FDC expects a HOST_REQ-style acknowledgment with CMD_CODE=201
-     * to confirm the transaction was received. This uses the same format
-     * as the pull-mode ACK sent by [RadixXmlBuilder.buildTransactionAck].
+     * to confirm the transaction was received. Delegates to
+     * [RadixXmlBuilder.buildTransactionAck] to include a proper SHA-1 signature,
+     * matching the pull-mode ACK format.
      */
     private fun buildAckResponse(): String {
-        return StringBuilder().apply {
-            append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-            append("<HOST_REQ>\n")
-            append("<REQ>\n")
-            append("    <CMD_CODE>201</CMD_CODE>\n")
-            append("    <CMD_NAME>SUCCESS</CMD_NAME>\n")
-            append("    <TOKEN>0</TOKEN>\n")
-            append("</REQ>\n")
-            append("</HOST_REQ>")
-        }.toString()
+        return RadixXmlBuilder.buildTransactionAck(token = "0", secret = sharedSecret)
     }
 
     /**
@@ -317,10 +320,19 @@ class RadixPushListener(
             append("<REQ>\n")
             append("    <CMD_CODE>255</CMD_CODE>\n")
             append("    <CMD_NAME>ERROR</CMD_NAME>\n")
-            append("    <MSG>").append(message).append("</MSG>\n")
+            append("    <MSG>").append(escapeXml(message)).append("</MSG>\n")
             append("</REQ>\n")
             append("</HOST_REQ>")
         }.toString()
+    }
+
+    private fun escapeXml(value: String): String {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
     }
 }
 

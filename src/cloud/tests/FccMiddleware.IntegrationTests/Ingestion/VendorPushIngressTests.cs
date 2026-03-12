@@ -18,6 +18,7 @@ namespace FccMiddleware.IntegrationTests.Ingestion;
 /// Integration tests for vendor-specific push ingress endpoints:
 ///   POST /api/v1/ingest/radix             — raw XML from Radix FDC (CLOUD_DIRECT)
 ///   POST /api/v1/ingest/petronite/webhook — webhook JSON from Petronite
+///   POST /api/v1/ingest/advatec/webhook   — webhook JSON from Advatec EFD (ADV-6.2)
 /// </summary>
 [Collection("Integration")]
 public sealed class VendorPushIngressTests : IAsyncLifetime
@@ -28,6 +29,9 @@ public sealed class VendorPushIngressTests : IAsyncLifetime
 
     private const string PetroniteSiteCode = "PETRO-SITE-001";
     private const string PetroniteWebhookSecret = "petronite-wh-secret-32chars!!";
+
+    private const string AdvatecSiteCode = "ADVATEC-SITE-001";
+    private const string AdvatecWebhookToken = "advatec-wh-token-test-32chars!!";
 
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()
         .WithImage("postgres:16-alpine").Build();
@@ -231,7 +235,100 @@ public sealed class VendorPushIngressTests : IAsyncLifetime
         body.GetProperty("status").GetString().Should().Be("IGNORED");
     }
 
+    // ── Advatec Webhook Tests (ADV-6.2) ─────────────────────────────────────
+
+    [Fact]
+    public async Task AdvatecWebhook_ValidReceipt_ReturnsAccepted()
+    {
+        var payload = BuildAdvatecReceiptPayload("TRSD1INV001", "abc12345678", 10.0m, 32850.00m, 3285.00m);
+
+        var response = await PostAdvatecWebhookAsync(payload, AdvatecWebhookToken);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("status").GetString().Should().Be("ACCEPTED");
+        body.GetProperty("transactionId").GetGuid().Should().NotBeEmpty();
+
+        // Verify stored in DB
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var stored = await db.Transactions
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.SiteCode == AdvatecSiteCode);
+
+        stored.Should().NotBeNull();
+        stored!.Status.Should().Be(TransactionStatus.PENDING);
+        stored.FccVendor.Should().Be(FccVendor.ADVATEC);
+    }
+
+    [Fact]
+    public async Task AdvatecWebhook_DuplicateReceipt_ReturnsDuplicate()
+    {
+        var payload = BuildAdvatecReceiptPayload("TRSD1INV-DEDUP-001", "dedup1234567", 5.0m, 16425.00m, 3285.00m);
+
+        var first = await PostAdvatecWebhookAsync(payload, AdvatecWebhookToken);
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        var firstBody = await first.Content.ReadFromJsonAsync<JsonElement>();
+        firstBody.GetProperty("status").GetString().Should().Be("ACCEPTED");
+
+        var second = await PostAdvatecWebhookAsync(payload, AdvatecWebhookToken);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+        var secondBody = await second.Content.ReadFromJsonAsync<JsonElement>();
+        secondBody.GetProperty("status").GetString().Should().Be("DUPLICATE");
+    }
+
+    [Fact]
+    public async Task AdvatecWebhook_MissingToken_Returns401()
+    {
+        var payload = BuildAdvatecReceiptPayload("TRSD1INV-NOAUTH", "noauth123456", 5.0m, 16425.00m, 3285.00m);
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, "/api/v1/ingest/advatec/webhook")
+        {
+            Content = new StringContent(payload, Encoding.UTF8, "application/json")
+        };
+        // No X-Webhook-Token header and no ?token= query parameter
+
+        var response = await _client.SendAsync(message);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("MISSING_WEBHOOK_TOKEN");
+    }
+
+    [Fact]
+    public async Task AdvatecWebhook_InvalidToken_Returns401()
+    {
+        var payload = BuildAdvatecReceiptPayload("TRSD1INV-BADTOKEN", "badtoken12345", 5.0m, 16425.00m, 3285.00m);
+
+        var response = await PostAdvatecWebhookAsync(payload, "wrong-advatec-token");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("INVALID_WEBHOOK_TOKEN");
+    }
+
+    [Fact]
+    public async Task AdvatecWebhook_EmptyBody_Returns200WithIgnored()
+    {
+        var response = await PostAdvatecWebhookAsync("", AdvatecWebhookToken);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("status").GetString().Should().Be("IGNORED");
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private async Task<HttpResponseMessage> PostAdvatecWebhookAsync(string json, string webhookToken)
+    {
+        using var message = new HttpRequestMessage(HttpMethod.Post, "/api/v1/ingest/advatec/webhook")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        message.Headers.Add("X-Webhook-Token", webhookToken);
+
+        return await _client.SendAsync(message);
+    }
 
     private async Task<HttpResponseMessage> PostRadixXmlAsync(string xml, int usnCode)
     {
@@ -296,6 +393,76 @@ public sealed class VendorPushIngressTests : IAsyncLifetime
         });
     }
 
+    private static string BuildAdvatecReceiptPayload(
+        string transactionId, string receiptCode,
+        decimal quantity, decimal amountInclusive, decimal unitPrice)
+    {
+        decimal taxRate = 0.18m;
+        decimal amountExclusive = Math.Round(amountInclusive / (1 + taxRate), 2);
+        decimal taxAmount = amountInclusive - amountExclusive;
+
+        return JsonSerializer.Serialize(new
+        {
+            DataType = "Receipt",
+            Data = new
+            {
+                TransactionId = transactionId,
+                ReceiptCode = receiptCode,
+                Date = "2026-03-13",
+                Time = "14:30:00",
+                AmountInclusive = amountInclusive,
+                AmountExclusive = amountExclusive,
+                TotalTaxAmount = taxAmount,
+                Discount = 0m,
+                CustIdType = 1,
+                CustomerId = "100-999-888",
+                CustomerName = "Test Customer",
+                ReceiptVCodeURL = $"https://virtual.tra.go.tz/efdmsrctverify/{receiptCode}_143000",
+                ZNumber = "20260313",
+                DailyCount = 1,
+                GlobalCount = 1,
+                Items = new[]
+                {
+                    new
+                    {
+                        Price = unitPrice,
+                        Amount = amountInclusive,
+                        TaxCode = "1",
+                        Quantity = quantity,
+                        TaxAmount = taxAmount,
+                        Product = "TANGO",
+                        TaxId = "A-18.00",
+                        DiscountAmount = 0m,
+                        TaxRate = 18.00m,
+                    }
+                },
+                Payments = new[]
+                {
+                    new
+                    {
+                        PaymentType = "CASH",
+                        PaymentAmount = amountInclusive,
+                    }
+                },
+                Company = new
+                {
+                    TIN = "100-123-456",
+                    VRN = "10-0123456-B",
+                    Name = "ADVATECH COMPANY LIMITED",
+                    City = "DAR ES SALAAM",
+                    Region = "DAR ES SALAAM",
+                    Street = "MSIMBAZI",
+                    Country = "TZ",
+                    Mobile = "+255712345678",
+                    TaxOffice = "ILALA TAX REGION",
+                    SerialNumber = "10TZ100625",
+                    RegistrationId = "TZ0100-0000625",
+                    UIN = "WEB0625",
+                }
+            }
+        });
+    }
+
     private static async Task SeedTestDataAsync(FccMiddlewareDbContext db)
     {
         var legalEntityId = Guid.Parse("aa000000-0000-0000-0000-000000000001");
@@ -303,6 +470,7 @@ public sealed class VendorPushIngressTests : IAsyncLifetime
 
         var radixSiteId = Guid.Parse("aa000000-0000-0000-0000-000000000002");
         var petroniteSiteId = Guid.Parse("aa000000-0000-0000-0000-000000000003");
+        var advatecSiteId = Guid.Parse("aa000000-0000-0000-0000-000000000006");
 
         db.LegalEntities.Add(new LegalEntity
         {
@@ -389,6 +557,43 @@ public sealed class VendorPushIngressTests : IAsyncLifetime
             ClientId = "test-client-id",
             ClientSecret = "test-client-secret",
             OAuthTokenEndpoint = "http://localhost/oauth/token",
+            IsActive = true,
+            ConfigVersion = 1,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+
+        // Advatec site (ADV-6.2)
+        db.Sites.Add(new Site
+        {
+            Id = advatecSiteId,
+            LegalEntityId = legalEntityId,
+            SiteCode = AdvatecSiteCode,
+            SiteName = "Advatec Test Station",
+            OperatingModel = SiteOperatingModel.COCO,
+            CompanyTaxPayerId = "TAX-ADV",
+            IsActive = true,
+            SyncedAt = DateTimeOffset.UtcNow,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+
+        db.FccConfigs.Add(new FccConfig
+        {
+            Id = Guid.Parse("aa000000-0000-0000-0000-000000000007"),
+            SiteId = advatecSiteId,
+            LegalEntityId = legalEntityId,
+            FccVendor = FccVendor.ADVATEC,
+            ConnectionProtocol = ConnectionProtocol.REST,
+            HostAddress = "127.0.0.1",
+            Port = 5560,
+            CredentialRef = "advatec-cred",
+            IngestionMethod = IngestionMethod.PUSH,
+            IngestionMode = IngestionMode.CLOUD_DIRECT,
+            AdvatecWebhookToken = AdvatecWebhookToken,
+            AdvatecDevicePort = 5560,
+            AdvatecEfdSerialNumber = "10TZ100625",
+            AdvatecCustIdType = 1,
             IsActive = true,
             ConfigVersion = 1,
             CreatedAt = DateTimeOffset.UtcNow,

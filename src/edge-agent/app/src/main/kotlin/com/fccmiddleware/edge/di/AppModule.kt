@@ -5,9 +5,13 @@ import com.fccmiddleware.edge.buffer.BufferDatabase
 import com.fccmiddleware.edge.buffer.CleanupWorker
 import com.fccmiddleware.edge.buffer.IntegrityChecker
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
+import com.fccmiddleware.edge.connectivity.BoundSocketFactory
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.connectivity.NetworkBinder
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.config.ConfigManager
+import com.fccmiddleware.edge.config.LocalOverrideManager
+import com.fccmiddleware.edge.config.SiteDataManager
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.runtime.CadenceController
 import com.fccmiddleware.edge.runtime.FccRuntimeState
@@ -22,7 +26,12 @@ import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
 import com.fccmiddleware.edge.sync.KeystoreDeviceTokenProvider
 import com.fccmiddleware.edge.adapter.common.FccAdapterFactory
 import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
+import com.fccmiddleware.edge.logging.AppLogger
+import com.fccmiddleware.edge.logging.LogLevel
+import com.fccmiddleware.edge.logging.StructuredFileLogger
 import com.fccmiddleware.edge.sync.TelemetryReporter
+import com.fccmiddleware.edge.websocket.OdooWebSocketServer
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,9 +46,27 @@ import java.util.concurrent.TimeUnit
 val appModule = module {
 
     // -------------------------------------------------------------------------
-    // Shared service scope — SupervisorJob so child failures don't cancel siblings
+    // Structured file logger — persistent JSONL logging (Phase 1A)
+    // Registered before CoroutineScope so crash handler can use it immediately.
     // -------------------------------------------------------------------------
-    single<CoroutineScope> { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    single {
+        StructuredFileLogger(
+            context = androidContext(),
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Shared service scope — SupervisorJob so child failures don't cancel siblings.
+    // CoroutineExceptionHandler logs uncaught coroutine exceptions to the file logger.
+    // -------------------------------------------------------------------------
+    single<CoroutineScope> {
+        val logger = get<StructuredFileLogger>()
+        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+            logger.e("CoroutineScope", "Uncaught coroutine exception: ${throwable.message}", throwable)
+        }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
+    }
 
     // -------------------------------------------------------------------------
     // Database — single WAL-mode Room instance shared across all consumers
@@ -51,6 +78,7 @@ val appModule = module {
     single { get<BufferDatabase>().syncStateDao() }
     single { get<BufferDatabase>().agentConfigDao() }
     single { get<BufferDatabase>().auditLogDao() }
+    single { get<BufferDatabase>().siteDataDao() }
 
     // -------------------------------------------------------------------------
     // Security — Keystore and EncryptedSharedPreferences
@@ -58,6 +86,8 @@ val appModule = module {
     single { KeystoreManager() }
     single { EncryptedPrefsManager(androidContext()) }
     single { ConfigManager(agentConfigDao = get(), keystoreManager = get(), encryptedPrefsManager = get()) }
+    single { LocalOverrideManager(androidContext()) }
+    single { SiteDataManager(siteDataDao = get()) }
     single { FccRuntimeState() }
 
     // -------------------------------------------------------------------------
@@ -82,13 +112,19 @@ val appModule = module {
         // This enables certificate pin rotation without APK update per security spec §5.3.
         val runtimePins = encryptedPrefs.runtimeCertificatePins
         val certificatePins = if (runtimePins.isNotEmpty()) {
-            android.util.Log.i("AppModule", "Using ${runtimePins.size} runtime certificate pin(s) from SiteConfig")
+            AppLogger.i("AppModule", "Using ${runtimePins.size} runtime certificate pin(s) from SiteConfig")
             runtimePins
         } else {
-            android.util.Log.i("AppModule", "Using ${bootstrapPins.size} bootstrap certificate pin(s)")
+            AppLogger.i("AppModule", "Using ${bootstrapPins.size} bootstrap certificate pin(s)")
             bootstrapPins
         }
-        HttpCloudApiClient.create(baseUrl, certificatePins)
+        val networkBinder = get<NetworkBinder>()
+        HttpCloudApiClient.create(
+            baseUrl,
+            certificatePins,
+            encryptedPrefs,
+            socketFactory = BoundSocketFactory { networkBinder.cloudNetwork.value },
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -110,10 +146,16 @@ val appModule = module {
     single { IntegrityChecker(get(), get(), androidContext()) }
 
     // -------------------------------------------------------------------------
+    // Network Binder — tracks WiFi and mobile data networks as reactive state
+    // -------------------------------------------------------------------------
+    single { NetworkBinder(context = androidContext(), scope = get<CoroutineScope>()) }
+
+    // -------------------------------------------------------------------------
     // Connectivity Manager
     //
     // Internet probe: HTTP GET to cloud /health with 4s timeout.
-    // FCC probe: TCP socket connect to fccHost:fccPort with 4s timeout.
+    //   Bound to cloudNetwork (mobile preferred, WiFi fallback).
+    // FCC probe: adapter.heartbeat() — socket already bound to WiFi via T2.2.
     //
     // Both probes read connection info from EncryptedPrefs on each invocation,
     // so they automatically start returning real results after registration
@@ -123,7 +165,11 @@ val appModule = module {
         val encryptedPrefs = get<EncryptedPrefsManager>()
         val configManager = get<ConfigManager>()
         val runtimeState = get<FccRuntimeState>()
+        val networkBinderInstance = get<NetworkBinder>()
+
+        // Internet probe OkHttp client bound to cloudNetwork (mobile > WiFi > default).
         val probeHttpClient = OkHttpClient.Builder()
+            .socketFactory(BoundSocketFactory { networkBinderInstance.cloudNetwork.value })
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(4, TimeUnit.SECONDS)
             .build()
@@ -156,6 +202,7 @@ val appModule = module {
             auditLogDao = get(),
             listener = null, // CadenceController registers itself after construction
             scope = get<CoroutineScope>(),
+            networkBinder = networkBinderInstance,
         )
     }
 
@@ -182,6 +229,8 @@ val appModule = module {
             cloudApiClient = get(),
             tokenProvider = get(),
             telemetryReporter = get(),
+            fileLogger = get(),
+            configManager = get(),
         )
     }
     single {
@@ -214,7 +263,7 @@ val appModule = module {
     // -------------------------------------------------------------------------
     // FCC Adapter Factory — resolves vendor adapters at runtime from config
     // -------------------------------------------------------------------------
-    single<IFccAdapterFactory> { FccAdapterFactory() }
+    single<IFccAdapterFactory> { FccAdapterFactory(networkBinder = get()) }
 
     // -------------------------------------------------------------------------
     // Configuration
@@ -225,6 +274,7 @@ val appModule = module {
             syncStateDao = get(),
             cloudApiClient = get(),
             tokenProvider = get(),
+            siteDataManager = get(),
         )
     }
 
@@ -249,6 +299,16 @@ val appModule = module {
     }
 
     // -------------------------------------------------------------------------
+    // Odoo WebSocket Server — backward-compat Fleck protocol
+    // -------------------------------------------------------------------------
+    single {
+        OdooWebSocketServer(
+            transactionDao = get(),
+            serviceScope = get<CoroutineScope>(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
     // Local REST API Server
     // -------------------------------------------------------------------------
     single {
@@ -263,6 +323,7 @@ val appModule = module {
             syncStateDao = get(),
             connectivityManager = get(),
             preAuthHandler = get(),
+            configManager = get(),
             serviceScope = get<CoroutineScope>(),
             ingestionOrchestrator = get(),
             deviceId = encryptedPrefs.deviceId ?: "00000000-0000-0000-0000-000000000000",

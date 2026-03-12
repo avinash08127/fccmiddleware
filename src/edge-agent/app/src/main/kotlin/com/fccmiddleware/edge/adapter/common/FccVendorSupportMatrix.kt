@@ -11,7 +11,7 @@ object FccVendorSupportMatrix {
             FccVendor.RADIX,
             FccVendor.PETRONITE,
             -> true
-            FccVendor.ADVATEC -> false
+            FccVendor.ADVATEC -> true
         }
 
     fun describe(vendor: FccVendor): String =
@@ -19,7 +19,7 @@ object FccVendorSupportMatrix {
             FccVendor.DOMS -> "TCP/JPL only"
             FccVendor.RADIX -> "supported"
             FccVendor.PETRONITE -> "supported"
-            FccVendor.ADVATEC -> "unsupported"
+            FccVendor.ADVATEC -> "supported"
         }
 
     fun unsupportedMessage(vendor: FccVendor, connectionProtocol: String): String =

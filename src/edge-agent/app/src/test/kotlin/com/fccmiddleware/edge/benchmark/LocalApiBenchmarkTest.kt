@@ -8,6 +8,7 @@ import com.fccmiddleware.edge.api.statusRoutes
 import com.fccmiddleware.edge.api.transactionRoutes
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import io.ktor.client.request.*
@@ -47,6 +48,7 @@ class LocalApiBenchmarkTest {
     private val transactionDao: TransactionBufferDao = mockk(relaxed = true)
     private val syncStateDao: SyncStateDao = mockk(relaxed = true)
     private val connectivityManager: ConnectivityManager = mockk(relaxed = true)
+    private val configManager: ConfigManager = mockk(relaxed = true)
     private val preAuthHandler: PreAuthHandler = mockk(relaxed = true)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
@@ -67,6 +69,7 @@ class LocalApiBenchmarkTest {
                     connectivityManager = connectivityManager,
                     transactionDao = transactionDao,
                     syncStateDao = syncStateDao,
+                    configManager = configManager,
                     agentVersion = "1.0.0-test",
                     deviceId = "benchmark-device",
                     siteCode = "BENCH",

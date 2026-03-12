@@ -1,7 +1,7 @@
 package com.fccmiddleware.edge.buffer
 
 import android.content.Context
-import android.util.Log
+import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.AuditLogDao
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
@@ -99,7 +99,7 @@ class CleanupWorker(
         val preAuthDeleted = preAuthDao.deleteTerminal(cutoff)
         val auditDeleted = auditLogDao.deleteOlderThan(cutoff)
 
-        Log.d(
+        AppLogger.d(
             TAG,
             "Retention cleanup: txArchived=$txArchived txDeleted=$txDeleted preAuth=$preAuthDeleted audit=$auditDeleted" +
                 " (cutoff=$cutoff retentionDays=$retentionDays)"
@@ -111,7 +111,7 @@ class CleanupWorker(
         // Pass 3: disk space check — if free space is critically low, aggressively trim
         val diskLow = isDiskSpaceLow()
         if (diskLow) {
-            Log.w(TAG, "Disk space critically low — running emergency quota cleanup")
+            AppLogger.w(TAG, "Disk space critically low — running emergency quota cleanup")
             // Use a tighter quota (half of normal) to aggressively free space
             enforceQuota(maxBufferRecords / 2, pendingKeepCount)
         }
@@ -165,7 +165,7 @@ class CleanupWorker(
         }
 
         val excess = totalCount - maxRecords
-        Log.w(TAG, "Buffer quota exceeded: $totalCount records (max=$maxRecords), need to free $excess")
+        AppLogger.w(TAG, "Buffer quota exceeded: $totalCount records (max=$maxRecords), need to free $excess")
 
         val now = Instant.now().toString()
         var remaining = excess
@@ -186,7 +186,7 @@ class CleanupWorker(
         } else 0
 
         if (deletedArchived > 0 || deletedSynced > 0 || archivedPending > 0) {
-            Log.w(
+            AppLogger.w(
                 TAG,
                 "Quota cleanup: deletedArchived=$deletedArchived deletedSynced=$deletedSynced " +
                     "archivedPending=$archivedPending (excess=$excess)"
@@ -217,11 +217,11 @@ class CleanupWorker(
             val freeSpace = parentDir.usableSpace
             val isLow = freeSpace < MIN_FREE_DISK_BYTES
             if (isLow) {
-                Log.w(TAG, "Low disk space: ${freeSpace / (1024 * 1024)} MB free (min: ${MIN_FREE_DISK_BYTES / (1024 * 1024)} MB)")
+                AppLogger.w(TAG, "Low disk space: ${freeSpace / (1024 * 1024)} MB free (min: ${MIN_FREE_DISK_BYTES / (1024 * 1024)} MB)")
             }
             isLow
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to check disk space", e)
+            AppLogger.e(TAG, "Failed to check disk space", e)
             false
         }
     }

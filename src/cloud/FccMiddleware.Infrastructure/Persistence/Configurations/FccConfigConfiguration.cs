@@ -73,6 +73,12 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
         builder.Property(e => e.WebhookSecret).HasColumnName("webhook_secret").HasMaxLength(500);
         builder.Property(e => e.OAuthTokenEndpoint).HasColumnName("oauth_token_endpoint").HasMaxLength(500);
 
+        // ── Advatec EFD fields ──────────────────────────────────────────────
+        builder.Property(e => e.AdvatecDevicePort).HasColumnName("advatec_device_port");
+        builder.Property(e => e.AdvatecWebhookToken).HasColumnName("advatec_webhook_token").HasMaxLength(500);
+        builder.Property(e => e.AdvatecEfdSerialNumber).HasColumnName("advatec_efd_serial_number").HasMaxLength(100);
+        builder.Property(e => e.AdvatecCustIdType).HasColumnName("advatec_cust_id_type");
+
         builder.HasOne(e => e.Site)
             .WithMany(s => s.FccConfigs)
             .HasForeignKey(e => e.SiteId)

@@ -61,7 +61,16 @@ public sealed class RevokeBootstrapTokenHandler
             })
         });
 
-        await _db.SaveChangesAsync(cancellationToken);
+        // L-07: Use TrySaveChangesAsync to handle concurrent revocation/registration
+        // of the same token gracefully instead of producing HTTP 500.
+        var saved = await _db.TrySaveChangesAsync(cancellationToken);
+        if (!saved)
+        {
+            _logger.LogWarning("Concurrency conflict revoking bootstrap token {TokenId} — token was modified by another request",
+                token.Id);
+            return Result<RevokeBootstrapTokenResult>.Failure("CONCURRENCY_CONFLICT",
+                "The token was modified by another operation. Please refresh and try again.");
+        }
 
         _logger.LogInformation("Bootstrap token {TokenId} revoked for site {SiteCode} by {RevokedBy}",
             token.Id, token.SiteCode, request.RevokedBy);
