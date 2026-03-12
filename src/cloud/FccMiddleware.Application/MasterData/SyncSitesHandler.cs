@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging;
 namespace FccMiddleware.Application.MasterData;
 
 /// <summary>
-/// Handles SyncSitesCommand — upserts sites and soft-deletes absent ones.
+/// Handles SyncSitesCommand — upserts sites and only soft-deletes absent ones for full snapshots.
 /// </summary>
 public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterDataSyncResult>
 {
@@ -59,21 +59,24 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
             }
         }
 
-        // Soft-delete active sites absent from this batch.
-        var allActiveIds = await _db.GetActiveSiteIdsAsync(ct);
-        var incomingSet  = incomingIds.ToHashSet();
-        var toDeactivate = allActiveIds.Where(id => !incomingSet.Contains(id)).ToList();
         int deactivated  = 0;
 
-        if (toDeactivate.Count > 0)
+        if (command.IsFullSnapshot)
         {
-            var deactivateEntities = await _db.GetSitesByIdsAsync(toDeactivate, ct);
-            foreach (var entity in deactivateEntities)
+            var allActiveIds = await _db.GetActiveSiteIdsAsync(ct);
+            var incomingSet  = incomingIds.ToHashSet();
+            var toDeactivate = allActiveIds.Where(id => !incomingSet.Contains(id)).ToList();
+
+            if (toDeactivate.Count > 0)
             {
-                entity.IsActive       = false;
-                entity.DeactivatedAt  = now;
-                entity.UpdatedAt      = now;
-                deactivated++;
+                var deactivateEntities = await _db.GetSitesByIdsAsync(toDeactivate, ct);
+                foreach (var entity in deactivateEntities)
+                {
+                    entity.IsActive       = false;
+                    entity.DeactivatedAt  = now;
+                    entity.UpdatedAt      = now;
+                    deactivated++;
+                }
             }
         }
 

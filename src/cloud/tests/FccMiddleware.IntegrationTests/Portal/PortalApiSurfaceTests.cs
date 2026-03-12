@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FccMiddleware.Contracts.Portal;
+using FccMiddleware.Contracts.Reconciliation;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Models;
@@ -137,6 +138,26 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
         var alerts = await _client.GetFromJsonAsync<DashboardAlertsResponseDto>($"/api/v1/admin/dashboard/alerts?legalEntityId={LegalEntityId}");
         alerts.Should().NotBeNull();
         alerts!.TotalCount.Should().BeGreaterThan(0);
+
+        var transactions = await _client.GetFromJsonAsync<PortalPagedResult<PortalTransactionDto>>(
+            $"/api/v1/ops/transactions?legalEntityId={LegalEntityId}&pageSize=20");
+        transactions.Should().NotBeNull();
+        transactions!.Data.Should().ContainSingle(item => item.Id == TransactionId);
+
+        var transactionDetail = await _client.GetFromJsonAsync<PortalTransactionDto>($"/api/v1/ops/transactions/{TransactionId}");
+        transactionDetail.Should().NotBeNull();
+        transactionDetail!.LegalEntityId.Should().Be(LegalEntityId);
+
+        var reconciliation = await _client.GetFromJsonAsync<JsonElement>(
+            $"/api/v1/ops/reconciliation/exceptions?legalEntityId={LegalEntityId}&pageSize=20");
+        reconciliation.GetProperty("data").EnumerateArray()
+            .Select(item => item.GetProperty("id").GetGuid())
+            .Should().Contain(ReconciliationId);
+
+        var reconciliationDetail = await _client.GetFromJsonAsync<ReconciliationRecordDto>(
+            $"/api/v1/ops/reconciliation/{ReconciliationId}");
+        reconciliationDetail.Should().NotBeNull();
+        reconciliationDetail!.Id.Should().Be(ReconciliationId);
     }
 
     [Fact]

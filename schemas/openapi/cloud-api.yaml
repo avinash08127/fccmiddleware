@@ -1267,6 +1267,18 @@ components:
           type: string
           nullable: true
           maxLength: 200
+        customerTaxId:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 100
+          description: Customer tax identifier (TIN) for fiscalized pre-auth flows.
+        customerBusinessName:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 200
+          description: Customer legal or business name for B2B fiscalized pre-auth flows.
         attendantId:
           type: string
           nullable: true

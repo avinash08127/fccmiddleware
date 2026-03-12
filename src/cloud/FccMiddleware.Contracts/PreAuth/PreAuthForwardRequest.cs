@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using FccMiddleware.Domain.Common;
 
 namespace FccMiddleware.Contracts.PreAuth;
@@ -25,5 +26,10 @@ public sealed record PreAuthForwardRequest
     public string? VehicleNumber { get; init; }
     [Sensitive]
     public string? CustomerName { get; init; }
+    [Sensitive]
+    [StringLength(100, MinimumLength = 1)]
+    public string? CustomerTaxId { get; init; }
+    [StringLength(200, MinimumLength = 1)]
+    public string? CustomerBusinessName { get; init; }
     public string? AttendantId { get; init; }
 }

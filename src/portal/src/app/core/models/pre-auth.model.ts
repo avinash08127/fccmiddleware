@@ -85,6 +85,8 @@ export interface PreAuthForwardRequest {
   fccAuthorizationCode?: string | null;
   vehicleNumber?: string | null;
   customerName?: string | null;
+  customerTaxId?: string | null;
+  customerBusinessName?: string | null;
   attendantId?: string | null;
 }
 

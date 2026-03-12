@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
+using FccMiddleware.Application.Common;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.Observability;
 using FccMiddleware.Application.Transactions;
@@ -18,7 +19,7 @@ namespace FccMiddleware.Api.Controllers;
 
 /// <summary>
 /// Handles transaction ingestion, Edge Agent uploads, Odoo polling, and Odoo acknowledgement.
-/// POST /api/v1/transactions/ingest       — single raw FCC payload (FCC API key + HMAC auth).
+/// POST /api/v1/transactions/ingest       — raw FCC push payload envelope (FCC API key + HMAC auth).
 /// POST /api/v1/transactions/upload       — batch canonical upload from Edge Agent (device JWT).
 /// GET  /api/v1/transactions              — Odoo poll: paginated PENDING transactions (Odoo API key).
 /// POST /api/v1/transactions/acknowledge  — Odoo acknowledge: batch stamp PENDING → SYNCED_TO_ODOO (Odoo API key).
@@ -42,17 +43,19 @@ public sealed class TransactionsController : ControllerBase
     }
 
     /// <summary>
-    /// Ingests a single raw FCC transaction payload.
+    /// Ingests an FCC push payload.
     /// </summary>
     /// <remarks>
-    /// Returns 202 Accepted when the transaction is new and stored as PENDING.
-    /// Returns 409 Conflict when the (fccTransactionId, siteCode) pair has already been ingested.
+    /// Returns 202 Accepted when a single transaction is new and stored as PENDING.
+    /// Returns 409 Conflict when a single transaction's (fccTransactionId, siteCode) pair has already been ingested.
+    /// Returns 200 OK with per-record outcomes when rawPayload contains a transactions[] batch.
     /// Returns 400 Bad Request when payload validation fails.
     /// </remarks>
-    /// <param name="request">FCC vendor, site code, capture timestamp and raw payload.</param>
+    /// <param name="request">FCC vendor, site code, capture timestamp and raw payload envelope.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     [HttpPost("ingest")]
     [Authorize(Policy = FccHmacAuthOptions.PolicyName)]
+    [ProducesResponseType(typeof(IngestBatchResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(IngestResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
@@ -73,18 +76,133 @@ public sealed class TransactionsController : ControllerBase
         var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
         var rawPayload = request.RawPayload.GetRawText();
 
+        if (TryGetBatchTransactions(request.RawPayload, out var transactionItems, out var batchError))
+        {
+            if (batchError is not null)
+                return BadRequest(batchError);
+
+            if (transactionItems.Count > 1)
+            {
+                return Ok(await IngestBatchAsync(
+                    transactionItems,
+                    vendor,
+                    request.SiteCode,
+                    request.CapturedAt,
+                    correlationId,
+                    cancellationToken));
+            }
+        }
+
+        var result = await SendIngestCommandAsync(
+            vendor,
+            request.SiteCode,
+            request.CapturedAt,
+            rawPayload,
+            correlationId,
+            cancellationToken);
+
+        return BuildSingleIngestResponse(result, request.SiteCode, vendor, rawPayload);
+    }
+
+    private async Task<IngestBatchResponse> IngestBatchAsync(
+        IReadOnlyList<JsonElement> transactionItems,
+        FccVendor vendor,
+        string siteCode,
+        DateTimeOffset capturedAt,
+        Guid correlationId,
+        CancellationToken cancellationToken)
+    {
+        var results = new List<IngestBatchRecordResult>(transactionItems.Count);
+        var acceptedCount = 0;
+        var rejectedCount = 0;
+
+        for (var index = 0; index < transactionItems.Count; index++)
+        {
+            var item = transactionItems[index];
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                rejectedCount++;
+                results.Add(new IngestBatchRecordResult
+                {
+                    RecordIndex = index,
+                    Outcome = "REJECTED",
+                    ErrorCode = "VALIDATION.INVALID_PAYLOAD",
+                    ErrorMessage = "Each item in rawPayload.transactions must be a JSON object."
+                });
+                continue;
+            }
+
+            var itemPayload = item.GetRawText();
+            var result = await SendIngestCommandAsync(
+                vendor,
+                siteCode,
+                capturedAt,
+                itemPayload,
+                correlationId,
+                cancellationToken);
+
+            if (result.IsSuccess && !result.Value!.IsDuplicate)
+            {
+                acceptedCount++;
+            }
+            else if (result.IsFailure)
+            {
+                rejectedCount++;
+
+                if (!result.Error!.Code.StartsWith("VALIDATION.", StringComparison.Ordinal))
+                {
+                    _metrics.RecordIngestionFailure(
+                        "fcc-push",
+                        result.Error.Code,
+                        siteCode,
+                        vendor.ToString());
+                }
+            }
+
+            results.Add(MapBatchResult(index, item, result));
+        }
+
+        if (acceptedCount > 0)
+        {
+            _metrics.RecordIngestionSuccess("fcc-push", siteCode, vendor.ToString(), acceptedCount);
+        }
+
+        return new IngestBatchResponse
+        {
+            Results = results,
+            AcceptedCount = acceptedCount,
+            DuplicateCount = results.Count(r => r.Outcome == "DUPLICATE"),
+            RejectedCount = rejectedCount
+        };
+    }
+
+    private async Task<Result<IngestTransactionResult>> SendIngestCommandAsync(
+        FccVendor vendor,
+        string siteCode,
+        DateTimeOffset capturedAt,
+        string rawPayload,
+        Guid correlationId,
+        CancellationToken cancellationToken)
+    {
         var command = new IngestTransactionCommand
         {
             FccVendor = vendor,
-            SiteCode = request.SiteCode,
-            CapturedAt = request.CapturedAt,
+            SiteCode = siteCode,
+            CapturedAt = capturedAt,
             RawPayload = rawPayload,
             ContentType = "application/json",
             CorrelationId = correlationId
         };
 
-        var result = await _mediator.Send(command, cancellationToken);
+        return await _mediator.Send(command, cancellationToken);
+    }
 
+    private IActionResult BuildSingleIngestResponse(
+        Result<IngestTransactionResult> result,
+        string siteCode,
+        FccVendor vendor,
+        string rawPayload)
+    {
         if (result.IsFailure)
         {
             if (!result.Error!.Code.StartsWith("VALIDATION.", StringComparison.Ordinal))
@@ -92,7 +210,7 @@ public sealed class TransactionsController : ControllerBase
                 _metrics.RecordIngestionFailure(
                     source: "fcc-push",
                     category: result.Error.Code,
-                    siteCode: request.SiteCode,
+                    siteCode: siteCode,
                     vendor: vendor.ToString());
             }
 
@@ -118,7 +236,7 @@ public sealed class TransactionsController : ControllerBase
                 retryable: false));
         }
 
-        _metrics.RecordIngestionSuccess("fcc-push", request.SiteCode, vendor.ToString());
+        _metrics.RecordIngestionSuccess("fcc-push", siteCode, vendor.ToString());
 
         return StatusCode(StatusCodes.Status202Accepted, new IngestResponse
         {
@@ -126,6 +244,70 @@ public sealed class TransactionsController : ControllerBase
             Status = "PENDING",
             FuzzyMatchFlagged = value.FuzzyMatchFlagged
         });
+    }
+
+    private IngestBatchRecordResult MapBatchResult(
+        int index,
+        JsonElement transactionItem,
+        Result<IngestTransactionResult> result)
+    {
+        var fccTransactionId = GetFccTransactionIdFromPayload(transactionItem.GetRawText());
+
+        if (result.IsFailure)
+        {
+            return new IngestBatchRecordResult
+            {
+                RecordIndex = index,
+                FccTransactionId = fccTransactionId,
+                Outcome = "REJECTED",
+                ErrorCode = result.Error!.Code,
+                ErrorMessage = result.Error.Message
+            };
+        }
+
+        var value = result.Value!;
+        return new IngestBatchRecordResult
+        {
+            RecordIndex = index,
+            FccTransactionId = fccTransactionId,
+            Outcome = value.IsDuplicate ? "DUPLICATE" : "ACCEPTED",
+            TransactionId = value.IsDuplicate ? null : value.TransactionId,
+            OriginalTransactionId = value.OriginalTransactionId
+        };
+    }
+
+    private bool TryGetBatchTransactions(
+        JsonElement rawPayload,
+        out IReadOnlyList<JsonElement> transactions,
+        out ErrorResponse? error)
+    {
+        transactions = Array.Empty<JsonElement>();
+        error = null;
+
+        if (rawPayload.ValueKind != JsonValueKind.Object
+            || !rawPayload.TryGetProperty("transactions", out var transactionArray))
+        {
+            return false;
+        }
+
+        if (transactionArray.ValueKind != JsonValueKind.Array)
+        {
+            error = BuildError(
+                "VALIDATION.INVALID_PAYLOAD",
+                "rawPayload.transactions must be a JSON array.");
+            return true;
+        }
+
+        if (transactionArray.GetArrayLength() == 0)
+        {
+            error = BuildError(
+                "VALIDATION.EMPTY_BATCH",
+                "rawPayload.transactions must contain at least one transaction.");
+            return true;
+        }
+
+        transactions = transactionArray.EnumerateArray().ToArray();
+        return true;
     }
 
     /// <summary>

@@ -144,6 +144,20 @@ interface TransactionBufferDao {
     suspend fun markBatchUploaded(ids: List<String>, now: String)
 
     /**
+     * Revert UPLOADED records back to PENDING by FCC transaction ID.
+     * Used when status poll returns NOT_FOUND — cloud has no record, so the edge re-uploads.
+     * Only reverts records currently at UPLOADED status to prevent overwriting other states.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "sync_status = 'PENDING', " +
+        "updated_at = :now " +
+        "WHERE fcc_transaction_id IN (:fccTransactionIds) " +
+        "AND sync_status = 'UPLOADED'"
+    )
+    suspend fun revertToPendingByFccId(fccTransactionIds: List<String>, now: String)
+
+    /**
      * Per-status counts for telemetry and diagnostics.
      */
     @Query(

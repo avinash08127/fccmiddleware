@@ -108,6 +108,33 @@ public sealed class ForwardPreAuthTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ForwardPreAuth_CustomerTaxFields_ArePersisted()
+    {
+        SetAuthHeader();
+
+        var request = MakeRequest(
+            "ODOO-ORDER-TAX-001",
+            "PENDING",
+            customerName: "Fuel Corp",
+            customerTaxId: "TIN-123456789",
+            customerBusinessName: "Fuel Corp Ltd");
+
+        var response = await _client.PostAsJsonAsync("/api/v1/preauth", request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var record = await db.PreAuthRecords.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(p => p.OdooOrderId == "ODOO-ORDER-TAX-001" && p.SiteCode == TestSiteCode);
+
+        record.Should().NotBeNull();
+        record!.CustomerName.Should().Be("Fuel Corp");
+        record.CustomerTaxId.Should().Be("TIN-123456789");
+        record.CustomerBusinessName.Should().Be("Fuel Corp Ltd");
+    }
+
+    [Fact]
     public async Task ForwardPreAuth_NewRecordWithAuthorizedStatus_Returns201()
     {
         SetAuthHeader();
@@ -300,6 +327,30 @@ public sealed class ForwardPreAuthTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ForwardPreAuth_EmptyCustomerTaxFields_Returns400()
+    {
+        SetAuthHeader();
+
+        var request = MakeRequest(
+            "ODOO-ORDER-TAX-INVALID-001",
+            "PENDING",
+            customerTaxId: string.Empty,
+            customerBusinessName: string.Empty);
+
+        var response = await _client.PostAsJsonAsync("/api/v1/preauth", request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("VALIDATION.INVALID_PAYLOAD");
+
+        var details = body.GetProperty("details");
+        var detailKeys = details.EnumerateObject().Select(property => property.Name).ToArray();
+        detailKeys.Should().Contain(key => string.Equals(key, "CustomerTaxId", StringComparison.OrdinalIgnoreCase));
+        detailKeys.Should().Contain(key => string.Equals(key, "CustomerBusinessName", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task ForwardPreAuth_OutboxEventCreated()
     {
         SetAuthHeader();
@@ -392,7 +443,10 @@ public sealed class ForwardPreAuthTests : IAsyncLifetime
         string odooOrderId,
         string status,
         string? fccCorrelationId = null,
-        string? fccAuthorizationCode = null) => new
+        string? fccAuthorizationCode = null,
+        string? customerName = null,
+        string? customerTaxId = null,
+        string? customerBusinessName = null) => new
     {
         siteCode       = TestSiteCode,
         odooOrderId,
@@ -406,7 +460,10 @@ public sealed class ForwardPreAuthTests : IAsyncLifetime
         requestedAt    = "2026-03-11T08:00:00Z",
         expiresAt      = "2026-03-11T08:30:00Z",
         fccCorrelationId,
-        fccAuthorizationCode
+        fccAuthorizationCode,
+        customerName,
+        customerTaxId,
+        customerBusinessName
     };
 
     private static string CreateDeviceJwt(

@@ -135,7 +135,18 @@ export type AcknowledgeOutcome =
 export interface AcknowledgeResult {
   id: string;
   outcome: AcknowledgeOutcome;
-  error: import('./common.model').ErrorResponse | null;
+  error: AcknowledgeError | null;
+}
+
+export interface AcknowledgeError {
+  code: string;
+  message: string;
+}
+
+export interface AcknowledgeBatchResponse {
+  results: AcknowledgeResult[];
+  succeededCount: number;
+  failedCount: number;
 }
 
 // ── Synced-status poll ─────────────────────────────────────────────────────────

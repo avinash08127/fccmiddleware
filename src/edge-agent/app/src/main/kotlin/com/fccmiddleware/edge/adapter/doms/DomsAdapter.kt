@@ -40,6 +40,9 @@ class DomsAdapter(private val config: AgentFccConfig) : IFccAdapter {
         throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }
 
+    /** No-op — DOMS uses cursor-based acknowledgment implicit in fetchTransactions. */
+    override suspend fun acknowledgeTransactions(transactionIds: List<String>): Boolean = true
+
     companion object {
         val VENDOR = FccVendor.DOMS
         const val ADAPTER_VERSION = "1.0.0"

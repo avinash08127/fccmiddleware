@@ -241,6 +241,11 @@ public sealed class DomsAdapter : IFccAdapter
         }
     }
 
+    /// <inheritdoc/>
+    /// <remarks>No-op — DOMS uses cursor-based acknowledgment implicit in FetchTransactionsAsync.</remarks>
+    public Task<bool> AcknowledgeTransactionsAsync(IReadOnlyList<string> transactionIds, CancellationToken ct)
+        => Task.FromResult(true);
+
     // ── Private helpers ──────────────────────────────────────────────────────
 
     private HttpRequestMessage BuildRequest(HttpMethod method, string path, HttpContent? content = null)

@@ -108,6 +108,8 @@ public sealed class PreAuthController : ControllerBase
             FccAuthorizationCode = request.FccAuthorizationCode,
             VehicleNumber = request.VehicleNumber,
             CustomerName = request.CustomerName,
+            CustomerTaxId = request.CustomerTaxId,
+            CustomerBusinessName = request.CustomerBusinessName,
             AttendantId = request.AttendantId,
             CorrelationId = correlationId
         };

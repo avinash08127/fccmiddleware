@@ -1,25 +1,34 @@
-using System.Diagnostics;
-using System.Security.Claims;
+using FccMiddleware.Api.Portal;
 using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Reconciliation;
+using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Infrastructure.Persistence;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace FccMiddleware.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/ops/reconciliation")]
 [Authorize(Policy = "PortalUser")]
-public sealed class OpsReconciliationController : ControllerBase
+public sealed class OpsReconciliationController : PortalControllerBase
 {
+    private readonly FccMiddlewareDbContext _db;
     private readonly IMediator _mediator;
+    private readonly PortalAccessResolver _accessResolver;
 
-    public OpsReconciliationController(IMediator mediator)
+    public OpsReconciliationController(
+        FccMiddlewareDbContext db,
+        IMediator mediator,
+        PortalAccessResolver accessResolver)
     {
+        _db = db;
         _mediator = mediator;
+        _accessResolver = accessResolver;
     }
 
     [HttpGet("exceptions")]
@@ -31,6 +40,8 @@ public sealed class OpsReconciliationController : ControllerBase
         [FromQuery] Guid? legalEntityId,
         [FromQuery] string? siteCode,
         [FromQuery] string? status,
+        [FromQuery] DateTimeOffset? from,
+        [FromQuery] DateTimeOffset? to,
         [FromQuery] DateTimeOffset? since,
         [FromQuery] string? cursor,
         [FromQuery] int pageSize = 50,
@@ -38,75 +49,212 @@ public sealed class OpsReconciliationController : ControllerBase
     {
         if (pageSize is < 1 or > 100)
         {
-            return BadRequest(BuildError(
-                "VALIDATION.INVALID_PAGE_SIZE",
-                "pageSize must be between 1 and 100."));
+            return BadRequest(BuildError("VALIDATION.INVALID_PAGE_SIZE", "pageSize must be between 1 and 100."));
         }
 
         ReconciliationStatus? parsedStatus = null;
         if (!string.IsNullOrWhiteSpace(status))
         {
-            if (!Enum.TryParse<ReconciliationStatus>(status, true, out var value))
+            if (!Enum.TryParse<ReconciliationStatus>(status, true, out var statusValue))
             {
-                return BadRequest(BuildError(
-                    "VALIDATION.INVALID_STATUS",
-                    $"Unknown reconciliation status '{status}'."));
+                return BadRequest(BuildError("VALIDATION.INVALID_STATUS", $"Unknown reconciliation status '{status}'."));
             }
 
-            parsedStatus = value;
+            parsedStatus = statusValue;
         }
 
-        var access = ResolvePortalAccess();
+        var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
         {
-            return Forbid();
+            return Unauthorized();
         }
 
-        if (legalEntityId.HasValue
-            && !access.AllowAllLegalEntities
-            && !access.ScopedLegalEntityIds.Contains(legalEntityId.Value))
+        if (legalEntityId.HasValue && !access.CanAccess(legalEntityId.Value))
         {
             return Forbid();
         }
 
-        var result = await _mediator.Send(new GetReconciliationExceptionsQuery
+        var query = _db.ReconciliationRecords
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .AsQueryable();
+
+        if (legalEntityId.HasValue)
         {
-            LegalEntityId = legalEntityId,
-            ScopedLegalEntityIds = access.ScopedLegalEntityIds,
-            AllowAllLegalEntities = access.AllowAllLegalEntities,
-            SiteCode = siteCode,
-            Status = parsedStatus,
-            Since = since,
-            Cursor = cursor,
-            PageSize = pageSize
-        }, cancellationToken);
+            query = query.Where(item => item.LegalEntityId == legalEntityId.Value);
+        }
+        else if (!access.AllowAllLegalEntities)
+        {
+            query = query.Where(item => access.ScopedLegalEntityIds.Contains(item.LegalEntityId));
+        }
+
+        if (!string.IsNullOrWhiteSpace(siteCode))
+        {
+            query = query.Where(item => item.SiteCode == siteCode);
+        }
+
+        if (parsedStatus.HasValue)
+        {
+            query = query.Where(item => item.Status == parsedStatus.Value);
+        }
+        else
+        {
+            query = query.Where(item =>
+                item.Status == ReconciliationStatus.VARIANCE_FLAGGED
+                || item.Status == ReconciliationStatus.UNMATCHED);
+        }
+
+        var lowerBound = from ?? since;
+        if (lowerBound.HasValue)
+        {
+            query = query.Where(item => item.CreatedAt >= lowerBound.Value);
+        }
+
+        if (to.HasValue)
+        {
+            query = query.Where(item => item.CreatedAt <= to.Value);
+        }
+
+        if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
+        {
+            query = query.Where(item =>
+                item.CreatedAt > cursorTimestamp
+                || (item.CreatedAt == cursorTimestamp && item.Id.CompareTo(cursorId) > 0));
+        }
+
+        var totalCount = await query.CountAsync(cancellationToken);
+        var rows = await query
+            .OrderBy(item => item.CreatedAt)
+            .ThenBy(item => item.Id)
+            .Take(pageSize + 1)
+            .ToListAsync(cancellationToken);
+
+        var hasMore = rows.Count > pageSize;
+        if (hasMore)
+        {
+            rows.RemoveAt(rows.Count - 1);
+        }
+
+        var preAuthIds = rows.Where(item => item.PreAuthId.HasValue).Select(item => item.PreAuthId!.Value).Distinct().ToList();
+        var transactionIds = rows.Select(item => item.TransactionId).Distinct().ToList();
+
+        var preAuthById = await _db.PreAuthRecords
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(item => preAuthIds.Contains(item.Id))
+            .ToDictionaryAsync(item => item.Id, cancellationToken);
+
+        var transactionById = await _db.Transactions
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(item => transactionIds.Contains(item.Id))
+            .ToDictionaryAsync(item => item.Id, cancellationToken);
+
+        var data = rows.Select(item =>
+        {
+            preAuthById.TryGetValue(item.PreAuthId ?? Guid.Empty, out var preAuth);
+            transactionById.TryGetValue(item.TransactionId, out var transaction);
+            var decision = item.Status switch
+            {
+                ReconciliationStatus.APPROVED => "APPROVED",
+                ReconciliationStatus.REJECTED => "REJECTED",
+                _ => null
+            };
+
+            return new ReconciliationExceptionDto
+            {
+                Id = item.Id,
+                ReconciliationId = item.Id,
+                PreAuthId = item.PreAuthId,
+                TransactionId = item.TransactionId,
+                Status = item.Status.ToString(),
+                SiteCode = item.SiteCode,
+                LegalEntityId = item.LegalEntityId,
+                PumpNumber = item.PumpNumber,
+                NozzleNumber = item.NozzleNumber,
+                OdooOrderId = item.OdooOrderId ?? preAuth?.OdooOrderId,
+                CurrencyCode = preAuth?.CurrencyCode ?? transaction?.CurrencyCode,
+                RequestedAmount = item.AuthorizedAmountMinorUnits ?? preAuth?.RequestedAmountMinorUnits,
+                ActualAmount = item.ActualAmountMinorUnits,
+                AmountVariance = item.VarianceMinorUnits,
+                VarianceBps = item.VariancePercent.HasValue ? decimal.Round(item.VariancePercent.Value * 100m, 2) : null,
+                AuthorizedAmountMinorUnits = item.AuthorizedAmountMinorUnits,
+                ActualAmountMinorUnits = item.ActualAmountMinorUnits,
+                VarianceMinorUnits = item.VarianceMinorUnits,
+                VariancePercent = item.VariancePercent,
+                MatchMethod = item.MatchMethod,
+                AmbiguityFlag = item.AmbiguityFlag,
+                Decision = decision,
+                DecisionReason = item.ReviewReason,
+                DecidedBy = item.ReviewedByUserId,
+                DecidedAt = item.ReviewedAtUtc,
+                CreatedAt = item.CreatedAt,
+                UpdatedAt = item.UpdatedAt,
+                LastMatchAttemptAt = item.LastMatchAttemptAt
+            };
+        }).ToList();
+
+        string? nextCursor = null;
+        if (hasMore && rows.Count > 0)
+        {
+            var last = rows[^1];
+            nextCursor = PortalCursor.Encode(last.CreatedAt, last.Id);
+        }
 
         return Ok(new GetReconciliationExceptionsResponse
         {
-            Data = result.Records.Select(r => new ReconciliationExceptionDto
-            {
-                ReconciliationId = r.ReconciliationId,
-                Status = r.Status.ToString(),
-                SiteCode = r.SiteCode,
-                LegalEntityId = r.LegalEntityId,
-                PumpNumber = r.PumpNumber,
-                NozzleNumber = r.NozzleNumber,
-                AuthorizedAmountMinorUnits = r.AuthorizedAmountMinorUnits,
-                ActualAmountMinorUnits = r.ActualAmountMinorUnits,
-                VarianceMinorUnits = r.VarianceMinorUnits,
-                VariancePercent = r.VariancePercent,
-                MatchMethod = r.MatchMethod,
-                AmbiguityFlag = r.AmbiguityFlag,
-                CreatedAt = r.CreatedAt,
-                LastMatchAttemptAt = r.LastMatchAttemptAt
-            }).ToList(),
+            Data = data,
             Meta = new ReconciliationExceptionPageMeta
             {
-                PageSize = result.Records.Count,
-                HasMore = result.HasMore,
-                NextCursor = result.NextCursor
+                PageSize = data.Count,
+                HasMore = hasMore,
+                NextCursor = nextCursor,
+                TotalCount = totalCount
             }
         });
+    }
+
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(ReconciliationRecordDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetById(Guid id, CancellationToken cancellationToken = default)
+    {
+        var access = _accessResolver.Resolve(User);
+        if (!access.IsValid)
+        {
+            return Unauthorized();
+        }
+
+        var record = await _db.ReconciliationRecords
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (record is null)
+        {
+            return NotFound(BuildError("NOT_FOUND.RECONCILIATION", "Reconciliation record was not found."));
+        }
+
+        if (!access.CanAccess(record.LegalEntityId))
+        {
+            return Forbid();
+        }
+
+        PreAuthRecord? preAuth = null;
+        if (record.PreAuthId.HasValue)
+        {
+            preAuth = await _db.PreAuthRecords
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .FirstOrDefaultAsync(item => item.Id == record.PreAuthId.Value, cancellationToken);
+        }
+
+        var transaction = await _db.Transactions
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .FirstOrDefaultAsync(item => item.Id == record.TransactionId, cancellationToken);
+
+        return Ok(MapRecord(record, preAuth, transaction));
     }
 
     [HttpPost("{id:guid}/approve")]
@@ -145,23 +293,16 @@ public sealed class OpsReconciliationController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(request.Reason))
         {
-            return BadRequest(BuildError(
-                "VALIDATION.REASON_REQUIRED",
-                "reason is required."));
+            return BadRequest(BuildError("VALIDATION.REASON_REQUIRED", "reason is required."));
         }
 
-        var access = ResolvePortalAccess();
+        var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
         {
-            return Forbid();
+            return Unauthorized();
         }
 
-        var reviewedBy = User.FindFirstValue("oid")
-            ?? User.FindFirstValue(ClaimTypes.NameIdentifier)
-            ?? User.FindFirstValue("sub")
-            ?? User.FindFirstValue("preferred_username")
-            ?? User.Identity?.Name;
-
+        var reviewedBy = _accessResolver.ResolveUserId(User);
         if (string.IsNullOrWhiteSpace(reviewedBy))
         {
             return Forbid();
@@ -206,46 +347,64 @@ public sealed class OpsReconciliationController : ControllerBase
         });
     }
 
-    private PortalAccess ResolvePortalAccess()
+    private static ReconciliationRecordDto MapRecord(
+        ReconciliationRecord record,
+        PreAuthRecord? preAuth,
+        Transaction? transaction)
     {
-        var roles = User.FindAll("roles")
-            .SelectMany(claim => claim.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var allowAll = roles.Contains("SystemAdmin") || roles.Contains("SystemAdministrator");
-        var legalEntityClaims = User.FindAll("legal_entities")
-            .Select(claim => claim.Value)
-            .ToList();
-
-        if (allowAll && (legalEntityClaims.Count == 0 || legalEntityClaims.Any(v => v.Trim() == "*")))
+        var decision = record.Status switch
         {
-            return new PortalAccess(true, Array.Empty<Guid>(), true);
-        }
-
-        var ids = legalEntityClaims
-            .SelectMany(value => value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            .Where(value => value != "*")
-            .Select(value => Guid.TryParse(value, out var parsed) ? parsed : Guid.Empty)
-            .Where(value => value != Guid.Empty)
-            .Distinct()
-            .ToArray();
-
-        return new PortalAccess(ids.Length > 0 || allowAll, ids, allowAll);
-    }
-
-    private ErrorResponse BuildError(string errorCode, string message) =>
-        new()
-        {
-            ErrorCode = errorCode,
-            Message = message,
-            Details = null,
-            TraceId = Activity.Current?.TraceId.ToString() ?? HttpContext.TraceIdentifier,
-            Timestamp = DateTimeOffset.UtcNow.ToString("O"),
-            Retryable = false
+            ReconciliationStatus.APPROVED => "APPROVED",
+            ReconciliationStatus.REJECTED => "REJECTED",
+            _ => null
         };
 
-    private sealed record PortalAccess(
-        bool IsValid,
-        IReadOnlyCollection<Guid> ScopedLegalEntityIds,
-        bool AllowAllLegalEntities);
+        return new ReconciliationRecordDto
+        {
+            Id = record.Id,
+            PreAuthId = record.PreAuthId,
+            TransactionId = record.TransactionId,
+            SiteCode = record.SiteCode,
+            LegalEntityId = record.LegalEntityId,
+            OdooOrderId = record.OdooOrderId ?? preAuth?.OdooOrderId,
+            PumpNumber = record.PumpNumber,
+            NozzleNumber = record.NozzleNumber,
+            ProductCode = preAuth?.ProductCode ?? transaction?.ProductCode,
+            CurrencyCode = preAuth?.CurrencyCode ?? transaction?.CurrencyCode,
+            RequestedAmount = record.AuthorizedAmountMinorUnits ?? preAuth?.RequestedAmountMinorUnits,
+            ActualAmount = record.ActualAmountMinorUnits,
+            AmountVariance = record.VarianceMinorUnits,
+            VarianceBps = record.VariancePercent.HasValue ? decimal.Round(record.VariancePercent.Value * 100m, 2) : null,
+            MatchMethod = record.MatchMethod,
+            AmbiguityFlag = record.AmbiguityFlag,
+            PreAuthStatus = preAuth?.Status.ToString(),
+            ReconciliationStatus = record.Status.ToString(),
+            Decision = decision,
+            DecisionReason = record.ReviewReason,
+            DecidedBy = record.ReviewedByUserId,
+            DecidedAt = record.ReviewedAtUtc,
+            CreatedAt = record.CreatedAt,
+            UpdatedAt = record.UpdatedAt,
+            PreAuthSummary = preAuth is null
+                ? null
+                : new ReconciliationPreAuthSummaryDto
+                {
+                    RequestedAt = preAuth.RequestedAt,
+                    VehicleNumber = preAuth.VehicleNumber,
+                    CustomerBusinessName = preAuth.CustomerBusinessName,
+                    AttendantId = preAuth.AttendantId,
+                    FccCorrelationId = preAuth.FccCorrelationId,
+                    FccAuthorizationCode = preAuth.FccAuthorizationCode
+                },
+            TransactionSummary = transaction is null
+                ? null
+                : new ReconciliationTransactionSummaryDto
+                {
+                    FccTransactionId = transaction.FccTransactionId,
+                    VolumeMicrolitres = transaction.VolumeMicrolitres,
+                    StartedAt = transaction.StartedAt,
+                    CompletedAt = transaction.CompletedAt
+                }
+        };
+    }
 }

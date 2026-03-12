@@ -77,4 +77,14 @@ interface IFccAdapter {
      * Overlapping transactions across fetch calls must not be suppressed.
      */
     suspend fun fetchTransactions(cursor: FetchCursor): TransactionBatch
+
+    /**
+     * Acknowledge transactions so the FCC can remove them from its buffer.
+     *
+     * Vendor-specific: DOMS uses cursor-based acknowledgment (no-op here),
+     * Radix uses explicit CMD_CODE=201 ACK (no-op here — ACK is sent during fetch loop).
+     *
+     * @return true if acknowledgment succeeded or was not needed.
+     */
+    suspend fun acknowledgeTransactions(transactionIds: List<String>): Boolean
 }

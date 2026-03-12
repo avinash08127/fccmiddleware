@@ -233,10 +233,16 @@ class PreAuthHandler(
             }
         }
 
+        // Validate FCC correlationId: warn if missing on AUTHORIZED (needed for reconciliation)
+        val fccCorrelationId = fccResult.correlationId
+        if (fccResult.status == PreAuthResultStatus.AUTHORIZED && fccCorrelationId == null) {
+            Log.w(TAG, "FCC returned AUTHORIZED without correlationId for orderId=$odooOrderId — reconciliation may fail")
+        }
+
         preAuthDao.updateStatus(
             id = activeRecord.id,
             status = newStatus,
-            fccCorrelationId = null,
+            fccCorrelationId = fccCorrelationId,
             fccAuthorizationCode = fccResult.authorizationCode,
             failureReason = if (fccResult.status != PreAuthResultStatus.AUTHORIZED) fccResult.message else null,
             authorizedAt = authorizedAt,

@@ -5,6 +5,12 @@ namespace FccMiddleware.Contracts.MasterData;
 /// </summary>
 public sealed class PumpSyncRequest
 {
+    /// <summary>
+    /// When true, pumps absent from this request are treated as stale and may be soft-deactivated.
+    /// Default false keeps the sync batch as upsert-only.
+    /// </summary>
+    public bool IsFullSnapshot { get; init; }
+
     public List<PumpRecord> Pumps { get; init; } = [];
 }
 

@@ -6,7 +6,8 @@ using Microsoft.Extensions.Logging;
 namespace FccMiddleware.Application.MasterData;
 
 /// <summary>
-/// Handles SyncOperatorsCommand — upserts operators per legal entity and soft-deletes absent ones.
+/// Handles SyncOperatorsCommand — upserts operators per legal entity and only soft-deletes absent ones
+/// for full snapshots.
 /// </summary>
 public sealed class SyncOperatorsHandler : IRequestHandler<SyncOperatorsCommand, MasterDataSyncResult>
 {
@@ -51,24 +52,27 @@ public sealed class SyncOperatorsHandler : IRequestHandler<SyncOperatorsCommand,
             }
         }
 
-        // Soft-delete active operators per legal entity absent from this batch.
-        var legalEntityIds = command.Items.Select(i => i.LegalEntityId).Distinct().ToList();
-        var incomingSet    = incomingIds.ToHashSet();
         int deactivated    = 0;
 
-        foreach (var leiId in legalEntityIds)
+        if (command.IsFullSnapshot)
         {
-            var activeIds    = await _db.GetActiveOperatorIdsAsync(leiId, ct);
-            var toDeactivate = activeIds.Where(id => !incomingSet.Contains(id)).ToList();
+            var legalEntityIds = command.Items.Select(i => i.LegalEntityId).Distinct().ToList();
+            var incomingSet    = incomingIds.ToHashSet();
 
-            if (toDeactivate.Count > 0)
+            foreach (var leiId in legalEntityIds)
             {
-                var deactivateEntities = await _db.GetOperatorsByIdsAsync(toDeactivate, ct);
-                foreach (var entity in deactivateEntities)
+                var activeIds    = await _db.GetActiveOperatorIdsAsync(leiId, ct);
+                var toDeactivate = activeIds.Where(id => !incomingSet.Contains(id)).ToList();
+
+                if (toDeactivate.Count > 0)
                 {
-                    entity.IsActive  = false;
-                    entity.UpdatedAt = now;
-                    deactivated++;
+                    var deactivateEntities = await _db.GetOperatorsByIdsAsync(toDeactivate, ct);
+                    foreach (var entity in deactivateEntities)
+                    {
+                        entity.IsActive  = false;
+                        entity.UpdatedAt = now;
+                        deactivated++;
+                    }
                 }
             }
         }

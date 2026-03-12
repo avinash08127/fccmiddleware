@@ -386,6 +386,8 @@ data class PreAuthForwardRequest(
     val fccAuthorizationCode: String? = null,
     val vehicleNumber: String? = null,
     val customerName: String? = null,
+    val customerTaxId: String? = null,
+    val customerBusinessName: String? = null,
     val attendantId: String? = null,
 )
 

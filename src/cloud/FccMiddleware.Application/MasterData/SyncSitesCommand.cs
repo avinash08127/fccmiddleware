@@ -4,6 +4,7 @@ namespace FccMiddleware.Application.MasterData;
 
 public sealed class SyncSitesCommand : IRequest<MasterDataSyncResult>
 {
+    public bool IsFullSnapshot { get; init; }
     public required List<SiteSyncItem> Items { get; init; }
 }
 

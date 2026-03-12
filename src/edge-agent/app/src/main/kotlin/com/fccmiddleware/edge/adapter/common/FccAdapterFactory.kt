@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.adapter.common
 
 import android.util.Log
 import com.fccmiddleware.edge.adapter.doms.DomsAdapter
+import com.fccmiddleware.edge.adapter.radix.RadixAdapter
 
 /**
  * Default [IFccAdapterFactory] implementation.
@@ -37,6 +38,7 @@ class FccAdapterFactory : IFccAdapterFactory {
 
         return when (vendor) {
             FccVendor.DOMS -> DomsAdapter(config)
+            FccVendor.RADIX -> RadixAdapter(config)
             else -> throw AdapterNotRegisteredException(vendor)
         }
     }

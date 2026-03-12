@@ -26,6 +26,8 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
             _httpFactory,
             config,
             _loggerFactory.CreateLogger<DomsAdapter>()),
+        FccVendor.Radix => throw new NotImplementedException(
+            "Radix adapter is not yet implemented"),
         _ => throw new ArgumentException($"Unknown FCC vendor: {vendor}", nameof(vendor))
     };
 }

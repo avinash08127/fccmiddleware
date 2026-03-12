@@ -35,7 +35,8 @@ public sealed class MasterDataController : ControllerBase
     }
 
     /// <summary>
-    /// Upserts a batch of legal entity records. Records absent from the payload are soft-deactivated.
+    /// Upserts a batch of legal entity records. Records absent from the payload are only soft-deactivated
+    /// when isFullSnapshot=true.
     /// </summary>
     [HttpPut("legal-entities")]
     [ProducesResponseType(typeof(MasterDataSyncResponse), StatusCodes.Status200OK)]
@@ -54,6 +55,7 @@ public sealed class MasterDataController : ControllerBase
 
         var command = new SyncLegalEntitiesCommand
         {
+            IsFullSnapshot = request.IsFullSnapshot,
             Items = request.LegalEntities.Select(r => new LegalEntitySyncItem
             {
                 Id           = r.Id,
@@ -70,7 +72,8 @@ public sealed class MasterDataController : ControllerBase
     }
 
     /// <summary>
-    /// Upserts a batch of site records. Records absent from the payload are soft-deactivated.
+    /// Upserts a batch of site records. Records absent from the payload are only soft-deactivated
+    /// when isFullSnapshot=true.
     /// </summary>
     [HttpPut("sites")]
     [ProducesResponseType(typeof(MasterDataSyncResponse), StatusCodes.Status200OK)]
@@ -89,6 +92,7 @@ public sealed class MasterDataController : ControllerBase
 
         var command = new SyncSitesCommand
         {
+            IsFullSnapshot = request.IsFullSnapshot,
             Items = request.Sites.Select(r => new SiteSyncItem
             {
                 Id              = r.Id,
@@ -105,7 +109,8 @@ public sealed class MasterDataController : ControllerBase
     }
 
     /// <summary>
-    /// Upserts a batch of pump records (including nested nozzles). Records absent are soft-deactivated.
+    /// Upserts a batch of pump records (including nested nozzles). Pumps absent from the payload are only
+    /// soft-deactivated when isFullSnapshot=true.
     /// </summary>
     [HttpPut("pumps")]
     [ProducesResponseType(typeof(MasterDataSyncResponse), StatusCodes.Status200OK)]
@@ -124,6 +129,7 @@ public sealed class MasterDataController : ControllerBase
 
         var command = new SyncPumpsCommand
         {
+            IsFullSnapshot = request.IsFullSnapshot,
             Items = request.Pumps.Select(r => new PumpSyncItem
             {
                 Id         = r.Id,
@@ -143,7 +149,8 @@ public sealed class MasterDataController : ControllerBase
     }
 
     /// <summary>
-    /// Upserts a batch of fuel product records. Records absent from the payload are soft-deactivated.
+    /// Upserts a batch of fuel product records. Records absent from the payload are only soft-deactivated
+    /// when isFullSnapshot=true.
     /// </summary>
     [HttpPut("products")]
     [ProducesResponseType(typeof(MasterDataSyncResponse), StatusCodes.Status200OK)]
@@ -162,6 +169,7 @@ public sealed class MasterDataController : ControllerBase
 
         var command = new SyncProductsCommand
         {
+            IsFullSnapshot = request.IsFullSnapshot,
             Items = request.Products.Select(r => new ProductSyncItem
             {
                 Id            = r.Id,
@@ -177,7 +185,8 @@ public sealed class MasterDataController : ControllerBase
     }
 
     /// <summary>
-    /// Upserts a batch of operator records. Records absent from the payload are soft-deactivated.
+    /// Upserts a batch of operator records. Records absent from the payload are only soft-deactivated
+    /// when isFullSnapshot=true.
     /// </summary>
     [HttpPut("operators")]
     [ProducesResponseType(typeof(MasterDataSyncResponse), StatusCodes.Status200OK)]
@@ -196,6 +205,7 @@ public sealed class MasterDataController : ControllerBase
 
         var command = new SyncOperatorsCommand
         {
+            IsFullSnapshot = request.IsFullSnapshot,
             Items = request.Operators.Select(r => new OperatorSyncItem
             {
                 Id            = r.Id,

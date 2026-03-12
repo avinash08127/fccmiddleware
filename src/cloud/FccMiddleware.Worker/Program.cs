@@ -72,6 +72,8 @@ try
 
                 return new DomsCloudAdapter(client, cfg);
             };
+            registry[FccVendor.RADIX] = _ => throw new NotImplementedException(
+                "Radix cloud adapter is not yet implemented");
         }));
 
     // ── Outbox Publisher Worker ───────────────────────────────────────────────

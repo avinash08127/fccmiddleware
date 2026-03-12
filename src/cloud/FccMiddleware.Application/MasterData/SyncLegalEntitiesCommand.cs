@@ -4,6 +4,7 @@ namespace FccMiddleware.Application.MasterData;
 
 public sealed class SyncLegalEntitiesCommand : IRequest<MasterDataSyncResult>
 {
+    public bool IsFullSnapshot { get; init; }
     public required List<LegalEntitySyncItem> Items { get; init; }
 }
 

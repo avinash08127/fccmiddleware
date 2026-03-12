@@ -113,7 +113,7 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
             <div class="field-grid">
               <div class="field">
                 <span class="field-label">Odoo Order ID</span>
-                <span class="field-value code">{{ record()!.odooOrderId }}</span>
+                <span class="field-value code">{{ record()!.odooOrderId || '—' }}</span>
               </div>
               <div class="field">
                 <span class="field-label">Site</span>
@@ -125,17 +125,19 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               </div>
               <div class="field">
                 <span class="field-label">Product</span>
-                <span class="field-value">{{ record()!.productCode }}</span>
+                <span class="field-value">{{ record()!.productCode || '—' }}</span>
               </div>
               <div class="field">
                 <span class="field-label">Authorised Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.requestedAmount | currencyMinorUnits: record()!.currencyCode }}
+                  {{ record()!.requestedAmount != null
+                      ? (record()!.requestedAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
+                      : '—' }}
                 </span>
               </div>
               <div class="field">
                 <span class="field-label">Pre-Auth Status</span>
-                <span class="field-value">{{ record()!.preAuthStatus | statusLabel }}</span>
+                <span class="field-value">{{ (record()!.preAuthStatus | statusLabel) || '—' }}</span>
               </div>
               @if (record()!.preAuthSummary; as pa) {
                 @if (pa.vehicleNumber) {
@@ -224,7 +226,9 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               <div class="field">
                 <span class="field-label">Authorised Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.requestedAmount | currencyMinorUnits: record()!.currencyCode }}
+                  {{ record()!.requestedAmount != null
+                      ? (record()!.requestedAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
+                      : '—' }}
                 </span>
               </div>
               <div class="field">

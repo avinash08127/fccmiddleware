@@ -101,11 +101,11 @@ Cypress.Commands.add('interceptDashboardApis', () => {
 });
 
 Cypress.Commands.add('interceptTransactionApis', () => {
-  cy.intercept('GET', '**/api/v1/transactions?*', {
+  cy.intercept('GET', '**/api/v1/ops/transactions?*', {
     fixture: 'transactions.json',
   }).as('getTransactions');
 
-  cy.intercept('GET', '**/api/v1/transactions/tx-001', {
+  cy.intercept('GET', '**/api/v1/ops/transactions/tx-001', {
     fixture: 'transaction-detail.json',
   }).as('getTransactionDetail');
 
@@ -119,19 +119,19 @@ Cypress.Commands.add('interceptTransactionApis', () => {
 });
 
 Cypress.Commands.add('interceptReconciliationApis', () => {
-  cy.intercept('GET', '**/api/v1/reconciliation/exceptions*', {
+  cy.intercept('GET', '**/api/v1/ops/reconciliation/exceptions*', {
     fixture: 'reconciliation-exceptions.json',
   }).as('getReconciliationExceptions');
 
-  cy.intercept('GET', '**/api/v1/reconciliation/exceptions/recon-001', {
+  cy.intercept('GET', '**/api/v1/ops/reconciliation/recon-001', {
     fixture: 'reconciliation-detail.json',
   }).as('getReconciliationDetail');
 
-  cy.intercept('POST', '**/api/v1/reconciliation/exceptions/recon-001/approve', {
+  cy.intercept('POST', '**/api/v1/ops/reconciliation/recon-001/approve', {
     fixture: 'reconciliation-approved.json',
   }).as('approveReconciliation');
 
-  cy.intercept('POST', '**/api/v1/reconciliation/exceptions/recon-001/reject', {
+  cy.intercept('POST', '**/api/v1/ops/reconciliation/recon-001/reject', {
     fixture: 'reconciliation-approved.json',
   }).as('rejectReconciliation');
 

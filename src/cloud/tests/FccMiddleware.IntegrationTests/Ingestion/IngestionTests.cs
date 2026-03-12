@@ -200,6 +200,146 @@ public sealed class IngestionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Ingest_BulkWrappedPayload_Returns200AndStoresEachTransaction()
+    {
+        var request = new
+        {
+            fccVendor = "DOMS",
+            siteCode = "ACCRA-001",
+            capturedAt = "2026-03-11T14:20:00Z",
+            rawPayload = new
+            {
+                transactions = new object[]
+                {
+                    new
+                    {
+                        transactionId = "TXN-INTEG-BULK-001",
+                        pumpNumber = 3,
+                        nozzleNumber = 1,
+                        productCode = "PMS",
+                        volumeMicrolitres = 15_000_000L,
+                        amountMinorUnits = 12_225_00L,
+                        unitPriceMinorPerLitre = 815_00L,
+                        startTime = "2026-03-11T14:15:00Z",
+                        endTime = "2026-03-11T14:16:50Z"
+                    },
+                    new
+                    {
+                        transactionId = "TXN-INTEG-BULK-002",
+                        pumpNumber = 4,
+                        nozzleNumber = 1,
+                        productCode = "AGO",
+                        volumeMicrolitres = 18_000_000L,
+                        amountMinorUnits = 16_200_00L,
+                        unitPriceMinorPerLitre = 900_00L,
+                        startTime = "2026-03-11T14:17:00Z",
+                        endTime = "2026-03-11T14:19:10Z"
+                    }
+                }
+            }
+        };
+
+        var response = await PostIngestAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("acceptedCount").GetInt32().Should().Be(2);
+        body.GetProperty("duplicateCount").GetInt32().Should().Be(0);
+        body.GetProperty("rejectedCount").GetInt32().Should().Be(0);
+
+        var results = body.GetProperty("results").EnumerateArray().ToList();
+        results.Should().HaveCount(2);
+        results[0].GetProperty("recordIndex").GetInt32().Should().Be(0);
+        results[0].GetProperty("outcome").GetString().Should().Be("ACCEPTED");
+        results[0].GetProperty("fccTransactionId").GetString().Should().Be("TXN-INTEG-BULK-001");
+        results[1].GetProperty("recordIndex").GetInt32().Should().Be(1);
+        results[1].GetProperty("outcome").GetString().Should().Be("ACCEPTED");
+        results[1].GetProperty("fccTransactionId").GetString().Should().Be("TXN-INTEG-BULK-002");
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var storedTransactions = await db.Transactions
+            .IgnoreQueryFilters()
+            .Where(t => t.FccTransactionId == "TXN-INTEG-BULK-001" || t.FccTransactionId == "TXN-INTEG-BULK-002")
+            .ToListAsync();
+
+        storedTransactions.Should().HaveCount(2);
+        storedTransactions.Should().OnlyContain(t => t.Status == TransactionStatus.PENDING);
+    }
+
+    [Fact]
+    public async Task Ingest_BulkWrappedPayload_WithInvalidRecord_ReturnsPerRecordOutcomes()
+    {
+        var request = new
+        {
+            fccVendor = "DOMS",
+            siteCode = "ACCRA-001",
+            capturedAt = "2026-03-11T14:25:00Z",
+            rawPayload = new
+            {
+                transactions = new object[]
+                {
+                    new
+                    {
+                        transactionId = "TXN-INTEG-BULK-MIXED-001",
+                        pumpNumber = 3,
+                        nozzleNumber = 1,
+                        productCode = "PMS",
+                        volumeMicrolitres = 12_000_000L,
+                        amountMinorUnits = 9_780_00L,
+                        unitPriceMinorPerLitre = 815_00L,
+                        startTime = "2026-03-11T14:21:00Z",
+                        endTime = "2026-03-11T14:22:20Z"
+                    },
+                    new
+                    {
+                        pumpNumber = 2,
+                        nozzleNumber = 1,
+                        productCode = "PMS",
+                        volumeMicrolitres = 11_000_000L,
+                        amountMinorUnits = 8_965_00L,
+                        unitPriceMinorPerLitre = 815_00L,
+                        startTime = "2026-03-11T14:23:00Z",
+                        endTime = "2026-03-11T14:24:00Z"
+                    }
+                }
+            }
+        };
+
+        var response = await PostIngestAsync(request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("acceptedCount").GetInt32().Should().Be(1);
+        body.GetProperty("duplicateCount").GetInt32().Should().Be(0);
+        body.GetProperty("rejectedCount").GetInt32().Should().Be(1);
+
+        var results = body.GetProperty("results").EnumerateArray().ToList();
+        results.Should().HaveCount(2);
+        results[0].GetProperty("outcome").GetString().Should().Be("ACCEPTED");
+        results[1].GetProperty("recordIndex").GetInt32().Should().Be(1);
+        results[1].GetProperty("outcome").GetString().Should().Be("REJECTED");
+        results[1].GetProperty("errorCode").GetString().Should().Be("VALIDATION.MISSING_REQUIRED_FIELD");
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var storedTransaction = await db.Transactions
+            .IgnoreQueryFilters()
+            .SingleOrDefaultAsync(t => t.FccTransactionId == "TXN-INTEG-BULK-MIXED-001");
+
+        storedTransaction.Should().NotBeNull();
+        storedTransaction!.Status.Should().Be(TransactionStatus.PENDING);
+
+        var invalidStoredCount = await db.Transactions
+            .IgnoreQueryFilters()
+            .CountAsync(t => t.StartedAt == DateTimeOffset.Parse("2026-03-11T14:23:00Z"));
+
+        invalidStoredCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Ingest_InvalidHmacSignature_Returns401()
     {
         var request = new

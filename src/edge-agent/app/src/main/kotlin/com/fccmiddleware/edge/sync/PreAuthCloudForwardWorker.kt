@@ -263,6 +263,7 @@ class PreAuthCloudForwardWorker(
             fccCorrelationId = fccCorrelationId,
             fccAuthorizationCode = fccAuthorizationCode,
             customerName = customerName,
+            customerTaxId = customerTaxId,
         )
 
     // -------------------------------------------------------------------------

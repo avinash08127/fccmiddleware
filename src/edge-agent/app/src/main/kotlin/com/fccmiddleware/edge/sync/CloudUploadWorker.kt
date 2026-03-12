@@ -75,6 +75,9 @@ class CloudUploadWorker(
         private const val STATUS_NOT_FOUND = "NOT_FOUND"
         private const val STATUS_STALE_PENDING = "STALE_PENDING"
         private const val STATUS_DUPLICATE = "DUPLICATE"
+        private const val STATUS_ARCHIVED = "ARCHIVED"
+        private const val STATUS_PENDING = "PENDING"
+        private const val STATUS_SYNCED = "SYNCED"
 
         /** Cloud API rejects batches larger than this. */
         private const val CLOUD_MAX_BATCH_SIZE = 500
@@ -407,21 +410,46 @@ class CloudUploadWorker(
         when (result) {
             is StatusPollAttemptResult.Success -> {
                 val syncedIds = mutableListOf<String>()
-                var notFoundCount = 0
+                val notFoundIds = mutableListOf<String>()
                 var stalePendingCount = 0
                 var duplicateCount = 0
+                var intermediateCount = 0
                 var otherCount = 0
 
                 for (entry in result.response.statuses) {
                     when (entry.status) {
                         SYNCED_TO_ODOO_STATUS -> syncedIds += entry.id
 
+                        STATUS_DUPLICATE -> {
+                            // Cloud confirms it already has this record — progress to SYNCED_TO_ODOO
+                            // since the data is confirmed to exist in cloud (dedup = cloud already processed it).
+                            syncedIds += entry.id
+                            duplicateCount++
+                            Log.i(
+                                TAG,
+                                "Status poll: fccTransactionId='${entry.id}' returned DUPLICATE — " +
+                                    "cloud dedup confirmed, progressing to SYNCED_TO_ODOO.",
+                            )
+                        }
+
+                        STATUS_ARCHIVED -> {
+                            // Cloud has completed the full lifecycle for this record — progress locally
+                            // to SYNCED_TO_ODOO so the edge can archive/delete it.
+                            syncedIds += entry.id
+                            Log.i(
+                                TAG,
+                                "Status poll: fccTransactionId='${entry.id}' returned ARCHIVED — " +
+                                    "cloud lifecycle complete, progressing to SYNCED_TO_ODOO.",
+                            )
+                        }
+
                         STATUS_NOT_FOUND -> {
-                            notFoundCount++
+                            // Cloud has no record — revert to PENDING for re-upload.
+                            notFoundIds += entry.id
                             Log.w(
                                 TAG,
                                 "Status poll: fccTransactionId='${entry.id}' returned NOT_FOUND — " +
-                                    "record may have been lost in cloud or never persisted.",
+                                    "reverting to PENDING for re-upload.",
                             )
                         }
 
@@ -434,12 +462,14 @@ class CloudUploadWorker(
                             )
                         }
 
-                        STATUS_DUPLICATE -> {
-                            duplicateCount++
-                            Log.i(
+                        STATUS_PENDING, STATUS_SYNCED -> {
+                            // Intermediate cloud states — record is being processed.
+                            // Leave as UPLOADED locally; will transition on a future poll.
+                            intermediateCount++
+                            Log.d(
                                 TAG,
-                                "Status poll: fccTransactionId='${entry.id}' returned DUPLICATE — " +
-                                    "cloud dedup confirmed.",
+                                "Status poll: fccTransactionId='${entry.id}' in intermediate " +
+                                    "cloud state '${entry.status}' — awaiting progression.",
                             )
                         }
 
@@ -456,20 +486,25 @@ class CloudUploadWorker(
 
                 if (syncedIds.isNotEmpty()) {
                     bm.markSyncedToOdoo(syncedIds)
-                    Log.i(TAG, "Marked ${syncedIds.size} records SYNCED_TO_ODOO")
+                    Log.i(TAG, "Marked ${syncedIds.size} records SYNCED_TO_ODOO (including ${duplicateCount} DUPLICATE)")
                 }
 
-                if (notFoundCount > 0 || stalePendingCount > 0) {
+                if (notFoundIds.isNotEmpty()) {
+                    bm.revertToPending(notFoundIds)
+                    Log.w(TAG, "Reverted ${notFoundIds.size} NOT_FOUND records to PENDING for re-upload")
+                }
+
+                if (notFoundIds.isNotEmpty() || stalePendingCount > 0) {
                     Log.w(
                         TAG,
-                        "Status poll anomalies: notFound=$notFoundCount stalePending=$stalePendingCount " +
-                            "duplicate=$duplicateCount other=$otherCount",
+                        "Status poll anomalies: notFound=${notFoundIds.size} stalePending=$stalePendingCount " +
+                            "duplicate=$duplicateCount intermediate=$intermediateCount other=$otherCount",
                     )
-                    telemetryReporter?.cloudUploadErrors?.addAndGet(notFoundCount + stalePendingCount)
+                    telemetryReporter?.cloudUploadErrors?.addAndGet(notFoundIds.size + stalePendingCount)
                 }
 
-                if (syncedIds.isEmpty() && notFoundCount == 0 && stalePendingCount == 0 &&
-                    duplicateCount == 0 && otherCount == 0
+                if (syncedIds.isEmpty() && notFoundIds.isEmpty() && stalePendingCount == 0 &&
+                    intermediateCount == 0 && otherCount == 0
                 ) {
                     Log.d(TAG, "Status poll returned no actionable entries")
                 }

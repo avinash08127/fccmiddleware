@@ -103,6 +103,15 @@ data class PreAuthCommand(
 
     /** Required when site fiscalization config requires it. PII — NEVER log. */
     @Sensitive val customerTaxId: String? = null,
+
+    /** Radix: Customer name — maps to CUSTNAME. */
+    val customerName: String? = null,
+
+    /** Radix: Customer ID type — maps to CUSTIDTYPE (1=TIN, 2=DrivingLicense, etc.). */
+    val customerIdType: Int? = null,
+
+    /** Radix: Customer phone — maps to MOBILENUM. */
+    val customerPhone: String? = null,
 )
 
 /**
@@ -123,6 +132,13 @@ data class PreAuthResult(
 
     /** Operator-safe outcome detail; never contains PII. */
     val message: String? = null,
+
+    /**
+     * FCC-assigned correlation ID linking this pre-auth to subsequent dispensing transactions.
+     * Used for reconciliation between edge pre-auth records and FCC transactions.
+     * Stored in PreAuthRecord.fccCorrelationId for later cloud forwarding.
+     */
+    val correlationId: String? = null,
 )
 
 // ---------------------------------------------------------------------------
@@ -189,4 +205,16 @@ data class AgentFccConfig(
      * Allows normalising FCC-internal numbering to Odoo POS numbering.
      */
     val pumpNumberOffset: Int = 0,
+
+    /** Radix: SHA-1 signing password for message authentication. */
+    @Sensitive val sharedSecret: String? = null,
+
+    /** Radix: Unique Station Number (1–999999). */
+    val usnCode: Int? = null,
+
+    /** Radix: External Authorization port; transaction port = authPort + 1. */
+    val authPort: Int? = null,
+
+    /** Radix: JSON string mapping canonical pump numbers to (PUMP_ADDR, FP) pairs. */
+    val fccPumpAddressMap: String? = null,
 )

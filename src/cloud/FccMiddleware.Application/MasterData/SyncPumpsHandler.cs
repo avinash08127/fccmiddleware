@@ -12,7 +12,7 @@ namespace FccMiddleware.Application.MasterData;
 ///   - Resolves SiteId/LegalEntityId via siteCode.
 ///   - Upserts the pump by id.
 ///   - Syncs nozzles nested in the payload (upsert by OdooNozzleNumber; soft-delete absent ones).
-/// Active pumps absent from the batch are soft-deactivated.
+/// Active pumps absent from the batch are soft-deactivated only for full snapshots.
 /// </summary>
 public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterDataSyncResult>
 {
@@ -101,21 +101,24 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
             await SyncNozzlesAsync(pump, item.Nozzles, nozzlesByPump, now, errors, ct);
         }
 
-        // Soft-delete active pumps absent from this batch.
-        var allActiveIds = await _db.GetActivePumpIdsAsync(ct);
-        var incomingSet  = incomingIds.ToHashSet();
-        var toDeactivate = allActiveIds.Where(id => !incomingSet.Contains(id)).ToList();
         int deactivated  = 0;
 
-        if (toDeactivate.Count > 0)
+        if (command.IsFullSnapshot)
         {
-            var deactivateEntities = await _db.GetPumpsByIdsAsync(toDeactivate, ct);
-            foreach (var entity in deactivateEntities)
+            var allActiveIds = await _db.GetActivePumpIdsAsync(ct);
+            var incomingSet  = incomingIds.ToHashSet();
+            var toDeactivate = allActiveIds.Where(id => !incomingSet.Contains(id)).ToList();
+
+            if (toDeactivate.Count > 0)
             {
-                entity.IsActive   = false;
-                entity.SyncedAt   = now;
-                entity.UpdatedAt  = now;
-                deactivated++;
+                var deactivateEntities = await _db.GetPumpsByIdsAsync(toDeactivate, ct);
+                foreach (var entity in deactivateEntities)
+                {
+                    entity.IsActive   = false;
+                    entity.SyncedAt   = now;
+                    entity.UpdatedAt  = now;
+                    deactivated++;
+                }
             }
         }
 

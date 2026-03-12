@@ -40,4 +40,12 @@ public interface IFccAdapter
     /// Never throws on transport failure — returns false instead.
     /// </summary>
     Task<bool> CancelPreAuthAsync(string fccCorrelationId, CancellationToken ct);
+
+    /// <summary>
+    /// Acknowledge transactions so the FCC can remove them from its buffer.
+    /// Vendor-specific: DOMS uses cursor-based acknowledgment (no-op here),
+    /// Radix uses explicit CMD_CODE=201 ACK (no-op here — ACK is sent during fetch loop).
+    /// </summary>
+    /// <returns>true if acknowledgment succeeded or was not needed.</returns>
+    Task<bool> AcknowledgeTransactionsAsync(IReadOnlyList<string> transactionIds, CancellationToken ct);
 }

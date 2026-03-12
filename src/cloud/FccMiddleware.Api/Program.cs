@@ -359,6 +359,8 @@ try
                 }
                 return new DomsCloudAdapter(client, cfg);
             };
+            registry[FccVendor.RADIX] = _ => throw new NotImplementedException(
+                "Radix cloud adapter is not yet implemented");
         }));
 
     // Health checks: PostgreSQL + Redis (registered here; liveness stub registered in ServiceDefaults)

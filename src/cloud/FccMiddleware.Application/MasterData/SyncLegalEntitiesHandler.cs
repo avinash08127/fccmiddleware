@@ -11,7 +11,7 @@ namespace FccMiddleware.Application.MasterData;
 /// For each incoming record:
 ///   - If found in DB: compare fields; update if changed (upsertedCount) or skip (unchangedCount).
 ///   - If not found: insert new record (upsertedCount).
-/// Active records absent from the payload are soft-deactivated (deactivatedCount).
+/// Active records absent from the payload are soft-deactivated only for full snapshots.
 /// Publishes a MasterDataSynced outbox event on any change.
 /// </summary>
 public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntitiesCommand, MasterDataSyncResult>
@@ -57,21 +57,24 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
             }
         }
 
-        // Soft-delete active records absent from this batch.
-        var allActiveIds = await _db.GetActiveLegalEntityIdsAsync(ct);
-        var incomingSet = incomingIds.ToHashSet();
-        var toDeactivate = allActiveIds.Where(id => !incomingSet.Contains(id)).ToList();
         var deactivated = 0;
 
-        if (toDeactivate.Count > 0)
+        if (command.IsFullSnapshot)
         {
-            var deactivateEntities = await _db.GetLegalEntitiesByIdsAsync(toDeactivate, ct);
-            foreach (var entity in deactivateEntities)
+            var allActiveIds = await _db.GetActiveLegalEntityIdsAsync(ct);
+            var incomingSet = incomingIds.ToHashSet();
+            var toDeactivate = allActiveIds.Where(id => !incomingSet.Contains(id)).ToList();
+
+            if (toDeactivate.Count > 0)
             {
-                entity.IsActive = false;
-                entity.DeactivatedAt = now;
-                entity.UpdatedAt = now;
-                deactivated++;
+                var deactivateEntities = await _db.GetLegalEntitiesByIdsAsync(toDeactivate, ct);
+                foreach (var entity in deactivateEntities)
+                {
+                    entity.IsActive = false;
+                    entity.DeactivatedAt = now;
+                    entity.UpdatedAt = now;
+                    deactivated++;
+                }
             }
         }
 

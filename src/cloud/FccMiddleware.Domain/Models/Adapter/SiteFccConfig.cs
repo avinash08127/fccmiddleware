@@ -56,4 +56,20 @@ public sealed record SiteFccConfig
     /// </summary>
     public IReadOnlyDictionary<string, string> ProductCodeMapping { get; init; } =
         new Dictionary<string, string>();
+
+    /// <summary>Radix: SHA-1 signing password for message authentication.</summary>
+    [Sensitive]
+    public string? SharedSecret { get; init; }
+
+    /// <summary>Radix: Unique Station Number (1–999999).</summary>
+    public int? UsnCode { get; init; }
+
+    /// <summary>Radix: External Authorization port; transaction port = AuthPort + 1.</summary>
+    public int? AuthPort { get; init; }
+
+    /// <summary>Radix: Maps canonical pump numbers to (PumpAddr, Fp) pairs for Radix three-level addressing.</summary>
+    public IReadOnlyDictionary<int, RadixPumpAddress>? FccPumpAddressMap { get; init; }
 }
+
+/// <summary>Radix pump addressing: maps to the (PUMP_ADDR, FP) pair in the Radix protocol.</summary>
+public sealed record RadixPumpAddress(int PumpAddr, int Fp);

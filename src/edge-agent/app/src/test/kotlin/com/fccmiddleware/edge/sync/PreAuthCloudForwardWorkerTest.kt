@@ -210,6 +210,7 @@ class PreAuthCloudForwardWorkerTest {
             fccCorrelationId = "FCC-CORR-123",
             fccAuthorizationCode = "AUTH-456",
             customerName = "Test Customer",
+            customerTaxId = "TIN-123456789",
         )
         coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
 
@@ -231,6 +232,7 @@ class PreAuthCloudForwardWorkerTest {
         assertEquals("FCC-CORR-123", req.fccCorrelationId)
         assertEquals("AUTH-456", req.fccAuthorizationCode)
         assertEquals("Test Customer", req.customerName)
+        assertEquals("TIN-123456789", req.customerTaxId)
     }
 
     // -------------------------------------------------------------------------
@@ -392,6 +394,7 @@ class PreAuthCloudForwardWorkerTest {
         fccCorrelationId: String? = null,
         fccAuthorizationCode: String? = null,
         customerName: String? = null,
+        customerTaxId: String? = null,
     ): PreAuthRecord = PreAuthRecord(
         id = id,
         siteCode = siteCode,
@@ -407,7 +410,7 @@ class PreAuthCloudForwardWorkerTest {
         fccAuthorizationCode = fccAuthorizationCode,
         failureReason = null,
         customerName = customerName,
-        customerTaxId = null,
+        customerTaxId = customerTaxId,
         rawFccResponse = null,
         requestedAt = "2024-01-01T10:00:00Z",
         authorizedAt = "2024-01-01T10:00:01Z",

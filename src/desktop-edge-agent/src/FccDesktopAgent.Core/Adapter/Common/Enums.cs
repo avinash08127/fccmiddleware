@@ -49,7 +49,8 @@ public enum IngestionMode
 /// <summary>FCC protocol adapter vendor.</summary>
 public enum FccVendor
 {
-    Doms
+    Doms,
+    Radix
 }
 
 /// <summary>Origin of a transaction's ingestion into the middleware.</summary>

@@ -1,4 +1,5 @@
 using FccMiddleware.Application.Common;
+using FccMiddleware.Domain.Common;
 using FccMiddleware.Domain.Enums;
 using MediatR;
 
@@ -26,6 +27,9 @@ public sealed record ForwardPreAuthCommand : IRequest<Result<ForwardPreAuthResul
     public string? FccAuthorizationCode { get; init; }
     public string? VehicleNumber { get; init; }
     public string? CustomerName { get; init; }
+    [Sensitive]
+    public string? CustomerTaxId { get; init; }
+    public string? CustomerBusinessName { get; init; }
     public string? AttendantId { get; init; }
     public required Guid CorrelationId { get; init; }
 }

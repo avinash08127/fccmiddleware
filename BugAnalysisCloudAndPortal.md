@@ -109,7 +109,7 @@ The few areas where portal and cloud appear to overlap still do not integrate cl
 
 **Fix direction**
 
-Create a dedicated portal-facing API contract or align the portal to the existing backend contract instead of reusing Odoo-oriented endpoints.
+Align the portal to the existing backend contract instead of reusing Odoo-oriented endpoints.
 
 ### P0-4: Master-data sync will deactivate valid records whenever data is sent in multiple batches
 

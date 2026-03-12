@@ -264,6 +264,12 @@ public sealed class ForwardPreAuthHandler
         if (command.CustomerName is not null)
             record.CustomerName = command.CustomerName;
 
+        if (command.CustomerTaxId is not null)
+            record.CustomerTaxId = command.CustomerTaxId;
+
+        if (command.CustomerBusinessName is not null)
+            record.CustomerBusinessName = command.CustomerBusinessName;
+
         if (command.AttendantId is not null)
             record.AttendantId = command.AttendantId;
     }

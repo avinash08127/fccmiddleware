@@ -336,23 +336,18 @@ class TelemetryReporter(
     // Sequence number (monotonic, persisted in SyncState)
     // -------------------------------------------------------------------------
 
+    /**
+     * Atomically increment and return the next telemetry sequence number.
+     *
+     * Uses [SyncStateDao.incrementAndGetTelemetrySequence] which wraps the
+     * read-modify-write in a Room @Transaction, eliminating the risk of
+     * duplicate sequence numbers from concurrent access or mid-operation crashes.
+     * The coroutine Mutex provides additional in-process serialization.
+     */
     private suspend fun nextSequenceNumber(): Long = sequenceMutex.withLock {
         try {
-            val current = syncStateDao.get()
-            val next = (current?.telemetrySequence ?: 0L) + 1L
             val now = Instant.now().toString()
-            val updated = current?.copy(telemetrySequence = next, updatedAt = now)
-                ?: com.fccmiddleware.edge.buffer.entity.SyncState(
-                    lastFccCursor = null,
-                    lastUploadAt = null,
-                    lastStatusPollAt = null,
-                    lastConfigPullAt = null,
-                    lastConfigVersion = null,
-                    telemetrySequence = next,
-                    updatedAt = now,
-                )
-            syncStateDao.upsert(updated)
-            next
+            syncStateDao.incrementAndGetTelemetrySequence(now)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to increment telemetry sequence number", e)
             1L

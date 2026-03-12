@@ -257,10 +257,9 @@ class ConfigPollWorkerTest {
 
         worker.pollConfig()
 
-        val syncSlot = slot<SyncState>()
-        coVerify { syncStateDao.upsert(capture(syncSlot)) }
-        // lastConfigVersion should NOT be updated for rejected configs
-        assertEquals(null, syncSlot.captured.lastConfigVersion)
+        // Rejected config records a failure — no SyncState upsert should occur
+        coVerify(exactly = 0) { syncStateDao.upsert(any()) }
+        assertTrue(worker.consecutiveFailureCount > 0)
     }
 
     // -------------------------------------------------------------------------

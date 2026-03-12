@@ -34,17 +34,17 @@ export interface ReconciliationTransactionSummary {
  */
 export interface ReconciliationRecord {
   id: string;
-  preAuthId: string;
+  preAuthId: string | null;
   transactionId: string | null;
   siteCode: string;
   legalEntityId: string;
-  odooOrderId: string;
+  odooOrderId: string | null;
   pumpNumber: number;
   nozzleNumber: number;
-  productCode: string;
-  currencyCode: string;
+  productCode: string | null;
+  currencyCode: string | null;
   /** Authorised amount in minor currency units. */
-  requestedAmount: number;
+  requestedAmount: number | null;
   /** Actual dispensed amount in minor currency units. Null when unmatched. */
   actualAmount: number | null;
   /** Variance in minor units (actualAmount − requestedAmount). Null when unmatched. */
@@ -55,7 +55,7 @@ export interface ReconciliationRecord {
   matchMethod: string | null;
   /** True when multiple candidates were found and a tie-break was applied. */
   ambiguityFlag: boolean;
-  preAuthStatus: PreAuthStatus;
+  preAuthStatus: PreAuthStatus | null;
   reconciliationStatus: ReconciliationStatus | null;
   decision: ReconciliationDecision | null;
   decisionReason: string | null;
@@ -75,15 +75,15 @@ export interface ReconciliationRecord {
  */
 export interface ReconciliationException {
   id: string;
-  preAuthId: string;
+  preAuthId: string | null;
   transactionId: string | null;
   legalEntityId: string;
   siteCode: string;
   pumpNumber: number;
   nozzleNumber: number;
-  odooOrderId: string;
-  currencyCode: string;
-  requestedAmount: number;
+  odooOrderId: string | null;
+  currencyCode: string | null;
+  requestedAmount: number | null;
   actualAmount: number | null;
   amountVariance: number | null;
   /** Variance in basis points (1 bps = 0.01%). */

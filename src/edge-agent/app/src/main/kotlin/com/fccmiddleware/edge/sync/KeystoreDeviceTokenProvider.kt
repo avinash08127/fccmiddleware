@@ -38,6 +38,16 @@ class KeystoreDeviceTokenProvider(
     }
 
     /**
+     * Volatile in-memory cache of the decommission flag.
+     * Eliminates the race window where one worker detects 403 DEVICE_DECOMMISSIONED
+     * but other workers pass their isDecommissioned() check before SharedPreferences
+     * is updated. Once set to true, all subsequent isDecommissioned() calls return
+     * true immediately without hitting SharedPreferences.
+     */
+    @Volatile
+    private var decommissionedCached: Boolean = false
+
+    /**
      * Mutex serializing [refreshAccessToken] calls so that concurrent 401
      * handlers (CloudUploadWorker, ConfigPollWorker, PreAuthCloudForwardWorker)
      * do not race to issue duplicate refresh requests. The first caller performs
@@ -46,7 +56,7 @@ class KeystoreDeviceTokenProvider(
     private val refreshMutex = Mutex()
 
     override fun getAccessToken(): String? {
-        if (encryptedPrefs.isDecommissioned) return null
+        if (decommissionedCached || encryptedPrefs.isDecommissioned) return null
 
         val blob = encryptedPrefs.getDeviceTokenBlob() ?: return null
         return try {
@@ -68,7 +78,7 @@ class KeystoreDeviceTokenProvider(
         // this by checking that we still hold a valid refresh token and proceed.
         // This is safe because storeTokens() atomically rotates both tokens.
 
-        if (encryptedPrefs.isDecommissioned) {
+        if (decommissionedCached || encryptedPrefs.isDecommissioned) {
             Log.w(TAG, "Device is decommissioned — cannot refresh token")
             return@withLock false
         }
@@ -108,10 +118,17 @@ class KeystoreDeviceTokenProvider(
     }
 
     override fun isDecommissioned(): Boolean {
-        return encryptedPrefs.isDecommissioned
+        // Fast-path: volatile in-memory flag avoids SharedPreferences I/O
+        if (decommissionedCached) return true
+        val persisted = encryptedPrefs.isDecommissioned
+        if (persisted) decommissionedCached = true
+        return persisted
     }
 
     override fun markDecommissioned() {
+        // Set volatile flag FIRST so concurrent workers see it immediately,
+        // then persist to SharedPreferences for crash recovery.
+        decommissionedCached = true
         encryptedPrefs.isDecommissioned = true
         Log.w(TAG, "Device marked as decommissioned — all sync stopped")
     }

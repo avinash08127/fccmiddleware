@@ -126,6 +126,19 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
     }
 
     /**
+     * Revert UPLOADED records back to PENDING by FCC transaction ID.
+     *
+     * Called when the status poll returns NOT_FOUND for a record — cloud has no record of it,
+     * so the edge should re-upload on the next upload cycle. Only reverts records currently
+     * at UPLOADED status to prevent overwriting SYNCED_TO_ODOO or ARCHIVED states.
+     */
+    suspend fun revertToPending(fccTransactionIds: List<String>) {
+        if (fccTransactionIds.isEmpty()) return
+        val now = Instant.now().toString()
+        dao.revertToPendingByFccId(fccTransactionIds, now)
+    }
+
+    /**
      * Return FCC transaction IDs for records at UPLOADED status.
      * Used by the status poller to check which records have reached SYNCED_TO_ODOO in cloud.
      *

@@ -4,6 +4,7 @@ namespace FccMiddleware.Application.MasterData;
 
 public sealed class SyncPumpsCommand : IRequest<MasterDataSyncResult>
 {
+    public bool IsFullSnapshot { get; init; }
     public required List<PumpSyncItem> Items { get; init; }
 }
 

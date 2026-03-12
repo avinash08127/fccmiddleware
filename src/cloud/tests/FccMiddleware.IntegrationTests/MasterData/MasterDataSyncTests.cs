@@ -16,7 +16,7 @@ namespace FccMiddleware.IntegrationTests.MasterData;
 
 /// <summary>
 /// Integration tests for the master data sync endpoints (PUT /api/v1/master-data/*).
-/// Verifies Databricks API key auth, upsert (insert + update), soft-delete of absent records,
+/// Verifies Databricks API key auth, upsert (insert + update), opt-in soft-delete for full snapshots,
 /// syncedAt timestamp updates, and outbox event publishing.
 /// </summary>
 [Collection("Integration")]
@@ -85,7 +85,6 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
             legalEntities = new[]
             {
                 new { id = newId, code = "KE", name = "Kenya Ltd", currencyCode = "KES", isActive = true },
-                // Also include the pre-existing test entity so it doesn't get deactivated
                 new { id = TestLegalEntityId, code = "CD", name = "Congo Ltd", currencyCode = "CDF", isActive = true }
             }
         };
@@ -134,7 +133,39 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task SyncLegalEntities_SoftDeletesAbsentRecords()
+    public async Task SyncLegalEntities_PartialBatch_DoesNotDeactivateAbsentRecords_ByDefault()
+    {
+        var extraId = Guid.NewGuid();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            db.LegalEntities.Add(MakeLegalEntity(extraId, "GW"));
+            await db.SaveChangesAsync();
+        }
+
+        var body = new
+        {
+            legalEntities = new[]
+            {
+                new { id = TestLegalEntityId, code = "CD", name = "Congo Ltd", currencyCode = "CDF", isActive = true }
+            }
+        };
+
+        var response = await _client.PutAsJsonAsync("/api/v1/master-data/legal-entities", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        json.GetProperty("deactivatedCount").GetInt32().Should().Be(0);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var extra = await verifyDb.LegalEntities.IgnoreQueryFilters().FirstAsync(e => e.Id == extraId);
+        extra.IsActive.Should().BeTrue();
+        extra.DeactivatedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task SyncLegalEntities_FullSnapshot_SoftDeletesAbsentRecords()
     {
         // Extra entity to be deactivated
         var extraId = Guid.NewGuid();
@@ -148,6 +179,7 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         // Sync with only TestLegalEntityId — extraId should be deactivated
         var body = new
         {
+            isFullSnapshot = true,
             legalEntities = new[]
             {
                 new { id = TestLegalEntityId, code = "CD", name = "Congo Ltd", currencyCode = "CDF", isActive = true }
@@ -206,6 +238,56 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         site.SyncedAt.Should().BeCloseTo(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(10));
     }
 
+    [Fact]
+    public async Task SyncSites_PartialBatch_DoesNotDeactivateAbsentRecords_ByDefault()
+    {
+        var extraSiteId = Guid.NewGuid();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            db.Sites.Add(new Site
+            {
+                Id               = extraSiteId,
+                LegalEntityId    = TestLegalEntityId,
+                SiteCode         = "SYNC-SITE-EXTRA",
+                SiteName         = "Extra Sync Site",
+                OperatingModel   = Domain.Enums.SiteOperatingModel.COCO,
+                ConnectivityMode = "CONNECTED",
+                CompanyTaxPayerId = string.Empty,
+                IsActive         = true,
+                SyncedAt         = DateTimeOffset.UtcNow.AddDays(-1),
+                CreatedAt        = DateTimeOffset.UtcNow.AddDays(-1),
+                UpdatedAt        = DateTimeOffset.UtcNow.AddDays(-1)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var body = new
+        {
+            sites = new[]
+            {
+                new
+                {
+                    id = SiteId1, siteCode = "SYNC-SITE-001",
+                    legalEntityId = TestLegalEntityId, siteName = "Existing Site",
+                    operatingModel = "COCO", isActive = true
+                }
+            }
+        };
+
+        var response = await _client.PutAsJsonAsync("/api/v1/master-data/sites", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        json.GetProperty("deactivatedCount").GetInt32().Should().Be(0);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var extraSite = await verifyDb.Sites.IgnoreQueryFilters().FirstAsync(s => s.Id == extraSiteId);
+        extraSite.IsActive.Should().BeTrue();
+        extraSite.DeactivatedAt.Should().BeNull();
+    }
+
     // ── Product sync ──────────────────────────────────────────────────────────
 
     [Fact]
@@ -238,10 +320,93 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         updated.ProductName.Should().Be("Unleaded Petrol (updated)");
     }
 
+    [Fact]
+    public async Task SyncProducts_PartialBatch_DoesNotDeactivateAbsentRecords_ByDefault()
+    {
+        var extraProductId = Guid.NewGuid();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            db.Products.Add(new Product
+            {
+                Id            = extraProductId,
+                LegalEntityId = TestLegalEntityId,
+                ProductCode   = "AGO",
+                ProductName   = "Diesel",
+                UnitOfMeasure = "LITRE",
+                IsActive      = true,
+                SyncedAt      = DateTimeOffset.UtcNow.AddDays(-1),
+                CreatedAt     = DateTimeOffset.UtcNow.AddDays(-1),
+                UpdatedAt     = DateTimeOffset.UtcNow.AddDays(-1)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var body = new
+        {
+            products = new[]
+            {
+                new { id = ProductId1, legalEntityId = TestLegalEntityId, canonicalCode = "PMS", displayName = "Unleaded Petrol", isActive = true }
+            }
+        };
+
+        var response = await _client.PutAsJsonAsync("/api/v1/master-data/products", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        json.GetProperty("deactivatedCount").GetInt32().Should().Be(0);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var extraProduct = await verifyDb.Products.IgnoreQueryFilters().FirstAsync(p => p.Id == extraProductId);
+        extraProduct.IsActive.Should().BeTrue();
+    }
+
     // ── Operator sync ─────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task SyncOperators_FullSyncCycle_InsertsUpdatesDeactivates()
+    public async Task SyncOperators_PartialBatch_DoesNotDeactivateAbsentRecords_ByDefault()
+    {
+        var extraOperatorId = Guid.NewGuid();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            db.Operators.Add(new Operator
+            {
+                Id            = extraOperatorId,
+                LegalEntityId = TestLegalEntityId,
+                OperatorCode  = extraOperatorId.ToString("N")[..16],
+                OperatorName  = "Extra Dealer",
+                IsActive      = true,
+                SyncedAt      = DateTimeOffset.UtcNow.AddDays(-1),
+                CreatedAt     = DateTimeOffset.UtcNow.AddDays(-1),
+                UpdatedAt     = DateTimeOffset.UtcNow.AddDays(-1)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var body = new
+        {
+            operators = new[]
+            {
+                new { id = OperatorId1, legalEntityId = TestLegalEntityId, name = "Dealer One", isActive = true }
+            }
+        };
+
+        var response = await _client.PutAsJsonAsync("/api/v1/master-data/operators", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        json.GetProperty("deactivatedCount").GetInt32().Should().Be(0);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var extraOperator = await verifyDb.Operators.IgnoreQueryFilters().FirstAsync(o => o.Id == extraOperatorId);
+        extraOperator.IsActive.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task SyncOperators_FullSnapshot_InsertsUpdatesDeactivates()
     {
         // Insert a new operator that will be deactivated in the second sync
         var ephemeralId = Guid.NewGuid();
@@ -265,6 +430,7 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         // Sync: only OperatorId1 — ephemeralId gets soft-deleted
         var body = new
         {
+            isFullSnapshot = true,
             operators = new[]
             {
                 new { id = OperatorId1, legalEntityId = TestLegalEntityId, name = "Dealer One (updated)", isActive = true }
@@ -372,6 +538,55 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         var nozzle = await db.Nozzles.IgnoreQueryFilters().FirstOrDefaultAsync(n => n.PumpId == newPumpId);
         nozzle.Should().NotBeNull();
         nozzle!.OdooNozzleNumber.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task SyncPumps_PartialBatch_DoesNotDeactivateAbsentRecords_ByDefault()
+    {
+        var extraPumpId = Guid.NewGuid();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            db.Pumps.Add(new Pump
+            {
+                Id            = extraPumpId,
+                SiteId        = SiteId1,
+                LegalEntityId = TestLegalEntityId,
+                PumpNumber    = 99,
+                FccPumpNumber = 99,
+                IsActive      = true,
+                SyncedAt      = DateTimeOffset.UtcNow.AddDays(-1),
+                CreatedAt     = DateTimeOffset.UtcNow.AddDays(-1),
+                UpdatedAt     = DateTimeOffset.UtcNow.AddDays(-1)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var body = new
+        {
+            pumps = new[]
+            {
+                new
+                {
+                    id         = PumpId1,
+                    siteCode   = "SYNC-SITE-001",
+                    pumpNumber = 2,
+                    nozzles    = new[] { new { nozzleNumber = 1, canonicalProductCode = "PMS" } },
+                    isActive   = true
+                }
+            }
+        };
+
+        var response = await _client.PutAsJsonAsync("/api/v1/master-data/pumps", body);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        json.GetProperty("deactivatedCount").GetInt32().Should().Be(0);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var extraPump = await verifyDb.Pumps.IgnoreQueryFilters().FirstAsync(p => p.Id == extraPumpId);
+        extraPump.IsActive.Should().BeTrue();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -32,7 +32,15 @@ public sealed record PreAuthCommand(
     long UnitPriceMinorPerLitre,
     string Currency,
     string? VehicleNumber,
-    string? FccCorrelationId);
+    string? FccCorrelationId,
+    /// <summary>Radix: Customer TIN — maps to CUSTID when CUSTIDTYPE=1. PII — never log.</summary>
+    string? CustomerTaxId = null,
+    /// <summary>Radix: Customer name — maps to CUSTNAME.</summary>
+    string? CustomerName = null,
+    /// <summary>Radix: Customer ID type — maps to CUSTIDTYPE (1=TIN, 2=DrivingLicense, etc.).</summary>
+    int? CustomerIdType = null,
+    /// <summary>Radix: Customer phone — maps to MOBILENUM.</summary>
+    string? CustomerPhone = null);
 
 /// <summary>Result of a pre-auth command sent to the FCC.</summary>
 public sealed record PreAuthResult(
@@ -48,4 +56,12 @@ public sealed record FccConnectionConfig(
     string BaseUrl,
     [property: SensitiveData] string ApiKey,
     TimeSpan RequestTimeout,
-    string SiteCode = "");
+    string SiteCode = "",
+    /// <summary>Radix: SHA-1 signing password for message authentication.</summary>
+    [property: SensitiveData] string? SharedSecret = null,
+    /// <summary>Radix: Unique Station Number (1–999999), sent as USN-Code HTTP header.</summary>
+    int? UsnCode = null,
+    /// <summary>Radix: External Authorization port; transaction port is AuthPort + 1.</summary>
+    int? AuthPort = null,
+    /// <summary>Radix: JSON dictionary mapping canonical pump numbers to (PUMP_ADDR, FP) pairs.</summary>
+    string? FccPumpAddressMap = null);

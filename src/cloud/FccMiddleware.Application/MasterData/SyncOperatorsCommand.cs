@@ -4,6 +4,7 @@ namespace FccMiddleware.Application.MasterData;
 
 public sealed class SyncOperatorsCommand : IRequest<MasterDataSyncResult>
 {
+    public bool IsFullSnapshot { get; init; }
     public required List<OperatorSyncItem> Items { get; init; }
 }
 
