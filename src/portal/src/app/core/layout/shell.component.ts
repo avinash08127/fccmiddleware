@@ -6,6 +6,7 @@ import { ButtonModule } from 'primeng/button';
 import { AvatarModule } from 'primeng/avatar';
 import { ToastModule } from 'primeng/toast';
 import { MessageService } from 'primeng/api';
+import { getCurrentAccount, getPrimaryRoleLabel } from '../auth/auth-state';
 
 interface NavItem {
   label: string;
@@ -49,12 +50,10 @@ export class ShellComponent implements OnInit {
   activeLegalEntity = signal<string>('');
 
   ngOnInit(): void {
-    const account = this.msal.instance.getActiveAccount();
+    const account = getCurrentAccount(this.msal.instance);
     if (account) {
       this.userName.set(account.name ?? account.username);
-      const claims = account.idTokenClaims as Record<string, unknown>;
-      const roles = Array.isArray(claims?.['roles']) ? (claims['roles'] as string[]) : [];
-      this.userRole.set(roles[0] ?? '');
+      this.userRole.set(getPrimaryRoleLabel(account));
     }
   }
 

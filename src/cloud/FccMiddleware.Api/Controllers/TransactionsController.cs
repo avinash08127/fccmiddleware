@@ -114,6 +114,177 @@ public sealed class TransactionsController : ControllerBase
         return BuildSingleIngestResponse(result, request.SiteCode, vendor, rawPayload);
     }
 
+    /// <summary>
+    /// Accepts a raw XML push from a Radix FDC in CLOUD_DIRECT mode.
+    /// The FDC identifies itself via the X-Usn-Code header; the payload is raw XML
+    /// containing one or more TRN elements. Returns an XML ACK envelope.
+    /// </summary>
+    [HttpPost("/api/v1/ingest/radix")]
+    [Consumes("text/xml", "application/xml")]
+    [Produces("text/xml")]
+    [AllowAnonymous] // Auth is via USN-Code lookup + Radix SHA-1 signature validation
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> IngestRadixXml(CancellationToken cancellationToken)
+    {
+        // ── Read USN-Code header ──────────────────────────────────────────────
+        if (!Request.Headers.TryGetValue("X-Usn-Code", out var usnHeader)
+            || !int.TryParse(usnHeader.FirstOrDefault(), out var usnCode))
+        {
+            return BadRequest(Content(
+                "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>MISSING_USN_CODE</ERROR_CODE></RESP>",
+                "text/xml"));
+        }
+
+        // ── Lookup site by USN code ───────────────────────────────────────────
+        var siteResult = await _siteFccConfigProvider.GetByUsnCodeAsync(usnCode, cancellationToken);
+        if (siteResult is null)
+        {
+            return NotFound(Content(
+                "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>USN_NOT_FOUND</ERROR_CODE></RESP>",
+                "text/xml"));
+        }
+
+        var (siteConfig, _) = siteResult.Value;
+
+        // ── Read raw XML body ─────────────────────────────────────────────────
+        using var reader = new StreamReader(Request.Body, leaveOpen: true);
+        var rawXml = await reader.ReadToEndAsync(cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(rawXml))
+        {
+            return BadRequest(Content(
+                "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>EMPTY_PAYLOAD</ERROR_CODE></RESP>",
+                "text/xml"));
+        }
+
+        // ── Feed into standard ingest pipeline with text/xml content type ─────
+        var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
+
+        var command = new IngestTransactionCommand
+        {
+            FccVendor = FccVendor.RADIX,
+            SiteCode = siteConfig.SiteCode,
+            CapturedAt = DateTimeOffset.UtcNow,
+            RawPayload = rawXml,
+            ContentType = "text/xml",
+            CorrelationId = correlationId
+        };
+
+        var result = await _mediator.Send(command, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            _metrics.RecordIngestionFailure(
+                "radix-push", result.Error!.Code, siteConfig.SiteCode, "RADIX");
+
+            return Content(
+                $"<RESP><STATUS>ERROR</STATUS><ERROR_CODE>{result.Error.Code}</ERROR_CODE></RESP>",
+                "text/xml");
+        }
+
+        if (result.Value!.IsDuplicate)
+        {
+            return Content(
+                "<RESP><STATUS>OK</STATUS><RESULT>DUPLICATE</RESULT></RESP>",
+                "text/xml");
+        }
+
+        _metrics.RecordIngestionSuccess("radix-push", siteConfig.SiteCode, "RADIX");
+
+        return Content(
+            $"<RESP><STATUS>OK</STATUS><RESULT>ACCEPTED</RESULT><TRANSACTION_ID>{result.Value.TransactionId}</TRANSACTION_ID></RESP>",
+            "text/xml");
+    }
+
+    /// <summary>
+    /// Accepts Petronite webhook events (push-only ingestion).
+    /// Validates the webhook secret via the X-Webhook-Secret header, then feeds
+    /// the transaction payload into the standard ingest pipeline.
+    /// Always returns 200 to avoid Petronite retries on validation errors.
+    /// </summary>
+    [HttpPost("/api/v1/ingest/petronite/webhook")]
+    [AllowAnonymous] // Auth is via X-Webhook-Secret constant-time comparison
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> IngestPetroniteWebhook(CancellationToken cancellationToken)
+    {
+        // ── Validate webhook secret header ────────────────────────────────────
+        if (!Request.Headers.TryGetValue("X-Webhook-Secret", out var secretHeader)
+            || string.IsNullOrWhiteSpace(secretHeader.FirstOrDefault()))
+        {
+            return Unauthorized(BuildError(
+                "UNAUTHORIZED.MISSING_WEBHOOK_SECRET",
+                "X-Webhook-Secret header is required."));
+        }
+
+        var webhookSecret = secretHeader.First()!;
+
+        // ── Lookup site by webhook secret (constant-time comparison) ──────────
+        var siteResult = await _siteFccConfigProvider.GetByWebhookSecretAsync(webhookSecret, cancellationToken);
+        if (siteResult is null)
+        {
+            return Unauthorized(BuildError(
+                "UNAUTHORIZED.INVALID_WEBHOOK_SECRET",
+                "No site configuration matches the provided webhook secret."));
+        }
+
+        var (siteConfig, _) = siteResult.Value;
+
+        // ── Read raw JSON body ────────────────────────────────────────────────
+        using var reader = new StreamReader(Request.Body, leaveOpen: true);
+        var rawJson = await reader.ReadToEndAsync(cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(rawJson))
+        {
+            // Return 200 to avoid Petronite retries for empty payloads
+            return Ok(new { status = "IGNORED", reason = "Empty payload" });
+        }
+
+        // ── Feed into standard ingest pipeline ────────────────────────────────
+        var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
+
+        var command = new IngestTransactionCommand
+        {
+            FccVendor = FccVendor.PETRONITE,
+            SiteCode = siteConfig.SiteCode,
+            CapturedAt = DateTimeOffset.UtcNow,
+            RawPayload = rawJson,
+            ContentType = "application/json",
+            CorrelationId = correlationId
+        };
+
+        var result = await _mediator.Send(command, cancellationToken);
+
+        if (result.IsFailure)
+        {
+            _metrics.RecordIngestionFailure(
+                "petronite-webhook", result.Error!.Code, siteConfig.SiteCode, "PETRONITE");
+
+            _logger.LogWarning(
+                "Petronite webhook ingestion failed for site {SiteCode}: {ErrorCode} — {Message}",
+                siteConfig.SiteCode, result.Error.Code, result.Error.Message);
+
+            // Return 200 anyway — webhook best practice: don't trigger retries for validation errors
+            return Ok(new { status = "REJECTED", errorCode = result.Error.Code });
+        }
+
+        if (result.Value!.IsDuplicate)
+        {
+            return Ok(new { status = "DUPLICATE" });
+        }
+
+        _metrics.RecordIngestionSuccess("petronite-webhook", siteConfig.SiteCode, "PETRONITE");
+
+        return Ok(new
+        {
+            status = "ACCEPTED",
+            transactionId = result.Value.TransactionId
+        });
+    }
+
     private async Task<IngestBatchResponse> IngestBatchAsync(
         IReadOnlyList<JsonElement> transactionItems,
         FccVendor vendor,
@@ -194,13 +365,19 @@ public sealed class TransactionsController : ControllerBase
         Guid correlationId,
         CancellationToken cancellationToken)
     {
+        // Detect content type: if the payload looks like XML, route as text/xml
+        // so the adapter can apply vendor-specific XML validation (e.g., Radix signature).
+        var contentType = rawPayload.TrimStart().StartsWith('<')
+            ? "text/xml"
+            : "application/json";
+
         var command = new IngestTransactionCommand
         {
             FccVendor = vendor,
             SiteCode = siteCode,
             CapturedAt = capturedAt,
             RawPayload = rawPayload,
-            ContentType = "application/json",
+            ContentType = contentType,
             CorrelationId = correlationId
         };
 

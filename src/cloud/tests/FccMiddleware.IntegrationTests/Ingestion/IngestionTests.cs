@@ -167,6 +167,69 @@ public sealed class IngestionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Ingest_FuzzySecondaryMatch_ReturnsAcceptedAndFlagsReview()
+    {
+        var firstRequest = new
+        {
+            fccVendor = "DOMS",
+            siteCode = "ACCRA-001",
+            capturedAt = "2026-03-11T14:06:00Z",
+            rawPayload = new
+            {
+                transactionId = "TXN-INTEG-FUZZY-001",
+                pumpNumber = 5,
+                nozzleNumber = 2,
+                productCode = "PMS",
+                volumeMicrolitres = 30_000_000L,
+                amountMinorUnits = 24_450_00L,
+                unitPriceMinorPerLitre = 815_00L,
+                startTime = "2026-03-11T14:00:00Z",
+                endTime = "2026-03-11T14:05:00Z"
+            }
+        };
+
+        var secondRequest = new
+        {
+            fccVendor = "DOMS",
+            siteCode = "ACCRA-001",
+            capturedAt = "2026-03-11T14:06:03Z",
+            rawPayload = new
+            {
+                transactionId = "TXN-INTEG-FUZZY-002",
+                pumpNumber = 5,
+                nozzleNumber = 2,
+                productCode = "PMS",
+                volumeMicrolitres = 30_100_000L,
+                amountMinorUnits = 24_450_00L,
+                unitPriceMinorPerLitre = 812_00L,
+                startTime = "2026-03-11T14:00:02Z",
+                endTime = "2026-03-11T14:05:04Z"
+            }
+        };
+
+        var firstResponse = await PostIngestAsync(firstRequest);
+        firstResponse.StatusCode.Should().Be(HttpStatusCode.Accepted);
+
+        var secondResponse = await PostIngestAsync(secondRequest);
+        secondResponse.StatusCode.Should().Be(HttpStatusCode.Accepted);
+
+        var secondBody = await secondResponse.Content.ReadFromJsonAsync<JsonElement>();
+        secondBody.GetProperty("status").GetString().Should().Be("PENDING");
+        secondBody.GetProperty("fuzzyMatchFlagged").GetBoolean().Should().BeTrue();
+        var secondTransactionId = secondBody.GetProperty("transactionId").GetGuid();
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var stored = await db.Transactions
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == secondTransactionId);
+
+        stored.Should().NotBeNull();
+        stored!.Status.Should().Be(TransactionStatus.PENDING);
+        stored.ReconciliationStatus.Should().Be(ReconciliationStatus.REVIEW_FUZZY_MATCH);
+    }
+
+    [Fact]
     public async Task Ingest_InvalidPayload_Returns400WithStructuredError()
     {
         var request = new

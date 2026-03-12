@@ -33,6 +33,7 @@ import {
   msalInstanceFactory,
   msalInterceptorConfigFactory,
 } from './core/auth/auth.config';
+import { providePortalAuth } from './core/auth/auth-state';
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -51,6 +52,7 @@ export const appConfig: ApplicationConfig = {
     MsalService,
     MsalGuard,
     MsalBroadcastService,
+    providePortalAuth(),
 
     // PrimeNG — Lara Light theme
     providePrimeNG({

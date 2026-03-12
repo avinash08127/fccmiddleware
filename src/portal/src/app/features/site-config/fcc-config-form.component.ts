@@ -29,6 +29,19 @@ export type FccConfigDraft = Pick<
   | 'heartbeatIntervalSeconds'
   | 'heartbeatTimeoutSeconds'
   | 'enabled'
+  | 'jplPort'
+  | 'fcAccessCode'
+  | 'domsCountryCode'
+  | 'posVersionId'
+  | 'configuredPumps'
+  | 'sharedSecret'
+  | 'usnCode'
+  | 'authPort'
+  | 'fccPumpAddressMap'
+  | 'clientId'
+  | 'clientSecret'
+  | 'webhookSecret'
+  | 'oauthTokenEndpoint'
 >;
 
 @Component({
@@ -197,6 +210,153 @@ export type FccConfigDraft = Pick<
             />
           </div>
         </div>
+
+        <!-- ── DOMS TCP/JPL vendor-specific fields ──────────────────────── -->
+        @if (draft.vendor === 'DOMS' && draft.connectionProtocol === 'TCP') {
+          <div class="vendor-section">
+            <h4 class="vendor-section-title">DOMS TCP/JPL Configuration</h4>
+            <div class="form-grid">
+              <div class="form-field">
+                <label>JPL Port</label>
+                <p-inputnumber
+                  [(ngModel)]="draft.jplPort"
+                  [min]="1" [max]="65535"
+                  [showButtons]="false" [useGrouping]="false"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>Access Code</label>
+                <input pInputText type="password"
+                  [(ngModel)]="draft.fcAccessCode"
+                  placeholder="FcLogon access code"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>Country Code</label>
+                <input pInputText
+                  [(ngModel)]="draft.domsCountryCode"
+                  placeholder="e.g. ZA"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>POS Version ID</label>
+                <input pInputText
+                  [(ngModel)]="draft.posVersionId"
+                  placeholder="e.g. FccMiddleware/1.0"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>Configured Pumps</label>
+                <input pInputText
+                  [(ngModel)]="draft.configuredPumps"
+                  placeholder="e.g. 1,2,3,4"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+            </div>
+          </div>
+        }
+
+        <!-- ── Radix vendor-specific fields ─────────────────────────────── -->
+        @if (draft.vendor === 'RADIX') {
+          <div class="vendor-section">
+            <h4 class="vendor-section-title">Radix FDC Configuration</h4>
+            <div class="form-grid">
+              <div class="form-field">
+                <label>Shared Secret</label>
+                <input pInputText type="password"
+                  [(ngModel)]="draft.sharedSecret"
+                  placeholder="SHA-1 signing password"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>USN Code</label>
+                <p-inputnumber
+                  [(ngModel)]="draft.usnCode"
+                  [min]="1" [max]="999999"
+                  [showButtons]="false" [useGrouping]="false"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>Auth Port (P)</label>
+                <p-inputnumber
+                  [(ngModel)]="draft.authPort"
+                  [min]="1" [max]="65535"
+                  [showButtons]="false" [useGrouping]="false"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field" style="grid-column: 1 / -1;">
+                <label>Pump Address Map (JSON)</label>
+                <textarea pInputText rows="3"
+                  [(ngModel)]="draft.fccPumpAddressMap"
+                  placeholder='{"1": {"pumpAddr": 1, "fp": 1}, "2": {"pumpAddr": 1, "fp": 2}}'
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                ></textarea>
+              </div>
+            </div>
+          </div>
+        }
+
+        <!-- ── Petronite vendor-specific fields ─────────────────────────── -->
+        @if (draft.vendor === 'PETRONITE') {
+          <div class="vendor-section">
+            <h4 class="vendor-section-title">Petronite OAuth2 Configuration</h4>
+            <div class="form-grid">
+              <div class="form-field">
+                <label>Client ID</label>
+                <input pInputText
+                  [(ngModel)]="draft.clientId"
+                  placeholder="OAuth2 Client ID"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>Client Secret</label>
+                <input pInputText type="password"
+                  [(ngModel)]="draft.clientSecret"
+                  placeholder="OAuth2 Client Secret"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>Webhook Secret</label>
+                <input pInputText type="password"
+                  [(ngModel)]="draft.webhookSecret"
+                  placeholder="X-Webhook-Secret header value"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+              <div class="form-field">
+                <label>OAuth Token Endpoint</label>
+                <input pInputText
+                  [(ngModel)]="draft.oauthTokenEndpoint"
+                  placeholder="https://api.petronite.com/oauth/token"
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                />
+              </div>
+            </div>
+          </div>
+        }
       }
     </p-card>
   `,
@@ -268,6 +428,19 @@ export type FccConfigDraft = Pick<
         font-style: italic;
         margin: 0;
       }
+      .vendor-section {
+        margin-top: 1.25rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--p-surface-200, #e2e8f0);
+      }
+      .vendor-section-title {
+        font-size: 0.85rem;
+        font-weight: 700;
+        color: var(--p-primary-color, #3b82f6);
+        margin: 0 0 0.75rem 0;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
     `,
   ],
 })
@@ -317,6 +490,22 @@ export class FccConfigFormComponent implements OnChanges {
         heartbeatIntervalSeconds: this.fccConfig.heartbeatIntervalSeconds,
         heartbeatTimeoutSeconds: this.fccConfig.heartbeatTimeoutSeconds,
         enabled: this.fccConfig.enabled,
+        // DOMS TCP fields
+        jplPort: this.fccConfig.jplPort,
+        fcAccessCode: this.fccConfig.fcAccessCode,
+        domsCountryCode: this.fccConfig.domsCountryCode,
+        posVersionId: this.fccConfig.posVersionId,
+        configuredPumps: this.fccConfig.configuredPumps,
+        // Radix fields
+        sharedSecret: this.fccConfig.sharedSecret,
+        usnCode: this.fccConfig.usnCode,
+        authPort: this.fccConfig.authPort,
+        fccPumpAddressMap: this.fccConfig.fccPumpAddressMap,
+        // Petronite fields
+        clientId: this.fccConfig.clientId,
+        clientSecret: this.fccConfig.clientSecret,
+        webhookSecret: this.fccConfig.webhookSecret,
+        oauthTokenEndpoint: this.fccConfig.oauthTokenEndpoint,
       };
     }
   }

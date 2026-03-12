@@ -1,6 +1,6 @@
 import { Directive, Input, OnInit, TemplateRef, ViewContainerRef, inject } from '@angular/core';
 import { MsalService } from '@azure/msal-angular';
-import { AppRole } from '../../core/auth/role.guard';
+import { AppRole, getCurrentAccount, hasAnyRequiredRole } from '../../core/auth/auth-state';
 
 /**
  * Structural directive that shows or hides an element based on user role.
@@ -32,20 +32,13 @@ export class RoleVisibleDirective implements OnInit {
   }
 
   private updateView(): void {
-    const account = this.msal.instance.getActiveAccount();
+    const account = getCurrentAccount(this.msal.instance);
     if (!account) {
       this.viewContainer.clear();
       return;
     }
 
-    const claims = account.idTokenClaims as Record<string, unknown>;
-    const userRoles: string[] = Array.isArray(claims?.['roles'])
-      ? (claims['roles'] as string[])
-      : [];
-
-    const hasRole = this.requiredRoles.some((r) => userRoles.includes(r));
-
-    if (hasRole) {
+    if (hasAnyRequiredRole(account, this.requiredRoles)) {
       if (this.viewContainer.length === 0) {
         this.viewContainer.createEmbeddedView(this.templateRef);
       }

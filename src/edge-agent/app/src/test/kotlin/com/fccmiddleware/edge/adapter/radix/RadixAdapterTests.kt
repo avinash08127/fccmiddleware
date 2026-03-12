@@ -80,14 +80,22 @@ class RadixAdapterTests {
 
     @Test
     fun `heartbeat returns true when RESP_CODE is 201`() = runTest {
+        val xml = productResponseXml(201, "SUCCESS", """<PRODUCT ID="0" NAME="UNLEADED" PRICE="1930" />""")
+
+        // Verify XML parsing works independently
+        val parseResult = RadixXmlParser.parseProductResponse(xml)
+        assertTrue("Parse should succeed", parseResult is RadixParseResult.Success)
+        assertEquals(201, (parseResult as RadixParseResult.Success).value.respCode)
+
         val mockEngine = MockEngine { respond(
-            content = productResponseXml(201, "SUCCESS", """<PRODUCT ID="0" NAME="UNLEADED" PRICE="1930" />"""),
+            content = xml,
             status = HttpStatusCode.OK,
             headers = headersOf("Content-Type" to listOf("Application/xml")),
         ) }
         val adapter = RadixAdapter(createConfig(), HttpClient(mockEngine))
 
-        assertTrue(adapter.heartbeat())
+        val result = adapter.heartbeat()
+        assertTrue("Heartbeat should return true for RESP_CODE=201 but got false", result)
     }
 
     // -----------------------------------------------------------------------

@@ -78,7 +78,15 @@ public sealed class JplTcpClient : IAsyncDisposable
     /// <summary>
     /// Send a JPL message and wait for a correlated response (matched by message name).
     /// </summary>
-    public async Task<JplMessage> SendAsync(JplMessage message, CancellationToken ct = default)
+    public Task<JplMessage> SendAsync(JplMessage message, CancellationToken ct = default)
+        => SendAsync(message, expectedResponseName: message.Name, ct);
+
+    /// <summary>
+    /// Send a JPL message and wait for a correlated response matched by the specified response name.
+    /// Use this overload when the response has a different message name than the request
+    /// (e.g., request "FcLogon_req" expects response "FcLogon_resp").
+    /// </summary>
+    public async Task<JplMessage> SendAsync(JplMessage message, string expectedResponseName, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -89,10 +97,10 @@ public sealed class JplTcpClient : IAsyncDisposable
         var frame = JplFrameCodec.Encode(json);
 
         var tcs = new TaskCompletionSource<JplMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_pendingRequests.TryAdd(message.Name, tcs))
+        if (!_pendingRequests.TryAdd(expectedResponseName, tcs))
         {
             // A request with the same name is already pending — replace it.
-            _pendingRequests[message.Name] = tcs;
+            _pendingRequests[expectedResponseName] = tcs;
         }
 
         try
@@ -109,7 +117,7 @@ public sealed class JplTcpClient : IAsyncDisposable
         }
         catch
         {
-            _pendingRequests.TryRemove(message.Name, out _);
+            _pendingRequests.TryRemove(expectedResponseName, out _);
             throw;
         }
     }

@@ -189,6 +189,25 @@ export interface FccConfig {
   heartbeatIntervalSeconds: number;
   heartbeatTimeoutSeconds: number;
   pushSourceIpAllowList: string[];
+
+  // ── DOMS TCP/JPL fields ──────────────────────────────────────────────────
+  jplPort: number | null;
+  fcAccessCode: string | null;
+  domsCountryCode: string | null;
+  posVersionId: string | null;
+  configuredPumps: string | null;
+
+  // ── Radix fields ─────────────────────────────────────────────────────────
+  sharedSecret: string | null;
+  usnCode: number | null;
+  authPort: number | null;
+  fccPumpAddressMap: string | null;
+
+  // ── Petronite OAuth2 fields ──────────────────────────────────────────────
+  clientId: string | null;
+  clientSecret: string | null;
+  webhookSecret: string | null;
+  oauthTokenEndpoint: string | null;
 }
 
 // ── SiteConfig sub-types ──────────────────────────────────────────────────────

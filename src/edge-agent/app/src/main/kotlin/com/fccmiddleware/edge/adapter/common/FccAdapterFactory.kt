@@ -22,8 +22,7 @@ class FccAdapterFactory : IFccAdapterFactory {
 
         /** Vendors whose adapters are fully implemented and safe to use. */
         private val IMPLEMENTED_VENDORS: Set<FccVendor> = setOf(
-            // Add vendors here as their adapters are completed.
-            // e.g. FccVendor.RADIX once RadixAdapter is implemented.
+            FccVendor.DOMS, // TCP/JPL + REST adapters
         )
     }
 
@@ -38,7 +37,13 @@ class FccAdapterFactory : IFccAdapterFactory {
         }
 
         return when (vendor) {
-            FccVendor.DOMS -> DomsAdapter(config)
+            FccVendor.DOMS -> {
+                if (config.connectionProtocol.equals("TCP", ignoreCase = true)) {
+                    com.fccmiddleware.edge.adapter.doms.DomsJplAdapter(config)
+                } else {
+                    DomsAdapter(config)
+                }
+            }
             FccVendor.RADIX -> RadixAdapter(config)
             FccVendor.PETRONITE -> PetroniteAdapter(config)
             else -> throw AdapterNotRegisteredException(vendor)

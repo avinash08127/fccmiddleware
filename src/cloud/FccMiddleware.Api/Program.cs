@@ -1,5 +1,7 @@
 using System.Text;
 using FccMiddleware.Adapter.Doms;
+using FccMiddleware.Adapter.Radix;
+using FccMiddleware.Adapter.Petronite;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Api.Portal;
@@ -359,10 +361,16 @@ try
                 }
                 return new DomsCloudAdapter(client, cfg);
             };
-            registry[FccVendor.RADIX] = _ => throw new NotImplementedException(
-                "Radix cloud adapter is not yet implemented");
-            registry[FccVendor.PETRONITE] = _ => throw new NotImplementedException(
-                "Petronite cloud adapter is not yet implemented");
+            registry[FccVendor.RADIX] = cfg =>
+            {
+                var client = hcf.CreateClient();
+                if (!string.IsNullOrEmpty(cfg.HostAddress))
+                {
+                    client.BaseAddress = new Uri($"http://{cfg.HostAddress}:{cfg.Port}/");
+                }
+                return new RadixCloudAdapter(client, cfg);
+            };
+            registry[FccVendor.PETRONITE] = cfg => new PetroniteCloudAdapter(cfg);
         }));
 
     // Health checks: PostgreSQL + Redis (registered here; liveness stub registered in ServiceDefaults)

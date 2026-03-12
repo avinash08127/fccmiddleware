@@ -1,8 +1,7 @@
 import { inject } from '@angular/core';
 import { CanActivateFn, Router, ActivatedRouteSnapshot } from '@angular/router';
 import { MsalService } from '@azure/msal-angular';
-
-export type AppRole = 'SystemAdmin' | 'OperationsManager' | 'SiteSupervisor' | 'Auditor';
+import { AppRole, getCurrentAccount, hasAnyRequiredRole } from './auth-state';
 
 /**
  * Route guard that reads the `roles` claim from the Entra ID JWT.
@@ -13,21 +12,13 @@ export function roleGuard(requiredRoles: AppRole[]): CanActivateFn {
     const msal = inject(MsalService);
     const router = inject(Router);
 
-    const account = msal.instance.getActiveAccount();
+    const account = getCurrentAccount(msal.instance);
     if (!account) {
-      router.navigate(['/access-denied']);
-      return false;
+      return router.parseUrl('/access-denied');
     }
 
-    const tokenClaims = account.idTokenClaims as Record<string, unknown>;
-    const userRoles: string[] = Array.isArray(tokenClaims?.['roles'])
-      ? (tokenClaims['roles'] as string[])
-      : [];
-
-    const hasRole = requiredRoles.some((r) => userRoles.includes(r));
-    if (!hasRole) {
-      router.navigate(['/access-denied']);
-      return false;
+    if (!hasAnyRequiredRole(account, requiredRoles)) {
+      return router.parseUrl('/access-denied');
     }
 
     return true;

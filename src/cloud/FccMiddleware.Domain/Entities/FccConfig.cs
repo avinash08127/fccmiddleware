@@ -30,6 +30,27 @@ public class FccConfig
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 
+    // ── Radix-specific fields (already exist in DB — verify) ─────────────────
+    public string? SharedSecret { get; set; }
+    public int? UsnCode { get; set; }
+    public int? AuthPort { get; set; }
+    public string? FccPumpAddressMap { get; set; }
+
+    // ── DOMS TCP/JPL fields ──────────────────────────────────────────────────
+    public int? JplPort { get; set; }
+    public string? FcAccessCode { get; set; }
+    public string? DomsCountryCode { get; set; }
+    public string? PosVersionId { get; set; }
+    public int? ReconnectBackoffMaxSeconds { get; set; }
+    public string? ConfiguredPumps { get; set; }
+    public string? DppPorts { get; set; }
+
+    // ── Petronite OAuth2 fields ──────────────────────────────────────────────
+    public string? ClientId { get; set; }
+    public string? ClientSecret { get; set; }
+    public string? WebhookSecret { get; set; }
+    public string? OAuthTokenEndpoint { get; set; }
+
     // Navigation properties
     public Site Site { get; set; } = null!;
     public LegalEntity LegalEntity { get; set; } = null!;

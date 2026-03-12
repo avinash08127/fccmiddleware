@@ -12,6 +12,7 @@ using VirtualLab.Application.Scenarios;
 using VirtualLab.Application.ContractValidation;
 using VirtualLab.Infrastructure.Callbacks;
 using VirtualLab.Infrastructure.ContractValidation;
+using VirtualLab.Infrastructure.DomsJpl;
 using VirtualLab.Infrastructure.Forecourt;
 using VirtualLab.Infrastructure.FccProfiles;
 using VirtualLab.Infrastructure.Observability;
@@ -19,7 +20,9 @@ using VirtualLab.Infrastructure.Management;
 using VirtualLab.Infrastructure.Persistence;
 using VirtualLab.Infrastructure.Persistence.Seed;
 using VirtualLab.Infrastructure.Diagnostics;
+using VirtualLab.Infrastructure.PetroniteSimulator;
 using VirtualLab.Infrastructure.PreAuth;
+using VirtualLab.Infrastructure.RadixSimulator;
 using VirtualLab.Infrastructure.Scenarios;
 
 namespace VirtualLab.Infrastructure;
@@ -116,6 +119,27 @@ public static class DependencyInjection
         services.AddScoped<IPreAuthSimulationService, PreAuthSimulationService>();
         services.AddHostedService<CallbackRetryWorker>();
         services.AddHostedService<PreAuthExpiryWorker>();
+
+        // DOMS JPL TCP simulator
+        services.Configure<DomsJplSimulatorOptions>(configuration.GetSection(DomsJplSimulatorOptions.SectionName));
+        services.AddSingleton<DomsJplSimulatorState>();
+        services.AddSingleton<DomsJplSimulatorService>();
+        services.AddHostedService(sp => sp.GetRequiredService<DomsJplSimulatorService>());
+
+        // Radix FDC HTTP/XML simulator (VL-4.2)
+        services.Configure<RadixSimulatorOptions>(configuration.GetSection(RadixSimulatorOptions.SectionName));
+        services.AddSingleton<RadixSimulatorState>();
+        services.AddSingleton<RadixSimulatorService>();
+        services.AddHostedService(sp => sp.GetRequiredService<RadixSimulatorService>());
+        services.AddHttpClient("RadixSimulator", client => client.Timeout = TimeSpan.FromSeconds(10));
+
+        // Petronite REST/JSON simulator (VL-4.3)
+        services.Configure<PetroniteSimulatorOptions>(configuration.GetSection(PetroniteSimulatorOptions.SectionName));
+        services.AddSingleton<PetroniteSimulatorState>();
+        services.AddSingleton<PetroniteSimulatorService>();
+        services.AddHostedService(sp => sp.GetRequiredService<PetroniteSimulatorService>());
+        services.AddHttpClient("PetroniteSimulator", client => client.Timeout = TimeSpan.FromSeconds(10));
+
         return services;
     }
 }

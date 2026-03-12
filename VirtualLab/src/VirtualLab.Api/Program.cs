@@ -19,7 +19,10 @@ using VirtualLab.Domain.Models;
 using VirtualLab.Infrastructure;
 using VirtualLab.Infrastructure.Auth;
 using VirtualLab.Infrastructure.Diagnostics;
+using VirtualLab.Infrastructure.DomsJpl;
 using VirtualLab.Infrastructure.FccProfiles;
+using VirtualLab.Infrastructure.PetroniteSimulator;
+using VirtualLab.Infrastructure.RadixSimulator;
 using VirtualLab.Infrastructure.Persistence;
 using VirtualLab.Infrastructure.Persistence.Seed;
 using VirtualLab.Api.Hubs;
@@ -234,6 +237,9 @@ app.MapGet("/api/dashboard", async (
 });
 
 app.MapVirtualLabManagementEndpoints();
+app.MapDomsJplManagementEndpoints();
+app.MapRadixManagementEndpoints();
+app.MapPetroniteManagementEndpoints();
 
 app.MapGet("/api/fcc-profiles", async (IFccProfileService profileService, CancellationToken cancellationToken) =>
 {

@@ -134,7 +134,9 @@
       "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixXmlBuilderTests\" 2>&1 | tail -50)",
       "Bash(cd \"C:/Users/a0812/fccmiddleware/src/edge-agent\" && ./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixXmlParserTests\" --no-daemon 2>&1 | tail -60)",
       "Bash(find /c/Users/a0812/fccmiddleware -name \"VirtualLab*\" -o -name \"virtual-lab*\" 2>/dev/null | head -10)",
-      "Bash(./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixAdapterTests\" 2>&1 | tail -60)"
+      "Bash(./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixAdapterTests\" 2>&1 | tail -60)",
+      "Bash(./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixAdapterTests\" --stacktrace 2>&1 | grep -A 20 \"FAILED\\\\|AssertionError\\\\|Exception\\\\|Caused by\")",
+      "Bash(./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixAdapterTests\" 2>&1 | tail -40)"
     ]
   }
 }

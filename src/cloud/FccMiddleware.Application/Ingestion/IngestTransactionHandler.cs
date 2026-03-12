@@ -123,7 +123,28 @@ public sealed class IngestTransactionHandler
             });
         }
 
-        // ── Step 7: Build new PENDING transaction entity ──────────────────────
+        // ── Step 7: Secondary fuzzy match review flag ─────────────────────────
+        var fuzzyMatchFlagged = await _db.HasFuzzyMatchAsync(
+            legalEntityId,
+            canonical.SiteCode,
+            canonical.PumpNumber,
+            canonical.NozzleNumber,
+            canonical.AmountMinorUnits,
+            canonical.CompletedAt.AddSeconds(-FuzzyMatchWindowSeconds),
+            canonical.CompletedAt.AddSeconds(FuzzyMatchWindowSeconds),
+            cancellationToken);
+
+        if (fuzzyMatchFlagged)
+        {
+            _logger.LogInformation(
+                "Fuzzy duplicate review flagged for {FccTransactionId} at site {SiteCode} pump {PumpNumber} nozzle {NozzleNumber}",
+                canonical.FccTransactionId,
+                canonical.SiteCode,
+                canonical.PumpNumber,
+                canonical.NozzleNumber);
+        }
+
+        // ── Step 8: Build new PENDING transaction entity ──────────────────────
         var transaction = new Transaction
         {
             Id = Guid.NewGuid(),
@@ -149,10 +170,11 @@ public sealed class IngestTransactionHandler
             IngestionSource = IngestionSource.FCC_PUSH,
             OdooOrderId = canonical.OdooOrderId,
             CorrelationId = command.CorrelationId,
+            ReconciliationStatus = fuzzyMatchFlagged ? ReconciliationStatus.REVIEW_FUZZY_MATCH : null,
             SchemaVersion = 1
         };
 
-        // ── Step 8: Archive raw payload to S3 (non-fatal on failure) ─────────
+        // ── Step 9: Archive raw payload to S3 (non-fatal on failure) ─────────
         try
         {
             transaction.RawPayloadRef = await _rawPayloadArchiver.ArchiveAsync(
@@ -167,7 +189,7 @@ public sealed class IngestTransactionHandler
                 canonical.FccTransactionId);
         }
 
-        // ── Step 9: Persist transaction + outbox event (single DB transaction) ──
+        // ── Step 10: Persist transaction + outbox event (single DB transaction) ──
         _db.AddTransaction(transaction);
         _db.AddOutboxMessage(BuildIngestedOutboxMessage(transaction, command.CorrelationId));
 
@@ -198,7 +220,7 @@ public sealed class IngestTransactionHandler
         await _reconciliationMatchingService.MatchAsync(transaction, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
 
-        // ── Step 10: Populate Redis cache after successful DB commit ──────────
+        // ── Step 11: Populate Redis cache after successful DB commit ──────────
         await _deduplicationService.SetCacheAsync(
             canonical.FccTransactionId, canonical.SiteCode,
             transaction.Id, DefaultDedupWindowDays, cancellationToken);
@@ -211,7 +233,7 @@ public sealed class IngestTransactionHandler
         {
             TransactionId = transaction.Id,
             IsDuplicate = false,
-            FuzzyMatchFlagged = false
+            FuzzyMatchFlagged = fuzzyMatchFlagged
         });
     }
 

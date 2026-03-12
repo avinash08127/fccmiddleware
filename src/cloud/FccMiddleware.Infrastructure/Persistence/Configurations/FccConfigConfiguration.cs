@@ -52,6 +52,27 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();
         builder.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("now()").IsRequired();
 
+        // ── Radix-specific fields ────────────────────────────────────────────
+        builder.Property(e => e.SharedSecret).HasColumnName("shared_secret").HasMaxLength(500);
+        builder.Property(e => e.UsnCode).HasColumnName("usn_code");
+        builder.Property(e => e.AuthPort).HasColumnName("auth_port");
+        builder.Property(e => e.FccPumpAddressMap).HasColumnName("fcc_pump_address_map");
+
+        // ── DOMS TCP/JPL fields ──────────────────────────────────────────────
+        builder.Property(e => e.JplPort).HasColumnName("jpl_port");
+        builder.Property(e => e.FcAccessCode).HasColumnName("fc_access_code").HasMaxLength(500);
+        builder.Property(e => e.DomsCountryCode).HasColumnName("doms_country_code").HasMaxLength(10);
+        builder.Property(e => e.PosVersionId).HasColumnName("pos_version_id").HasMaxLength(50);
+        builder.Property(e => e.ReconnectBackoffMaxSeconds).HasColumnName("reconnect_backoff_max_seconds");
+        builder.Property(e => e.ConfiguredPumps).HasColumnName("configured_pumps").HasMaxLength(200);
+        builder.Property(e => e.DppPorts).HasColumnName("dpp_ports").HasMaxLength(200);
+
+        // ── Petronite OAuth2 fields ──────────────────────────────────────────
+        builder.Property(e => e.ClientId).HasColumnName("client_id").HasMaxLength(500);
+        builder.Property(e => e.ClientSecret).HasColumnName("client_secret").HasMaxLength(500);
+        builder.Property(e => e.WebhookSecret).HasColumnName("webhook_secret").HasMaxLength(500);
+        builder.Property(e => e.OAuthTokenEndpoint).HasColumnName("oauth_token_endpoint").HasMaxLength(500);
+
         builder.HasOne(e => e.Site)
             .WithMany(s => s.FccConfigs)
             .HasForeignKey(e => e.SiteId)
