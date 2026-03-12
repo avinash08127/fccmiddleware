@@ -2,6 +2,7 @@ using System.Text;
 using FccMiddleware.Adapter.Doms;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
+using FccMiddleware.Api.Portal;
 using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.MasterData;
@@ -203,6 +204,15 @@ try
                     "SystemAdmin",
                     "SystemAdministrator")));
 
+        opts.AddPolicy("PortalAdminWrite", policy =>
+            policy
+                .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
+                .RequireAuthenticatedUser()
+                .RequireAssertion(context => HasAnyRole(context,
+                    "OperationsManager",
+                    "SystemAdmin",
+                    "SystemAdministrator")));
+
         opts.AddPolicy("EdgeAgentDevice", policy =>
             policy
                 .RequireAuthenticatedUser()
@@ -291,6 +301,7 @@ try
     builder.Services.AddScoped<FccMiddleware.Infrastructure.Persistence.TenantContext>();
     builder.Services.AddScoped<FccMiddleware.Domain.Interfaces.ICurrentTenantProvider>(
         sp => sp.GetRequiredService<FccMiddleware.Infrastructure.Persistence.TenantContext>());
+    builder.Services.AddScoped<PortalAccessResolver>();
 
     // ── Infrastructure: PostgreSQL (EF Core) ──────────────────────────────────
     builder.Services.AddDbContext<FccMiddlewareDbContext>((sp, opts) =>

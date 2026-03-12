@@ -61,6 +61,10 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     // -------------------------------------------------------------------------
     public DbSet<FccConfig> FccConfigs => Set<FccConfig>();
     public DbSet<AgentRegistration> AgentRegistrations => Set<AgentRegistration>();
+    public DbSet<AgentTelemetrySnapshot> AgentTelemetrySnapshots => Set<AgentTelemetrySnapshot>();
+    public DbSet<PortalSettings> PortalSettings => Set<PortalSettings>();
+    public DbSet<LegalEntitySettingsOverride> LegalEntitySettingsOverrides => Set<LegalEntitySettingsOverride>();
+    public DbSet<DeadLetterItem> DeadLetterItems => Set<DeadLetterItem>();
 
     // -------------------------------------------------------------------------
     // Audit & outbox
@@ -300,11 +304,23 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
 
+        modelBuilder.Entity<AgentTelemetrySnapshot>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
         modelBuilder.Entity<AuditEvent>()
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
 
         modelBuilder.Entity<BootstrapToken>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
+        modelBuilder.Entity<LegalEntitySettingsOverride>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
+        modelBuilder.Entity<DeadLetterItem>()
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
 
@@ -455,6 +471,16 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
 
     void ITelemetryDbContext.AddAuditEvent(AuditEvent auditEvent) =>
         AuditEvents.Add(auditEvent);
+
+    Task<AgentTelemetrySnapshot?> ITelemetryDbContext.FindTelemetrySnapshotByDeviceIdAsync(
+        Guid deviceId,
+        CancellationToken ct) =>
+        Set<AgentTelemetrySnapshot>()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(snapshot => snapshot.DeviceId == deviceId, ct);
+
+    void ITelemetryDbContext.AddTelemetrySnapshot(AgentTelemetrySnapshot snapshot) =>
+        AgentTelemetrySnapshots.Add(snapshot);
 
     // -------------------------------------------------------------------------
     // IPreAuthDbContext implementation

@@ -22,7 +22,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -365,7 +366,7 @@ class PreAuthHandlerTest {
         coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
         coEvery { preAuthDao.insert(any()) } returns 1L
         coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
-        coEvery { fccAdapter.sendPreAuth(any()) } throws TimeoutCancellationException("Timed out")
+        coEvery { fccAdapter.sendPreAuth(any()) } coAnswers { withTimeout(1) { delay(100) }; error("unreachable") }
 
         val result = handler.handle(baseCommand())
 

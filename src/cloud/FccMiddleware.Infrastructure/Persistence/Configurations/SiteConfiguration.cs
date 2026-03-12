@@ -32,6 +32,15 @@ internal sealed class SiteConfiguration : IEntityTypeConfiguration<Site>
         builder.Property(e => e.OperatorName).HasColumnName("operator_name").HasMaxLength(200);
         builder.Property(e => e.OperatorTaxPayerId).HasColumnName("operator_tax_payer_id").HasMaxLength(100);
         builder.Property(e => e.CompanyTaxPayerId).HasColumnName("company_tax_payer_id").HasMaxLength(100).IsRequired();
+        builder.Property(e => e.FiscalizationMode)
+            .HasColumnName("fiscalization_mode")
+            .HasMaxLength(30)
+            .HasConversion<string>()
+            .HasDefaultValue(FiscalizationMode.NONE)
+            .IsRequired();
+        builder.Property(e => e.TaxAuthorityEndpoint).HasColumnName("tax_authority_endpoint").HasMaxLength(500);
+        builder.Property(e => e.RequireCustomerTaxId).HasColumnName("require_customer_tax_id").HasDefaultValue(false).IsRequired();
+        builder.Property(e => e.FiscalReceiptRequired).HasColumnName("fiscal_receipt_required").HasDefaultValue(false).IsRequired();
         builder.Property(e => e.OdooSiteId).HasColumnName("odoo_site_id").HasMaxLength(100);
         builder.Property(e => e.IsActive).HasColumnName("is_active").HasDefaultValue(true);
         builder.Property(e => e.DeactivatedAt).HasColumnName("deactivated_at");
@@ -54,5 +63,8 @@ internal sealed class SiteConfiguration : IEntityTypeConfiguration<Site>
         builder.ToTable(t => t.HasCheckConstraint(
             "chk_sites_operating_model",
             "operating_model IN ('COCO','CODO','DODO','DOCO')"));
+        builder.ToTable(t => t.HasCheckConstraint(
+            "chk_sites_fiscalization_mode",
+            "fiscalization_mode IN ('FCC_DIRECT','EXTERNAL_INTEGRATION','NONE')"));
     }
 }

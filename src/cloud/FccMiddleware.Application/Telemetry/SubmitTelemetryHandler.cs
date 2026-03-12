@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Events;
@@ -11,7 +12,8 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Converters = { new JsonStringEnumConverter() }
     };
 
     private readonly ITelemetryDbContext _db;
@@ -94,6 +96,35 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
             Source = "edge-agent",
             Payload = JsonSerializer.Serialize(envelope, JsonOptions)
         });
+
+        var payloadJson = JsonSerializer.Serialize(request.Payload, JsonOptions);
+        var snapshot = await _db.FindTelemetrySnapshotByDeviceIdAsync(request.DeviceId, cancellationToken);
+        if (snapshot is null)
+        {
+            snapshot = new AgentTelemetrySnapshot
+            {
+                DeviceId = request.DeviceId,
+                CreatedAt = now
+            };
+            _db.AddTelemetrySnapshot(snapshot);
+        }
+
+        snapshot.LegalEntityId = request.LegalEntityId;
+        snapshot.SiteCode = request.SiteCode;
+        snapshot.ReportedAtUtc = request.Payload.ReportedAtUtc;
+        snapshot.ConnectivityState = request.Payload.ConnectivityState;
+        snapshot.PayloadJson = payloadJson;
+        snapshot.BatteryPercent = request.Payload.Device.BatteryPercent;
+        snapshot.IsCharging = request.Payload.Device.IsCharging;
+        snapshot.PendingUploadCount = request.Payload.Buffer.PendingUploadCount;
+        snapshot.SyncLagSeconds = request.Payload.Sync.SyncLagSeconds;
+        snapshot.LastHeartbeatAtUtc = request.Payload.FccHealth.LastHeartbeatAtUtc;
+        snapshot.HeartbeatAgeSeconds = request.Payload.FccHealth.HeartbeatAgeSeconds;
+        snapshot.FccVendor = request.Payload.FccHealth.FccVendor;
+        snapshot.FccHost = request.Payload.FccHealth.FccHost;
+        snapshot.FccPort = request.Payload.FccHealth.FccPort;
+        snapshot.ConsecutiveHeartbeatFailures = request.Payload.FccHealth.ConsecutiveHeartbeatFailures;
+        snapshot.UpdatedAt = now;
 
         await _db.SaveChangesAsync(cancellationToken);
 

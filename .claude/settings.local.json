@@ -115,7 +115,13 @@
       "Bash(./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.ingestion.IngestionOrchestratorTest\" 2>&1 | tail -20)",
       "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew compileDebugUnitTestKotlinSources 2>&1 | tail -80)",
       "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew tasks --all 2>&1 | grep -i \"compile.*test.*kotlin\" | head -10)",
-      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:compileDebugUnitTestKotlin 2>&1 | tail -100)"
+      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:compileDebugUnitTestKotlin 2>&1 | tail -100)",
+      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:compileDebugUnitTestKotlin 2>&1 | tail -50)",
+      "Bash(find C:/Users/a0812/fccmiddleware/docs -name \"*adapter*\" -o -name \"*radix*\" 2>/dev/null | head -20)",
+      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:testDebugUnitTest 2>&1 | tail -60)",
+      "Bash(find C:/Users/a0812/fccmiddleware/docs -name \"*agent-prompt*\" -o -name \"*radix*\" 2>/dev/null | grep -v \".pdf\" | sort)",
+      "Bash(find C:/Users/a0812/fccmiddleware/src/cloud -name \"*Test*\" -o -name \"*test*\" 2>/dev/null | head -10)",
+      "Bash(cd C:/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew app:testDebugUnitTest 2>&1 | grep \"FAILED\" | sort)"
     ]
   }
 }

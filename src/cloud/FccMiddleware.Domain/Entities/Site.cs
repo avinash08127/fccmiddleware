@@ -21,6 +21,10 @@ public class Site
     public string? OperatorName { get; set; }
     public string? OperatorTaxPayerId { get; set; }
     public string CompanyTaxPayerId { get; set; } = null!;
+    public FiscalizationMode FiscalizationMode { get; set; } = FiscalizationMode.NONE;
+    public string? TaxAuthorityEndpoint { get; set; }
+    public bool RequireCustomerTaxId { get; set; }
+    public bool FiscalReceiptRequired { get; set; }
     public string? OdooSiteId { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTimeOffset? DeactivatedAt { get; set; }

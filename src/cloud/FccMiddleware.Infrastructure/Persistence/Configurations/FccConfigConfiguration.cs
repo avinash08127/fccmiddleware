@@ -46,6 +46,7 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
             .IsRequired();
         builder.Property(e => e.PullIntervalSeconds).HasColumnName("pull_interval_seconds");
         builder.Property(e => e.HeartbeatIntervalSeconds).HasColumnName("heartbeat_interval_seconds").HasDefaultValue(60).IsRequired();
+        builder.Property(e => e.HeartbeatTimeoutSeconds).HasColumnName("heartbeat_timeout_seconds").HasDefaultValue(180).IsRequired();
         builder.Property(e => e.IsActive).HasColumnName("is_active").HasDefaultValue(true);
         builder.Property(e => e.ConfigVersion).HasColumnName("config_version").HasDefaultValue(1).IsRequired();
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();

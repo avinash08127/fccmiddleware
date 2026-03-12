@@ -24,6 +24,7 @@ public class FccConfig
     public IngestionMode IngestionMode { get; set; } = IngestionMode.CLOUD_DIRECT;
     public int? PullIntervalSeconds { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 60;
+    public int HeartbeatTimeoutSeconds { get; set; } = 180;
     public bool IsActive { get; set; } = true;
     public int ConfigVersion { get; set; } = 1;
     public DateTimeOffset CreatedAt { get; set; }

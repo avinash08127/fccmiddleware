@@ -230,8 +230,8 @@ class StatusPollWorkerTest {
 
     @Test
     fun `successful poll resets failure count and backoff`() = runTest {
-        worker.statusPollConsecutiveFailureCount = 3
-        worker.statusPollNextRetryAt = Instant.EPOCH // expired backoff
+        worker.statusPollCircuitBreaker.consecutiveFailureCount = 3
+        worker.statusPollCircuitBreaker.nextRetryAt = Instant.EPOCH // expired backoff
 
         val ids = listOf("FCC-1")
         coEvery { bufferManager.getUploadedFccTransactionIds(any()) } returns ids
@@ -342,7 +342,7 @@ class StatusPollWorkerTest {
             CloudStatusPollResult.TransportError("Network error")
 
         worker.pollSyncedToOdooStatus()
-        worker.statusPollNextRetryAt = Instant.EPOCH // expire backoff for next attempt
+        worker.statusPollCircuitBreaker.nextRetryAt = Instant.EPOCH // expire backoff for next attempt
         worker.pollSyncedToOdooStatus()
 
         assertEquals(2, worker.statusPollConsecutiveFailureCount)

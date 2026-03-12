@@ -170,7 +170,7 @@ class OfflineScenarioStressTest {
         assertEquals(1, uploadWorker.consecutiveFailureCount)
 
         // Simulate backoff expiry
-        uploadWorker.nextRetryAt = Instant.EPOCH
+        uploadWorker.uploadCircuitBreaker.nextRetryAt = Instant.EPOCH
 
         // Second attempt: success
         coEvery { cloudApiClient.uploadBatch(any(), any()) } returns CloudUploadResult.Success(
@@ -306,8 +306,8 @@ class OfflineScenarioStressTest {
         assertEquals(1, uploadWorker.consecutiveFailureCount)
 
         // Phase 2: Internet recovers — reset backoff, retry succeeds
-        uploadWorker.nextRetryAt = Instant.EPOCH
-        uploadWorker.consecutiveFailureCount = 0
+        uploadWorker.uploadCircuitBreaker.nextRetryAt = Instant.EPOCH
+        uploadWorker.uploadCircuitBreaker.consecutiveFailureCount = 0
 
         coEvery { cloudApiClient.uploadBatch(any(), any()) } returns CloudUploadResult.Success(
             makeAllAcceptedResponse(bufferedDuringOutage),
