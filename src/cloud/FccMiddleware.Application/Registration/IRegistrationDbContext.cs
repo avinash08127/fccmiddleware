@@ -18,6 +18,13 @@ public interface IRegistrationDbContext
     void AddAgentRegistration(AgentRegistration registration);
     void AddBootstrapToken(BootstrapToken token);
     void AddDeviceRefreshToken(DeviceRefreshToken token);
+    void AddAuditEvent(AuditEvent auditEvent);
 
     Task<int> SaveChangesAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Saves all pending changes. Returns false if a concurrency conflict was detected
+    /// (e.g., bootstrap token modified by another concurrent request), true on success.
+    /// </summary>
+    Task<bool> TrySaveChangesAsync(CancellationToken ct);
 }

@@ -395,6 +395,7 @@ try
     }
 
     app.UseAuthentication();
+    app.UseMiddleware<DeviceActiveCheckMiddleware>();
     app.UseMiddleware<TenantScopeMiddleware>();
     app.UseAuthorization();
 

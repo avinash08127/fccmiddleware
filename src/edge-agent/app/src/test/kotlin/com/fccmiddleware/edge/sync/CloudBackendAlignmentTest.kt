@@ -131,6 +131,7 @@ class CloudBackendAlignmentTest {
                 pumpNumber = 1,
                 nozzleNumber = 1,
                 amountMinorUnits = 5000L,
+                unitPrice = 1_100L,
                 currencyCode = "ZMW",
                 odooOrderId = "order-1",
             ),
@@ -185,6 +186,7 @@ class CloudBackendAlignmentTest {
                 pumpNumber = 1,
                 nozzleNumber = 1,
                 amountMinorUnits = 5000L,
+                unitPrice = 1_100L,
                 currencyCode = "ZMW",
                 odooOrderId = "order-1",
             ),
@@ -206,138 +208,54 @@ class CloudBackendAlignmentTest {
     }
 
     // =========================================================================
-    // Gap 2: Status Polling — all cloud statuses handled
+    // Gap 2: Status Polling — timestamp watermark contract honored
     // =========================================================================
 
     @Test
-    fun `status poll DUPLICATE marks records SYNCED_TO_ODOO`() = runTest {
+    fun `status poll marks only returned ids that are still uploaded locally`() = runTest {
         val worker = buildUploadWorker()
         val ids = listOf("fcc-1", "fcc-2")
 
-        coEvery { worker.bufferManager.getUploadedFccTransactionIds(any()) } returns ids
-        coEvery { worker.cloudApiClient.getSyncedStatus(ids, "token") } returns CloudStatusPollResult.Success(
-            SyncedStatusResponse(
-                statuses = listOf(
-                    TransactionStatusEntry("fcc-1", "DUPLICATE"),
-                    TransactionStatusEntry("fcc-2", "SYNCED_TO_ODOO"),
-                ),
-            ),
+        coEvery { worker.syncStateDao.get() } returns SyncState(
+            lastFccCursor = null,
+            lastUploadAt = null,
+            lastStatusPollAt = "2026-03-11T10:00:00Z",
+            lastConfigPullAt = null,
+            lastConfigVersion = null,
+            updatedAt = "2026-03-11T10:00:00Z",
         )
-
-        worker.worker.pollSyncedToOdooStatus()
-
-        // Both DUPLICATE and SYNCED_TO_ODOO should be marked
-        coVerify { worker.bufferManager.markSyncedToOdoo(listOf("fcc-1", "fcc-2")) }
-    }
-
-    @Test
-    fun `status poll ARCHIVED marks records SYNCED_TO_ODOO`() = runTest {
-        val worker = buildUploadWorker()
-        val ids = listOf("fcc-1")
-
         coEvery { worker.bufferManager.getUploadedFccTransactionIds(any()) } returns ids
-        coEvery { worker.cloudApiClient.getSyncedStatus(ids, "token") } returns CloudStatusPollResult.Success(
+        coEvery {
+            worker.cloudApiClient.getSyncedStatus("2026-03-11T10:00:00Z", "token")
+        } returns CloudStatusPollResult.Success(
             SyncedStatusResponse(
-                statuses = listOf(
-                    TransactionStatusEntry("fcc-1", "ARCHIVED"),
-                ),
+                fccTransactionIds = listOf("fcc-1", "fcc-3", "fcc-1"),
             ),
         )
 
         worker.worker.pollSyncedToOdooStatus()
 
         coVerify { worker.bufferManager.markSyncedToOdoo(listOf("fcc-1")) }
-    }
-
-    @Test
-    fun `status poll NOT_FOUND reverts records to PENDING for re-upload`() = runTest {
-        val worker = buildUploadWorker()
-        val ids = listOf("fcc-lost")
-
-        coEvery { worker.bufferManager.getUploadedFccTransactionIds(any()) } returns ids
-        coEvery { worker.cloudApiClient.getSyncedStatus(ids, "token") } returns CloudStatusPollResult.Success(
-            SyncedStatusResponse(
-                statuses = listOf(
-                    TransactionStatusEntry("fcc-lost", "NOT_FOUND"),
-                ),
-            ),
-        )
-
-        worker.worker.pollSyncedToOdooStatus()
-
-        coVerify { worker.bufferManager.revertToPending(listOf("fcc-lost")) }
-        // Should NOT mark as SYNCED_TO_ODOO
-        coVerify(exactly = 0) { worker.bufferManager.markSyncedToOdoo(any()) }
-    }
-
-    @Test
-    fun `status poll recognizes PENDING and SYNCED as intermediate states`() = runTest {
-        val worker = buildUploadWorker()
-        val ids = listOf("fcc-a", "fcc-b")
-
-        coEvery { worker.bufferManager.getUploadedFccTransactionIds(any()) } returns ids
-        coEvery { worker.cloudApiClient.getSyncedStatus(ids, "token") } returns CloudStatusPollResult.Success(
-            SyncedStatusResponse(
-                statuses = listOf(
-                    TransactionStatusEntry("fcc-a", "PENDING"),
-                    TransactionStatusEntry("fcc-b", "SYNCED"),
-                ),
-            ),
-        )
-
-        worker.worker.pollSyncedToOdooStatus()
-
-        // Intermediate states: no SYNCED_TO_ODOO mark, no revert
-        coVerify(exactly = 0) { worker.bufferManager.markSyncedToOdoo(any()) }
         coVerify(exactly = 0) { worker.bufferManager.revertToPending(any()) }
     }
 
     @Test
-    fun `status poll mixed statuses handled correctly in single response`() = runTest {
+    fun `first status poll falls back to epoch watermark`() = runTest {
         val worker = buildUploadWorker()
-        val ids = listOf("fcc-1", "fcc-2", "fcc-3", "fcc-4", "fcc-5")
+        val ids = listOf("fcc-1")
 
         coEvery { worker.bufferManager.getUploadedFccTransactionIds(any()) } returns ids
-        coEvery { worker.cloudApiClient.getSyncedStatus(ids, "token") } returns CloudStatusPollResult.Success(
+        coEvery {
+            worker.cloudApiClient.getSyncedStatus("1970-01-01T00:00:00Z", "token")
+        } returns CloudStatusPollResult.Success(
             SyncedStatusResponse(
-                statuses = listOf(
-                    TransactionStatusEntry("fcc-1", "SYNCED_TO_ODOO"),
-                    TransactionStatusEntry("fcc-2", "DUPLICATE"),
-                    TransactionStatusEntry("fcc-3", "NOT_FOUND"),
-                    TransactionStatusEntry("fcc-4", "PENDING"),
-                    TransactionStatusEntry("fcc-5", "ARCHIVED"),
-                ),
+                fccTransactionIds = listOf("fcc-1"),
             ),
         )
 
         worker.worker.pollSyncedToOdooStatus()
 
-        // SYNCED_TO_ODOO + DUPLICATE + ARCHIVED → marked
-        coVerify { worker.bufferManager.markSyncedToOdoo(listOf("fcc-1", "fcc-2", "fcc-5")) }
-        // NOT_FOUND → reverted
-        coVerify { worker.bufferManager.revertToPending(listOf("fcc-3")) }
-    }
-
-    @Test
-    fun `status poll STALE_PENDING increments error telemetry but leaves UPLOADED`() = runTest {
-        val worker = buildUploadWorker()
-        val ids = listOf("fcc-stuck")
-
-        coEvery { worker.bufferManager.getUploadedFccTransactionIds(any()) } returns ids
-        coEvery { worker.cloudApiClient.getSyncedStatus(ids, "token") } returns CloudStatusPollResult.Success(
-            SyncedStatusResponse(
-                statuses = listOf(
-                    TransactionStatusEntry("fcc-stuck", "STALE_PENDING"),
-                ),
-            ),
-        )
-
-        worker.worker.pollSyncedToOdooStatus()
-
-        coVerify(exactly = 0) { worker.bufferManager.markSyncedToOdoo(any()) }
-        coVerify(exactly = 0) { worker.bufferManager.revertToPending(any()) }
-        // Error telemetry should be incremented
-        assertTrue(worker.telemetryReporter.cloudUploadErrors.get() > 0)
+        coVerify { worker.bufferManager.markSyncedToOdoo(listOf("fcc-1")) }
     }
 
     // =========================================================================
@@ -506,6 +424,7 @@ class CloudBackendAlignmentTest {
                 pumpNumber = 1,
                 nozzleNumber = 1,
                 amountMinorUnits = 5000L,
+                unitPrice = 1_100L,
                 currencyCode = "ZMW",
                 odooOrderId = "order-1",
             ),
@@ -563,6 +482,7 @@ class CloudBackendAlignmentTest {
                 pumpNumber = 1,
                 nozzleNumber = 1,
                 amountMinorUnits = 5000L,
+                unitPrice = 1_100L,
                 currencyCode = "ZMW",
                 odooOrderId = "order-1",
             ),
@@ -587,6 +507,7 @@ class CloudBackendAlignmentTest {
                 pumpNumber = 1,
                 nozzleNumber = 1,
                 amountMinorUnits = 5000L,
+                unitPrice = 1_100L,
                 currencyCode = "ZMW",
                 odooOrderId = "order-2",
             ),
@@ -613,9 +534,8 @@ class CloudBackendAlignmentTest {
                 results = listOf(
                     CloudUploadRecordResult(
                         fccTransactionId = "FCC-DEDUP-001",
-                        siteCode = "SITE-XYZ",
                         outcome = "ACCEPTED",
-                        id = "cloud-uuid",
+                        transactionId = "cloud-uuid",
                     ),
                 ),
                 acceptedCount = 1,
@@ -643,9 +563,8 @@ class CloudBackendAlignmentTest {
                 results = listOf(
                     CloudUploadRecordResult(
                         fccTransactionId = "FCC-RESUBMIT-001",
-                        siteCode = tx.siteCode,
                         outcome = "DUPLICATE",
-                        id = "existing-cloud-uuid",
+                        originalTransactionId = "existing-cloud-uuid",
                     ),
                 ),
                 acceptedCount = 0,
@@ -731,9 +650,8 @@ class CloudBackendAlignmentTest {
                 results = listOf(
                     CloudUploadRecordResult(
                         fccTransactionId = tx.fccTransactionId,
-                        siteCode = tx.siteCode,
                         outcome = "ACCEPTED",
-                        id = UUID.randomUUID().toString(),
+                        transactionId = UUID.randomUUID().toString(),
                     ),
                 ),
                 acceptedCount = 1,
@@ -778,8 +696,16 @@ class CloudBackendAlignmentTest {
         coEvery { worker.cloudApiClient.uploadBatch(capture(requestSlot), any()) } returns CloudUploadResult.Success(
             CloudUploadResponse(
                 results = listOf(
-                    CloudUploadRecordResult(txOld.fccTransactionId, txOld.siteCode, "ACCEPTED", UUID.randomUUID().toString()),
-                    CloudUploadRecordResult(txNew.fccTransactionId, txNew.siteCode, "ACCEPTED", UUID.randomUUID().toString()),
+                    CloudUploadRecordResult(
+                        fccTransactionId = txOld.fccTransactionId,
+                        outcome = "ACCEPTED",
+                        transactionId = UUID.randomUUID().toString(),
+                    ),
+                    CloudUploadRecordResult(
+                        fccTransactionId = txNew.fccTransactionId,
+                        outcome = "ACCEPTED",
+                        transactionId = UUID.randomUUID().toString(),
+                    ),
                 ),
                 acceptedCount = 2,
                 duplicateCount = 0,
@@ -805,9 +731,8 @@ class CloudBackendAlignmentTest {
                 "results": [
                     {
                         "fccTransactionId": "FCC-001",
-                        "siteCode": "SITE-001",
                         "outcome": "ACCEPTED",
-                        "id": "cloud-uuid-123",
+                        "transactionId": "cloud-uuid-123",
                         "unknownField": "should be ignored",
                         "extraNested": {"key": "value"}
                     }
@@ -822,30 +747,20 @@ class CloudBackendAlignmentTest {
         val response = json.decodeFromString<CloudUploadResponse>(responseJson)
         assertEquals(1, response.acceptedCount)
         assertEquals("ACCEPTED", response.results[0].outcome)
-        assertEquals("cloud-uuid-123", response.results[0].id)
+        assertEquals("cloud-uuid-123", response.results[0].transactionId)
     }
 
     @Test
-    fun `synced status response with all known status values is parsed`() {
+    fun `synced status response parses fcc transaction ids`() {
         val responseJson = """
             {
-                "statuses": [
-                    {"id": "fcc-1", "status": "SYNCED_TO_ODOO"},
-                    {"id": "fcc-2", "status": "DUPLICATE"},
-                    {"id": "fcc-3", "status": "NOT_FOUND"},
-                    {"id": "fcc-4", "status": "STALE_PENDING"},
-                    {"id": "fcc-5", "status": "ARCHIVED"},
-                    {"id": "fcc-6", "status": "PENDING"},
-                    {"id": "fcc-7", "status": "SYNCED"},
-                    {"id": "fcc-8", "status": "FUTURE_STATUS_VALUE"}
-                ]
+                "fccTransactionIds": ["fcc-1", "fcc-2", "fcc-3"]
             }
         """.trimIndent()
 
         val response = json.decodeFromString<SyncedStatusResponse>(responseJson)
-        assertEquals(8, response.statuses.size)
-        assertEquals("ARCHIVED", response.statuses[4].status)
-        assertEquals("FUTURE_STATUS_VALUE", response.statuses[7].status)
+        assertEquals(3, response.fccTransactionIds.size)
+        assertEquals("fcc-2", response.fccTransactionIds[1])
     }
 
     // =========================================================================

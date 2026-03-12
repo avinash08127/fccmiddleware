@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-
 namespace VirtualLab.Tests.Simulators;
 
 /// <summary>
@@ -9,8 +8,16 @@ namespace VirtualLab.Tests.Simulators;
 /// Validates that all three vendor simulators (DOMS, Radix, Petronite) can run
 /// simultaneously within a single VirtualLab host without interference.
 /// </summary>
+[Collection("Simulators")]
 public sealed class CrossVendorRegressionTests
 {
+    private readonly SimulatorTestFixture _fixture;
+
+    public CrossVendorRegressionTests(SimulatorTestFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
     private static readonly string[] VendorPrefixes = ["doms-jpl", "radix", "petronite"];
 
     // ---------------------------------------------------------------------
@@ -20,8 +27,8 @@ public sealed class CrossVendorRegressionTests
     [Fact]
     public async Task AllSimulatorsStartSimultaneously_StateEndpointsReturnCorrectVendorState()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Query all three state endpoints
         using HttpResponseMessage domsResponse = await client.GetAsync("/api/doms-jpl/state");
@@ -73,8 +80,8 @@ public sealed class CrossVendorRegressionTests
     [Fact]
     public async Task InjectAndResetAll_EachSimulatorRecordsAndClearsIndependently()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Inject one transaction into each simulator
         using HttpResponseMessage domsInject = await client.PostAsJsonAsync("/api/doms-jpl/inject-transaction", new
@@ -128,8 +135,8 @@ public sealed class CrossVendorRegressionTests
     [Fact]
     public async Task IndependentStateIsolation_InjectingIntoOneVendorDoesNotAffectOthers()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Inject data into DOMS only
         using HttpResponseMessage domsInject = await client.PostAsJsonAsync("/api/doms-jpl/inject-transaction", new
@@ -187,8 +194,8 @@ public sealed class CrossVendorRegressionTests
     [Fact]
     public async Task CloudFactoryResolvesAllVendors_StateEndpointsReturnValidJsonWithExpectedFields()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // DOMS state should include vendor-specific fields
         string domsBody = await GetBodyAsync(client, "/api/doms-jpl/state");
@@ -239,8 +246,8 @@ public sealed class CrossVendorRegressionTests
     [Fact]
     public async Task ParallelOperationsDontInterfere_ConcurrentInjectsProduceCorrectPerVendorCounts()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         const int domsCount = 3;
         const int radixCount = 2;

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -25,7 +26,7 @@ import com.fccmiddleware.edge.service.EdgeAgentForegroundService
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudRegistrationResult
 import com.fccmiddleware.edge.sync.DeviceRegistrationRequest
-import com.fccmiddleware.edge.sync.KeystoreDeviceTokenProvider
+import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanIntentResult
 import com.journeyapps.barcodescanner.ScanOptions
@@ -225,18 +226,14 @@ class ProvisioningActivity : AppCompatActivity() {
         }
     }
 
-    @Suppress("DEPRECATION")
     private fun buildRegistrationRequest(qrData: QrBootstrapData): DeviceRegistrationRequest {
-        val serialNumber = try {
-            Build.getSerial()
-        } catch (_: SecurityException) {
-            Build.SERIAL
-        }
+        val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+            ?: "unknown-${java.util.UUID.randomUUID().toString().take(8)}"
 
         return DeviceRegistrationRequest(
             provisioningToken = qrData.provisioningToken,
             siteCode = qrData.siteCode,
-            deviceSerialNumber = serialNumber,
+            deviceSerialNumber = androidId,
             deviceModel = Build.MODEL,
             osVersion = Build.VERSION.RELEASE,
             agentVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0",

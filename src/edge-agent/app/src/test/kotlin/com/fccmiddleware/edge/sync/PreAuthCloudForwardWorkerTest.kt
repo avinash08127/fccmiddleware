@@ -205,6 +205,7 @@ class PreAuthCloudForwardWorkerTest {
             nozzleNumber = 2,
             productCode = "AGO",
             requestedAmount = 50_000L,
+            unitPrice = 8_150L,
             currencyCode = "TZS",
             status = "AUTHORIZED",
             fccCorrelationId = "FCC-CORR-123",
@@ -227,6 +228,7 @@ class PreAuthCloudForwardWorkerTest {
         assertEquals(2, req.nozzleNumber)
         assertEquals("AGO", req.productCode)
         assertEquals(50_000L, req.requestedAmount)
+        assertEquals(8_150L, req.unitPrice)
         assertEquals("TZS", req.currency)
         assertEquals("AUTHORIZED", req.status)
         assertEquals("FCC-CORR-123", req.fccCorrelationId)
@@ -340,6 +342,17 @@ class PreAuthCloudForwardWorkerTest {
     }
 
     @Test
+    fun `legacy record without unit price is not forwarded with fabricated placeholder`() = runTest {
+        val record = makePreAuth(unitPrice = null)
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify(exactly = 0) { cloudApiClient.forwardPreAuth(any(), any()) }
+        coVerify { preAuthDao.recordCloudSyncFailure(record.id, any()) }
+    }
+
+    @Test
     fun `successful forward after failures resets backoff`() = runTest {
         worker.circuitBreaker.consecutiveFailureCount = 3
         worker.circuitBreaker.nextRetryAt = Instant.EPOCH
@@ -389,6 +402,7 @@ class PreAuthCloudForwardWorkerTest {
         nozzleNumber: Int = 1,
         productCode: String = "PMS",
         requestedAmount: Long = 10_000L,
+        unitPrice: Long? = 1_500L,
         currencyCode: String = "NGN",
         status: String = "AUTHORIZED",
         fccCorrelationId: String? = null,
@@ -404,6 +418,7 @@ class PreAuthCloudForwardWorkerTest {
         productCode = productCode,
         currencyCode = currencyCode,
         requestedAmountMinorUnits = requestedAmount,
+        unitPrice = unitPrice,
         authorizedAmountMinorUnits = null,
         status = status,
         fccCorrelationId = fccCorrelationId,

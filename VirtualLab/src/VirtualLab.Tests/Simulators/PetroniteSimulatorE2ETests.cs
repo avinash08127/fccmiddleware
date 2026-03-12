@@ -1,8 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-using VirtualLab.Tests.Api;
-
 namespace VirtualLab.Tests.Simulators;
 
 /// <summary>
@@ -11,8 +9,16 @@ namespace VirtualLab.Tests.Simulators;
 /// nozzle discovery, order injection, webhook registration, nozzle state
 /// control, reset behavior, and multi-pump operations.
 /// </summary>
+[Collection("Simulators")]
 public sealed class PetroniteSimulatorE2ETests
 {
+    private readonly SimulatorTestFixture _fixture;
+
+    public PetroniteSimulatorE2ETests(SimulatorTestFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
     // ---------------------------------------------------------------------
     // 1. OAuth & Initial State
     // ---------------------------------------------------------------------
@@ -20,8 +26,8 @@ public sealed class PetroniteSimulatorE2ETests
     [Fact]
     public async Task OAuthAndInitialState_SimulatorStartsWithNozzleAssignmentsAndNoActiveTokens()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         using HttpResponseMessage response = await client.GetAsync("/api/petronite/state");
         string body = await response.Content.ReadAsStringAsync();
@@ -51,8 +57,8 @@ public sealed class PetroniteSimulatorE2ETests
     [Fact]
     public async Task NozzleDiscovery_AllPumpNozzleAssignmentsPresent_WithDefaultProductCodes()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         using HttpResponseMessage response = await client.GetAsync("/api/petronite/state");
         string body = await response.Content.ReadAsStringAsync();
@@ -104,8 +110,8 @@ public sealed class PetroniteSimulatorE2ETests
     [Fact]
     public async Task OrderLifecycle_SetNozzleLiftedThenInjectTransaction_OrderCompletedWithCount1()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Lift nozzle on pump 1
         using HttpResponseMessage liftResponse = await client.PostAsJsonAsync(
@@ -148,8 +154,8 @@ public sealed class PetroniteSimulatorE2ETests
     [Fact]
     public async Task WebhookRegistration_SetUrl_VerifyInState_InjectTransaction_OrderCompleted()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         string webhookUrl = "https://example.com/webhook/petronite";
 
@@ -203,8 +209,8 @@ public sealed class PetroniteSimulatorE2ETests
     [Fact]
     public async Task NozzleStateControl_LiftNozzle_VerifyState_SetDown_VerifyStateChanged()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Lift nozzle on pump 1
         using HttpResponseMessage liftResponse = await client.PostAsJsonAsync(
@@ -263,8 +269,8 @@ public sealed class PetroniteSimulatorE2ETests
     [Fact]
     public async Task ResetClearsAllState_OrdersEmpty_WebhookUrlCleared_NozzleAssignmentsReset()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Set webhook URL
         using HttpResponseMessage setUrlResponse = await client.PostAsJsonAsync(
@@ -345,8 +351,8 @@ public sealed class PetroniteSimulatorE2ETests
     [Fact]
     public async Task MultiPumpOperations_InjectOnPumps1Through3_Verify3Orders_EachWithCorrectPump()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Lift nozzles on pumps 1, 2, and 3
         for (int pump = 1; pump <= 3; pump++)

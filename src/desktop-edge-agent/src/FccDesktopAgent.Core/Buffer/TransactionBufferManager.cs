@@ -206,6 +206,90 @@ public sealed class TransactionBufferManager
         };
     }
 
+    /// <summary>
+    /// Cursor-based query for the local API. Returns transactions with CompletedAt before the cursor,
+    /// ordered by CompletedAt DESC. Only returns Pending/Uploaded records (not yet synced to Odoo).
+    /// </summary>
+    public async Task<(IReadOnlyList<BufferedTransaction> Items, string? NextCursor)> GetPagedForLocalApiAsync(
+        DateTimeOffset? cursor, int pageSize, string? status, int? pumpNumber,
+        DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct = default)
+    {
+        var query = _db.Transactions
+            .Where(t => t.SyncStatus == SyncStatus.Pending || t.SyncStatus == SyncStatus.Uploaded);
+
+        if (cursor.HasValue)
+            query = query.Where(t => t.CompletedAt < cursor.Value);
+
+        if (pumpNumber.HasValue)
+            query = query.Where(t => t.PumpNumber == pumpNumber.Value);
+
+        if (from.HasValue)
+            query = query.Where(t => t.CompletedAt >= from.Value);
+
+        if (to.HasValue)
+            query = query.Where(t => t.CompletedAt <= to.Value);
+
+        if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<SyncStatus>(status, ignoreCase: true, out var parsedStatus))
+            query = query.Where(t => t.SyncStatus == parsedStatus);
+
+        // Fetch one extra to detect if there's a next page
+        var items = await query
+            .OrderByDescending(t => t.CompletedAt)
+            .Take(pageSize + 1)
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        string? nextCursor = null;
+        if (items.Count > pageSize)
+        {
+            items.RemoveAt(items.Count - 1);
+            nextCursor = items[^1].CompletedAt.ToString("O");
+        }
+
+        return (items, nextCursor);
+    }
+
+    /// <summary>
+    /// Returns a single transaction by its middleware UUID, or null if not found.
+    /// </summary>
+    public async Task<BufferedTransaction?> GetByIdAsync(string id, CancellationToken ct = default)
+    {
+        return await _db.Transactions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(t => t.Id == id, ct);
+    }
+
+    /// <summary>
+    /// Stamps an Odoo order ID on a transaction. Idempotent: same odooOrderId returns success.
+    /// Different odooOrderId on an already-acknowledged transaction returns false (conflict).
+    /// </summary>
+    public async Task<AcknowledgeResult> AcknowledgeAsync(
+        string transactionId, string odooOrderId, CancellationToken ct = default)
+    {
+        var tx = await _db.Transactions.FirstOrDefaultAsync(t => t.Id == transactionId, ct);
+        if (tx is null)
+            return AcknowledgeResult.NotFound;
+
+        if (tx.OdooOrderId is not null)
+        {
+            // Idempotent: same order ID → success
+            if (string.Equals(tx.OdooOrderId, odooOrderId, StringComparison.Ordinal))
+                return AcknowledgeResult.Success;
+
+            // Conflict: different order ID already stamped
+            return AcknowledgeResult.Conflict;
+        }
+
+        tx.OdooOrderId = odooOrderId;
+        tx.AcknowledgedAt = DateTimeOffset.UtcNow;
+        tx.UpdatedAt = DateTimeOffset.UtcNow;
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Transaction {Id} acknowledged with OdooOrderId {OdooOrderId}",
+            transactionId, odooOrderId);
+        return AcknowledgeResult.Success;
+    }
+
     private static bool IsDuplicateKeyException(DbUpdateException ex)
     {
         // SQLite unique constraint violation message
@@ -213,6 +297,14 @@ public sealed class TransactionBufferManager
         return message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
             || message.Contains("duplicate", StringComparison.OrdinalIgnoreCase);
     }
+}
+
+/// <summary>Result of an acknowledge operation.</summary>
+public enum AcknowledgeResult
+{
+    Success,
+    NotFound,
+    Conflict,
 }
 
 /// <summary>Transaction buffer counts by SyncStatus for telemetry.</summary>

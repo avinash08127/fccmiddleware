@@ -1,3 +1,5 @@
+using FccDesktopAgent.Core.Buffer;
+using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Ingestion;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -19,28 +21,93 @@ internal static class TransactionEndpoints
             .WithTags("Transactions");
 
         // GET /api/v1/transactions — list buffered transactions (cursor-based pagination)
-        // DEA-2.x: inject IBufferQueryService and implement cursor pagination + filters
-        group.MapGet("/", (
+        group.MapGet("/", async (
             string? cursor,
             int pageSize = 50,
             string? status = null,
             int? pumpNumber = null,
             DateTimeOffset? from = null,
-            DateTimeOffset? to = null) =>
-            NotImplemented("GET /api/v1/transactions"))
-            .WithName("listLocalTransactions");
+            DateTimeOffset? to = null,
+            TransactionBufferManager buffer = default!,
+            CancellationToken ct = default) =>
+        {
+            if (pageSize is < 1 or > 200)
+                return Results.Json(
+                    new { errorCode = "VALIDATION_ERROR", message = "pageSize must be between 1 and 200", timestamp = DateTimeOffset.UtcNow },
+                    statusCode: StatusCodes.Status400BadRequest);
+
+            DateTimeOffset? parsedCursor = null;
+            if (!string.IsNullOrWhiteSpace(cursor))
+            {
+                if (!DateTimeOffset.TryParse(cursor, out var c))
+                    return Results.Json(
+                        new { errorCode = "VALIDATION_ERROR", message = "Invalid cursor format; expected ISO 8601 timestamp", timestamp = DateTimeOffset.UtcNow },
+                        statusCode: StatusCodes.Status400BadRequest);
+                parsedCursor = c;
+            }
+
+            var (items, nextCursor) = await buffer.GetPagedForLocalApiAsync(
+                parsedCursor, pageSize, status, pumpNumber, from, to, ct);
+
+            return Results.Ok(new TransactionListResponse(
+                Items: items.Select(MapToDto).ToList(),
+                NextCursor: nextCursor,
+                Count: items.Count));
+        })
+        .WithName("listLocalTransactions");
 
         // GET /api/v1/transactions/{id} — get single transaction by middleware UUID
-        // DEA-2.x: query buffer by primary key
-        group.MapGet("/{id:guid}", (Guid id) =>
-            NotImplemented("GET /api/v1/transactions/{id}"))
-            .WithName("getLocalTransactionById");
+        group.MapGet("/{id:guid}", async (
+            Guid id,
+            TransactionBufferManager buffer,
+            CancellationToken ct) =>
+        {
+            var tx = await buffer.GetByIdAsync(id.ToString(), ct);
+            if (tx is null)
+                return Results.Json(
+                    new { errorCode = "NOT_FOUND", message = $"Transaction {id} not found", timestamp = DateTimeOffset.UtcNow },
+                    statusCode: StatusCodes.Status404NotFound);
+
+            return Results.Ok(MapToDto(tx));
+        })
+        .WithName("getLocalTransactionById");
 
         // POST /api/v1/transactions/{id}/acknowledge — stamp odooOrderId on a transaction
-        // Idempotent: same odooOrderId → 200; different odooOrderId → 409 (DEA-2.x)
-        group.MapPost("/{id:guid}/acknowledge", (Guid id) =>
-            NotImplemented("POST /api/v1/transactions/{id}/acknowledge"))
-            .WithName("acknowledgeLocalTransaction");
+        // Idempotent: same odooOrderId → 200; different odooOrderId → 409
+        group.MapPost("/{id:guid}/acknowledge", async (
+            Guid id,
+            [FromBody] AcknowledgeRequest request,
+            TransactionBufferManager buffer,
+            CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.OdooOrderId))
+                return Results.Json(
+                    new { errorCode = "VALIDATION_ERROR", message = "odooOrderId is required", timestamp = DateTimeOffset.UtcNow },
+                    statusCode: StatusCodes.Status400BadRequest);
+
+            var result = await buffer.AcknowledgeAsync(id.ToString(), request.OdooOrderId.Trim(), ct);
+
+            return result switch
+            {
+                AcknowledgeResult.Success => Results.Ok(new
+                {
+                    transactionId = id.ToString(),
+                    odooOrderId = request.OdooOrderId.Trim(),
+                    acknowledged = true,
+                    timestamp = DateTimeOffset.UtcNow
+                }),
+                AcknowledgeResult.NotFound => Results.Json(
+                    new { errorCode = "NOT_FOUND", message = $"Transaction {id} not found", timestamp = DateTimeOffset.UtcNow },
+                    statusCode: StatusCodes.Status404NotFound),
+                AcknowledgeResult.Conflict => Results.Json(
+                    new { errorCode = "CONFLICT", message = $"Transaction {id} is already acknowledged with a different Odoo order ID", timestamp = DateTimeOffset.UtcNow },
+                    statusCode: StatusCodes.Status409Conflict),
+                _ => Results.Json(
+                    new { errorCode = "INTERNAL_ERROR", message = "Unexpected acknowledge result", timestamp = DateTimeOffset.UtcNow },
+                    statusCode: StatusCodes.Status500InternalServerError),
+            };
+        })
+        .WithName("acknowledgeLocalTransaction");
 
         // POST /api/v1/transactions/pull — on-demand FCC pull (DEA-2.7)
         // Serialized with background poller via SemaphoreSlim; never races cursor state.
@@ -67,17 +134,55 @@ internal static class TransactionEndpoints
         return app;
     }
 
-    private static IResult NotImplemented(string endpoint) =>
-        Results.Json(
-            new
-            {
-                errorCode = "NOT_IMPLEMENTED",
-                message = $"{endpoint} is not yet implemented",
-                traceId = (string?)null,
-                timestamp = DateTimeOffset.UtcNow
-            },
-            statusCode: StatusCodes.Status501NotImplemented);
+    private static TransactionDto MapToDto(BufferedTransaction tx) => new(
+        Id: tx.Id,
+        FccTransactionId: tx.FccTransactionId,
+        SiteCode: tx.SiteCode,
+        PumpNumber: tx.PumpNumber,
+        NozzleNumber: tx.NozzleNumber,
+        ProductCode: tx.ProductCode,
+        VolumeMicrolitres: tx.VolumeMicrolitres,
+        AmountMinorUnits: tx.AmountMinorUnits,
+        UnitPriceMinorPerLitre: tx.UnitPriceMinorPerLitre,
+        CurrencyCode: tx.CurrencyCode,
+        StartedAtUtc: tx.StartedAt,
+        CompletedAtUtc: tx.CompletedAt,
+        FiscalReceiptNumber: tx.FiscalReceiptNumber,
+        FccVendor: tx.FccVendor,
+        AttendantId: tx.AttendantId,
+        SyncStatus: tx.SyncStatus.ToString(),
+        OdooOrderId: tx.OdooOrderId,
+        AcknowledgedAtUtc: tx.AcknowledgedAt);
 }
+
+// ── DTOs ──────────────────────────────────────────────────────────────────────
+
+internal sealed record TransactionDto(
+    string Id,
+    string FccTransactionId,
+    string SiteCode,
+    int PumpNumber,
+    int NozzleNumber,
+    string ProductCode,
+    long VolumeMicrolitres,
+    long AmountMinorUnits,
+    long UnitPriceMinorPerLitre,
+    string CurrencyCode,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset CompletedAtUtc,
+    string? FiscalReceiptNumber,
+    string FccVendor,
+    string? AttendantId,
+    string SyncStatus,
+    string? OdooOrderId,
+    DateTimeOffset? AcknowledgedAtUtc);
+
+internal sealed record TransactionListResponse(
+    IReadOnlyList<TransactionDto> Items,
+    string? NextCursor,
+    int Count);
+
+internal sealed record AcknowledgeRequest(string OdooOrderId);
 
 /// <summary>
 /// Optional request body for POST /api/v1/transactions/pull.

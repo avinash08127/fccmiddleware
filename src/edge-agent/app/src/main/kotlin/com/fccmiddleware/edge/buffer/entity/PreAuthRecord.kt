@@ -57,7 +57,7 @@ data class PreAuthRecord(
 
     /** Minor units per litre. Null for legacy rows created before unit price was persisted. */
     @ColumnInfo(name = "unit_price_minor_per_litre")
-    val unitPrice: Long?,
+    val unitPrice: Long? = null,
 
     /** Minor units. Null until FCC authorizes. */
     @ColumnInfo(name = "authorized_amount_minor_units")

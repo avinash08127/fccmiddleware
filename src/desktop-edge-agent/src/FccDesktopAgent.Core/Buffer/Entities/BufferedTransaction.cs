@@ -64,6 +64,12 @@ public sealed class BufferedTransaction
 
     public string SchemaVersion { get; set; } = "1.0";
 
+    /// <summary>Odoo order ID stamped by acknowledge. Null until acknowledged.</summary>
+    public string? OdooOrderId { get; set; }
+
+    /// <summary>Timestamp when Odoo acknowledged this transaction. Null until acknowledged.</summary>
+    public DateTimeOffset? AcknowledgedAt { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

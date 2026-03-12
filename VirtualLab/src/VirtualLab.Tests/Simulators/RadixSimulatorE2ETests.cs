@@ -1,16 +1,22 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-using VirtualLab.Tests.Api;
-
 namespace VirtualLab.Tests.Simulators;
 
 /// <summary>
 /// TEST-5.2: VirtualLab Radix simulator E2E scenarios.
 /// All tests interact exclusively through the Radix management API endpoints.
 /// </summary>
+[Collection("Simulators")]
 public sealed class RadixSimulatorE2ETests
 {
+    private readonly SimulatorTestFixture _fixture;
+
+    public RadixSimulatorE2ETests(SimulatorTestFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
     // -----------------------------------------------------------------------
     // 1. Heartbeat / Product Read
     // -----------------------------------------------------------------------
@@ -18,8 +24,8 @@ public sealed class RadixSimulatorE2ETests
     [Fact]
     public async Task HeartbeatAndProductRead_InitialState_ProductCatalogPresent()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         using HttpResponseMessage stateResponse = await client.GetAsync("/api/radix/state");
         string stateBody = await stateResponse.Content.ReadAsStringAsync();
@@ -50,8 +56,8 @@ public sealed class RadixSimulatorE2ETests
     [Fact]
     public async Task FifoBufferInjection_InjectFive_BufferDepthAndOrderPreserved()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Inject 5 transactions with ascending saveNum so we can verify order
         for (int i = 1; i <= 5; i++)
@@ -104,8 +110,8 @@ public sealed class RadixSimulatorE2ETests
     [Fact]
     public async Task NormalizationFields_InjectedValues_AllFieldsPresentInSnapshot()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         using HttpResponseMessage injectResponse = await client.PostAsJsonAsync(
             "/api/radix/inject-transaction",
@@ -158,8 +164,8 @@ public sealed class RadixSimulatorE2ETests
     [Fact]
     public async Task ModeManagement_SwitchBetweenOnDemandAndUnsolicited()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Confirm initial mode is ON_DEMAND
         using HttpResponseMessage initialState = await client.GetAsync("/api/radix/state");
@@ -225,8 +231,8 @@ public sealed class RadixSimulatorE2ETests
     [Fact]
     public async Task ErrorInjection_QueueTransactionAndAuthErrors_BothQueued()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Queue a transaction error (code 255)
         using HttpResponseMessage txErrorResponse = await client.PostAsJsonAsync(
@@ -284,8 +290,8 @@ public sealed class RadixSimulatorE2ETests
     [Fact]
     public async Task TransactionAndResetCycle_InjectThenReset_BufferEmptyAndModeRestored()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Switch to UNSOLICITED so reset also verifies mode restoration
         await client.PostAsJsonAsync("/api/radix/set-mode", new
@@ -346,8 +352,8 @@ public sealed class RadixSimulatorE2ETests
     [Fact]
     public async Task MultipleTransactionsDifferentPumps_InjectFour_AllPresentWithCorrectPumpNumbers()
     {
-        using VirtualLabApiFactory factory = new();
-        using HttpClient client = factory.CreateClient();
+        await _fixture.ResetAllSimulatorsAsync();
+        var client = _fixture.Client;
 
         // Inject transactions for pumps 1 through 4
         for (int pump = 1; pump <= 4; pump++)

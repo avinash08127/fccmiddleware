@@ -36,5 +36,11 @@ internal sealed class BootstrapTokenConfiguration : IEntityTypeConfiguration<Boo
         builder.HasIndex(e => e.TokenHash)
             .IsUnique()
             .HasDatabaseName("ix_bootstrap_token_hash");
+
+        // BUG-007: Use PostgreSQL xmin as optimistic concurrency token to prevent
+        // race condition where two concurrent registrations consume the same token.
+        builder.Property<uint>("xmin")
+            .HasColumnType("xid")
+            .IsRowVersion();
     }
 }

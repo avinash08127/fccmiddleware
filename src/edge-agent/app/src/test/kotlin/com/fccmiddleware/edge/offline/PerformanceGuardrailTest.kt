@@ -235,9 +235,8 @@ class PerformanceGuardrailTest {
                     results = req.transactions.map {
                         CloudUploadRecordResult(
                             fccTransactionId = it.fccTransactionId,
-                            siteCode = it.siteCode,
                             outcome = "ACCEPTED",
-                            id = UUID.randomUUID().toString(),
+                            transactionId = UUID.randomUUID().toString(),
                         )
                     },
                     acceptedCount = req.transactions.size,

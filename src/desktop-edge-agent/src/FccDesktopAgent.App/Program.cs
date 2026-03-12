@@ -76,6 +76,12 @@ try
 
     if (registrationState.IsRegistered)
     {
+        // Validate runtime config is complete for the selected ingestion mode
+        var resolvedConfig = webApp.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentConfiguration>>().Value;
+        var configError = AgentConfigurationValidator.Validate(resolvedConfig);
+        if (configError is not null)
+            Log.Warning("Startup config validation: {Error} — agent may not function correctly until config is received from cloud", configError);
+
         // Normal operational mode — start all services, then show dashboard
         webApp.Start();
         Log.Information("FCC Desktop Agent host started — listening on port 8585");

@@ -185,7 +185,8 @@ class UploadSyncEdgeCaseTest {
                 listOf(
                     makeResult(txOk.fccTransactionId, "ACCEPTED"),
                     makeResult(txBad.fccTransactionId, "REJECTED",
-                        error = CloudErrorResponse("SCHEMA_MISMATCH", "Missing field")),
+                        errorCode = "SCHEMA_MISMATCH",
+                        errorMessage = "Missing field"),
                 ),
                 acceptedCount = 1,
                 rejectedCount = 1,
@@ -261,7 +262,7 @@ class UploadSyncEdgeCaseTest {
         coEvery { cloudApiClient.getSyncedStatus(any(), any()) } returns
             CloudStatusPollResult.Success(
                 SyncedStatusResponse(
-                    statuses = listOf(TransactionStatusEntry(id = "fcc-1", status = "SYNCED_TO_ODOO")),
+                    fccTransactionIds = listOf("fcc-1"),
                 ),
             )
         // Simulate DB write failure
@@ -309,7 +310,7 @@ class UploadSyncEdgeCaseTest {
         coEvery { cloudApiClient.getSyncedStatus(any(), "new-token") } returns
             CloudStatusPollResult.Success(
                 SyncedStatusResponse(
-                    statuses = listOf(TransactionStatusEntry(id = "fcc-1", status = "SYNCED_TO_ODOO")),
+                    fccTransactionIds = listOf("fcc-1"),
                 ),
             )
 
@@ -375,13 +376,15 @@ class UploadSyncEdgeCaseTest {
     private fun makeResult(
         fccTransactionId: String,
         outcome: String,
-        error: CloudErrorResponse? = null,
+        errorCode: String? = null,
+        errorMessage: String? = null,
     ): CloudUploadRecordResult = CloudUploadRecordResult(
         fccTransactionId = fccTransactionId,
-        siteCode = "SITE-001",
         outcome = outcome,
-        id = if (outcome != "REJECTED") UUID.randomUUID().toString() else null,
-        error = error,
+        transactionId = if (outcome == "ACCEPTED") UUID.randomUUID().toString() else null,
+        originalTransactionId = if (outcome == "DUPLICATE") UUID.randomUUID().toString() else null,
+        errorCode = errorCode,
+        errorMessage = errorMessage,
     )
 
     private fun makeResponse(

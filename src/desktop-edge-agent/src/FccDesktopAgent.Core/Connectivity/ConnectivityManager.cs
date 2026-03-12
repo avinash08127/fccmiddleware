@@ -72,14 +72,40 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
         ILogger<ConnectivityManager> logger)
         : this(
             ct => PingCloudAsync(httpFactory, config.Value.CloudBaseUrl, ct),
-            ct =>
-            {
-                var adapter = (IFccAdapter?)services.GetService(typeof(IFccAdapter));
-                return adapter is not null ? adapter.HeartbeatAsync(ct) : Task.FromResult(false);
-            },
+            ct => ProbeFccAsync(services, ct),
             config,
             logger)
     {
+    }
+
+    /// <summary>
+    /// BUG-014 fix: IFccAdapter is not registered in DI — only IFccAdapterFactory is.
+    /// Resolve the factory and create an adapter on demand using current config.
+    /// Returns false if config is incomplete (pre-registration) or adapter creation fails.
+    /// </summary>
+    private static async Task<bool> ProbeFccAsync(IServiceProvider services, CancellationToken ct)
+    {
+        try
+        {
+            var factory = (IFccAdapterFactory?)services.GetService(typeof(IFccAdapterFactory));
+            if (factory is null) return false;
+
+            var monitor = (IOptionsMonitor<AgentConfiguration>?)services.GetService(
+                typeof(IOptionsMonitor<AgentConfiguration>));
+            var agentConfig = monitor?.CurrentValue;
+            if (agentConfig is null || string.IsNullOrWhiteSpace(agentConfig.FccBaseUrl))
+                return false;
+
+            var resolved = DesktopFccRuntimeConfiguration.Resolve(
+                agentConfig, siteConfig: null, TimeSpan.FromSeconds(5));
+            var adapter = factory.Create(resolved.Vendor, resolved.ConnectionConfig);
+            return await adapter.HeartbeatAsync(ct);
+        }
+        catch
+        {
+            // Config not ready, adapter creation failed, or heartbeat failed — FCC unreachable.
+            return false;
+        }
     }
 
     // ── Internal test constructor ─────────────────────────────────────────────

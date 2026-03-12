@@ -274,7 +274,8 @@ class CloudUploadWorkerTest {
                     makeResult(
                         tx.fccTransactionId,
                         "REJECTED",
-                        error = CloudErrorResponse("VALIDATION_ERROR", "Missing field"),
+                        errorCode = "VALIDATION_ERROR",
+                        errorMessage = "Missing field",
                     ),
                 ),
                 rejectedCount = 1,
@@ -593,46 +594,39 @@ class CloudUploadWorkerTest {
     }
 
     // -------------------------------------------------------------------------
-    // H-04: Status poll processes non-SYNCED_TO_ODOO statuses
+    // H-04: Status poll ignores non-local IDs while still updating watermark
     // -------------------------------------------------------------------------
 
     @Test
-    fun `H-04 status poll logs NOT_FOUND entries`() = runTest {
+    fun `H-04 status poll ignores synced ids not currently uploaded locally`() = runTest {
         coEvery { bufferManager.getUploadedFccTransactionIds(any()) } returns listOf("fcc-1")
         coEvery { cloudApiClient.getSyncedStatus(any(), any()) } returns
             CloudStatusPollResult.Success(
                 SyncedStatusResponse(
-                    statuses = listOf(TransactionStatusEntry(id = "fcc-1", status = "NOT_FOUND")),
+                    fccTransactionIds = listOf("fcc-2"),
                 ),
             )
 
         worker.pollSyncedToOdooStatus()
 
-        // NOT_FOUND should NOT trigger markSyncedToOdoo
         coVerify(exactly = 0) { bufferManager.markSyncedToOdoo(any()) }
-        // Should still update lastStatusPollAt (successful HTTP response)
         coVerify { syncStateDao.upsert(any()) }
     }
 
     @Test
-    fun `H-04 status poll processes mixed statuses correctly`() = runTest {
+    fun `H-04 status poll marks intersection of cloud ids and local uploaded ids`() = runTest {
         coEvery { bufferManager.getUploadedFccTransactionIds(any()) } returns
             listOf("fcc-1", "fcc-2", "fcc-3")
         coEvery { cloudApiClient.getSyncedStatus(any(), any()) } returns
             CloudStatusPollResult.Success(
                 SyncedStatusResponse(
-                    statuses = listOf(
-                        TransactionStatusEntry(id = "fcc-1", status = "SYNCED_TO_ODOO"),
-                        TransactionStatusEntry(id = "fcc-2", status = "NOT_FOUND"),
-                        TransactionStatusEntry(id = "fcc-3", status = "STALE_PENDING"),
-                    ),
+                    fccTransactionIds = listOf("fcc-1", "fcc-4", "fcc-3"),
                 ),
             )
 
         worker.pollSyncedToOdooStatus()
 
-        // Only SYNCED_TO_ODOO should be marked
-        coVerify { bufferManager.markSyncedToOdoo(listOf("fcc-1")) }
+        coVerify { bufferManager.markSyncedToOdoo(listOf("fcc-1", "fcc-3")) }
     }
 
     // -------------------------------------------------------------------------
@@ -692,13 +686,15 @@ class CloudUploadWorkerTest {
     private fun makeResult(
         fccTransactionId: String,
         outcome: String,
-        error: CloudErrorResponse? = null,
+        errorCode: String? = null,
+        errorMessage: String? = null,
     ): CloudUploadRecordResult = CloudUploadRecordResult(
         fccTransactionId = fccTransactionId,
-        siteCode = "SITE-001",
         outcome = outcome,
-        id = if (outcome != "REJECTED") UUID.randomUUID().toString() else null,
-        error = error,
+        transactionId = if (outcome == "ACCEPTED") UUID.randomUUID().toString() else null,
+        originalTransactionId = if (outcome == "DUPLICATE") UUID.randomUUID().toString() else null,
+        errorCode = errorCode,
+        errorMessage = errorMessage,
     )
 
     private fun makeResponse(

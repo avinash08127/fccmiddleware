@@ -432,6 +432,22 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     void IRegistrationDbContext.AddDeviceRefreshToken(DeviceRefreshToken token) =>
         DeviceRefreshTokens.Add(token);
 
+    void IRegistrationDbContext.AddAuditEvent(AuditEvent auditEvent) =>
+        AuditEvents.Add(auditEvent);
+
+    async Task<bool> IRegistrationDbContext.TrySaveChangesAsync(CancellationToken ct)
+    {
+        try
+        {
+            await SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return false;
+        }
+    }
+
     // -------------------------------------------------------------------------
     // IAgentConfigDbContext implementation
     // Eager-loads Site → Pumps → Nozzles → Products and LegalEntity so the

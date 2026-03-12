@@ -245,14 +245,13 @@ class SecurityInputValidationTest {
         // A response with deeply nested unknown fields
         val responseJson = """
             {
-                "statuses": [
-                    {"id": "fcc-1", "status": "SYNCED_TO_ODOO", "extra": {"deep": {"nested": "value"}}}
-                ]
+                "fccTransactionIds": ["fcc-1"],
+                "extra": {"deep": {"nested": "value"}}
             }
         """.trimIndent()
 
         val response = json.decodeFromString<com.fccmiddleware.edge.sync.SyncedStatusResponse>(responseJson)
-        assertEquals(1, response.statuses.size)
-        assertEquals("SYNCED_TO_ODOO", response.statuses[0].status)
+        assertEquals(1, response.fccTransactionIds.size)
+        assertEquals("fcc-1", response.fccTransactionIds[0])
     }
 }

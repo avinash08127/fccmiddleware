@@ -1,11 +1,9 @@
 package com.fccmiddleware.edge.offline
 
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
-import com.fccmiddleware.edge.sync.CloudErrorResponse
 import com.fccmiddleware.edge.sync.CloudUploadRecordResult
 import com.fccmiddleware.edge.sync.CloudUploadResponse
 import com.fccmiddleware.edge.sync.SyncedStatusResponse
-import com.fccmiddleware.edge.sync.TransactionStatusEntry
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.UUID
@@ -94,9 +92,8 @@ object OfflineScenarioTestHelpers {
         results = batch.map {
             CloudUploadRecordResult(
                 fccTransactionId = it.fccTransactionId,
-                siteCode = it.siteCode,
                 outcome = "ACCEPTED",
-                id = UUID.randomUUID().toString(),
+                transactionId = UUID.randomUUID().toString(),
             )
         },
         acceptedCount = batch.size,
@@ -115,17 +112,16 @@ object OfflineScenarioTestHelpers {
         val accepted = batch.take(acceptedCount).map {
             CloudUploadRecordResult(
                 fccTransactionId = it.fccTransactionId,
-                siteCode = it.siteCode,
                 outcome = "ACCEPTED",
-                id = UUID.randomUUID().toString(),
+                transactionId = UUID.randomUUID().toString(),
             )
         }
         val rejected = batch.drop(acceptedCount).map {
             CloudUploadRecordResult(
                 fccTransactionId = it.fccTransactionId,
-                siteCode = it.siteCode,
                 outcome = "REJECTED",
-                error = CloudErrorResponse("UPLOAD_INTERRUPTED", "Connection lost mid-batch"),
+                errorCode = "UPLOAD_INTERRUPTED",
+                errorMessage = "Connection lost mid-batch",
             )
         }
         return CloudUploadResponse(
@@ -142,8 +138,6 @@ object OfflineScenarioTestHelpers {
     fun makeSyncedStatusResponse(
         fccTransactionIds: List<String>,
     ): SyncedStatusResponse = SyncedStatusResponse(
-        statuses = fccTransactionIds.map {
-            TransactionStatusEntry(id = it, status = "SYNCED_TO_ODOO")
-        },
+        fccTransactionIds = fccTransactionIds,
     )
 }

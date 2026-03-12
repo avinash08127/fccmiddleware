@@ -183,7 +183,10 @@
       "Bash(find /c/Users/a0812/fccmiddleware/VirtualLab/src/VirtualLab.Infrastructure -name \"*.cs\" -type f | xargs grep -l \"AddVirtualLabInfrastructure\" 2>/dev/null)",
       "Bash(find /c/Users/a0812/fccmiddleware/VirtualLab -name \"*.cs\" | xargs grep -l \"VirtualLabApiFactory\" | head -1)",
       "Bash(./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.runtime.CadenceControllerTest\" --tests \"com.fccmiddleware.edge.ingestion.IngestionOrchestratorTest\" --tests \"com.fccmiddleware.edge.preauth.PreAuthHandlerTest\" --tests \"com.fccmiddleware.edge.config.ConfigManagerTest\" 2>&1 | tail -20)",
-      "Bash(./gradlew testDebugUnitTest 2>&1 | grep -E \"FAILED|tests completed\")"
+      "Bash(./gradlew testDebugUnitTest 2>&1 | grep -E \"FAILED|tests completed\")",
+      "Bash(dotnet exec:*)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -type f -name \"*.cs\" | xargs grep -l \"IDeviceRegistrationService\" | head -10)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent/tests -type f -name \"*.cs\" | xargs grep -l \"RegistrationManager\\\\|registration.json\" | head -5)"
     ]
   }
 }

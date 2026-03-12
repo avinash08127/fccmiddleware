@@ -133,9 +133,8 @@ class OfflineCrashRecoveryTest {
                 results = listOf(
                     CloudUploadRecordResult(
                         fccTransactionId = tx.fccTransactionId,
-                        siteCode = tx.siteCode,
                         outcome = "ACCEPTED",
-                        id = UUID.randomUUID().toString(),
+                        transactionId = UUID.randomUUID().toString(),
                     ),
                 ),
                 acceptedCount = 1,

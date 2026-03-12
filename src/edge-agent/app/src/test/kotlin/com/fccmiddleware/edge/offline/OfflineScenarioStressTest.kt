@@ -24,7 +24,6 @@ import com.fccmiddleware.edge.sync.CloudUploadWorker
 import com.fccmiddleware.edge.sync.CloudUploadWorkerConfig
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.fccmiddleware.edge.sync.SyncedStatusResponse
-import com.fccmiddleware.edge.sync.TransactionStatusEntry
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -357,9 +356,8 @@ class OfflineScenarioStressTest {
                 results = batch.map {
                     com.fccmiddleware.edge.sync.CloudUploadRecordResult(
                         fccTransactionId = it.fccTransactionId,
-                        siteCode = it.siteCode,
                         outcome = "DUPLICATE",
-                        id = UUID.randomUUID().toString(),
+                        originalTransactionId = UUID.randomUUID().toString(),
                     )
                 },
                 acceptedCount = 0,
@@ -400,9 +398,8 @@ class OfflineScenarioStressTest {
                     results = req.transactions.map {
                         com.fccmiddleware.edge.sync.CloudUploadRecordResult(
                             fccTransactionId = it.fccTransactionId,
-                            siteCode = it.siteCode,
                             outcome = "ACCEPTED",
-                            id = UUID.randomUUID().toString(),
+                            transactionId = UUID.randomUUID().toString(),
                         )
                     },
                     acceptedCount = req.transactions.size,
@@ -452,9 +449,8 @@ class OfflineScenarioStressTest {
                     results = req.transactions.map {
                         com.fccmiddleware.edge.sync.CloudUploadRecordResult(
                             fccTransactionId = it.fccTransactionId,
-                            siteCode = it.siteCode,
                             outcome = "ACCEPTED",
-                            id = UUID.randomUUID().toString(),
+                            transactionId = UUID.randomUUID().toString(),
                         )
                     },
                     acceptedCount = req.transactions.size,
@@ -513,9 +509,8 @@ class OfflineScenarioStressTest {
                     results = req.transactions.map {
                         com.fccmiddleware.edge.sync.CloudUploadRecordResult(
                             fccTransactionId = it.fccTransactionId,
-                            siteCode = it.siteCode,
                             outcome = "ACCEPTED",
-                            id = UUID.randomUUID().toString(),
+                            transactionId = UUID.randomUUID().toString(),
                         )
                     },
                     acceptedCount = req.transactions.size,
@@ -560,9 +555,8 @@ class OfflineScenarioStressTest {
                     results = req.transactions.map {
                         com.fccmiddleware.edge.sync.CloudUploadRecordResult(
                             fccTransactionId = it.fccTransactionId,
-                            siteCode = it.siteCode,
                             outcome = "ACCEPTED",
-                            id = UUID.randomUUID().toString(),
+                            transactionId = UUID.randomUUID().toString(),
                         )
                     },
                     acceptedCount = req.transactions.size,

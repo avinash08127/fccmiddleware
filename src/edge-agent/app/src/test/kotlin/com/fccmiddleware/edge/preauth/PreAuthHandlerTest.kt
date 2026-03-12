@@ -98,6 +98,25 @@ class PreAuthHandlerTest {
         assertNotNull(result.message)
     }
 
+    @Test
+    fun `handle persists requested unit price on new record`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        val insertSlot = slot<PreAuthRecord>()
+        coEvery { preAuthDao.getByOdooOrderId("order-1", "SITE-A") } returns null
+        coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
+        coEvery { preAuthDao.insert(capture(insertSlot)) } returns 1L
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } returns PreAuthResult(
+            status = PreAuthResultStatus.AUTHORIZED,
+            authorizationCode = "AUTH-UNIT-PRICE",
+        )
+
+        val result = handler.handle(baseCommand().copy(unitPrice = 1_375L))
+
+        assertEquals(PreAuthResultStatus.AUTHORIZED, result.status)
+        assertEquals(1_375L, insertSlot.captured.unitPrice)
+    }
+
     // -------------------------------------------------------------------------
     // handle — dedup (non-terminal existing record)
     // -------------------------------------------------------------------------
@@ -680,6 +699,7 @@ class PreAuthHandlerTest {
         pumpNumber = 1,
         nozzleNumber = 1,
         amountMinorUnits = 50_00L, // 50.00 ZMW in minor units
+        unitPrice = 11_00L,
         currencyCode = "ZMW",
         odooOrderId = "order-1",
         customerTaxId = null,

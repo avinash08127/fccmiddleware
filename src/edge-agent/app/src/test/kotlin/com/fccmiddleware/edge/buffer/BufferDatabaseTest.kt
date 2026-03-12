@@ -204,6 +204,21 @@ class BufferDatabaseTest {
     }
 
     @Test
+    fun `PreAuthDao getUnsynced returns legacy missing-unit-price row only before first failure`() = runBlocking {
+        val dao = db.preAuthDao()
+        val legacy = buildPreAuthRecord(odooOrderId = "LEGACY", unitPrice = null)
+        dao.insert(legacy)
+
+        val firstFetch = dao.getUnsynced(limit = 10)
+        assertEquals(listOf("LEGACY"), firstFetch.map { it.odooOrderId })
+
+        dao.recordCloudSyncFailure(legacy.id, Instant.now().toString())
+
+        val secondFetch = dao.getUnsynced(limit = 10)
+        assertTrue(secondFetch.none { it.odooOrderId == "LEGACY" })
+    }
+
+    @Test
     fun `PreAuthDao getExpiring returns records in active states past expiry`() = runBlocking {
         val dao = db.preAuthDao()
         val pastExpiry = Instant.parse("2024-01-14T12:00:00Z").toString()
@@ -382,6 +397,7 @@ class BufferDatabaseTest {
         id: String = UUID.randomUUID().toString(),
         odooOrderId: String = UUID.randomUUID().toString(),
         siteCode: String = "SITE_A",
+        unitPrice: Long? = 1_500L,
         status: String = "PENDING",
         isCloudSynced: Int = 0,
         expiresAt: String = Instant.now().plusSeconds(300).toString(),
@@ -395,6 +411,7 @@ class BufferDatabaseTest {
         productCode = "ULP95",
         currencyCode = "MWK",
         requestedAmountMinorUnits = 50_000L,
+        unitPrice = unitPrice,
         authorizedAmountMinorUnits = null,
         status = status,
         fccCorrelationId = null,

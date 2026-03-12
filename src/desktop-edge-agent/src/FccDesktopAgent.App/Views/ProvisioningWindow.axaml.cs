@@ -472,6 +472,26 @@ public sealed partial class ProvisioningWindow : Window
 
         try
         {
+            // For the manual config path, persist registration state now.
+            // The code-based path already saved state inside DeviceRegistrationService.RegisterAsync().
+            if (!_isCodeMethod && _registrationManager is not null)
+            {
+                await _registrationManager.SaveStateAsync(new RegistrationState
+                {
+                    IsRegistered = true,
+                    DeviceId = _resolvedDeviceId,
+                    SiteCode = _resolvedSiteCode,
+                    CloudBaseUrl = _resolvedCloudUrl,
+                    RegisteredAt = DateTimeOffset.UtcNow,
+                    DeviceModel = Environment.MachineName,
+                    OsVersion = Environment.OSVersion.VersionString,
+                    AgentVersion = typeof(ProvisioningWindow).Assembly.GetName().Version?.ToString() ?? "1.0.0",
+                });
+                _logger?.LogInformation(
+                    "Manual config registration state persisted (deviceId={DeviceId}, site={SiteCode})",
+                    _resolvedDeviceId, _resolvedSiteCode);
+            }
+
             // Start the host if not already running
             if (AgentAppContext.WebApp is { } webApp)
             {

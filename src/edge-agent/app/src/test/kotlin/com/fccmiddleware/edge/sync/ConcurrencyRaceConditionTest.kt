@@ -239,6 +239,7 @@ class ConcurrencyRaceConditionTest {
             siteCode = "SITE-001",
             pumpNumber = 1,
             amountMinorUnits = 10000,
+            unitPrice = 1_500L,
             currencyCode = "ZAR",
             nozzleNumber = 1,
             odooOrderId = "ORD-123",

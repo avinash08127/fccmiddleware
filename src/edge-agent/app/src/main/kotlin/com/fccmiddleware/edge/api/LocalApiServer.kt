@@ -319,6 +319,7 @@ private fun LanApiKeyAuthPlugin(storedKey: String): ApplicationPlugin<Unit> =
                             timestamp = Instant.now().toString(),
                         )
                     )
+                    return@onCall
                 }
             }
         }
@@ -347,6 +348,7 @@ private val LanApiBlockPlugin: ApplicationPlugin<Unit> =
                         timestamp = Instant.now().toString(),
                     )
                 )
+                return@onCall
             }
         }
     }
@@ -423,6 +425,7 @@ private fun RateLimitPlugin(
                     timestamp = Instant.now().toString(),
                 )
             )
+            return@onCall
         }
     }
 }

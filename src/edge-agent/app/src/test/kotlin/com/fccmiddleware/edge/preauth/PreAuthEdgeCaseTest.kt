@@ -369,6 +369,7 @@ class PreAuthEdgeCaseTest {
             siteCode = "SITE-A",
             pumpNumber = 1,
             amountMinorUnits = 10_000L,
+            unitPrice = 1_100L,
             currencyCode = "ZAR",
             nozzleNumber = 1,
             odooOrderId = null,
@@ -378,6 +379,14 @@ class PreAuthEdgeCaseTest {
 
         assertEquals(PreAuthResultStatus.ERROR, result.status)
         assertEquals("odooOrderId is required", result.message)
+    }
+
+    @Test
+    fun `missing unit price returns error`() = runTest {
+        val result = handler.handle(baseCommand().copy(unitPrice = 0L))
+
+        assertEquals(PreAuthResultStatus.ERROR, result.status)
+        assertEquals("INVALID_UNIT_PRICE", result.message)
     }
 
     // -------------------------------------------------------------------------
@@ -412,6 +421,7 @@ class PreAuthEdgeCaseTest {
             siteCode = "SITE-A",
             pumpNumber = 1,
             amountMinorUnits = 10_000L,
+            unitPrice = 1_100L,
             currencyCode = "ZAR",
             nozzleNumber = 1,
             odooOrderId = odooOrderId,

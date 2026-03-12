@@ -115,6 +115,9 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
 
         if (!string.IsNullOrEmpty(state.CloudBaseUrl))
             options.CloudBaseUrl = state.CloudBaseUrl;
+
+        if (!string.IsNullOrEmpty(state.LegalEntityId))
+            options.LegalEntityId = state.LegalEntityId;
     }
 
     // ── Private ──────────────────────────────────────────────────────────────

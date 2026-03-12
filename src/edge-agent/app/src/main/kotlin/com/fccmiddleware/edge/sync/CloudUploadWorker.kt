@@ -71,13 +71,7 @@ class CloudUploadWorker(
     companion object {
         private const val TAG = "CloudUploadWorker"
         private const val DECOMMISSIONED_ERROR_CODE = "DEVICE_DECOMMISSIONED"
-        private const val SYNCED_TO_ODOO_STATUS = "SYNCED_TO_ODOO"
-        private const val STATUS_NOT_FOUND = "NOT_FOUND"
-        private const val STATUS_STALE_PENDING = "STALE_PENDING"
-        private const val STATUS_DUPLICATE = "DUPLICATE"
-        private const val STATUS_ARCHIVED = "ARCHIVED"
-        private const val STATUS_PENDING = "PENDING"
-        private const val STATUS_SYNCED = "SYNCED"
+        private const val DEFAULT_STATUS_POLL_SINCE = "1970-01-01T00:00:00Z"
 
         /** Cloud API rejects batches larger than this. */
         private const val CLOUD_MAX_BATCH_SIZE = 500
@@ -187,9 +181,17 @@ class CloudUploadWorker(
      *
      * ## Algorithm
      * 1. Query local buffer for UPLOADED records' fccTransactionIds (max 500).
-     * 2. Call `GET /api/v1/transactions/synced-status?ids=...` with device JWT.
-     * 3. For each entry with status SYNCED_TO_ODOO: call `bufferManager.markSyncedToOdoo()`.
-     * 4. Update `SyncState.lastStatusPollAt`.
+     * 2. Load the last successful status-poll watermark from `SyncState.lastStatusPollAt`
+     *    (or the Unix epoch on first poll).
+     * 3. Call `GET /api/v1/transactions/synced-status?since=...` with device JWT.
+     * 4. Intersect the returned FCC IDs with the current local UPLOADED set, then call
+     *    `bufferManager.markSyncedToOdoo()` for the matches.
+     * 5. Persist the poll-start watermark back to `SyncState.lastStatusPollAt`.
+     *
+     * The cloud endpoint only returns IDs that have newly reached `SYNCED_TO_ODOO` since
+     * the supplied timestamp; it does not expose per-record intermediate or failure states.
+     * The worker therefore uses an overlap window keyed by the previous poll start time so
+     * late acknowledgements are not missed if they land during the request.
      *
      * On HTTP 401: attempt one token refresh and retry.
      * On 403 DEVICE_DECOMMISSIONED: stop all sync permanently.
@@ -236,10 +238,20 @@ class CloudUploadWorker(
             return
         }
 
-        Log.i(TAG, "Polling synced-to-Odoo status for ${uploadedIds.size} UPLOADED records")
+        val since = getStatusPollSince()
+        val pollStartedAt = Instant.now().toString()
+        Log.i(
+            TAG,
+            "Polling synced-to-Odoo status for ${uploadedIds.size} UPLOADED records since $since",
+        )
 
-        val result = doStatusPoll(client, provider, uploadedIds, token)
-        handleStatusPollResult(bm, result)
+        val result = doStatusPoll(client, provider, since, token)
+        handleStatusPollResult(
+            bm = bm,
+            uploadedIds = uploadedIds,
+            pollStartedAt = pollStartedAt,
+            result = result,
+        )
     }
 
     /**
@@ -349,10 +361,10 @@ class CloudUploadWorker(
     private suspend fun doStatusPoll(
         client: CloudApiClient,
         provider: DeviceTokenProvider,
-        ids: List<String>,
+        since: String,
         token: String,
     ): StatusPollAttemptResult {
-        return when (val result = client.getSyncedStatus(ids, token)) {
+        return when (val result = client.getSyncedStatus(since, token)) {
             is CloudStatusPollResult.Success -> StatusPollAttemptResult.Success(result.response)
 
             is CloudStatusPollResult.Unauthorized -> {
@@ -370,7 +382,7 @@ class CloudUploadWorker(
                     return StatusPollAttemptResult.TransportFailure("CRITICAL: token store inconsistency — refresh succeeded but no token available")
                 }
                 Log.i(TAG, "Token refreshed; retrying status poll")
-                when (val retryResult = client.getSyncedStatus(ids, freshToken)) {
+                when (val retryResult = client.getSyncedStatus(since, freshToken)) {
                     is CloudStatusPollResult.Success -> StatusPollAttemptResult.Success(retryResult.response)
                     is CloudStatusPollResult.Unauthorized ->
                         StatusPollAttemptResult.TransportFailure("401 Unauthorized after token refresh retry")
@@ -405,112 +417,39 @@ class CloudUploadWorker(
      */
     private suspend fun handleStatusPollResult(
         bm: TransactionBufferManager,
+        uploadedIds: List<String>,
+        pollStartedAt: String,
         result: StatusPollAttemptResult,
     ) {
         when (result) {
             is StatusPollAttemptResult.Success -> {
-                val syncedIds = mutableListOf<String>()
-                val notFoundIds = mutableListOf<String>()
-                var stalePendingCount = 0
-                var duplicateCount = 0
-                var intermediateCount = 0
-                var otherCount = 0
-
-                for (entry in result.response.statuses) {
-                    when (entry.status) {
-                        SYNCED_TO_ODOO_STATUS -> syncedIds += entry.id
-
-                        STATUS_DUPLICATE -> {
-                            // Cloud confirms it already has this record — progress to SYNCED_TO_ODOO
-                            // since the data is confirmed to exist in cloud (dedup = cloud already processed it).
-                            syncedIds += entry.id
-                            duplicateCount++
-                            Log.i(
-                                TAG,
-                                "Status poll: fccTransactionId='${entry.id}' returned DUPLICATE — " +
-                                    "cloud dedup confirmed, progressing to SYNCED_TO_ODOO.",
-                            )
-                        }
-
-                        STATUS_ARCHIVED -> {
-                            // Cloud has completed the full lifecycle for this record — progress locally
-                            // to SYNCED_TO_ODOO so the edge can archive/delete it.
-                            syncedIds += entry.id
-                            Log.i(
-                                TAG,
-                                "Status poll: fccTransactionId='${entry.id}' returned ARCHIVED — " +
-                                    "cloud lifecycle complete, progressing to SYNCED_TO_ODOO.",
-                            )
-                        }
-
-                        STATUS_NOT_FOUND -> {
-                            // Cloud has no record — revert to PENDING for re-upload.
-                            notFoundIds += entry.id
-                            Log.w(
-                                TAG,
-                                "Status poll: fccTransactionId='${entry.id}' returned NOT_FOUND — " +
-                                    "reverting to PENDING for re-upload.",
-                            )
-                        }
-
-                        STATUS_STALE_PENDING -> {
-                            stalePendingCount++
-                            Log.w(
-                                TAG,
-                                "Status poll: fccTransactionId='${entry.id}' returned STALE_PENDING — " +
-                                    "record is stuck in cloud processing.",
-                            )
-                        }
-
-                        STATUS_PENDING, STATUS_SYNCED -> {
-                            // Intermediate cloud states — record is being processed.
-                            // Leave as UPLOADED locally; will transition on a future poll.
-                            intermediateCount++
-                            Log.d(
-                                TAG,
-                                "Status poll: fccTransactionId='${entry.id}' in intermediate " +
-                                    "cloud state '${entry.status}' — awaiting progression.",
-                            )
-                        }
-
-                        else -> {
-                            otherCount++
-                            Log.w(
-                                TAG,
-                                "Status poll: fccTransactionId='${entry.id}' returned " +
-                                    "unrecognised status '${entry.status}'.",
-                            )
-                        }
-                    }
-                }
+                val uploadedSet = uploadedIds.toHashSet()
+                val syncedIds = result.response.fccTransactionIds
+                    .asSequence()
+                    .filter { it in uploadedSet }
+                    .distinct()
+                    .toList()
+                val unmatchedCloudIds = result.response.fccTransactionIds.size - syncedIds.size
 
                 if (syncedIds.isNotEmpty()) {
                     bm.markSyncedToOdoo(syncedIds)
-                    Log.i(TAG, "Marked ${syncedIds.size} records SYNCED_TO_ODOO (including ${duplicateCount} DUPLICATE)")
+                    Log.i(TAG, "Marked ${syncedIds.size} records SYNCED_TO_ODOO")
                 }
 
-                if (notFoundIds.isNotEmpty()) {
-                    bm.revertToPending(notFoundIds)
-                    Log.w(TAG, "Reverted ${notFoundIds.size} NOT_FOUND records to PENDING for re-upload")
-                }
-
-                if (notFoundIds.isNotEmpty() || stalePendingCount > 0) {
-                    Log.w(
+                if (unmatchedCloudIds > 0) {
+                    Log.d(
                         TAG,
-                        "Status poll anomalies: notFound=${notFoundIds.size} stalePending=$stalePendingCount " +
-                            "duplicate=$duplicateCount intermediate=$intermediateCount other=$otherCount",
+                        "Status poll returned $unmatchedCloudIds synced FCC ID(s) that are no longer " +
+                            "locally UPLOADED; ignoring them.",
                     )
-                    telemetryReporter?.cloudUploadErrors?.addAndGet(notFoundIds.size + stalePendingCount)
                 }
 
-                if (syncedIds.isEmpty() && notFoundIds.isEmpty() && stalePendingCount == 0 &&
-                    intermediateCount == 0 && otherCount == 0
-                ) {
+                if (syncedIds.isEmpty()) {
                     Log.d(TAG, "Status poll returned no actionable entries")
                 }
 
                 // M-03: Write SyncState before resetting circuit breaker (same rationale as upload)
-                val dbWriteSucceeded = updateLastStatusPollAt()
+                val dbWriteSucceeded = updateLastStatusPollAt(pollStartedAt)
                 if (dbWriteSucceeded) {
                     statusPollCircuitBreaker.recordSuccess()
                 } else {
@@ -550,19 +489,18 @@ class CloudUploadWorker(
     }
 
     /** Update [SyncState.lastStatusPollAt] after a successful status poll. Returns true on success. */
-    private suspend fun updateLastStatusPollAt(): Boolean {
+    private suspend fun updateLastStatusPollAt(pollStartedAt: String): Boolean {
         val dao = syncStateDao ?: return false
-        val now = Instant.now().toString()
         return try {
             val current = dao.get()
-            val updated = current?.copy(lastStatusPollAt = now, updatedAt = now)
+            val updated = current?.copy(lastStatusPollAt = pollStartedAt, updatedAt = pollStartedAt)
                 ?: SyncState(
                     lastFccCursor = null,
                     lastUploadAt = null,
-                    lastStatusPollAt = now,
+                    lastStatusPollAt = pollStartedAt,
                     lastConfigPullAt = null,
                     lastConfigVersion = null,
-                    updatedAt = now,
+                    updatedAt = pollStartedAt,
                 )
             dao.upsert(updated)
             true
@@ -571,6 +509,9 @@ class CloudUploadWorker(
             false
         }
     }
+
+    private suspend fun getStatusPollSince(): String =
+        syncStateDao?.get()?.lastStatusPollAt ?: DEFAULT_STATUS_POLL_SINCE
 
     // -------------------------------------------------------------------------
     // Upload helpers
@@ -763,9 +704,9 @@ class CloudUploadWorker(
                 UploadOutcome.DUPLICATE.name -> uploadedIds += local.id
 
                 UploadOutcome.REJECTED.name -> {
-                    val errorMsg = result.error
-                        ?.let { "${it.errorCode}: ${it.message}" }
-                        ?: "REJECTED (no error detail)"
+                    val errorMsg = listOfNotNull(result.errorCode, result.errorMessage)
+                        .joinToString(": ")
+                        .ifBlank { "REJECTED (no error detail)" }
                     rejectedPairs += local to errorMsg
                 }
 

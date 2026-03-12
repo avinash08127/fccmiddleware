@@ -215,6 +215,17 @@ public sealed class ConfigManager
 
     internal static void ApplyHotReloadFields(AgentConfiguration target, SiteConfig source)
     {
+        // ── Identity fields (from cloud config, not just registration) ──
+        if (!string.IsNullOrWhiteSpace(source.Identity?.DeviceId))
+            target.DeviceId = source.Identity.DeviceId;
+
+        if (!string.IsNullOrWhiteSpace(source.Identity?.SiteCode))
+            target.SiteId = source.Identity.SiteCode;
+
+        if (!string.IsNullOrWhiteSpace(source.Identity?.LegalEntityId))
+            target.LegalEntityId = source.Identity.LegalEntityId;
+
+        // ── FCC runtime fields ──
         if (DesktopFccRuntimeConfiguration.TryParseVendor(source.Fcc?.Vendor, out var vendor))
             target.FccVendor = vendor;
 
@@ -231,7 +242,11 @@ public sealed class ConfigManager
         if (source.Fcc?.HeartbeatIntervalSeconds > 0)
             target.ConnectivityProbeIntervalSeconds = source.Fcc.HeartbeatIntervalSeconds;
 
-        // Sync intervals
+        // Petronite webhook listener port
+        if (source.Fcc?.WebhookListenerPort is > 0)
+            target.PetroniteWebhookListenerPort = source.Fcc.WebhookListenerPort.Value;
+
+        // ── Sync intervals ──
         if (source.Sync is not null)
         {
             if (source.Sync.UploadIntervalSeconds > 0)
@@ -240,9 +255,11 @@ public sealed class ConfigManager
                 target.UploadBatchSize = source.Sync.UploadBatchSize;
             if (source.Sync.ConfigPollIntervalSeconds > 0)
                 target.ConfigPollIntervalSeconds = source.Sync.ConfigPollIntervalSeconds;
+            if (!string.IsNullOrWhiteSpace(source.Sync.CloudBaseUrl))
+                target.CloudBaseUrl = source.Sync.CloudBaseUrl;
         }
 
-        // Buffer
+        // ── Buffer ──
         if (source.Buffer is not null)
         {
             if (source.Buffer.RetentionDays > 0)
@@ -251,7 +268,14 @@ public sealed class ConfigManager
                 target.CleanupIntervalHours = source.Buffer.CleanupIntervalHours;
         }
 
-        // Telemetry
+        // ── Local API ──
+        if (source.LocalApi is not null)
+        {
+            if (source.LocalApi.LocalhostPort > 0)
+                target.LocalApiPort = source.LocalApi.LocalhostPort;
+        }
+
+        // ── Telemetry ──
         if (source.Telemetry is not null)
         {
             if (source.Telemetry.TelemetryIntervalSeconds > 0)

@@ -15,6 +15,9 @@ public sealed class AgentConfiguration
     /// <summary>Site identifier this agent is registered to.</summary>
     public string SiteId { get; set; } = string.Empty;
 
+    /// <summary>Legal entity ID from registration or site config.</summary>
+    public string LegalEntityId { get; set; } = string.Empty;
+
     /// <summary>FCC base URL over station LAN (e.g. http://192.168.1.100:8080).</summary>
     public string FccBaseUrl { get; set; } = string.Empty;
 

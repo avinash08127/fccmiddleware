@@ -22,6 +22,7 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
     internal const string RefreshTokenKey = "device:refresh_token";
     private const string RefreshPath = "/api/v1/agent/token/refresh";
 
+    private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly ICredentialStore _store;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IOptions<AgentConfiguration> _config;
@@ -52,6 +53,22 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
     }
 
     public async Task<string?> RefreshTokenAsync(CancellationToken ct = default)
+    {
+        // BUG-009: Serialize refresh attempts so that concurrent 401 handlers
+        // (ConfigPollWorker, CloudUploadWorker) do not race to issue duplicate
+        // refresh requests — matching the Android agent's Mutex pattern.
+        await _refreshLock.WaitAsync(ct);
+        try
+        {
+            return await RefreshTokenCoreAsync(ct);
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
+    }
+
+    private async Task<string?> RefreshTokenCoreAsync(CancellationToken ct)
     {
         // Per spec: send refresh token in JSON body, not as Bearer header
         var refreshToken = await _store.GetSecretAsync(RefreshTokenKey, ct);

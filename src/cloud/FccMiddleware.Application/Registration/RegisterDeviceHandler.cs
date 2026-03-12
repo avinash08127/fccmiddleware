@@ -63,6 +63,11 @@ public sealed class RegisterDeviceHandler
             return Result<RegisterDeviceResult>.Failure("SITE_NOT_FOUND",
                 $"Site '{request.SiteCode}' not found.");
 
+        // BUG-016: Cross-validate LegalEntityId between bootstrap token and site
+        if (site.LegalEntityId != bootstrapToken.LegalEntityId)
+            return Result<RegisterDeviceResult>.Failure("SITE_MISMATCH",
+                "Bootstrap token LegalEntityId does not match the site's LegalEntityId.");
+
         var existingConfig = await _agentConfigDb.GetFccConfigWithSiteDataAsync(
             request.SiteCode,
             bootstrapToken.LegalEntityId,
@@ -141,7 +146,20 @@ public sealed class RegisterDeviceHandler
         bootstrapToken.UsedAt = now;
         bootstrapToken.UsedByDeviceId = deviceId;
 
-        await _db.SaveChangesAsync(cancellationToken);
+        // BUG-007: TrySaveChangesAsync returns false when a concurrency conflict
+        // is detected (xmin on BootstrapToken changed), preventing two concurrent
+        // registrations from consuming the same single-use token.
+        var saved = await _db.TrySaveChangesAsync(cancellationToken);
+        if (!saved)
+        {
+            _logger.LogWarning(
+                "Concurrent registration race detected for bootstrap token (site {SiteCode}). " +
+                "Another request consumed the token first.",
+                request.SiteCode);
+
+            return Result<RegisterDeviceResult>.Failure("BOOTSTRAP_TOKEN_ALREADY_USED",
+                "Bootstrap token has already been used.");
+        }
 
         _logger.LogInformation("Device {DeviceId} registered for site {SiteCode}",
             deviceId, request.SiteCode);

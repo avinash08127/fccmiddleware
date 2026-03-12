@@ -18,7 +18,7 @@ internal sealed class DeviceRefreshTokenConfiguration : IEntityTypeConfiguration
         builder.Property(e => e.DeviceId).HasColumnName("device_id").IsRequired();
         builder.Property(e => e.TokenHash).HasColumnName("token_hash").HasMaxLength(128).IsRequired();
         builder.Property(e => e.ExpiresAt).HasColumnName("expires_at").IsRequired();
-        builder.Property(e => e.RevokedAt).HasColumnName("revoked_at");
+        builder.Property(e => e.RevokedAt).HasColumnName("revoked_at").IsConcurrencyToken();
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();
 
         builder.HasOne(e => e.Device)

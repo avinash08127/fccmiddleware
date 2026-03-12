@@ -308,6 +308,7 @@ class SecurityHardeningTest {
                 siteCode = "ZM-LUSAKA-01",
                 pumpNumber = 3,
                 amountMinorUnits = 50000,
+                unitPrice = 1_100L,
                 currencyCode = "ZAR",
                 customerTaxId = "1234567890",
             )
@@ -599,6 +600,7 @@ class SecurityHardeningTest {
                 siteCode = "ZM-LUSAKA-01",
                 pumpNumber = 3,
                 amountMinorUnits = 50000,
+                unitPrice = 1_100L,
                 currencyCode = "ZAR",
                 customerTaxId = "9876543210",
             )
