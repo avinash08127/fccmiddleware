@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace FccMiddleware.Contracts.Portal;
 
-public sealed record DeadLetterDto
+public record DeadLetterDto
 {
     public required Guid Id { get; init; }
     public required string Type { get; init; }
@@ -32,7 +32,7 @@ public sealed record RetryHistoryEntryDto
     public string? ErrorMessage { get; init; }
 }
 
-public sealed record DeadLetterDetailDto : DeadLetterDto
+public record DeadLetterDetailDto : DeadLetterDto
 {
     public JsonElement? RawPayload { get; init; }
     public required IReadOnlyList<RetryHistoryEntryDto> RetryHistory { get; init; }

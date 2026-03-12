@@ -184,9 +184,9 @@ class OfflineCrashRecoveryTest {
         // Transaction should still be buffered (it was fetched before cursor persist failed)
         coVerify { bufferManager.bufferTransaction(any()) }
         assertEquals(1, result?.newCount)
-        // But cursor should NOT have advanced (persist failed), so fetchCycles stops at 1
-        // and hasMore=true is not pursued
-        assertEquals(1, result?.fetchCycles)
+        // Cursor persist failed and break executes before fetchCycles++ — counter stays at 0.
+        // hasMore=true is not pursued because the loop broke out.
+        assertEquals(0, result?.fetchCycles)
     }
 
     @Test

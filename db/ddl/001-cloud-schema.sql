@@ -39,6 +39,10 @@ CREATE TABLE sites (
     operator_name           varchar(200),
     operator_tax_payer_id   varchar(100),
     company_tax_payer_id    varchar(100)    NOT NULL,
+    fiscalization_mode      varchar(30)     NOT NULL DEFAULT 'NONE',
+    tax_authority_endpoint  varchar(500),
+    require_customer_tax_id boolean         NOT NULL DEFAULT false,
+    fiscal_receipt_required boolean         NOT NULL DEFAULT false,
     odoo_site_id            varchar(100),
     is_active               boolean         NOT NULL DEFAULT true,
     deactivated_at          timestamptz,
@@ -48,7 +52,8 @@ CREATE TABLE sites (
     CONSTRAINT pk_sites PRIMARY KEY (id),
     CONSTRAINT uq_sites_site_code UNIQUE (site_code),
     CONSTRAINT fk_sites_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
-    CONSTRAINT chk_sites_operating_model CHECK (operating_model IN ('COCO','CODO','DODO','DOCO'))
+    CONSTRAINT chk_sites_operating_model CHECK (operating_model IN ('COCO','CODO','DODO','DOCO')),
+    CONSTRAINT chk_sites_fiscalization_mode CHECK (fiscalization_mode IN ('FCC_DIRECT','EXTERNAL_INTEGRATION','NONE'))
 );
 
 CREATE INDEX ix_sites_legal_entity ON sites (legal_entity_id);
@@ -262,6 +267,7 @@ CREATE TABLE fcc_configs (
     ingestion_mode              varchar(20)     NOT NULL DEFAULT 'CLOUD_DIRECT',
     pull_interval_seconds       int,
     heartbeat_interval_seconds  int             NOT NULL DEFAULT 60,
+    heartbeat_timeout_seconds   int             NOT NULL DEFAULT 180,
     is_active                   boolean         NOT NULL DEFAULT true,
     config_version              int             NOT NULL DEFAULT 1,
     created_at                  timestamptz     NOT NULL DEFAULT now(),
@@ -296,6 +302,86 @@ CREATE TABLE agent_registrations (
 );
 
 CREATE INDEX ix_agent_site ON agent_registrations (site_id, is_active);
+
+CREATE TABLE agent_telemetry_snapshots (
+    device_id                        uuid            NOT NULL,
+    legal_entity_id                  uuid            NOT NULL,
+    site_code                        varchar(50)     NOT NULL,
+    reported_at_utc                  timestamptz     NOT NULL,
+    connectivity_state               varchar(30)     NOT NULL,
+    payload_json                     jsonb           NOT NULL,
+    battery_percent                  int             NOT NULL,
+    is_charging                      boolean         NOT NULL,
+    pending_upload_count             int             NOT NULL,
+    sync_lag_seconds                 int,
+    last_heartbeat_at_utc            timestamptz,
+    heartbeat_age_seconds            int,
+    fcc_vendor                       varchar(30)     NOT NULL,
+    fcc_host                         varchar(200)    NOT NULL,
+    fcc_port                         int             NOT NULL,
+    consecutive_heartbeat_failures   int             NOT NULL,
+    created_at                       timestamptz     NOT NULL DEFAULT now(),
+    updated_at                       timestamptz     NOT NULL DEFAULT now(),
+    CONSTRAINT pk_agent_telemetry_snapshots PRIMARY KEY (device_id)
+);
+
+CREATE INDEX ix_agent_telemetry_legal_entity_site
+    ON agent_telemetry_snapshots (legal_entity_id, site_code);
+
+CREATE TABLE portal_settings (
+    id                          uuid            NOT NULL,
+    global_defaults_json        jsonb           NOT NULL,
+    alert_configuration_json    jsonb           NOT NULL,
+    created_at                  timestamptz     NOT NULL DEFAULT now(),
+    updated_at                  timestamptz     NOT NULL DEFAULT now(),
+    updated_by                  varchar(200),
+    CONSTRAINT pk_portal_settings PRIMARY KEY (id)
+);
+
+CREATE TABLE legal_entity_settings_overrides (
+    id                                  uuid            NOT NULL DEFAULT gen_random_uuid(),
+    legal_entity_id                     uuid            NOT NULL,
+    amount_tolerance_percent            numeric(5,2),
+    amount_tolerance_absolute_minor_units bigint,
+    time_window_minutes                 int,
+    stale_pending_threshold_days        int,
+    created_at                          timestamptz     NOT NULL DEFAULT now(),
+    updated_at                          timestamptz     NOT NULL DEFAULT now(),
+    updated_by                          varchar(200),
+    CONSTRAINT pk_legal_entity_settings_overrides PRIMARY KEY (id),
+    CONSTRAINT fk_legal_entity_settings_overrides_legal_entity
+        FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
+    CONSTRAINT uq_legal_entity_settings_overrides_legal_entity_id UNIQUE (legal_entity_id)
+);
+
+CREATE TABLE dead_letter_items (
+    id                  uuid            NOT NULL DEFAULT gen_random_uuid(),
+    legal_entity_id     uuid            NOT NULL,
+    site_code           varchar(50)     NOT NULL,
+    type                varchar(20)     NOT NULL,
+    fcc_transaction_id  varchar(200),
+    raw_payload_ref     varchar(500),
+    raw_payload_json    jsonb,
+    failure_reason      varchar(40)     NOT NULL,
+    error_code          varchar(100)    NOT NULL,
+    error_message       varchar(4000)   NOT NULL,
+    status              varchar(20)     NOT NULL,
+    retry_count         int             NOT NULL DEFAULT 0,
+    last_retry_at       timestamptz,
+    retry_history_json  jsonb,
+    discard_reason      varchar(2000),
+    discarded_by        varchar(200),
+    discarded_at        timestamptz,
+    created_at          timestamptz     NOT NULL DEFAULT now(),
+    updated_at          timestamptz     NOT NULL DEFAULT now(),
+    CONSTRAINT pk_dead_letter_items PRIMARY KEY (id),
+    CONSTRAINT chk_dead_letter_type CHECK (type IN ('TRANSACTION','PRE_AUTH','TELEMETRY','UNKNOWN')),
+    CONSTRAINT chk_dead_letter_reason CHECK (failure_reason IN ('VALIDATION_FAILURE','DEDUPLICATION_ERROR','ADAPTER_ERROR','PERSISTENCE_ERROR','UNKNOWN')),
+    CONSTRAINT chk_dead_letter_status CHECK (status IN ('PENDING','RETRYING','RESOLVED','DISCARDED'))
+);
+
+CREATE INDEX ix_dead_letter_items_legal_entity_status_created_at
+    ON dead_letter_items (legal_entity_id, status, created_at);
 
 -- =============================================================================
 -- AUDIT EVENTS (PARTITIONED, APPEND-ONLY)

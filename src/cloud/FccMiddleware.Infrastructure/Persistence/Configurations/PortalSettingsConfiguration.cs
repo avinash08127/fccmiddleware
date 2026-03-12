@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace FccMiddleware.Infrastructure.Persistence.Configurations;
 
-internal sealed class PortalSettingsConfiguration : IEntityTypeConfiguration<PortalSettings>
+public sealed class PortalSettingsConfiguration : IEntityTypeConfiguration<PortalSettings>
 {
     public static readonly Guid SingletonId = new("20000000-0000-0000-0000-000000000001");
     private static readonly DateTimeOffset SeededAt = new(2025, 1, 1, 0, 0, 0, TimeSpan.Zero);

@@ -1,6 +1,6 @@
 namespace FccMiddleware.Contracts.Portal;
 
-public sealed record SiteDto
+public record SiteDto
 {
     public required Guid Id { get; init; }
     public required string SiteCode { get; init; }
@@ -15,7 +15,7 @@ public sealed record SiteDto
     public DateTimeOffset? UpdatedAt { get; init; }
 }
 
-public sealed record SiteDetailDto : SiteDto
+public record SiteDetailDto : SiteDto
 {
     public string? OperatorName { get; init; }
     public FccConfigurationDto? Fcc { get; init; }

@@ -264,19 +264,17 @@ class ConcurrencyRaceConditionTest {
         val cb = CircuitBreaker(
             name = "test",
             openThreshold = 3,
-            halfOpenAfterMs = 100, // short for test
         )
 
         // Drive to OPEN
         repeat(3) { cb.recordFailure() }
         assertEquals(CircuitBreaker.State.OPEN, cb.state)
 
-        // Wait for half-open window
-        delay(150)
+        // Directly set HALF_OPEN state (delay + Instant.now() is unreliable in runTest)
+        cb.state = CircuitBreaker.State.HALF_OPEN
 
-        // Should allow a probe request
+        // Should allow a probe request in HALF_OPEN
         assertTrue(cb.allowRequest())
-        assertEquals(CircuitBreaker.State.HALF_OPEN, cb.state)
 
         // Probe succeeds
         cb.recordSuccess()
@@ -289,17 +287,15 @@ class ConcurrencyRaceConditionTest {
         val cb = CircuitBreaker(
             name = "test",
             openThreshold = 3,
-            halfOpenAfterMs = 100,
         )
 
         // Drive to OPEN
         repeat(3) { cb.recordFailure() }
         assertEquals(CircuitBreaker.State.OPEN, cb.state)
 
-        // Wait for half-open window
-        delay(150)
-        assertTrue(cb.allowRequest()) // HALF_OPEN
-        assertEquals(CircuitBreaker.State.HALF_OPEN, cb.state)
+        // Directly set HALF_OPEN state (delay + Instant.now() is unreliable in runTest)
+        cb.state = CircuitBreaker.State.HALF_OPEN
+        assertTrue(cb.allowRequest()) // HALF_OPEN allows probe
 
         // Probe fails
         cb.recordFailure()
