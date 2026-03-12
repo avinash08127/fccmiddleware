@@ -26,59 +26,112 @@ public sealed partial class App : Application
             // Prevent auto-exit when the last window is closed — tray keeps the app alive
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
-            var mainWindow = new MainWindow();
-            desktop.MainWindow = mainWindow;
-
-            // Wire tray icon
-            var services = AgentAppContext.ServiceProvider;
-            var logger = services?.GetService<ILogger<TrayIconManager>>()
-                ?? LoggerFactory.Create(b => b.AddConsole()).CreateLogger<TrayIconManager>();
-            var connectivity = services?.GetService<IConnectivityMonitor>();
-
-            _trayIconManager = new TrayIconManager(logger, connectivity);
-            _trayIconManager.AttachToApplication(this);
-
-            _trayIconManager.ShowDashboardRequested += (_, _) =>
+            switch (AgentAppContext.Mode)
             {
-                mainWindow.Show();
-                mainWindow.Activate();
-            };
+                case StartupMode.Decommissioned:
+                    InitializeDecommissionedMode(desktop);
+                    break;
 
-            _trayIconManager.CheckForUpdatesRequested += async (_, _) =>
-            {
-                var updateService = services?.GetService<IUpdateService>();
-                if (updateService is null)
-                {
-                    logger.LogWarning("Update service not available");
-                    return;
-                }
+                case StartupMode.Provisioning:
+                    InitializeProvisioningMode(desktop);
+                    break;
 
-                logger.LogInformation("Manual update check triggered from tray");
-                var result = await updateService.CheckForUpdatesAsync();
-                if (result.UpdateAvailable && result.Downloaded)
-                    logger.LogInformation("Update {Version} downloaded — restart to apply", result.AvailableVersion);
-                else if (result.ErrorMessage is not null)
-                    logger.LogInformation("Update check: {Message}", result.ErrorMessage);
-                else
-                    logger.LogInformation("No updates available");
-            };
-
-            _trayIconManager.RestartAgentRequested += (_, _) =>
-            {
-                // DEA-2.x: trigger host restart via IHostApplicationLifetime
-                logger.LogWarning("Agent restart requested via tray — not yet implemented (DEA-2.x)");
-            };
-
-            _trayIconManager.ExitRequested += (_, _) =>
-            {
-                mainWindow.ForceClose();
-                desktop.Shutdown();
-            };
+                case StartupMode.Normal:
+                default:
+                    InitializeNormalMode(desktop);
+                    break;
+            }
 
             // Handle clean-up when desktop lifetime exits
             desktop.Exit += (_, _) => _trayIconManager?.Dispose();
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private void InitializeDecommissionedMode(IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        // Dead-end window — no tray icon, no background services
+        var window = new DecommissionedWindow();
+        desktop.MainWindow = window;
+        // Allow exit when this window closes
+        desktop.ShutdownMode = ShutdownMode.OnLastWindowClose;
+    }
+
+    private void InitializeProvisioningMode(IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        var provisioningWindow = new ProvisioningWindow();
+        desktop.MainWindow = provisioningWindow;
+
+        provisioningWindow.RegistrationCompleted += (_, _) =>
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                // Transition to normal operational mode
+                var mainWindow = new MainWindow();
+                desktop.MainWindow = mainWindow;
+                mainWindow.Show();
+
+                // Set up tray icon
+                SetupTrayIcon(desktop, mainWindow);
+
+                // Close the provisioning window
+                provisioningWindow.Close();
+            });
+        };
+    }
+
+    private void InitializeNormalMode(IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        var mainWindow = new MainWindow();
+        desktop.MainWindow = mainWindow;
+        SetupTrayIcon(desktop, mainWindow);
+    }
+
+    private void SetupTrayIcon(IClassicDesktopStyleApplicationLifetime desktop, MainWindow mainWindow)
+    {
+        var services = AgentAppContext.ServiceProvider;
+        var logger = services?.GetService<ILogger<TrayIconManager>>()
+            ?? LoggerFactory.Create(b => b.AddConsole()).CreateLogger<TrayIconManager>();
+        var connectivity = services?.GetService<IConnectivityMonitor>();
+
+        _trayIconManager = new TrayIconManager(logger, connectivity);
+        _trayIconManager.AttachToApplication(this);
+
+        _trayIconManager.ShowDashboardRequested += (_, _) =>
+        {
+            mainWindow.Show();
+            mainWindow.Activate();
+        };
+
+        _trayIconManager.CheckForUpdatesRequested += async (_, _) =>
+        {
+            var updateService = services?.GetService<IUpdateService>();
+            if (updateService is null)
+            {
+                logger.LogWarning("Update service not available");
+                return;
+            }
+
+            logger.LogInformation("Manual update check triggered from tray");
+            var result = await updateService.CheckForUpdatesAsync();
+            if (result.UpdateAvailable && result.Downloaded)
+                logger.LogInformation("Update {Version} downloaded — restart to apply", result.AvailableVersion);
+            else if (result.ErrorMessage is not null)
+                logger.LogInformation("Update check: {Message}", result.ErrorMessage);
+            else
+                logger.LogInformation("No updates available");
+        };
+
+        _trayIconManager.RestartAgentRequested += (_, _) =>
+        {
+            logger.LogWarning("Agent restart requested via tray — not yet implemented (DEA-2.x)");
+        };
+
+        _trayIconManager.ExitRequested += (_, _) =>
+        {
+            mainWindow.ForceClose();
+            desktop.Shutdown();
+        };
     }
 }

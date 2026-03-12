@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using VirtualLab.Application.ContractValidation;
 using VirtualLab.Application.Forecourt;
 using VirtualLab.Domain.Enums;
 using VirtualLab.Domain.Models;
@@ -14,7 +15,8 @@ namespace VirtualLab.Infrastructure.Forecourt;
 
 public sealed class ForecourtSimulationService(
     VirtualLabDbContext dbContext,
-    CallbackDeliveryService callbackDeliveryService) : IForecourtSimulationService
+    CallbackDeliveryService callbackDeliveryService,
+    IContractValidationService contractValidationService) : IForecourtSimulationService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -199,7 +201,11 @@ public sealed class ForecourtSimulationService(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        return SuccessResult(context, correlationId, "Nozzle hung.", transaction);
+        return SuccessResult(
+            context,
+            correlationId,
+            "Nozzle hung.",
+            transaction is null ? null : CreateTransactionSummary(context.Site.ActiveFccSimulatorProfile, transaction));
     }
 
     public async Task<NozzleActionResult> DispenseAsync(
@@ -796,6 +802,8 @@ public sealed class ForecourtSimulationService(
         string correlationId = state.CorrelationId;
         string occurredAtText = now.ToString("O");
         string deliveryCursor = $"{now.UtcTicks:D20}:{externalTransactionId}";
+        DateTimeOffset startedAtUtc = ResolveTransactionStartedAtUtc(state, now);
+        FccProfileContract contract = FccProfileService.ToRecord(context.Site.ActiveFccSimulatorProfile).Contract;
 
         string rawPayloadJson = Serialize(new
         {
@@ -822,12 +830,24 @@ public sealed class ForecourtSimulationService(
             pumpNumber = context.Pump.PumpNumber,
             nozzleNumber = context.Nozzle.NozzleNumber,
             productCode = context.Product.ProductCode,
-            actualVolume = state.AccumulatedVolume,
-            actualAmount = state.AccumulatedAmount,
-            unitPrice = context.Product.UnitPrice,
+            volumeMicrolitres = ToMicrolitres(state.AccumulatedVolume),
+            amountMinorUnits = ToMinorUnits(state.AccumulatedAmount),
+            unitPriceMinorPerLitre = ToMinorUnits(context.Product.UnitPrice),
             currencyCode = context.Product.CurrencyCode,
+            startedAt = startedAtUtc,
+            completedAt = now,
+            fccVendor = NormalizeVendorFamily(context.Site.ActiveFccSimulatorProfile.VendorFamily),
+            status = "PENDING",
+            preAuthId = activeSession?.ExternalReference,
+            schemaVersion = 1,
             source = "VirtualLab",
         });
+
+        PayloadContractValidationReport validation = contractValidationService.Validate(
+            contract,
+            ContractValidationScopes.Transaction,
+            rawPayloadJson,
+            canonicalPayloadJson);
 
         AppendTimeline(
             state.Timeline,
@@ -894,6 +914,36 @@ public sealed class ForecourtSimulationService(
                 transaction.Volume,
                 transaction.TotalAmount,
             });
+
+        if (validation.ErrorCount > 0 || validation.WarningCount > 0)
+        {
+            dbContext.LabEventLogs.Add(new LabEventLog
+            {
+                Id = Guid.NewGuid(),
+                SiteId = context.Site.Id,
+                FccSimulatorProfileId = context.Site.ActiveFccSimulatorProfileId,
+                PreAuthSessionId = activeSession?.Id,
+                SimulatedTransactionId = transaction.Id,
+                CorrelationId = correlationId,
+                Severity = validation.ErrorCount > 0 ? "Warning" : "Information",
+                Category = "ContractValidation",
+                EventType = "TransactionContractValidated",
+                Message = $"Transaction contract validation finished with outcome {validation.Outcome}.",
+                RawPayloadJson = rawPayloadJson,
+                CanonicalPayloadJson = canonicalPayloadJson,
+                MetadataJson = Serialize(new
+                {
+                    validation.Outcome,
+                    validation.ErrorCount,
+                    validation.WarningCount,
+                    validation.MissingCount,
+                    validation.MismatchCount,
+                    validation.Issues,
+                    validation.Comparisons,
+                }),
+                OccurredAtUtc = now,
+            });
+        }
 
         return transaction;
     }
@@ -1109,13 +1159,13 @@ public sealed class ForecourtSimulationService(
         NozzleSiteContext context,
         string correlationId,
         string message,
-        SimulatedTransaction? transaction = null)
+        TransactionSimulationSummary? transaction = null)
     {
         return new NozzleActionResult(
             StatusCodes.Status200OK,
             message,
             CreateSnapshot(context, correlationId),
-            transaction is null ? null : CreateTransactionSummary(transaction),
+            transaction,
             transaction is not null,
             context.Nozzle.State == NozzleState.Faulted,
             correlationId);
@@ -1169,8 +1219,14 @@ public sealed class ForecourtSimulationService(
             context.Nozzle.UpdatedAtUtc);
     }
 
-    private static TransactionSimulationSummary CreateTransactionSummary(SimulatedTransaction transaction)
+    private TransactionSimulationSummary CreateTransactionSummary(FccSimulatorProfile profile, SimulatedTransaction transaction)
     {
+        PayloadContractValidationReport validation = contractValidationService.Validate(
+            FccProfileService.ToRecord(profile).Contract,
+            ContractValidationScopes.Transaction,
+            transaction.RawPayloadJson,
+            transaction.CanonicalPayloadJson);
+
         return new TransactionSimulationSummary(
             transaction.Id,
             transaction.ExternalTransactionId,
@@ -1183,6 +1239,7 @@ public sealed class ForecourtSimulationService(
             transaction.OccurredAtUtc,
             transaction.RawPayloadJson,
             transaction.CanonicalPayloadJson,
+            validation,
             transaction.MetadataJson,
             transaction.TimelineJson);
     }
@@ -1214,6 +1271,33 @@ public sealed class ForecourtSimulationService(
     private static decimal RoundVolume(decimal value) => Math.Round(value, 3, MidpointRounding.AwayFromZero);
 
     private static decimal RoundAmount(decimal value) => Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+    private static DateTimeOffset ResolveTransactionStartedAtUtc(NozzleSimulationState state, DateTimeOffset completedAtUtc)
+    {
+        if (state.LiftedAtUtc.HasValue)
+        {
+            return state.LiftedAtUtc.Value;
+        }
+
+        return completedAtUtc.AddSeconds(-Math.Max(state.TotalDispenseSeconds, 1));
+    }
+
+    private static long ToMinorUnits(decimal value)
+    {
+        return decimal.ToInt64(decimal.Round(value * 100m, 0, MidpointRounding.AwayFromZero));
+    }
+
+    private static long ToMicrolitres(decimal litres)
+    {
+        return decimal.ToInt64(decimal.Round(litres * 1000000m, 0, MidpointRounding.AwayFromZero));
+    }
+
+    private static string NormalizeVendorFamily(string vendorFamily)
+    {
+        return string.IsNullOrWhiteSpace(vendorFamily)
+            ? "DOMS"
+            : vendorFamily.Trim().ToUpperInvariant();
+    }
 
     private static JsonElement ParseJsonElement(string json)
     {

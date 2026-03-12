@@ -1,0 +1,39 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35818.85
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DppMiddleWareService", "DppMiddleWareService\DppMiddleWareService.csproj", "{9DCD4593-5938-43C4-A737-9C0A6BA54251}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Installer", "Installer\Installer.csproj", "{91C2554B-9822-4E8F-9D19-D982545C9031}"
+EndProject
+Project("{00D1A9C2-B5F0-4AF3-8072-F6C62B433612}") = "DppMiddleWareDatabase", "DppMiddleWareDatabase\DppMiddleWareDatabase.sqlproj", "{A3F1BFB5-558E-4221-9E32-288F2FE1B069}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9DCD4593-5938-43C4-A737-9C0A6BA54251}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9DCD4593-5938-43C4-A737-9C0A6BA54251}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9DCD4593-5938-43C4-A737-9C0A6BA54251}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9DCD4593-5938-43C4-A737-9C0A6BA54251}.Release|Any CPU.Build.0 = Release|Any CPU
+		{91C2554B-9822-4E8F-9D19-D982545C9031}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{91C2554B-9822-4E8F-9D19-D982545C9031}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{91C2554B-9822-4E8F-9D19-D982545C9031}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{91C2554B-9822-4E8F-9D19-D982545C9031}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A3F1BFB5-558E-4221-9E32-288F2FE1B069}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A3F1BFB5-558E-4221-9E32-288F2FE1B069}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A3F1BFB5-558E-4221-9E32-288F2FE1B069}.Debug|Any CPU.Deploy.0 = Debug|Any CPU
+		{A3F1BFB5-558E-4221-9E32-288F2FE1B069}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A3F1BFB5-558E-4221-9E32-288F2FE1B069}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A3F1BFB5-558E-4221-9E32-288F2FE1B069}.Release|Any CPU.Deploy.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {17C39AE9-4E57-4334-B28A-B60FF22DE939}
+	EndGlobalSection
+EndGlobal

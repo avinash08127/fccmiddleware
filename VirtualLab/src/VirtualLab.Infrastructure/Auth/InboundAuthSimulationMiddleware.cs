@@ -32,6 +32,16 @@ public sealed class InboundAuthSimulationMiddleware(RequestDelegate next, ILogge
         }
 
         string correlationId = InboundAuthRequestSanitizer.ResolveCorrelationId(context);
+        string requestBody = target.TargetType == "Callback"
+            ? await ReadRequestBodyAsync(context.Request, context.RequestAborted)
+            : "{}";
+        string responsePayload = JsonSerializer.Serialize(
+            new
+            {
+                error = "unauthorized",
+                message = "Inbound authentication simulation rejected the request.",
+            },
+            JsonOptions);
         LabEventLog entry = new()
         {
             Id = Guid.NewGuid(),
@@ -42,17 +52,46 @@ public sealed class InboundAuthSimulationMiddleware(RequestDelegate next, ILogge
             Category = "AuthFailure",
             EventType = target.TargetType == "Callback" ? "CallbackAuthRejected" : "FccAuthRejected",
             Message = $"{target.TargetType} request authentication failed for '{target.TargetKey}'.",
-            RawPayloadJson = "{}",
+            RawPayloadJson = string.IsNullOrWhiteSpace(requestBody) ? "{}" : requestBody,
             CanonicalPayloadJson = "{}",
-            MetadataJson = InboundAuthRequestSanitizer.BuildSafeMetadataJson(
-                context,
-                target.TargetType,
-                target.TargetKey,
-                target.Mode.ToString(),
-                result.FailureReason,
-                target.CallbackTargetId,
-                target.SiteId,
-                target.ProfileId),
+            MetadataJson = target.TargetType == "Callback"
+                ? JsonSerializer.Serialize(
+                    new
+                    {
+                        targetType = target.TargetType,
+                        targetKey = target.TargetKey,
+                        authMode = target.Mode.ToString(),
+                        authOutcome = "Rejected",
+                        failureReason = result.FailureReason,
+                        callbackTargetId = target.CallbackTargetId,
+                        siteId = target.SiteId,
+                        profileId = target.ProfileId,
+                        method = context.Request.Method,
+                        path = context.Request.Path.Value,
+                        requestUrl = context.Request.Path.Value,
+                        requestHeaders = JsonSerializer.Deserialize<object>(InboundAuthRequestSanitizer.SerializeHeaders(context.Request.Headers)),
+                        responseStatusCode = StatusCodes.Status401Unauthorized,
+                        responseHeaders = new { content_type = "application/json" },
+                        responsePayload = JsonSerializer.Deserialize<object>(responsePayload),
+                        correlationMetadata = new
+                        {
+                            requestCorrelationId = correlationId,
+                            isReplay = context.Request.Headers.ContainsKey("X-VirtualLab-Replay-Of"),
+                            replayOfCaptureId = context.Request.Headers.TryGetValue("X-VirtualLab-Replay-Of", out Microsoft.Extensions.Primitives.StringValues replayOf)
+                                ? replayOf.ToString()
+                                : null,
+                        },
+                    },
+                    JsonOptions)
+                : InboundAuthRequestSanitizer.BuildSafeMetadataJson(
+                    context,
+                    target.TargetType,
+                    target.TargetKey,
+                    target.Mode.ToString(),
+                    result.FailureReason,
+                    target.CallbackTargetId,
+                    target.SiteId,
+                    target.ProfileId),
             OccurredAtUtc = DateTimeOffset.UtcNow,
         };
 
@@ -73,14 +112,7 @@ public sealed class InboundAuthSimulationMiddleware(RequestDelegate next, ILogge
 
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         context.Response.ContentType = "application/json";
-        await context.Response.WriteAsync(
-            JsonSerializer.Serialize(
-                new
-                {
-                    error = "unauthorized",
-                    message = "Inbound authentication simulation rejected the request.",
-                },
-                JsonOptions));
+        await context.Response.WriteAsync(responsePayload);
     }
 
     private static async Task<InboundAuthTarget?> ResolveTargetAsync(HttpContext context, VirtualLabDbContext dbContext, CancellationToken cancellationToken)
@@ -259,6 +291,23 @@ public sealed class InboundAuthSimulationMiddleware(RequestDelegate next, ILogge
         {
             return new FccAuthConfiguration();
         }
+    }
+
+    private static async Task<string> ReadRequestBodyAsync(HttpRequest request, CancellationToken cancellationToken)
+    {
+        if (!request.Body.CanSeek)
+        {
+            request.EnableBuffering();
+        }
+        else
+        {
+            request.Body.Position = 0;
+        }
+
+        using StreamReader reader = new(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+        string body = await reader.ReadToEndAsync(cancellationToken);
+        request.Body.Position = 0;
+        return body;
     }
 
     private sealed record InboundAuthTarget(

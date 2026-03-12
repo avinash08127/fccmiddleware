@@ -1,0 +1,39 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="FccDesktopAgent.App.Views.DecommissionedWindow"
+        Title="FCC Desktop Agent — Decommissioned"
+        Width="460"
+        Height="280"
+        MinWidth="400"
+        MinHeight="260"
+        CanResize="False"
+        WindowStartupLocation="CenterScreen">
+
+  <Grid RowDefinitions="*,Auto" Margin="32">
+
+    <!-- Message -->
+    <StackPanel Grid.Row="0" VerticalAlignment="Center" Spacing="12">
+      <TextBlock Text="Device Decommissioned"
+                 FontSize="22"
+                 FontWeight="SemiBold"
+                 Foreground="#B91C1C" />
+      <TextBlock Text="This device has been decommissioned by the cloud administrator."
+                 TextWrapping="Wrap"
+                 FontSize="14" />
+      <TextBlock Text="All synchronization services have been permanently stopped. Contact your site supervisor or system administrator for assistance."
+                 TextWrapping="Wrap"
+                 Foreground="Gray"
+                 FontSize="13" />
+    </StackPanel>
+
+    <!-- Exit button -->
+    <Button Grid.Row="1"
+            Content="Exit"
+            Click="OnExitClicked"
+            HorizontalAlignment="Right"
+            MinWidth="100"
+            HorizontalContentAlignment="Center" />
+
+  </Grid>
+
+</Window>

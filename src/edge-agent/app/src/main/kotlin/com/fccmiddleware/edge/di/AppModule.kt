@@ -60,11 +60,15 @@ val appModule = module {
     single<CloudApiClient> {
         val encryptedPrefs = get<EncryptedPrefsManager>()
         val baseUrl = encryptedPrefs.cloudBaseUrl ?: "https://not-yet-provisioned"
-        // Certificate pins are delivered via SiteConfig from cloud (EA-2.x).
-        // When available, they are passed here to enable OkHttp cert pinning
-        // against intermediate CA public keys. On pin mismatch, the connection
-        // is refused — no fallback to unpinned.
-        val certificatePins = emptyList<String>() // TODO (EA-2.x): load from ConfigManager
+        // Bootstrap pins bundled in the APK ensure certificate pinning is active
+        // during device registration (before SiteConfig delivers runtime pins).
+        // These are SHA-256 hashes of the intermediate CA public keys for the
+        // known cloud endpoint(s). Update when rotating cloud TLS certificates.
+        // TODO (EA-2.x): once SiteConfig delivers runtime pins, prefer those over bootstrap pins.
+        val certificatePins = listOf(
+            "sha256/YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=", // Primary intermediate CA
+            "sha256/Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=", // Backup intermediate CA
+        )
         HttpCloudApiClient.create(baseUrl, certificatePins)
     }
 
@@ -83,7 +87,7 @@ val appModule = module {
     // Buffer management
     // -------------------------------------------------------------------------
     single { TransactionBufferManager(get()) }
-    single { CleanupWorker(get(), get(), get()) }
+    single { CleanupWorker(get(), get(), get(), androidContext()) }
     single { IntegrityChecker(get(), get(), androidContext()) }
 
     // -------------------------------------------------------------------------

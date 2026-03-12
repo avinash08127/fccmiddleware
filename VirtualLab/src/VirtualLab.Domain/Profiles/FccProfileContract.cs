@@ -58,10 +58,16 @@ public sealed class FccValidationRuleDefinition
     public string Expression { get; set; } = string.Empty;
     public string Message { get; set; } = string.Empty;
     public bool Required { get; set; } = true;
+    public string ExpectedType { get; set; } = string.Empty;
+    public decimal? Minimum { get; set; }
+    public decimal? Maximum { get; set; }
+    public string Pattern { get; set; } = string.Empty;
+    public List<string> AllowedValues { get; set; } = [];
 }
 
 public sealed class FccFieldMappingDefinition
 {
+    public string Scope { get; set; } = string.Empty;
     public string SourceField { get; set; } = string.Empty;
     public string TargetField { get; set; } = string.Empty;
     public string Direction { get; set; } = "Inbound";

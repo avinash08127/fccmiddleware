@@ -175,6 +175,11 @@ class ProvisioningActivity : AppCompatActivity() {
                 return null
             }
 
+            if (!cloudUrl.startsWith("https://")) {
+                Log.w(TAG, "Cloud URL must use HTTPS — rejecting insecure QR code")
+                return null
+            }
+
             QrBootstrapData(
                 siteCode = siteCode,
                 cloudBaseUrl = cloudUrl.trimEnd('/'),

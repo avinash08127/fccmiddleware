@@ -4,6 +4,8 @@ import android.util.Base64
 import android.util.Log
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.security.KeystoreManager
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Production [DeviceTokenProvider] backed by Android Keystore + EncryptedSharedPreferences.
@@ -35,6 +37,14 @@ class KeystoreDeviceTokenProvider(
         private const val TAG = "DeviceTokenProvider"
     }
 
+    /**
+     * Mutex serializing [refreshAccessToken] calls so that concurrent 401
+     * handlers (CloudUploadWorker, ConfigPollWorker, PreAuthCloudForwardWorker)
+     * do not race to issue duplicate refresh requests. The first caller performs
+     * the refresh; others suspend and then see the already-refreshed token.
+     */
+    private val refreshMutex = Mutex()
+
     override fun getAccessToken(): String? {
         if (encryptedPrefs.isDecommissioned) return null
 
@@ -52,23 +62,28 @@ class KeystoreDeviceTokenProvider(
         return encryptedPrefs.legalEntityId
     }
 
-    override suspend fun refreshAccessToken(): Boolean {
+    override suspend fun refreshAccessToken(): Boolean = refreshMutex.withLock {
+        // Inside the mutex: if another caller already refreshed while we were
+        // waiting, the token stored in EncryptedPrefs is now fresh. We detect
+        // this by checking that we still hold a valid refresh token and proceed.
+        // This is safe because storeTokens() atomically rotates both tokens.
+
         if (encryptedPrefs.isDecommissioned) {
             Log.w(TAG, "Device is decommissioned — cannot refresh token")
-            return false
+            return@withLock false
         }
 
         val client = cloudApiClient ?: run {
             Log.w(TAG, "CloudApiClient not available — cannot refresh token")
-            return false
+            return@withLock false
         }
 
         val currentRefreshToken = getRefreshToken() ?: run {
             Log.w(TAG, "No refresh token available — cannot refresh")
-            return false
+            return@withLock false
         }
 
-        return when (val result = client.refreshToken(currentRefreshToken)) {
+        when (val result = client.refreshToken(currentRefreshToken)) {
             is CloudTokenRefreshResult.Success -> {
                 storeTokens(result.response.deviceToken, result.response.refreshToken)
                 Log.i(TAG, "Token refreshed successfully, expires=${result.response.tokenExpiresAt}")

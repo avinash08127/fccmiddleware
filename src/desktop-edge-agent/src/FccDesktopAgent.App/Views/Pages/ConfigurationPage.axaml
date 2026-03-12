@@ -1,0 +1,263 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FccDesktopAgent.App.Views.Pages.ConfigurationPage">
+
+  <ScrollViewer Padding="24">
+    <StackPanel Spacing="16">
+
+      <!-- Header with save button -->
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Text="Configuration" FontSize="22" FontWeight="SemiBold" />
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+          <TextBlock x:Name="SaveFeedback" Text="" FontSize="12" Opacity="0.6"
+                     VerticalAlignment="Center" Margin="0,0,8,0" />
+          <Button x:Name="SaveButton" Content="Save &amp; Apply"
+                  Padding="16,6" FontSize="12" Click="OnSaveClicked" />
+        </StackPanel>
+      </Grid>
+
+      <!-- Restart warning banner -->
+      <Border x:Name="RestartBanner"
+              IsVisible="False"
+              Background="#FEF3C7"
+              CornerRadius="6"
+              Padding="12">
+        <TextBlock Text="A restart is required for some configuration changes to take effect."
+                   Foreground="#92400E"
+                   FontSize="13"
+                   TextWrapping="Wrap" />
+      </Border>
+
+      <!-- ═══ Device Identity (read-only) ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Device Identity" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#E5E7EB" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Cloud-Managed" FontSize="10" Foreground="#6B7280" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2" Margin="0,0,8,8">
+              <TextBlock Text="Device ID" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CfgDeviceId" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="0" Grid.Column="1" Spacing="2" Margin="0,0,0,8">
+              <TextBlock Text="Site ID" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CfgSiteId" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Cloud URL" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CfgCloudUrl" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Grid.Column="1" Spacing="2">
+              <TextBlock Text="Config Version" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CfgConfigVersion" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- ═══ FCC Connection ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="FCC Connection" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border x:Name="FccManagedBadge" Background="#E5E7EB" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Cloud-Managed" FontSize="10" Foreground="#6B7280" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="FCC Base URL" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CfgFccBaseUrl" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Vendor" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CfgFccVendor" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="2" Spacing="2">
+              <TextBlock Text="Ingestion Mode" FontSize="11" Opacity="0.5" />
+              <TextBox x:Name="CfgIngestionMode" IsReadOnly="True" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- ═══ Polling Intervals (hot-reloadable) ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Polling Intervals" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#DBEAFE" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Hot-Reloadable" FontSize="10" Foreground="#1D4ED8" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*,*,*" RowDefinitions="Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="FCC Poll (sec)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgFccPollInterval" Minimum="5" Maximum="3600"
+                             Increment="5" FormatString="0" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Cloud Sync (sec)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgCloudSyncInterval" Minimum="10" Maximum="3600"
+                             Increment="10" FormatString="0" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="2" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Config Poll (sec)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgConfigPollInterval" Minimum="30" Maximum="3600"
+                             Increment="10" FormatString="0" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="3" Spacing="2">
+              <TextBlock Text="Telemetry (sec)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgTelemetryInterval" Minimum="30" Maximum="3600"
+                             Increment="30" FormatString="0" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- ═══ Buffer Settings (hot-reloadable) ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Buffer Settings" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#DBEAFE" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Hot-Reloadable" FontSize="10" Foreground="#1D4ED8" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Retention (days)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgRetentionDays" Minimum="1" Maximum="90"
+                             Increment="1" FormatString="0" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Upload Batch Size" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgUploadBatchSize" Minimum="1" Maximum="500"
+                             Increment="10" FormatString="0" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="2" Spacing="2">
+              <TextBlock Text="Cleanup Interval (hrs)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgCleanupInterval" Minimum="1" Maximum="168"
+                             Increment="1" FormatString="0" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- ═══ Local API Settings ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Local API" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#FEE2E2" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Restart Required" FontSize="10" Foreground="#991B1B" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*" RowDefinitions="Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="API Port" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgApiPort" Minimum="1024" Maximum="65535"
+                             Increment="1" FormatString="0" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="2">
+              <TextBlock Text="API Key" FontSize="11" Opacity="0.5" />
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBox x:Name="CfgApiKey" IsReadOnly="True" FontSize="12"
+                         FontFamily="Consolas, monospace" />
+                <Button x:Name="RegenerateApiKeyButton" Grid.Column="1"
+                        Content="Regenerate" Margin="8,0,0,0"
+                        Padding="8,4" FontSize="11"
+                        Click="OnRegenerateApiKeyClicked" />
+              </Grid>
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- ═══ Auto-Update ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Auto-Update" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+          <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+            <CheckBox x:Name="CfgAutoUpdateEnabled" Content="Enable automatic updates" />
+            <Button x:Name="CheckUpdateButton" Grid.Column="1"
+                    Content="Check Now" Padding="12,4" FontSize="12"
+                    Click="OnCheckUpdateClicked" />
+          </Grid>
+          <TextBlock x:Name="UpdateStatusText" Text="" FontSize="12" Opacity="0.6" />
+        </StackPanel>
+      </Border>
+
+      <!-- ═══ Logging ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Logging" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#DBEAFE" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Hot-Reloadable" FontSize="10" Foreground="#1D4ED8" />
+            </Border>
+          </Grid>
+          <StackPanel Spacing="2" Margin="0,4,0,0">
+            <TextBlock Text="Log Level" FontSize="11" Opacity="0.5" />
+            <ComboBox x:Name="CfgLogLevel" Width="200" FontSize="12">
+              <ComboBoxItem Content="Verbose" Tag="Verbose" />
+              <ComboBoxItem Content="Debug" Tag="Debug" />
+              <ComboBoxItem Content="Information" Tag="Information" />
+              <ComboBoxItem Content="Warning" Tag="Warning" />
+              <ComboBoxItem Content="Error" Tag="Error" />
+              <ComboBoxItem Content="Fatal" Tag="Fatal" />
+            </ComboBox>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- ═══ Connectivity Probes ═══ -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Connectivity Probes" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Border Background="#DBEAFE" CornerRadius="4" Padding="6,2">
+              <TextBlock Text="Hot-Reloadable" FontSize="10" Foreground="#1D4ED8" />
+            </Border>
+          </Grid>
+          <Grid ColumnDefinitions="*,*" RowDefinitions="Auto" Margin="0,4,0,0">
+            <StackPanel Grid.Column="0" Spacing="2" Margin="0,0,8,0">
+              <TextBlock Text="Probe Interval (sec)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgConnProbeInterval" Minimum="10" Maximum="300"
+                             Increment="5" FormatString="0" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="2">
+              <TextBlock Text="Pre-Auth Timeout (sec)" FontSize="11" Opacity="0.5" />
+              <NumericUpDown x:Name="CfgPreAuthTimeout" Minimum="5" Maximum="120"
+                             Increment="5" FormatString="0" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Bottom spacing -->
+      <Border Height="20" />
+
+    </StackPanel>
+  </ScrollViewer>
+
+</UserControl>

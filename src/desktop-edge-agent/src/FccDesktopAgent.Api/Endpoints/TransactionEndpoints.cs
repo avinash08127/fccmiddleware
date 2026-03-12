@@ -1,5 +1,7 @@
+using FccDesktopAgent.Core.Ingestion;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 
 namespace FccDesktopAgent.Api.Endpoints;
@@ -40,12 +42,27 @@ internal static class TransactionEndpoints
             NotImplemented("POST /api/v1/transactions/{id}/acknowledge"))
             .WithName("acknowledgeLocalTransaction");
 
-        // POST /api/v1/transactions/pull — on-demand FCC pull (manual trigger)
-        // Architecture: serialized with background poller; never races cursor state
-        // DEA-2.x: inject IIngestionOrchestrator and trigger pull
-        group.MapPost("/pull", () =>
-            NotImplemented("POST /api/v1/transactions/pull"))
-            .WithName("manualFccPull");
+        // POST /api/v1/transactions/pull — on-demand FCC pull (DEA-2.7)
+        // Serialized with background poller via SemaphoreSlim; never races cursor state.
+        // pumpNumber in request body is informational only — all transactions since last cursor
+        // are fetched so no data is lost for other pumps.
+        group.MapPost("/pull", async (
+            [FromBody] ManualPullRequest? request,
+            IIngestionOrchestrator ingestion,
+            CancellationToken ct) =>
+        {
+            var triggeredAt = DateTimeOffset.UtcNow;
+            var result = await ingestion.ManualPullAsync(request?.PumpNumber, ct);
+
+            return Results.Ok(new ManualPullResponse(
+                NewCount: result.NewTransactionsBuffered,
+                SkippedCount: result.DuplicatesSkipped,
+                FetchCycles: result.FetchCycles,
+                CursorAdvanced: result.FetchCycles > 0 &&
+                                result.NewTransactionsBuffered + result.DuplicatesSkipped > 0,
+                TriggeredAtUtc: triggeredAt));
+        })
+        .WithName("manualFccPull");
 
         return app;
     }
@@ -61,3 +78,20 @@ internal static class TransactionEndpoints
             },
             statusCode: StatusCodes.Status501NotImplemented);
 }
+
+/// <summary>
+/// Optional request body for POST /api/v1/transactions/pull.
+/// <see cref="PumpNumber"/> is logged for diagnostics but does not restrict the fetch —
+/// all transactions since the last cursor are always fetched.
+/// </summary>
+internal sealed record ManualPullRequest(int? PumpNumber = null);
+
+/// <summary>
+/// Response from POST /api/v1/transactions/pull.
+/// </summary>
+internal sealed record ManualPullResponse(
+    int NewCount,
+    int SkippedCount,
+    int FetchCycles,
+    bool CursorAdvanced,
+    DateTimeOffset TriggeredAtUtc);

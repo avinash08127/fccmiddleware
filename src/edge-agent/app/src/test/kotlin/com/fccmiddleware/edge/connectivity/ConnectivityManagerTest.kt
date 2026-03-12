@@ -42,11 +42,12 @@ class ConnectivityManagerTest {
     private lateinit var auditLogDao: AuditLogDao
     private val testDispatcher = StandardTestDispatcher()
 
-    // Fast probe config — 100ms interval, 50ms timeout, threshold=3
+    // Fast probe config — 100ms interval, 50ms timeout, threshold=3, recoveryThreshold=2
     private val fastConfig = ConnectivityManager.ProbeConfig(
         probeIntervalMs = 100L,
         probeTimeoutMs = 50L,
         failureThreshold = 3,
+        recoveryThreshold = 2,
         jitterRangeMs = 0L,
     )
 
@@ -71,10 +72,11 @@ class ConnectivityManagerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `both probes UP transitions to FULLY_ONLINE`() = runTest(testDispatcher) {
+    fun `both probes UP transitions to FULLY_ONLINE after recovery threshold`() = runTest(testDispatcher) {
         val mgr = buildManager(internet = { true }, fcc = { true })
         mgr.start()
-        advanceTimeBy(200L)
+        // Need 2 consecutive successes (recoveryThreshold=2) for each probe
+        advanceTimeBy(300L)
         assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
         mgr.stop()
     }
@@ -83,7 +85,7 @@ class ConnectivityManagerTest {
     fun `internet DOWN fcc UP transitions to INTERNET_DOWN`() = runTest(testDispatcher) {
         val mgr = buildManager(internet = { false }, fcc = { true })
         mgr.start()
-        // FCC succeeds immediately → fccUp=true
+        // FCC needs 2 consecutive successes → fccUp=true after 2nd probe
         // Internet must fail 3 times before internetUp=false
         advanceTimeBy(500L)
         assertEquals(ConnectivityState.INTERNET_DOWN, mgr.state.value)
@@ -154,27 +156,50 @@ class ConnectivityManagerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `single internet success immediately recovers from DOWN`() = runTest(testDispatcher) {
+    fun `internet recovers from DOWN after recovery threshold consecutive successes`() = runTest(testDispatcher) {
         var internetCallCount = 0
         val mgr = buildManager(
             internet = {
                 internetCallCount++
-                // First probe at t=0. With 100ms interval and threshold=3:
-                //   t=0: call 1 (false), t=100: call 2 (false), t=200: call 3 (false) → INTERNET_DOWN
-                //   t=300: call 4 (false), t=400: call 5 (false) — safe assert window
-                //   t=500: call 6 (true) → recovery to FULLY_ONLINE
+                // Calls 1-5: false → INTERNET_DOWN after call 3
+                // Calls 6+: true → recovery after 2 consecutive successes (call 7)
                 internetCallCount > 5
             },
             fcc = { true },
         )
         mgr.start()
-        // After 5 failed probes (t=0..400), state is INTERNET_DOWN
+        // After 5 failed probes, state is INTERNET_DOWN
         advanceTimeBy(450L)
         assertEquals(ConnectivityState.INTERNET_DOWN, mgr.state.value)
 
-        // 6th call at t=500 succeeds → immediately recover
-        advanceTimeBy(200L)
+        // Calls 6 and 7 succeed → recoveryThreshold=2 met after 2nd success
+        advanceTimeBy(300L)
         assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
+        mgr.stop()
+    }
+
+    @Test
+    fun `single internet success does NOT recover from DOWN (H-10 anti-oscillation)`() = runTest(testDispatcher) {
+        var internetCallCount = 0
+        val mgr = buildManager(
+            internet = {
+                internetCallCount++
+                // Calls 1-3: false → INTERNET_DOWN
+                // Call 4: true (single success)
+                // Call 5: false again → resets consecutive success counter
+                when {
+                    internetCallCount <= 3 -> false
+                    internetCallCount == 4 -> true
+                    else -> false
+                }
+            },
+            fcc = { true },
+        )
+        mgr.start()
+        // After 3 failures + 1 success + 1 failure
+        advanceTimeBy(550L)
+        // Single success should NOT have recovered — still INTERNET_DOWN
+        assertEquals(ConnectivityState.INTERNET_DOWN, mgr.state.value)
         mgr.stop()
     }
 
@@ -213,8 +238,7 @@ class ConnectivityManagerTest {
     fun `stateFlow emits FULLY_ONLINE when both probes succeed`() = runTest(testDispatcher) {
         val mgr = buildManager(internet = { true }, fcc = { true })
         mgr.start()
-        advanceTimeBy(200L)
-        // StateFlow.first() would return current value if already transitioned
+        advanceTimeBy(300L) // 2 consecutive successes needed per recoveryThreshold
         assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
         mgr.stop()
     }
@@ -228,7 +252,7 @@ class ConnectivityManagerTest {
         runTest(testDispatcher) {
             val mgr = buildManager(internet = { true }, fcc = { true })
             mgr.start()
-            advanceTimeBy(200L)
+            advanceTimeBy(300L) // 2 consecutive successes needed
 
             val captured = mutableListOf<AuditLog>()
             coVerify(atLeast = 1) { auditLogDao.insert(capture(captured)) }
@@ -255,7 +279,7 @@ class ConnectivityManagerTest {
                 listener = listener,
             )
             mgr.start()
-            advanceTimeBy(200L)
+            advanceTimeBy(300L) // 2 consecutive successes needed
 
             assert(transitions.isNotEmpty()) { "Expected at least one transition" }
             val toOnline = transitions.firstOrNull { (_, to) -> to == ConnectivityState.FULLY_ONLINE }
@@ -278,7 +302,7 @@ class ConnectivityManagerTest {
         runTest(testDispatcher) {
             val mgr = buildManager(internet = { true }, fcc = { true })
             mgr.start()
-            advanceTimeBy(200L)
+            advanceTimeBy(300L) // wait for probes to run
             assertNotNull(mgr.fccHeartbeatAgeSeconds())
             mgr.stop()
         }

@@ -1,0 +1,160 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FccDesktopAgent.App.Views.Pages.DashboardPage">
+
+  <ScrollViewer Padding="24">
+    <StackPanel Spacing="20">
+
+      <!-- Header with manual actions -->
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Text="Dashboard" FontSize="22" FontWeight="SemiBold" />
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+          <Button x:Name="ForcePollButton" Content="Force FCC Poll"
+                  Padding="12,6" FontSize="12" Click="OnForcePollClicked" />
+          <Button x:Name="ForceSyncButton" Content="Force Cloud Sync"
+                  Padding="12,6" FontSize="12" Click="OnForceSyncClicked" />
+          <Button x:Name="ClearSyncedButton" Content="Clear Synced Cache"
+                  Padding="12,6" FontSize="12" Click="OnClearSyncedClicked" />
+        </StackPanel>
+      </Grid>
+
+      <!-- System Status card with color-coded indicator -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <TextBlock Text="System Status" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <TextBlock x:Name="StatusIndicator" Text="●" FontSize="24" VerticalAlignment="Center" />
+            <TextBlock x:Name="StatusText" Text="Waiting for connectivity probe..." FontSize="16" VerticalAlignment="Center" />
+          </StackPanel>
+          <TextBlock x:Name="ActionHintText" Text="" FontSize="12" Opacity="0.5" />
+        </StackPanel>
+      </Border>
+
+      <!-- Buffer stats row -->
+      <UniformGrid Columns="4" Rows="1">
+        <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                CornerRadius="8" Padding="16" Margin="0,0,6,0" BorderThickness="1"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+          <StackPanel>
+            <TextBlock Text="Pending" FontSize="12" Opacity="0.6" />
+            <TextBlock x:Name="PendingCount" Text="--" FontSize="28" FontWeight="Bold" />
+          </StackPanel>
+        </Border>
+
+        <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                CornerRadius="8" Padding="16" Margin="3,0" BorderThickness="1"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+          <StackPanel>
+            <TextBlock Text="Uploaded" FontSize="12" Opacity="0.6" />
+            <TextBlock x:Name="UploadedCount" Text="--" FontSize="28" FontWeight="Bold" />
+          </StackPanel>
+        </Border>
+
+        <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                CornerRadius="8" Padding="16" Margin="3,0" BorderThickness="1"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+          <StackPanel>
+            <TextBlock Text="Synced to Odoo" FontSize="12" Opacity="0.6" />
+            <TextBlock x:Name="SyncedCount" Text="--" FontSize="28" FontWeight="Bold" />
+          </StackPanel>
+        </Border>
+
+        <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                CornerRadius="8" Padding="16" Margin="6,0,0,0" BorderThickness="1"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+          <StackPanel>
+            <TextBlock Text="Total Buffered" FontSize="12" Opacity="0.6" />
+            <TextBlock x:Name="TotalCount" Text="--" FontSize="28" FontWeight="Bold" />
+          </StackPanel>
+        </Border>
+      </UniformGrid>
+
+      <!-- Two-column layout: Connectivity + Sync details -->
+      <Grid ColumnDefinitions="*,12,*">
+
+        <!-- Connectivity details -->
+        <Border Grid.Column="0"
+                Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                CornerRadius="8" Padding="20" BorderThickness="1"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+          <StackPanel Spacing="8">
+            <TextBlock Text="Connectivity" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto">
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="Internet (Cloud):" Margin="0,4" />
+              <TextBlock Grid.Row="0" Grid.Column="1" x:Name="InternetStatus" Text="--" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Text="FCC (LAN):" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="1" x:Name="FccStatus" Text="--" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="0" Text="Last FCC Heartbeat:" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="1" x:Name="LastFccHeartbeat" Text="--" Margin="0,4" />
+              <TextBlock Grid.Row="3" Grid.Column="0" Text="FCC Failures:" Margin="0,4" />
+              <TextBlock Grid.Row="3" Grid.Column="1" x:Name="FccFailures" Text="0" Margin="0,4" />
+            </Grid>
+          </StackPanel>
+        </Border>
+
+        <!-- Sync details -->
+        <Border Grid.Column="2"
+                Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                CornerRadius="8" Padding="20" BorderThickness="1"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+          <StackPanel Spacing="8">
+            <TextBlock Text="Cloud Sync" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+            <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto">
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="Last Cloud Sync:" Margin="0,4" />
+              <TextBlock Grid.Row="0" Grid.Column="1" x:Name="LastCloudSync" Text="--" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Text="Sync Lag:" Margin="0,4" />
+              <TextBlock Grid.Row="1" Grid.Column="1" x:Name="SyncLag" Text="--" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="0" Text="Oldest Pending:" Margin="0,4" />
+              <TextBlock Grid.Row="2" Grid.Column="1" x:Name="OldestPending" Text="--" Margin="0,4" />
+              <TextBlock Grid.Row="3" Grid.Column="0" Text="Config Version:" Margin="0,4" />
+              <TextBlock Grid.Row="3" Grid.Column="1" x:Name="ConfigVersion" Text="--" Margin="0,4" />
+            </Grid>
+          </StackPanel>
+        </Border>
+
+      </Grid>
+
+      <!-- Device info -->
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Device Info" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+          <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto">
+            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,4">
+              <TextBlock Text="Device ID" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="DeviceIdText" Text="--" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,4">
+              <TextBlock Text="Site Code" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="SiteCodeText" Text="--" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="0" Grid.Column="2" Margin="0,4">
+              <TextBlock Text="App Version" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="AppVersionText" Text="--" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,4">
+              <TextBlock Text="Uptime" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="UptimeText" Text="--" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,4">
+              <TextBlock Text="Memory" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="MemoryText" Text="--" FontSize="12" />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,4">
+              <TextBlock Text="Storage" FontSize="11" Opacity="0.5" />
+              <TextBlock x:Name="StorageText" Text="--" FontSize="12" />
+            </StackPanel>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Action status feedback -->
+      <TextBlock x:Name="ActionFeedback" Text="" FontSize="12" Opacity="0.6" />
+
+    </StackPanel>
+  </ScrollViewer>
+
+</UserControl>

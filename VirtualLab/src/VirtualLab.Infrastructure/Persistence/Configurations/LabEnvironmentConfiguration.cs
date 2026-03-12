@@ -13,6 +13,7 @@ internal sealed class LabEnvironmentConfiguration : IEntityTypeConfiguration<Lab
         builder.Property(x => x.Key).HasMaxLength(64);
         builder.Property(x => x.Name).HasMaxLength(128);
         builder.Property(x => x.Description).HasMaxLength(1024);
+        builder.Property(x => x.SettingsJson).HasColumnType("TEXT");
         builder.HasIndex(x => x.Key).IsUnique();
     }
 }

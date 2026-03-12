@@ -349,12 +349,14 @@ public sealed class FccProfileService(VirtualLabDbContext dbContext) : IFccProfi
 
     private static void ValidateMappings(FccProfileRecord record, ICollection<FccProfileValidationMessage> messages)
     {
-        if (!record.Contract.FieldMappings.Any(x => string.Equals(x.TargetField, "transactionId", StringComparison.OrdinalIgnoreCase)))
+        if (!record.Contract.FieldMappings.Any(x =>
+                string.Equals(GetTerminalFieldName(x.TargetField), "transactionId", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(GetTerminalFieldName(x.TargetField), "fccTransactionId", StringComparison.OrdinalIgnoreCase)))
         {
-            messages.Add(new("contract.fieldMappings", "Field mappings must include transactionId.", "Error"));
+            messages.Add(new("contract.fieldMappings", "Field mappings must include a transaction identifier target.", "Error"));
         }
 
-        if (!record.Contract.FieldMappings.Any(x => string.Equals(x.TargetField, "siteCode", StringComparison.OrdinalIgnoreCase)))
+        if (!record.Contract.FieldMappings.Any(x => string.Equals(GetTerminalFieldName(x.TargetField), "siteCode", StringComparison.OrdinalIgnoreCase)))
         {
             messages.Add(new("contract.fieldMappings", "Field mappings must include siteCode.", "Error"));
         }
@@ -403,6 +405,33 @@ public sealed class FccProfileService(VirtualLabDbContext dbContext) : IFccProfi
     }
 
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, JsonOptions);
+
+    private static string GetTerminalFieldName(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return string.Empty;
+        }
+
+        string normalized = path.Trim();
+        if (normalized.StartsWith("$.", StringComparison.Ordinal))
+        {
+            normalized = normalized[2..];
+        }
+        else if (normalized.StartsWith("$", StringComparison.Ordinal))
+        {
+            normalized = normalized[1..];
+        }
+
+        int bracketIndex = normalized.LastIndexOf('[');
+        if (bracketIndex >= 0)
+        {
+            normalized = normalized[..bracketIndex];
+        }
+
+        int dotIndex = normalized.LastIndexOf('.');
+        return dotIndex >= 0 ? normalized[(dotIndex + 1)..] : normalized;
+    }
 
     private static T Deserialize<T>(string json, T fallback)
     {

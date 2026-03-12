@@ -1,4 +1,5 @@
 using FccDesktopAgent.Api;
+using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Runtime;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -44,6 +45,53 @@ try
     builder.WebHost.UseUrls($"http://0.0.0.0:{builder.Configuration["LocalApi:Port"] ?? "8585"}");
 
     var app = builder.Build();
+
+    // ── Registration gate ────────────────────────────────────────────────────
+    var registrationManager = app.Services.GetRequiredService<IRegistrationManager>();
+    var state = registrationManager.LoadState();
+
+    if (state.IsDecommissioned)
+    {
+        Log.Fatal("Device has been decommissioned. Service cannot start. " +
+                  "Contact your system administrator.");
+        return 2;
+    }
+
+    if (!state.IsRegistered)
+    {
+        // Check for --register CLI argument for headless registration
+        if (TryParseRegisterArgs(args, out var cloudUrl, out var siteCode, out var token))
+        {
+            Log.Information("Headless registration: registering with cloud at {CloudUrl}", cloudUrl);
+            var regService = app.Services.GetRequiredService<IDeviceRegistrationService>();
+            var request = DeviceInfoProvider.BuildRequest(token, siteCode);
+            var result = await regService.RegisterAsync(cloudUrl, request);
+
+            switch (result)
+            {
+                case RegistrationResult.Success success:
+                    Log.Information("Headless registration successful — deviceId={DeviceId}",
+                        success.Response.DeviceId);
+                    break;
+
+                case RegistrationResult.Rejected rejected:
+                    Log.Fatal("Headless registration rejected: {ErrorCode} — {Message}",
+                        rejected.Code, rejected.Message);
+                    return 3;
+
+                case RegistrationResult.TransportError transport:
+                    Log.Fatal("Headless registration failed: {Message}", transport.Message);
+                    return 3;
+            }
+        }
+        else
+        {
+            Log.Fatal("Device is not registered. Register first using the GUI app, or use: " +
+                      "--register --cloud-url <URL> --site-code <CODE> --provisioning-token <TOKEN>");
+            return 3;
+        }
+    }
+
     app.MapHealthChecks("/health");
     app.MapLocalApi();
 
@@ -60,6 +108,34 @@ finally
 }
 
 return 0;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+static bool TryParseRegisterArgs(string[] args, out string cloudUrl, out string siteCode, out string token)
+{
+    cloudUrl = siteCode = token = string.Empty;
+
+    if (!args.Contains("--register", StringComparer.OrdinalIgnoreCase))
+        return false;
+
+    for (int i = 0; i < args.Length - 1; i++)
+    {
+        switch (args[i].ToLowerInvariant())
+        {
+            case "--cloud-url":
+                cloudUrl = args[++i];
+                break;
+            case "--site-code":
+                siteCode = args[++i];
+                break;
+            case "--provisioning-token":
+                token = args[++i];
+                break;
+        }
+    }
+
+    return !string.IsNullOrEmpty(cloudUrl) && !string.IsNullOrEmpty(siteCode) && !string.IsNullOrEmpty(token);
+}
 
 static string GetLogPath()
 {

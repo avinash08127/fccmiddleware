@@ -6,6 +6,7 @@ public sealed class LabEnvironment
     public string Key { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
+    public string SettingsJson { get; set; } = "{}";
     public int SeedVersion { get; set; }
     public int DeterministicSeed { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }

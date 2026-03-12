@@ -3,6 +3,8 @@ package com.fccmiddleware.edge.sync
 import android.util.Log
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 
 /**
@@ -58,10 +60,11 @@ class PreAuthCloudForwardWorker(
         private const val DECOMMISSIONED_ERROR_CODE = "DEVICE_DECOMMISSIONED"
     }
 
-    @Volatile
+    /** Guards compound read-modify-write of [consecutiveFailureCount] + [nextRetryAt]. */
+    private val backoffMutex = Mutex()
+
     internal var consecutiveFailureCount: Int = 0
 
-    @Volatile
     internal var nextRetryAt: Instant = Instant.EPOCH
 
     // -------------------------------------------------------------------------
@@ -95,15 +98,21 @@ class PreAuthCloudForwardWorker(
         }
 
         val now = Instant.now()
-        if (now.isBefore(nextRetryAt)) {
-            val waitMs = nextRetryAt.toEpochMilli() - now.toEpochMilli()
+        val currentNextRetry = backoffMutex.withLock { nextRetryAt }
+        if (now.isBefore(currentNextRetry)) {
+            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
             Log.d(TAG, "forwardUnsyncedPreAuths() skipped — backoff active (${waitMs}ms remaining)")
             return
         }
 
         val unsynced = dao.getUnsynced(config.batchSize)
         if (unsynced.isEmpty()) {
-            Log.d(TAG, "forwardUnsyncedPreAuths() — no unsynced pre-auth records")
+            // H-02 fix: reset backoff when no unsynced records so new records forward immediately
+            backoffMutex.withLock {
+                consecutiveFailureCount = 0
+                nextRetryAt = Instant.EPOCH
+            }
+            Log.d(TAG, "forwardUnsyncedPreAuths() — no unsynced pre-auth records, backoff reset")
             return
         }
 
@@ -120,8 +129,10 @@ class PreAuthCloudForwardWorker(
                 is ForwardAttemptResult.Success -> {
                     val attemptNow = Instant.now().toString()
                     dao.markCloudSynced(record.id, attemptNow)
-                    consecutiveFailureCount = 0
-                    nextRetryAt = Instant.EPOCH
+                    backoffMutex.withLock {
+                        consecutiveFailureCount = 0
+                        nextRetryAt = Instant.EPOCH
+                    }
                     Log.i(TAG, "Pre-auth ${record.odooOrderId} forwarded to cloud")
                 }
 
@@ -134,14 +145,16 @@ class PreAuthCloudForwardWorker(
                 is ForwardAttemptResult.TransportFailure -> {
                     val attemptNow = Instant.now().toString()
                     dao.recordCloudSyncFailure(record.id, attemptNow)
-                    consecutiveFailureCount++
-                    val backoffMs = calculateBackoffMs(consecutiveFailureCount)
-                    nextRetryAt = Instant.now().plusMillis(backoffMs)
-                    Log.w(
-                        TAG,
-                        "Pre-auth forward failed (failure #$consecutiveFailureCount); " +
-                            "next retry after ${backoffMs}ms. Error: ${result.message}",
-                    )
+                    backoffMutex.withLock {
+                        consecutiveFailureCount++
+                        val backoffMs = calculateBackoffMs(consecutiveFailureCount)
+                        nextRetryAt = Instant.now().plusMillis(backoffMs)
+                        Log.w(
+                            TAG,
+                            "Pre-auth forward failed (failure #$consecutiveFailureCount); " +
+                                "next retry after ${backoffMs}ms. Error: ${result.message}",
+                        )
+                    }
                     // Stop processing remaining records — retry on next cycle
                     return
                 }

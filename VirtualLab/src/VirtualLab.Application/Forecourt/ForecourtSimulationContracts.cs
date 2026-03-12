@@ -1,4 +1,5 @@
 using VirtualLab.Domain.Enums;
+using VirtualLab.Application.ContractValidation;
 
 namespace VirtualLab.Application.Forecourt;
 
@@ -72,6 +73,7 @@ public sealed record TransactionSimulationSummary(
     DateTimeOffset OccurredAtUtc,
     string RawPayloadJson,
     string CanonicalPayloadJson,
+    PayloadContractValidationReport ContractValidation,
     string MetadataJson,
     string TimelineJson);
 

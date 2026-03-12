@@ -34,6 +34,24 @@ public sealed class VirtualLabSeedService(
             Key = "default-lab",
             Name = "Default Virtual Lab",
             Description = "Deterministic seeded environment for demos and local development.",
+            SettingsJson = """
+            {
+              "retention": {
+                "logRetentionDays": 30,
+                "callbackHistoryRetentionDays": 30,
+                "transactionRetentionDays": 90,
+                "preserveTimelineIntegrity": true
+              },
+              "backup": {
+                "includeRuntimeDataByDefault": true,
+                "includeScenarioRunsByDefault": true
+              },
+              "telemetry": {
+                "emitMetrics": true,
+                "emitActivities": true
+              }
+            }
+            """,
             SeedVersion = 1,
             DeterministicSeed = seedProfile.ScenarioSeed,
             CreatedAtUtc = now,
@@ -56,29 +74,154 @@ public sealed class VirtualLabSeedService(
             CreateProduct(environment.Id, "SUP", "Super Unleaded", "95", "#2563eb", 1.61m, now),
         ];
 
-        ScenarioDefinition scenarioDefinition = new()
-        {
-            Id = DeterministicGuid("scenario:default-demo"),
-            LabEnvironmentId = environment.Id,
-            ScenarioKey = "default-demo",
-            Name = "Default Demo Flow",
-            Description = "Deterministic lift, pre-auth, and delivery walkthrough.",
-            DeterministicSeed = seedProfile.ScenarioSeed,
-            DefinitionJson = """
+        List<ScenarioDefinition> scenarioDefinitions =
+        [
+            new()
             {
-              "steps": [
-                "lift-nozzle",
-                "create-preauth",
-                "authorize-preauth",
-                "dispense",
-                "push-transaction"
-              ]
-            }
-            """,
-            ReplaySignature = seedProfile.ComputeReplaySignature(),
-            CreatedAtUtc = now,
-            UpdatedAtUtc = now,
-        };
+                Id = DeterministicGuid("scenario:fiscalized-preauth-success"),
+                LabEnvironmentId = environment.Id,
+                ScenarioKey = "fiscalized-preauth-success",
+                Name = "Fiscalized Pre-Auth Success",
+                Description = "Deterministic create-then-authorize pre-auth flow with successful push delivery.",
+                DeterministicSeed = seedProfile.ScenarioSeed,
+                DefinitionJson = """
+                {
+                  "version": 1,
+                  "siteCode": "VL-MW-BT001",
+                  "setup": {
+                    "resetNozzles": true,
+                    "clearActivePreAuth": true,
+                    "profileKey": "doms-like",
+                    "deliveryMode": "Hybrid",
+                    "preAuthMode": "CreateThenAuthorize"
+                  },
+                  "actions": [
+                    { "kind": "preauth", "name": "Create pre-auth", "action": "create", "correlationAlias": "flow", "pumpNumber": 1, "nozzleNumber": 1, "amount": 15000, "expiresInSeconds": 300, "customerName": "Demo Fleet", "customerTaxId": "TAX-123", "customerTaxOffice": "Lilongwe" },
+                    { "kind": "preauth", "name": "Authorize pre-auth", "action": "authorize", "correlationAlias": "flow", "pumpNumber": 1, "nozzleNumber": 1, "amount": 15000 },
+                    { "kind": "lift", "name": "Lift nozzle", "correlationAlias": "flow", "pumpNumber": 1, "nozzleNumber": 1 },
+                    { "kind": "dispense", "name": "Start dispense", "action": "start", "correlationAlias": "flow", "pumpNumber": 1, "nozzleNumber": 1, "targetAmount": 9725.5, "elapsedSeconds": 90 },
+                    { "kind": "dispense", "name": "Stop dispense", "action": "stop", "correlationAlias": "flow", "pumpNumber": 1, "nozzleNumber": 1, "elapsedSeconds": 90 },
+                    { "kind": "hang", "name": "Hang nozzle", "correlationAlias": "flow", "pumpNumber": 1, "nozzleNumber": 1 },
+                    { "kind": "push-transactions", "name": "Push delivery", "correlationAlias": "flow", "targetKey": "demo-callback" }
+                  ],
+                  "assertions": [
+                    { "kind": "preauth-status", "name": "Completed pre-auth exists", "correlationAlias": "flow", "expectedStatus": "Completed", "minimumCount": 1 },
+                    { "kind": "transaction-status", "name": "Delivered transaction exists", "correlationAlias": "flow", "expectedStatus": "Delivered", "minimumCount": 1 },
+                    { "kind": "callback-attempt-count", "name": "Push attempt recorded", "correlationAlias": "flow", "targetKey": "demo-callback", "minimumCount": 1 }
+                  ]
+                }
+                """,
+                ReplaySignature = seedProfile.ComputeReplaySignature(),
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+            },
+            new()
+            {
+                Id = DeterministicGuid("scenario:create-then-authorize-timeout"),
+                LabEnvironmentId = environment.Id,
+                ScenarioKey = "create-then-authorize-timeout",
+                Name = "Create Then Authorize Timeout",
+                Description = "Create a pre-auth, delay, then expire it to simulate an authorization timeout path.",
+                DeterministicSeed = seedProfile.ScenarioSeed,
+                DefinitionJson = """
+                {
+                  "version": 1,
+                  "siteCode": "VL-MW-BT001",
+                  "setup": {
+                    "resetNozzles": true,
+                    "clearActivePreAuth": true,
+                    "profileKey": "doms-like",
+                    "deliveryMode": "Hybrid",
+                    "preAuthMode": "CreateThenAuthorize"
+                  },
+                  "actions": [
+                    { "kind": "preauth", "name": "Create pre-auth", "action": "create", "correlationAlias": "timeout", "pumpNumber": 1, "nozzleNumber": 1, "amount": 12000, "expiresInSeconds": 2 },
+                    { "kind": "delay", "name": "Delay past expiry", "delayMs": 2000 },
+                    { "kind": "preauth", "name": "Expire timed-out session", "action": "expire", "correlationAlias": "timeout" }
+                  ],
+                  "assertions": [
+                    { "kind": "preauth-status", "name": "Expired pre-auth exists", "correlationAlias": "timeout", "expectedStatus": "Expired", "minimumCount": 1 }
+                  ]
+                }
+                """,
+                ReplaySignature = seedProfile.ComputeReplaySignature(),
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+            },
+            new()
+            {
+                Id = DeterministicGuid("scenario:bulk-push-duplicate-batch"),
+                LabEnvironmentId = environment.Id,
+                ScenarioKey = "bulk-push-duplicate-batch",
+                Name = "Bulk Push Duplicate Batch",
+                Description = "Create a duplicate-injection transaction and verify multiple callback attempts are recorded.",
+                DeterministicSeed = seedProfile.ScenarioSeed,
+                DefinitionJson = """
+                {
+                  "version": 1,
+                  "siteCode": "VL-MW-BT001",
+                  "setup": {
+                    "resetNozzles": true,
+                    "clearActivePreAuth": true,
+                    "profileKey": "bulk-push",
+                    "deliveryMode": "Push",
+                    "preAuthMode": "CreateOnly"
+                  },
+                  "actions": [
+                    { "kind": "lift", "name": "Lift nozzle", "correlationAlias": "batch", "pumpNumber": 1, "nozzleNumber": 1 },
+                    { "kind": "dispense", "name": "Start duplicate dispense", "action": "start", "correlationAlias": "batch", "pumpNumber": 1, "nozzleNumber": 1, "targetAmount": 4500, "elapsedSeconds": 45, "injectDuplicate": true },
+                    { "kind": "dispense", "name": "Stop dispense", "action": "stop", "correlationAlias": "batch", "pumpNumber": 1, "nozzleNumber": 1, "elapsedSeconds": 45 },
+                    { "kind": "hang", "name": "Hang nozzle", "correlationAlias": "batch", "pumpNumber": 1, "nozzleNumber": 1 },
+                    { "kind": "push-transactions", "name": "Push duplicate batch", "correlationAlias": "batch", "targetKey": "demo-callback" }
+                  ],
+                  "assertions": [
+                    { "kind": "transaction-status", "name": "Delivered transaction exists", "correlationAlias": "batch", "expectedStatus": "Delivered", "minimumCount": 1 },
+                    { "kind": "callback-attempt-count", "name": "Duplicate callback attempts exist", "correlationAlias": "batch", "targetKey": "demo-callback", "minimumCount": 2 }
+                  ]
+                }
+                """,
+                ReplaySignature = seedProfile.ComputeReplaySignature(),
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+            },
+            new()
+            {
+                Id = DeterministicGuid("scenario:offline-pull-catch-up"),
+                LabEnvironmentId = environment.Id,
+                ScenarioKey = "offline-pull-catch-up",
+                Name = "Offline Pull Catch-Up",
+                Description = "Generate a pull-mode transaction, fetch it, and acknowledge it to simulate a catch-up cycle.",
+                DeterministicSeed = seedProfile.ScenarioSeed,
+                DefinitionJson = """
+                {
+                  "version": 1,
+                  "siteCode": "VL-MW-BT001",
+                  "setup": {
+                    "resetNozzles": true,
+                    "clearActivePreAuth": true,
+                    "profileKey": "generic-create-only",
+                    "deliveryMode": "Pull",
+                    "preAuthMode": "CreateOnly"
+                  },
+                  "actions": [
+                    { "kind": "lift", "name": "Lift nozzle", "correlationAlias": "pull", "pumpNumber": 1, "nozzleNumber": 1 },
+                    { "kind": "dispense", "name": "Start dispense", "action": "start", "correlationAlias": "pull", "pumpNumber": 1, "nozzleNumber": 1, "targetAmount": 3600, "elapsedSeconds": 30 },
+                    { "kind": "dispense", "name": "Stop dispense", "action": "stop", "correlationAlias": "pull", "pumpNumber": 1, "nozzleNumber": 1, "elapsedSeconds": 30 },
+                    { "kind": "hang", "name": "Hang nozzle", "correlationAlias": "pull", "pumpNumber": 1, "nozzleNumber": 1 },
+                    { "kind": "pull-transactions", "name": "Pull transaction batch", "limit": 10 },
+                    { "kind": "acknowledge-transactions", "name": "Acknowledge pulled batch", "correlationAlias": "pull" }
+                  ],
+                  "assertions": [
+                    { "kind": "transaction-status", "name": "Acknowledged transaction exists", "correlationAlias": "pull", "expectedStatus": "Acknowledged", "minimumCount": 1 },
+                    { "kind": "log-count", "name": "Acknowledgement log exists", "correlationAlias": "pull", "category": "TransactionPulled", "eventType": "TransactionAcknowledged", "minimumCount": 1 }
+                  ]
+                }
+                """,
+                ReplaySignature = seedProfile.ComputeReplaySignature(),
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+            },
+        ];
 
         Site site = new()
         {
@@ -130,6 +273,8 @@ public sealed class VirtualLabSeedService(
                 SiteId = site.Id,
                 PumpNumber = pumpNumber,
                 FccPumpNumber = pumpNumber,
+                LayoutX = 120 + ((pumpNumber - 1) * 240),
+                LayoutY = 120,
                 Label = $"Pump {pumpNumber}",
                 CreatedAtUtc = now,
             };
@@ -157,7 +302,7 @@ public sealed class VirtualLabSeedService(
         {
             Id = DeterministicGuid("scenario-run:default-demo"),
             SiteId = site.Id,
-            ScenarioDefinitionId = scenarioDefinition.Id,
+            ScenarioDefinitionId = scenarioDefinitions[0].Id,
             CorrelationId = "corr-default-scenario",
             ReplaySeed = seedProfile.ScenarioSeed,
             ReplaySignature = seedProfile.ComputeReplaySignature(),
@@ -193,10 +338,10 @@ public sealed class VirtualLabSeedService(
             AuthorizedAmount = 15000m,
             FinalAmount = 9725.50m,
             FinalVolume = 42.113m,
-            RawRequestJson = """{"amount":15000,"pump":1,"nozzle":1}""",
-            CanonicalRequestJson = """{"reservedAmount":15000,"pumpNumber":1,"nozzleNumber":1}""",
-            RawResponseJson = """{"status":"authorized","authorizationId":"AUTH-0001"}""",
-            CanonicalResponseJson = """{"status":"authorized","externalReference":"preauth-0001"}""",
+            RawRequestJson = """{"amount":15000,"pump":1,"nozzle":1,"correlationId":"corr-default-flow"}""",
+            CanonicalRequestJson = """{"siteCode":"VL-MW-BT001","preAuthId":"preauth-0001","correlationId":"corr-default-flow","pumpNumber":1,"nozzleNumber":1,"productCode":"PMS","requestedAmountMinorUnits":1500000,"unitPriceMinorPerLitre":23100,"currencyCode":"MWK","status":"COMPLETED","requestedAt":"2026-03-11T00:00:00Z","expiresAt":"2026-03-11T00:05:00Z"}""",
+            RawResponseJson = """{"status":"completed","preauthId":"preauth-0001","correlationId":"corr-default-flow","expiresAtUtc":"2026-03-11T00:05:00Z"}""",
+            CanonicalResponseJson = """{"status":"COMPLETED","preAuthId":"preauth-0001","correlationId":"corr-default-flow","expiresAtUtc":"2026-03-11T00:05:00Z","authorizedAmountMinorUnits":1500000,"finalAmountMinorUnits":972550,"finalVolumeMillilitres":42113,"errorCode":null,"failureMessage":null}""",
             TimelineJson = """
             [
               {"event":"create","at":"2026-03-11T00:00:00Z"},
@@ -229,8 +374,8 @@ public sealed class VirtualLabSeedService(
             OccurredAtUtc = now.AddSeconds(-1),
             CreatedAtUtc = now.AddSeconds(-1),
             DeliveredAtUtc = now,
-            RawPayloadJson = """{"siteCode":"VL-MW-BT001","volume":42.113,"amount":9725.50}""",
-            CanonicalPayloadJson = """{"site":"VL-MW-BT001","totalAmount":9725.50,"volume":42.113}""",
+            RawPayloadJson = """{"transactionId":"TX-0001","correlationId":"corr-default-flow","siteCode":"VL-MW-BT001","pumpNumber":1,"nozzleNumber":1,"productCode":"PMS","productName":"Premium Motor Spirit","volume":42.113,"amount":9725.50,"unitPrice":231.00,"currencyCode":"MWK","occurredAtUtc":"2026-03-11T00:00:04Z","preAuthId":"preauth-0001"}""",
+            CanonicalPayloadJson = """{"fccTransactionId":"TX-0001","correlationId":"corr-default-flow","siteCode":"VL-MW-BT001","pumpNumber":1,"nozzleNumber":1,"productCode":"PMS","volumeMicrolitres":42113000,"amountMinorUnits":972550,"unitPriceMinorPerLitre":23100,"currencyCode":"MWK","startedAt":"2026-03-11T00:00:00Z","completedAt":"2026-03-11T00:00:04Z","fccVendor":"DOMS","status":"PENDING","preAuthId":"preauth-0001","schemaVersion":1,"source":"VirtualLab"}""",
             RawHeadersJson = """{"content-type":"application/json"}""",
             DeliveryCursor = "cursor-0001",
             MetadataJson = """{"seeded":true,"duplicateInjectionEnabled":false,"simulateFailureEnabled":false}""",
@@ -310,7 +455,7 @@ public sealed class VirtualLabSeedService(
         dbContext.Add(callbackTarget);
         dbContext.AddRange(pumps);
         dbContext.AddRange(nozzles);
-        dbContext.Add(scenarioDefinition);
+        dbContext.AddRange(scenarioDefinitions);
         dbContext.Add(scenarioRun);
         dbContext.Add(preAuthSession);
         dbContext.Add(transaction);

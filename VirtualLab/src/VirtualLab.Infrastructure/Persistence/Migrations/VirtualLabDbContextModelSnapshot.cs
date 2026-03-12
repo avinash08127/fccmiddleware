@@ -23,11 +23,11 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
-                    b.Property<int>("AttemptNumber")
-                        .HasColumnType("INTEGER");
-
                     b.Property<DateTime?>("AcknowledgedAtUtc")
                         .HasColumnType("TEXT");
+
+                    b.Property<int>("AttemptNumber")
+                        .HasColumnType("INTEGER");
 
                     b.Property<DateTime>("AttemptedAtUtc")
                         .HasColumnType("TEXT");
@@ -295,6 +295,10 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
 
                     b.Property<int>("SeedVersion")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("SettingsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("UpdatedAtUtc")
                         .HasColumnType("TEXT");
@@ -603,6 +607,12 @@ namespace VirtualLab.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
+
+                    b.Property<int>("LayoutX")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("LayoutY")
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("PumpNumber")
                         .HasColumnType("INTEGER");

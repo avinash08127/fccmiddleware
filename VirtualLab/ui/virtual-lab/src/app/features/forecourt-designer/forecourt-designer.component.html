@@ -1,0 +1,474 @@
+<section class="page-header">
+  <div>
+    <p class="eyebrow">VL-2.3 Forecourt Designer</p>
+    <h2>Visual pump layout, numbering, and product mapping in one editor.</h2>
+    <p class="copy">
+      Drag pumps on the SVG canvas, edit display and FCC numbering independently, clone working
+      layouts, and save an exact site forecourt payload back to the management API.
+    </p>
+  </div>
+
+  <div class="header-actions">
+    <button
+      type="button"
+      class="secondary"
+      (click)="reloadForecourt()"
+      [disabled]="loadingForecourt"
+    >
+      Reload
+    </button>
+    <button
+      type="button"
+      (click)="saveForecourt()"
+      [disabled]="!dirty || saving || loadingForecourt"
+    >
+      {{ saving ? 'Saving…' : 'Save forecourt' }}
+    </button>
+  </div>
+</section>
+
+<section *ngIf="actionMessage" class="banner success">{{ actionMessage }}</section>
+<section *ngIf="errorMessage" class="banner error">{{ errorMessage }}</section>
+
+<div class="designer-shell">
+  <aside class="side-panel catalog-panel">
+    <section class="panel-section">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Sites</p>
+          <h3>Choose a forecourt</h3>
+        </div>
+        <span class="status-chip" [class.dirty]="dirty">{{ dirty ? 'Unsaved' : 'Synced' }}</span>
+      </div>
+
+      <div class="site-list">
+        <button
+          *ngFor="let site of sites"
+          type="button"
+          class="site-card"
+          [class.active]="site.id === selectedSiteId"
+          [class.inactive]="!site.isActive"
+          (click)="selectSite(site.id)"
+        >
+          <strong>{{ site.siteCode }}</strong>
+          <span>{{ site.name }}</span>
+          <small>
+            {{ site.forecourt.pumpCount }} pumps · {{ site.forecourt.nozzleCount }} nozzles ·
+            {{ site.activeProfile.name }}
+          </small>
+        </button>
+
+        <p *ngIf="!sites.length && !loadingCatalog" class="empty-copy">
+          No sites are available yet.
+        </p>
+      </div>
+    </section>
+
+    <section class="panel-section">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Products</p>
+          <h3>Available nozzle mappings</h3>
+        </div>
+        <span class="pill">{{ activeProductOptions.length }} active</span>
+      </div>
+
+      <div class="product-list">
+        <article
+          *ngFor="let product of products"
+          class="product-card"
+          [class.inactive]="!product.isActive"
+        >
+          <span class="swatch" [style.background]="product.colorHex"></span>
+          <div>
+            <strong>{{ product.productCode }}</strong>
+            <p>{{ product.name }}</p>
+          </div>
+          <small>{{ product.assignedNozzleCount }} assigned</small>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel-section">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Bulk Create</p>
+          <h3>Fast layout scaffolding</h3>
+        </div>
+      </div>
+
+      <label>
+        Pumps to add
+        <input type="number" min="1" max="24" [(ngModel)]="bulkPumpCount" />
+      </label>
+      <label>
+        Nozzles per pump
+        <input type="number" min="0" max="8" [(ngModel)]="bulkNozzlesPerPump" />
+      </label>
+
+      <div class="button-row">
+        <button type="button" class="secondary" (click)="addPump()" [disabled]="!selectedSiteId">
+          Add one pump
+        </button>
+        <button
+          type="button"
+          class="secondary"
+          (click)="bulkCreatePumps()"
+          [disabled]="!selectedSiteId"
+        >
+          Add batch
+        </button>
+      </div>
+      <div class="button-row">
+        <button
+          type="button"
+          class="secondary"
+          (click)="cloneSelectedPump()"
+          [disabled]="!selectedPump"
+        >
+          Clone selected
+        </button>
+        <button
+          type="button"
+          class="danger"
+          (click)="removeSelectedPump()"
+          [disabled]="!selectedPump"
+        >
+          Remove selected
+        </button>
+      </div>
+    </section>
+
+    <section *ngIf="validationMessages.length" class="panel-section validation-list">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Validation</p>
+          <h3>Server feedback</h3>
+        </div>
+      </div>
+      <ul>
+        <li *ngFor="let message of validationMessages">
+          <strong>{{ message.path }}</strong> · {{ message.message }}
+        </li>
+      </ul>
+    </section>
+  </aside>
+
+  <section class="canvas-panel">
+    <div class="panel-toolbar">
+      <div>
+        <p class="section-kicker">Layout Canvas</p>
+        <h3 *ngIf="forecourt">{{ forecourt.siteCode }} · {{ forecourt.siteName }}</h3>
+        <p *ngIf="selectedSite as site; else loadingLabel">
+          {{ site.deliveryMode }} · {{ site.preAuthMode }} · {{ site.activeProfile.vendorFamily }}
+        </p>
+        <ng-template #loadingLabel>
+          <p>Select a site to start editing.</p>
+        </ng-template>
+      </div>
+
+      <div class="metrics">
+        <div>
+          <strong>{{ forecourt?.pumps?.length ?? 0 }}</strong>
+          <span>Pumps</span>
+        </div>
+        <div>
+          <strong>{{ totalNozzles }}</strong>
+          <span>Nozzles</span>
+        </div>
+        <div>
+          <strong>{{ selectedPump?.pumpNumber ?? '—' }}</strong>
+          <span>Selected</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="canvas-meta">
+      <span class="legend-item"><span class="legend-dot display"></span>Display numbering</span>
+      <span class="legend-item"><span class="legend-dot fcc"></span>FCC numbering</span>
+      <span class="legend-item"
+        ><span class="legend-dot live"></span>Nozzle state overlay ready</span
+      >
+    </div>
+
+    <div class="svg-frame" [class.loading]="loadingForecourt || loadingCatalog">
+      <svg
+        #canvas
+        *ngIf="forecourt; else emptyCanvas"
+        class="designer-canvas"
+        [attr.viewBox]="'0 0 ' + canvasWidth + ' ' + canvasHeight"
+        role="img"
+        aria-label="Forecourt layout editor"
+      >
+        <defs>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path
+              d="M 40 0 L 0 0 0 40"
+              fill="none"
+              stroke="rgba(44, 64, 81, 0.12)"
+              stroke-width="1"
+            ></path>
+          </pattern>
+        </defs>
+
+        <rect
+          x="0"
+          y="0"
+          [attr.width]="canvasWidth"
+          [attr.height]="canvasHeight"
+          fill="url(#grid)"
+        ></rect>
+        <rect
+          x="20"
+          y="20"
+          [attr.width]="canvasWidth - 40"
+          [attr.height]="canvasHeight - 40"
+          class="boundary"
+        ></rect>
+
+        <g *ngFor="let pump of forecourt.pumps; trackBy: trackByLocalId">
+          <g
+            class="pump-group"
+            [class.selected]="pump.localId === selectedPumpLocalId"
+            [class.inactive]="!pump.isActive"
+            [attr.transform]="'translate(' + pump.layoutX + ' ' + pump.layoutY + ')'"
+            (pointerdown)="beginDrag($event, pump.localId)"
+            (click)="selectPump(pump.localId)"
+          >
+            <rect
+              class="pump-frame"
+              rx="26"
+              ry="26"
+              [attr.width]="pumpWidth"
+              [attr.height]="displayPumpBodyHeight(pump)"
+            ></rect>
+            <rect class="pump-header" rx="26" ry="26" [attr.width]="pumpWidth" height="86"></rect>
+
+            <text x="18" y="28" class="pump-name">
+              {{ pump.label || 'Pump ' + pump.pumpNumber }}
+            </text>
+            <text x="18" y="52" class="pump-display">Display {{ pump.pumpNumber }}</text>
+            <text x="18" y="72" class="pump-fcc">FCC {{ pump.fccPumpNumber }}</text>
+
+            <g
+              *ngFor="let nozzle of pump.nozzles; let nozzleIndex = index; trackBy: trackByLocalId"
+              class="nozzle-row"
+              [class.selected]="nozzle.localId === selectedNozzleLocalId"
+              [attr.transform]="
+                'translate(14 ' +
+                (pumpHeaderHeight + 10 + nozzleIndex * (nozzleRowHeight + nozzleGap)) +
+                ')'
+              "
+              (pointerdown)="$event.stopPropagation()"
+              (click)="selectNozzle(pump.localId, nozzle.localId)"
+            >
+              <rect
+                class="nozzle-chip"
+                rx="16"
+                ry="16"
+                [attr.width]="pumpWidth - 28"
+                [attr.height]="nozzleRowHeight"
+              ></rect>
+              <circle cx="16" cy="18" r="7" [attr.fill]="productColor(nozzle.productId)"></circle>
+              <text x="32" y="16" class="nozzle-label">
+                {{ nozzle.label || 'Nozzle ' + nozzle.nozzleNumber }}
+              </text>
+              <text x="32" y="28" class="nozzle-map">
+                N{{ nozzle.nozzleNumber }} / FCC {{ nozzle.fccNozzleNumber }}
+              </text>
+              <text x="142" y="23" text-anchor="end" class="nozzle-product">
+                {{ nozzle.productCode }}
+              </text>
+            </g>
+          </g>
+        </g>
+      </svg>
+
+      <ng-template #emptyCanvas>
+        <div class="empty-canvas">
+          <h3>{{ loadingCatalog ? 'Loading forecourt context…' : 'Select a site to begin.' }}</h3>
+          <p>
+            The designer loads the persisted forecourt model, keeps display and FCC numbering
+            separate, and saves the exact layout back to the backend.
+          </p>
+        </div>
+      </ng-template>
+    </div>
+  </section>
+
+  <aside class="side-panel inspector-panel">
+    <section class="panel-section">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Inspector</p>
+          <h3 *ngIf="selectedPump; else selectPumpPrompt">
+            Pump {{ selectedPump.pumpNumber }} · FCC {{ selectedPump.fccPumpNumber }}
+          </h3>
+          <ng-template #selectPumpPrompt>
+            <h3>Select a pump</h3>
+          </ng-template>
+        </div>
+      </div>
+
+      <div *ngIf="selectedPump as pump; else inspectorEmpty" class="inspector-stack">
+        <div class="two-up">
+          <label>
+            Display pump number
+            <input
+              type="number"
+              min="1"
+              [ngModel]="pump.pumpNumber"
+              (ngModelChange)="updatePumpNumber(pump.localId, $event)"
+            />
+          </label>
+          <label>
+            FCC pump number
+            <input
+              type="number"
+              min="1"
+              [ngModel]="pump.fccPumpNumber"
+              (ngModelChange)="updateFccPumpNumber(pump.localId, $event)"
+            />
+          </label>
+        </div>
+
+        <label>
+          Pump label
+          <input [ngModel]="pump.label" (ngModelChange)="updatePumpLabel(pump.localId, $event)" />
+        </label>
+
+        <div class="two-up">
+          <label>
+            X position
+            <input [value]="pump.layoutX" readonly />
+          </label>
+          <label>
+            Y position
+            <input [value]="pump.layoutY" readonly />
+          </label>
+        </div>
+
+        <label class="checkbox">
+          <input
+            type="checkbox"
+            [ngModel]="pump.isActive"
+            (ngModelChange)="updatePumpActive(pump.localId, $event)"
+          />
+          Pump active
+        </label>
+      </div>
+
+      <ng-template #inspectorEmpty>
+        <p class="empty-copy">
+          Pick a pump on the canvas to edit numbering, labels, and nozzle mappings.
+        </p>
+      </ng-template>
+    </section>
+
+    <section class="panel-section" *ngIf="selectedPump as pump">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Nozzles</p>
+          <h3>{{ pump.nozzles.length }} configured</h3>
+        </div>
+        <button type="button" class="secondary compact" (click)="addNozzle()">Add nozzle</button>
+      </div>
+
+      <div class="nozzle-list">
+        <button
+          *ngFor="let nozzle of pump.nozzles; trackBy: trackByLocalId"
+          type="button"
+          class="nozzle-card"
+          [class.active]="nozzle.localId === selectedNozzleLocalId"
+          (click)="selectNozzle(pump.localId, nozzle.localId)"
+        >
+          <span class="swatch" [style.background]="productColor(nozzle.productId)"></span>
+          <div>
+            <strong>{{ nozzle.label }}</strong>
+            <small
+              >{{ nozzle.productCode }} · N{{ nozzle.nozzleNumber }} / FCC
+              {{ nozzle.fccNozzleNumber }}</small
+            >
+          </div>
+        </button>
+      </div>
+    </section>
+
+    <section class="panel-section" *ngIf="selectedNozzle as nozzle">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Selected Nozzle</p>
+          <h3>{{ nozzle.label }}</h3>
+        </div>
+        <button type="button" class="danger compact" (click)="removeNozzle(nozzle.localId)">
+          Remove
+        </button>
+      </div>
+
+      <div class="inspector-stack">
+        <div class="two-up">
+          <label>
+            Display nozzle number
+            <input
+              type="number"
+              min="1"
+              [ngModel]="nozzle.nozzleNumber"
+              (ngModelChange)="updateNozzleNumber(nozzle.localId, $event)"
+            />
+          </label>
+          <label>
+            FCC nozzle number
+            <input
+              type="number"
+              min="1"
+              [ngModel]="nozzle.fccNozzleNumber"
+              (ngModelChange)="updateFccNozzleNumber(nozzle.localId, $event)"
+            />
+          </label>
+        </div>
+
+        <label>
+          Nozzle label
+          <input
+            [ngModel]="nozzle.label"
+            (ngModelChange)="updateNozzleLabel(nozzle.localId, $event)"
+          />
+        </label>
+
+        <label>
+          Product mapping
+          <select
+            [ngModel]="nozzle.productId"
+            (ngModelChange)="updateNozzleProduct(nozzle.localId, $event)"
+          >
+            <option
+              *ngFor="let product of products"
+              [value]="product.id"
+              [disabled]="!product.isActive"
+            >
+              {{ product.productCode }} · {{ product.name
+              }}{{ product.isActive ? '' : ' · inactive' }}
+            </option>
+          </select>
+        </label>
+
+        <label class="checkbox">
+          <input
+            type="checkbox"
+            [ngModel]="nozzle.isActive"
+            (ngModelChange)="updateNozzleActive(nozzle.localId, $event)"
+          />
+          Nozzle active
+        </label>
+
+        <div class="state-card">
+          <span class="pill">{{ nozzle.state }}</span>
+          <p>
+            SVG rows already carry state-aware styling, so live overlays can layer on without
+            reworking the layout.
+          </p>
+        </div>
+      </div>
+    </section>
+  </aside>
+</div>

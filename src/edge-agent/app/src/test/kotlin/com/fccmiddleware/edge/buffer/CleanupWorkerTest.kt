@@ -211,6 +211,97 @@ class CleanupWorkerTest {
     }
 
     // -------------------------------------------------------------------------
+    // Quota-based cleanup (C-08)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `runCleanup archives oldest PENDING when total records exceed maxBufferRecords`() = runBlocking {
+        val now = Instant.now().toString()
+        val dao = db.transactionDao()
+
+        // Insert 15 PENDING records
+        for (i in 1..15) {
+            dao.insert(
+                buildTx(
+                    fccId = "PENDING-$i",
+                    syncStatus = "PENDING",
+                    updatedAt = now,
+                    createdAt = Instant.now().minusSeconds(100L - i).toString(),
+                )
+            )
+        }
+
+        // maxBufferRecords=10, pendingKeepCount=5 → should archive oldest PENDING beyond 5
+        val result = worker.runCleanup(
+            retentionDays = 7,
+            maxBufferRecords = 10,
+            pendingKeepCount = 5,
+        )
+
+        // With 15 total and max 10, excess = 5. No ARCHIVED or SYNCED_TO_ODOO to delete,
+        // so it force-archives oldest PENDING beyond keepCount=5, which archives 10 records.
+        assertTrue(
+            "Should archive some PENDING records",
+            result.quotaArchivedPending > 0,
+        )
+    }
+
+    @Test
+    fun `runCleanup deletes ARCHIVED records first when over quota`() = runBlocking {
+        val now = Instant.now().toString()
+        val dao = db.transactionDao()
+
+        // Insert 8 ARCHIVED + 5 PENDING = 13 total
+        for (i in 1..8) {
+            dao.insert(
+                buildTx(
+                    fccId = "ARCHIVED-$i",
+                    syncStatus = "ARCHIVED",
+                    updatedAt = now,
+                    createdAt = Instant.now().minusSeconds(100L - i).toString(),
+                )
+            )
+        }
+        for (i in 1..5) {
+            dao.insert(
+                buildTx(
+                    fccId = "PENDING-$i",
+                    syncStatus = "PENDING",
+                    updatedAt = now,
+                    createdAt = now,
+                )
+            )
+        }
+
+        val result = worker.runCleanup(
+            retentionDays = 7,
+            maxBufferRecords = 10,
+            pendingKeepCount = 5,
+        )
+
+        // Excess = 3. Should delete 3 ARCHIVED records first.
+        assertEquals("Should delete 3 ARCHIVED", 3, result.quotaDeletedArchived)
+        assertEquals("Should not touch PENDING", 0, result.quotaArchivedPending)
+    }
+
+    @Test
+    fun `runCleanup does not trigger quota cleanup when under max`() = runBlocking {
+        val now = Instant.now().toString()
+        // Insert just 3 PENDING records (well under default quota)
+        for (i in 1..3) {
+            db.transactionDao().insert(
+                buildTx(fccId = "TX-$i", syncStatus = "PENDING", updatedAt = now)
+            )
+        }
+
+        val result = worker.runCleanup(retentionDays = 7, maxBufferRecords = 100)
+
+        assertEquals(0, result.quotaDeletedArchived)
+        assertEquals(0, result.quotaDeletedSynced)
+        assertEquals(0, result.quotaArchivedPending)
+    }
+
+    // -------------------------------------------------------------------------
     // Builders
     // -------------------------------------------------------------------------
 

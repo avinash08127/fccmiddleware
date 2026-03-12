@@ -22,6 +22,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -34,6 +35,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.net.ConnectException
 
 /**
  * PreAuthHandlerTest — unit tests for EA-2.5 pre-auth handler logic.
@@ -124,14 +126,15 @@ class PreAuthHandlerTest {
     }
 
     @Test
-    fun `handle returns ERROR result for existing PENDING record (dedup in-progress)`() = runTest {
+    fun `handle returns IN_PROGRESS result for existing PENDING record (dedup in-progress)`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         val existing = stubRecord(status = PreAuthStatus.PENDING.name, authCode = null)
         coEvery { preAuthDao.getByOdooOrderId("order-1", "SITE-A") } returns existing
 
         val result = handler.handle(baseCommand())
 
-        assertEquals(PreAuthResultStatus.ERROR, result.status)
+        // H-07: Must return IN_PROGRESS (not ERROR) so Odoo treats it as "wait and retry"
+        assertEquals(PreAuthResultStatus.IN_PROGRESS, result.status)
         assertNotNull(result.message)
         // Must NOT call nozzle lookup or FCC for a dedup hit
         coVerify(exactly = 0) { nozzleDao.resolveForPreAuth(any(), any(), any()) }
@@ -351,6 +354,70 @@ class PreAuthHandlerTest {
         assertEquals(PreAuthStatus.FAILED.name, statusSlot.captured)
     }
 
+    // -------------------------------------------------------------------------
+    // handle — H-08: exception type differentiation
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `handle returns TIMEOUT for TimeoutCancellationException`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        coEvery { preAuthDao.getByOdooOrderId(any(), any()) } returns null
+        coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
+        coEvery { preAuthDao.insert(any()) } returns 1L
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } throws TimeoutCancellationException("Timed out")
+
+        val result = handler.handle(baseCommand())
+
+        assertEquals(PreAuthResultStatus.TIMEOUT, result.status)
+        assertTrue(result.message!!.contains("timeout"))
+    }
+
+    @Test
+    fun `handle returns ERROR with FCC_CONNECTION_REFUSED for ConnectException`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        coEvery { preAuthDao.getByOdooOrderId(any(), any()) } returns null
+        coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
+        coEvery { preAuthDao.insert(any()) } returns 1L
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } throws ConnectException("Connection refused")
+
+        val result = handler.handle(baseCommand())
+
+        assertEquals(PreAuthResultStatus.ERROR, result.status)
+        assertEquals("FCC_CONNECTION_REFUSED", result.message)
+    }
+
+    @Test
+    fun `handle returns ERROR with FCC_NETWORK_ERROR for IOException`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        coEvery { preAuthDao.getByOdooOrderId(any(), any()) } returns null
+        coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
+        coEvery { preAuthDao.insert(any()) } returns 1L
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } throws java.io.IOException("Network unreachable")
+
+        val result = handler.handle(baseCommand())
+
+        assertEquals(PreAuthResultStatus.ERROR, result.status)
+        assertTrue(result.message!!.startsWith("FCC_NETWORK_ERROR"))
+    }
+
+    @Test
+    fun `handle returns ERROR with FCC_INTERNAL_ERROR for unexpected exceptions`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        coEvery { preAuthDao.getByOdooOrderId(any(), any()) } returns null
+        coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
+        coEvery { preAuthDao.insert(any()) } returns 1L
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } throws IllegalStateException("Adapter bug")
+
+        val result = handler.handle(baseCommand())
+
+        assertEquals(PreAuthResultStatus.ERROR, result.status)
+        assertTrue(result.message!!.startsWith("FCC_INTERNAL_ERROR"))
+    }
+
     @Test
     fun `handle writes audit log entry asynchronously`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
@@ -542,7 +609,7 @@ class PreAuthHandlerTest {
     }
 
     @Test
-    fun `runExpiryCheck continues processing remaining records if FCC deauth throws`() = runTest {
+    fun `runExpiryCheck skips AUTHORIZED records when FCC deauth fails (H-09 zombie prevention)`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         val record1 = stubRecord(id = "id-1", status = PreAuthStatus.AUTHORIZED.name)
         val record2 = stubRecord(id = "id-2", status = PreAuthStatus.AUTHORIZED.name)
@@ -552,9 +619,44 @@ class PreAuthHandlerTest {
 
         handler.runExpiryCheck()
 
-        // Both records must still be transitioned to EXPIRED despite FCC throwing
-        coVerify(exactly = 2) {
+        // Neither record should be marked EXPIRED — they stay AUTHORIZED for retry next cycle
+        coVerify(exactly = 0) {
             preAuthDao.updateStatus(any(), PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `runExpiryCheck marks AUTHORIZED record EXPIRED only after successful FCC deauth`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        val record = stubRecord(id = "id-1", status = PreAuthStatus.AUTHORIZED.name)
+        coEvery { preAuthDao.getExpiring(any()) } returns listOf(record)
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } returns PreAuthResult(status = PreAuthResultStatus.DECLINED)
+
+        handler.runExpiryCheck()
+
+        coVerify(exactly = 1) {
+            preAuthDao.updateStatus("id-1", PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `runExpiryCheck expires PENDING records even when FCC adapter throws for AUTHORIZED`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        val authorizedRecord = stubRecord(id = "id-1", status = PreAuthStatus.AUTHORIZED.name)
+        val pendingRecord = stubRecord(id = "id-2", status = PreAuthStatus.PENDING.name)
+        coEvery { preAuthDao.getExpiring(any()) } returns listOf(authorizedRecord, pendingRecord)
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } throws RuntimeException("FCC down")
+
+        handler.runExpiryCheck()
+
+        // AUTHORIZED record skipped (deauth failed), PENDING record expired normally
+        coVerify(exactly = 0) {
+            preAuthDao.updateStatus("id-1", PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
+        }
+        coVerify(exactly = 1) {
+            preAuthDao.updateStatus("id-2", PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
         }
     }
 

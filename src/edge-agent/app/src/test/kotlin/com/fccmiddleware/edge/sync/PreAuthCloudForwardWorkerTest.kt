@@ -128,6 +128,19 @@ class PreAuthCloudForwardWorkerTest {
     }
 
     @Test
+    fun `empty batch resets backoff so new records forward immediately (H-02)`() = runTest {
+        // Seed prior failure state
+        worker.consecutiveFailureCount = 3
+        worker.nextRetryAt = Instant.EPOCH // expired so we pass the guard
+
+        coEvery { preAuthDao.getUnsynced(any()) } returns emptyList()
+        worker.forwardUnsyncedPreAuths()
+
+        assertEquals("Failure count should be reset", 0, worker.consecutiveFailureCount)
+        assertEquals("nextRetryAt should be reset", Instant.EPOCH, worker.nextRetryAt)
+    }
+
+    @Test
     fun `returns early when access token is null`() = runTest {
         every { tokenProvider.getAccessToken() } returns null
         coEvery { preAuthDao.getUnsynced(any()) } returns listOf(makePreAuth())

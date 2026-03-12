@@ -1,23 +1,149 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:FccDesktopAgent.App.ViewModels"
         x:Class="FccDesktopAgent.App.Views.MainWindow"
         Title="FCC Desktop Agent"
-        Width="900"
-        Height="600"
-        MinWidth="600"
-        MinHeight="400">
+        Width="960"
+        Height="640"
+        MinWidth="700"
+        MinHeight="450"
+        x:DataType="vm:MainWindowViewModel">
 
-  <Grid RowDefinitions="Auto,*">
-    <TextBlock Grid.Row="0"
-               Text="FCC Desktop Agent — Diagnostics Dashboard"
-               FontSize="18"
-               Margin="16,12"
-               FontWeight="SemiBold" />
-    <TextBlock Grid.Row="1"
-               Text="Agent starting... DEA-2.x will populate this dashboard."
-               VerticalAlignment="Center"
-               HorizontalAlignment="Center"
-               Foreground="Gray" />
+  <Grid RowDefinitions="*,Auto">
+
+    <!-- Main content area: sidebar + page -->
+    <Grid Grid.Row="0" ColumnDefinitions="200,*">
+
+      <!-- Sidebar navigation -->
+      <Border Grid.Column="0"
+              Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}"
+              BorderThickness="0,0,1,0"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <DockPanel>
+          <!-- App title in sidebar header -->
+          <Border DockPanel.Dock="Top" Padding="16,16,16,12">
+            <StackPanel Spacing="4">
+              <TextBlock Text="FCC Desktop Agent"
+                         FontSize="15" FontWeight="SemiBold" />
+              <TextBlock Text="Edge Agent"
+                         FontSize="11" Opacity="0.5" />
+            </StackPanel>
+          </Border>
+
+          <Border DockPanel.Dock="Top" Height="1" Margin="12,0"
+                  Background="{DynamicResource CardStrokeColorDefaultBrush}" />
+
+          <!-- Theme toggle at bottom -->
+          <Border DockPanel.Dock="Bottom" Padding="12,8">
+            <Button x:Name="ThemeToggleButton"
+                    Content="Toggle Theme"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    Padding="8,6"
+                    FontSize="11"
+                    Click="OnThemeToggleClicked" />
+          </Border>
+
+          <!-- Nav items -->
+          <StackPanel Margin="8,12" Spacing="2">
+            <Button x:Name="NavDashboard"
+                    Content="   Dashboard"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Padding="12,10"
+                    Tag="Dashboard"
+                    Click="OnNavClicked"
+                    Classes="navButton" />
+            <Button x:Name="NavTransactions"
+                    Content="   Transactions"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Padding="12,10"
+                    Tag="Transactions"
+                    Click="OnNavClicked"
+                    Classes="navButton" />
+            <Button x:Name="NavPreAuth"
+                    Content="   Pre-Auth"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Padding="12,10"
+                    Tag="PreAuth"
+                    Click="OnNavClicked"
+                    Classes="navButton" />
+            <Button x:Name="NavConfiguration"
+                    Content="   Configuration"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Padding="12,10"
+                    Tag="Configuration"
+                    Click="OnNavClicked"
+                    Classes="navButton" />
+            <Button x:Name="NavLogs"
+                    Content="   Logs"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Padding="12,10"
+                    Tag="Logs"
+                    Click="OnNavClicked"
+                    Classes="navButton" />
+          </StackPanel>
+        </DockPanel>
+      </Border>
+
+      <!-- Page content area -->
+      <ContentControl Grid.Column="1" x:Name="PageContent" />
+
+    </Grid>
+
+    <!-- Status bar -->
+    <Border Grid.Row="1"
+            Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}"
+            BorderThickness="0,1,0,0"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+            Padding="16,6">
+      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto">
+        <!-- Connectivity indicator -->
+        <TextBlock Grid.Column="0"
+                   x:Name="StatusDot"
+                   Text="●"
+                   FontSize="14"
+                   VerticalAlignment="Center"
+                   Foreground="#22C55E" />
+        <TextBlock Grid.Column="1"
+                   x:Name="StatusConnectivity"
+                   Text="Online"
+                   FontSize="12"
+                   Margin="6,0,0,0"
+                   VerticalAlignment="Center" />
+
+        <!-- Spacer -->
+        <TextBlock Grid.Column="2" />
+
+        <!-- Buffer depth -->
+        <TextBlock Grid.Column="3"
+                   x:Name="StatusBufferLabel"
+                   Text="Buffer:"
+                   FontSize="12"
+                   Opacity="0.6"
+                   VerticalAlignment="Center"
+                   Margin="0,0,4,0" />
+        <TextBlock Grid.Column="4"
+                   x:Name="StatusBuffer"
+                   Text="0 pending"
+                   FontSize="12"
+                   VerticalAlignment="Center"
+                   Margin="0,0,20,0" />
+
+        <!-- Last sync -->
+        <TextBlock Grid.Column="5"
+                   x:Name="StatusLastSync"
+                   Text="Last sync: Never"
+                   FontSize="12"
+                   Opacity="0.6"
+                   VerticalAlignment="Center" />
+      </Grid>
+    </Border>
+
   </Grid>
 
 </Window>

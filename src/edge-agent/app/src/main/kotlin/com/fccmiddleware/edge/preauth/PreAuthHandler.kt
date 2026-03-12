@@ -14,8 +14,10 @@ import com.fccmiddleware.edge.buffer.entity.AuditLog
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import java.net.ConnectException
 import java.time.Instant
 import java.util.UUID
 
@@ -186,11 +188,29 @@ class PreAuthHandler(
             withTimeout(config.fccTimeoutMs) {
                 adapter.sendPreAuth(fccCommand)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "FCC sendPreAuth timed out or failed for orderId=$odooOrderId: ${e.javaClass.simpleName}")
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "FCC sendPreAuth timed out for orderId=$odooOrderId")
             PreAuthResult(
                 status = PreAuthResultStatus.TIMEOUT,
-                message = "FCC did not respond within timeout",
+                message = "FCC did not respond within ${config.fccTimeoutMs}ms timeout",
+            )
+        } catch (e: ConnectException) {
+            Log.w(TAG, "FCC connection refused for orderId=$odooOrderId: ${e.message}")
+            PreAuthResult(
+                status = PreAuthResultStatus.ERROR,
+                message = "FCC_CONNECTION_REFUSED",
+            )
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "FCC network I/O error for orderId=$odooOrderId: ${e.javaClass.simpleName}: ${e.message}")
+            PreAuthResult(
+                status = PreAuthResultStatus.ERROR,
+                message = "FCC_NETWORK_ERROR: ${e.javaClass.simpleName}",
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error in sendPreAuth for orderId=$odooOrderId: ${e.javaClass.simpleName}: ${e.message}")
+            PreAuthResult(
+                status = PreAuthResultStatus.ERROR,
+                message = "FCC_INTERNAL_ERROR: ${e.javaClass.simpleName}",
             )
         }
 
@@ -324,11 +344,14 @@ class PreAuthHandler(
         Log.i(TAG, "Expiry check: ${expiring.size} pre-auth record(s) to expire")
 
         for (r in expiring) {
-            // Best-effort FCC deauthorization for AUTHORIZED records
+            // For AUTHORIZED records, attempt FCC deauthorization before marking EXPIRED.
+            // If deauth fails, skip this record so it is retried on the next cadence tick —
+            // this prevents "zombie" FCC authorizations where the pump stays authorized
+            // but our DB says EXPIRED.
             if (r.status == PreAuthStatus.AUTHORIZED.name) {
                 val adapter = fccAdapter
                 if (adapter != null) {
-                    try {
+                    val deauthSucceeded = try {
                         val deauthCommand = PreAuthCommand(
                             siteCode = r.siteCode,
                             pumpNumber = r.pumpNumber,
@@ -341,10 +364,28 @@ class PreAuthHandler(
                         withTimeout(config.fccTimeoutMs) {
                             adapter.sendPreAuth(deauthCommand)
                         }
+                        true
                     } catch (e: Exception) {
-                        Log.w(TAG, "FCC deauth on expiry failed for id=${r.id} (best-effort): ${e.javaClass.simpleName}")
+                        Log.w(TAG, "FCC deauth on expiry failed for id=${r.id}, will retry next cycle: ${e.javaClass.simpleName}")
+                        false
+                    }
+
+                    if (!deauthSucceeded) {
+                        // Leave record as AUTHORIZED so next expiry check retries deauth
+                        scope.launch {
+                            auditLogDao.insert(
+                                AuditLog(
+                                    eventType = "PRE_AUTH_DEAUTH_RETRY_PENDING",
+                                    message = "id=${r.id} orderId=${r.odooOrderId} FCC deauth failed, will retry",
+                                    correlationId = r.id,
+                                    createdAt = Instant.now().toString(),
+                                )
+                            )
+                        }
+                        continue
                     }
                 }
+                // adapter == null: no FCC to deauthorize, safe to mark EXPIRED
             }
 
             preAuthDao.updateStatus(
@@ -383,8 +424,9 @@ class PreAuthHandler(
                 message = "Existing active pre-auth returned (idempotent)",
             )
             else -> PreAuthResult(
-                // PENDING: FCC call in progress or stale — treat as in-progress error
-                status = PreAuthResultStatus.ERROR,
+                // PENDING: FCC call is in-flight — signal Odoo to wait and retry
+                // (not ERROR, which Odoo would interpret as a permanent failure)
+                status = PreAuthResultStatus.IN_PROGRESS,
                 message = "Pre-auth in progress for orderId=${existing.odooOrderId}",
             )
         }

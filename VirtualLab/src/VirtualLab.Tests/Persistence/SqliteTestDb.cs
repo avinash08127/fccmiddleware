@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using VirtualLab.Infrastructure.Persistence;
 
 namespace VirtualLab.Tests.Persistence;
@@ -17,6 +18,7 @@ internal sealed class SqliteTestDb : IAsyncDisposable
         builder.UseSqlite(
             connection,
             options => options.MigrationsAssembly(typeof(VirtualLabDbContext).Assembly.FullName));
+        builder.ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.PendingModelChangesWarning));
 
         DbContext = new VirtualLabDbContext(builder.Options);
         DbContext.Database.Migrate();

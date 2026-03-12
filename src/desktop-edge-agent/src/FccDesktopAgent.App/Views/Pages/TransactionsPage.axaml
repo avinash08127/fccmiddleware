@@ -1,0 +1,155 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FccDesktopAgent.App.Views.Pages.TransactionsPage"
+             x:CompileBindings="False">
+
+  <Grid RowDefinitions="Auto,Auto,*,Auto,Auto" Margin="24">
+
+    <!-- Header -->
+    <TextBlock Grid.Row="0" Text="Transactions" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16" />
+
+    <!-- Filters -->
+    <Border Grid.Row="1"
+            Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+            CornerRadius="8" Padding="16" Margin="0,0,0,12" BorderThickness="1"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <StackPanel Spacing="4">
+          <TextBlock Text="Sync Status" FontSize="11" Opacity="0.6" />
+          <ComboBox x:Name="StatusFilter" Width="140" SelectedIndex="0"
+                    SelectionChanged="OnFilterChanged">
+            <ComboBoxItem Content="All" />
+            <ComboBoxItem Content="Pending" />
+            <ComboBoxItem Content="Uploaded" />
+            <ComboBoxItem Content="SyncedToOdoo" />
+            <ComboBoxItem Content="DuplicateConfirmed" />
+            <ComboBoxItem Content="Archived" />
+          </ComboBox>
+        </StackPanel>
+        <StackPanel Spacing="4">
+          <TextBlock Text="Pump Number" FontSize="11" Opacity="0.6" />
+          <TextBox x:Name="PumpFilter" Width="80" Watermark="All"
+                   KeyDown="OnFilterKeyDown" />
+        </StackPanel>
+        <StackPanel Spacing="4">
+          <TextBlock Text="Date From" FontSize="11" Opacity="0.6" />
+          <DatePicker x:Name="DateFromPicker" Width="140"
+                      SelectedDateChanged="OnDateFilterChanged" />
+        </StackPanel>
+        <StackPanel Spacing="4">
+          <TextBlock Text="Date To" FontSize="11" Opacity="0.6" />
+          <DatePicker x:Name="DateToPicker" Width="140"
+                      SelectedDateChanged="OnDateFilterChanged" />
+        </StackPanel>
+        <Button Content="Apply" VerticalAlignment="Bottom" Padding="16,6"
+                Click="OnApplyFilterClicked" />
+        <Button Content="Clear" VerticalAlignment="Bottom" Padding="16,6"
+                Click="OnClearFilterClicked" />
+      </StackPanel>
+    </Border>
+
+    <!-- Transaction table -->
+    <DataGrid Grid.Row="2"
+              x:Name="TransactionGrid"
+              AutoGenerateColumns="False"
+              IsReadOnly="True"
+              SelectionMode="Single"
+              CanUserSortColumns="False"
+              GridLinesVisibility="Horizontal"
+              SelectionChanged="OnTransactionSelected">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="Completed" Binding="{Binding CompletedAtLocal}" Width="140" />
+        <DataGridTextColumn Header="Pump" Binding="{Binding PumpNumber}" Width="60" />
+        <DataGridTextColumn Header="Nozzle" Binding="{Binding NozzleNumber}" Width="60" />
+        <DataGridTextColumn Header="Product" Binding="{Binding ProductCode}" Width="80" />
+        <DataGridTextColumn Header="Volume (L)" Binding="{Binding VolumeDisplay}" Width="90" />
+        <DataGridTextColumn Header="Amount" Binding="{Binding AmountDisplay}" Width="90" />
+        <DataGridTextColumn Header="Sync Status" Binding="{Binding SyncStatus}" Width="110" />
+        <DataGridTextColumn Header="Uploads" Binding="{Binding UploadAttempts}" Width="65" />
+        <DataGridTextColumn Header="FCC Txn ID" Binding="{Binding FccTransactionId}" Width="*" />
+      </DataGrid.Columns>
+    </DataGrid>
+
+    <!-- Pagination -->
+    <Border Grid.Row="3"
+            Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+            CornerRadius="0,0,8,8" Padding="12,8" BorderThickness="1,0,1,1"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <TextBlock Grid.Column="0" x:Name="PageInfoText"
+                   Text="Page 1" FontSize="12" VerticalAlignment="Center" Opacity="0.6" />
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
+          <Button x:Name="PrevButton" Content="Previous" Padding="12,4" FontSize="12"
+                  Click="OnPrevPageClicked" IsEnabled="False" />
+          <Button x:Name="NextButton" Content="Next" Padding="12,4" FontSize="12"
+                  Click="OnNextPageClicked" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Detail panel (shown when a transaction is selected) -->
+    <Border Grid.Row="4"
+            x:Name="DetailPanel"
+            IsVisible="False"
+            Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+            CornerRadius="8" Padding="16" Margin="0,12,0,0" BorderThickness="1"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+      <StackPanel Spacing="8">
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBlock Text="Transaction Detail" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+          <Button Grid.Column="1" Content="Close" Padding="8,2" FontSize="11"
+                  Click="OnCloseDetailClicked" />
+        </Grid>
+        <Grid ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto,Auto,Auto">
+          <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,4">
+            <TextBlock Text="ID" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailId" FontSize="12" />
+          </StackPanel>
+          <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,4">
+            <TextBlock Text="FCC Transaction ID" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailFccId" FontSize="12" />
+          </StackPanel>
+          <StackPanel Grid.Row="0" Grid.Column="2" Margin="0,4">
+            <TextBlock Text="Site Code" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailSiteCode" FontSize="12" />
+          </StackPanel>
+          <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,4">
+            <TextBlock Text="Started" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailStarted" FontSize="12" />
+          </StackPanel>
+          <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,4">
+            <TextBlock Text="Completed" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailCompleted" FontSize="12" />
+          </StackPanel>
+          <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,4">
+            <TextBlock Text="Currency" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailCurrency" FontSize="12" />
+          </StackPanel>
+          <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,4">
+            <TextBlock Text="Upload Attempts" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailUploadAttempts" FontSize="12" />
+          </StackPanel>
+          <StackPanel Grid.Row="2" Grid.Column="1" Margin="0,4">
+            <TextBlock Text="Last Upload Error" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailLastError" FontSize="12" TextWrapping="Wrap" />
+          </StackPanel>
+          <StackPanel Grid.Row="2" Grid.Column="2" Margin="0,4">
+            <TextBlock Text="Correlation ID" FontSize="11" Opacity="0.5" />
+            <TextBlock x:Name="DetailCorrelationId" FontSize="12" />
+          </StackPanel>
+        </Grid>
+        <StackPanel Spacing="4">
+          <TextBlock Text="Raw Payload" FontSize="11" Opacity="0.5" />
+          <TextBox x:Name="DetailRawPayload"
+                   IsReadOnly="True"
+                   AcceptsReturn="True"
+                   MaxHeight="200"
+                   FontFamily="Consolas, Courier New, monospace"
+                   FontSize="11" />
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+  </Grid>
+
+</UserControl>

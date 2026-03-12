@@ -35,6 +35,9 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
     private bool _internetUp;
     private bool _fccUp;
 
+    // Last successful FCC probe timestamp — used by telemetry reporter for heartbeat age.
+    private DateTimeOffset? _lastFccSuccessAt;
+
     // Published snapshot — volatile reference; reference writes are atomic on .NET.
     private volatile ConnectivitySnapshot _current;
 
@@ -45,6 +48,12 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
 
     /// <inheritdoc/>
     public ConnectivitySnapshot Current => _current;
+
+    /// <inheritdoc/>
+    public DateTimeOffset? LastFccSuccessAtUtc => _lastFccSuccessAt;
+
+    /// <inheritdoc/>
+    public int FccConsecutiveFailures => _fccFailures;
 
     /// <inheritdoc/>
     public event EventHandler<ConnectivitySnapshot>? StateChanged;
@@ -225,6 +234,10 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
 
             failures = 0;
             isUp = true; // Spec §5.4: "1 success immediately transitions back to UP"
+
+            // Track last successful FCC heartbeat for telemetry reporting.
+            if (probeName == "FCC")
+                _lastFccSuccessAt = DateTimeOffset.UtcNow;
         }
         else
         {

@@ -48,6 +48,7 @@ public sealed class VirtualLabPersistenceTests
         Assert.Equal(2, site.Pumps.Count);
         Assert.Equal(6, site.Pumps.SelectMany(x => x.Nozzles).Count());
         Assert.Equal(3, site.Pumps.SelectMany(x => x.Nozzles).Select(x => x.ProductId).Distinct().Count());
+        Assert.All(site.Pumps, pump => Assert.True(pump.LayoutX >= 0 && pump.LayoutY >= 0));
 
         SimulatedTransaction transaction = await testDb.DbContext.SimulatedTransactions
             .AsNoTracking()
@@ -61,7 +62,7 @@ public sealed class VirtualLabPersistenceTests
             .SingleAsync();
 
         Assert.Contains("\"volume\":42.113", transaction.RawPayloadJson);
-        Assert.Contains("\"totalAmount\":9725.50", transaction.CanonicalPayloadJson);
+        Assert.Contains("\"amountMinorUnits\":972550", transaction.CanonicalPayloadJson);
         Assert.Equal("corr-default-flow", transaction.CorrelationId);
         Assert.Equal("TransactionGenerated", log.Category);
         Assert.Contains("\"seeded\":true", log.MetadataJson);
@@ -83,5 +84,34 @@ public sealed class VirtualLabPersistenceTests
         Assert.Contains("IX_SimulatedTransactions_CorrelationId", indexNames);
         Assert.Contains("IX_LabEventLogs_SiteId_Category_OccurredAtUtc", indexNames);
         Assert.Contains("IX_CallbackAttempts_CallbackTargetId_AttemptedAtUtc", indexNames);
+    }
+
+    [Fact]
+    public async Task LabEventLogConventionsNormalizeCategorySeverityAndPayloadDefaults()
+    {
+        await using SqliteTestDb testDb = new();
+
+        testDb.DbContext.LabEventLogs.Add(new LabEventLog
+        {
+            Id = Guid.NewGuid(),
+            Category = "authfailure",
+            Severity = "warn",
+            EventType = "AuthRejected",
+            Message = "",
+            RawPayloadJson = "",
+            CanonicalPayloadJson = "",
+            MetadataJson = "",
+            OccurredAtUtc = DateTimeOffset.UtcNow,
+        });
+
+        await testDb.DbContext.SaveChangesAsync();
+
+        LabEventLog saved = await testDb.DbContext.LabEventLogs.SingleAsync();
+        Assert.Equal("AuthFailure", saved.Category);
+        Assert.Equal("Warning", saved.Severity);
+        Assert.Equal("AuthRejected", saved.Message);
+        Assert.Equal("{}", saved.RawPayloadJson);
+        Assert.Equal("{}", saved.CanonicalPayloadJson);
+        Assert.Equal("{}", saved.MetadataJson);
     }
 }

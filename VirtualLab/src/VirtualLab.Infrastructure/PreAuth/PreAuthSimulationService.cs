@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using VirtualLab.Application.ContractValidation;
 using VirtualLab.Application.FccProfiles;
 using VirtualLab.Application.PreAuth;
 using VirtualLab.Domain.Enums;
@@ -12,7 +13,9 @@ using VirtualLab.Infrastructure.Persistence;
 
 namespace VirtualLab.Infrastructure.PreAuth;
 
-public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IPreAuthSimulationService
+public sealed class PreAuthSimulationService(
+    VirtualLabDbContext dbContext,
+    IContractValidationService contractValidationService) : IPreAuthSimulationService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -74,28 +77,89 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
             .ToListAsync(cancellationToken);
 
         return sessions
-            .Select(x => new PreAuthSessionSummary(
-                x.Id,
-                x.Site.SiteCode,
-                x.Site.ActiveFccSimulatorProfile.ProfileKey,
-                x.CorrelationId,
-                x.ExternalReference,
-                ToModeName(x.Mode),
-                ToStatusName(x.Status),
-                x.ReservedAmount,
-                x.AuthorizedAmount,
-                x.FinalAmount,
-                x.FinalVolume,
-                x.CreatedAtUtc,
-                x.AuthorizedAtUtc,
-                x.CompletedAtUtc,
-                x.ExpiresAtUtc,
-                x.RawRequestJson,
-                x.CanonicalRequestJson,
-                x.RawResponseJson,
-                x.CanonicalResponseJson,
-                x.TimelineJson))
+            .Select(MapSessionSummary)
             .ToList();
+    }
+
+    public async Task<PreAuthSessionSummary?> GetSessionAsync(
+        string siteCode,
+        string? correlationId,
+        string? preAuthId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(siteCode))
+        {
+            return null;
+        }
+
+        IQueryable<PreAuthSession> query = dbContext.PreAuthSessions
+            .AsNoTracking()
+            .Include(x => x.Site)
+            .ThenInclude(x => x.ActiveFccSimulatorProfile)
+            .Where(x => x.Site.SiteCode == siteCode);
+
+        if (!string.IsNullOrWhiteSpace(preAuthId))
+        {
+            query = query.Where(x => x.ExternalReference == preAuthId);
+        }
+        else if (!string.IsNullOrWhiteSpace(correlationId))
+        {
+            query = query.Where(x => x.CorrelationId == correlationId);
+        }
+        else
+        {
+            return null;
+        }
+
+        PreAuthSession? session = await query
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return session is null ? null : MapSessionSummary(session);
+    }
+
+    public async Task<PreAuthSessionSummary?> ExpireSessionAsync(
+        PreAuthManualExpiryRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.SiteCode) || string.IsNullOrWhiteSpace(request.PreAuthId))
+        {
+            return null;
+        }
+
+        SiteProfileContext? context = await LoadContextAsync(request.SiteCode, cancellationToken);
+        if (context is null)
+        {
+            return null;
+        }
+
+        PreAuthSession? session = await dbContext.PreAuthSessions
+            .Include(x => x.Site)
+            .ThenInclude(x => x.ActiveFccSimulatorProfile)
+            .SingleOrDefaultAsync(
+                x => x.SiteId == context.Site.Id && x.ExternalReference == request.PreAuthId,
+                cancellationToken);
+
+        if (session is null)
+        {
+            return null;
+        }
+
+        if (!IsActiveStatus(session.Status))
+        {
+            return MapSessionSummary(session);
+        }
+
+        string correlationId = string.IsNullOrWhiteSpace(request.CorrelationId)
+            ? session.CorrelationId
+            : request.CorrelationId;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        session.CorrelationId = correlationId;
+        ExpireSession(session, context.ProfileId, now, "Session manually expired from the lab action console.");
+        session.ExpiresAtUtc = now;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return MapSessionSummary(session);
     }
 
     public async Task<int> ExpireSessionsAsync(CancellationToken cancellationToken = default)
@@ -221,6 +285,8 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
             CreatedAtUtc = now,
             ExpiresAtUtc = now.AddSeconds(expirySeconds),
         };
+        canonicalRequest = BuildCanonicalRequestJson(context, payload, match, session);
+        session.CanonicalRequestJson = canonicalRequest;
 
         List<PreAuthTimelineEntry> timeline = [];
         AppendTimeline(
@@ -266,13 +332,7 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         Dictionary<string, string> sampleValues = BuildResponseValues(context, session, request.Operation, responseStatus);
         string responseBody = RenderResponseBody(context.Profile.Contract, request.Operation, sampleValues);
         session.RawResponseJson = responseBody;
-        session.CanonicalResponseJson = Serialize(new
-        {
-            status = ToStatusName(session.Status),
-            preAuthId = session.ExternalReference,
-            correlationId = session.CorrelationId,
-            expiresAtUtc = session.ExpiresAtUtc,
-        });
+        session.CanonicalResponseJson = BuildCanonicalResponseJson(session);
 
         AppendTimeline(
             timeline,
@@ -288,6 +348,8 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         session.TimelineJson = Serialize(timeline);
 
         PreAuthSimulationResponse response = new(StatusCodes.Status200OK, "application/json", responseBody);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthRequest, session.RawRequestJson, session.CanonicalRequestJson);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthResponse, session.RawResponseJson, session.CanonicalResponseJson);
         await LogResponseAsync(context, session, correlationId, request.Operation, response.StatusCode, response.Body, request.RawRequestJson);
         await dbContext.SaveChangesAsync(cancellationToken);
         return response;
@@ -394,8 +456,15 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
                 request.Path,
             });
 
-        session.RawRequestJson = NormalizeJson(request.RawRequestJson);
-        session.CanonicalRequestJson = canonicalRequest;
+        if (string.IsNullOrWhiteSpace(session.RawRequestJson) || session.RawRequestJson == "{}")
+        {
+            session.RawRequestJson = NormalizeJson(request.RawRequestJson);
+        }
+
+        if (string.IsNullOrWhiteSpace(session.CanonicalRequestJson) || session.CanonicalRequestJson == "{}")
+        {
+            session.CanonicalRequestJson = canonicalRequest;
+        }
 
         if (ShouldFail(context.Profile.Contract, payload, request.Operation, correlationId))
         {
@@ -421,13 +490,7 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         Dictionary<string, string> sampleValues = BuildResponseValues(context, session, request.Operation, responseStatus);
         string responseBody = RenderResponseBody(context.Profile.Contract, request.Operation, sampleValues);
         session.RawResponseJson = responseBody;
-        session.CanonicalResponseJson = Serialize(new
-        {
-            status = ToStatusName(session.Status),
-            preAuthId = session.ExternalReference,
-            correlationId = session.CorrelationId,
-            expiresAtUtc = session.ExpiresAtUtc,
-        });
+        session.CanonicalResponseJson = BuildCanonicalResponseJson(session);
         AppendTimeline(
             timeline,
             DateTimeOffset.UtcNow,
@@ -441,6 +504,8 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         session.TimelineJson = Serialize(timeline);
 
         PreAuthSimulationResponse response = new(StatusCodes.Status200OK, "application/json", responseBody);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthRequest, session.RawRequestJson, session.CanonicalRequestJson);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthResponse, session.RawResponseJson, session.CanonicalResponseJson);
         await LogResponseAsync(context, session, correlationId, request.Operation, response.StatusCode, response.Body, request.RawRequestJson);
         await dbContext.SaveChangesAsync(cancellationToken);
         return response;
@@ -526,8 +591,15 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
                 request.Path,
             });
 
-        session.RawRequestJson = NormalizeJson(request.RawRequestJson);
-        session.CanonicalRequestJson = canonicalRequest;
+        if (string.IsNullOrWhiteSpace(session.RawRequestJson) || session.RawRequestJson == "{}")
+        {
+            session.RawRequestJson = NormalizeJson(request.RawRequestJson);
+        }
+
+        if (string.IsNullOrWhiteSpace(session.CanonicalRequestJson) || session.CanonicalRequestJson == "{}")
+        {
+            session.CanonicalRequestJson = canonicalRequest;
+        }
 
         if (ShouldFail(context.Profile.Contract, payload, request.Operation, correlationId))
         {
@@ -552,12 +624,7 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         Dictionary<string, string> sampleValues = BuildResponseValues(context, session, request.Operation, responseStatus);
         string responseBody = RenderResponseBody(context.Profile.Contract, request.Operation, sampleValues);
         session.RawResponseJson = responseBody;
-        session.CanonicalResponseJson = Serialize(new
-        {
-            status = ToStatusName(session.Status),
-            preAuthId = session.ExternalReference,
-            correlationId = session.CorrelationId,
-        });
+        session.CanonicalResponseJson = BuildCanonicalResponseJson(session);
         AppendTimeline(
             timeline,
             DateTimeOffset.UtcNow,
@@ -571,6 +638,8 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         session.TimelineJson = Serialize(timeline);
 
         PreAuthSimulationResponse response = new(StatusCodes.Status200OK, "application/json", responseBody);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthRequest, session.RawRequestJson, session.CanonicalRequestJson);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthResponse, session.RawResponseJson, session.CanonicalResponseJson);
         await LogResponseAsync(context, session, correlationId, request.Operation, response.StatusCode, response.Body, request.RawRequestJson);
         await dbContext.SaveChangesAsync(cancellationToken);
         return response;
@@ -624,7 +693,7 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         });
 
         session.RawResponseJson = responseBody;
-        session.CanonicalResponseJson = responseBody;
+        session.CanonicalResponseJson = BuildCanonicalResponseJson(session, errorCode, message);
         session.TimelineJson = Serialize(timeline);
 
         dbContext.LabEventLogs.Add(new LabEventLog
@@ -650,6 +719,8 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         });
 
         PreAuthSimulationResponse response = new(statusCode, "application/json", responseBody);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthRequest, session.RawRequestJson, session.CanonicalRequestJson);
+        LogContractValidation(context, session, request.Operation, ContractValidationScopes.PreAuthResponse, session.RawResponseJson, session.CanonicalResponseJson);
         await LogResponseAsync(context, session, correlationId, request.Operation, response.StatusCode, response.Body, request.RawRequestJson);
         await dbContext.SaveChangesAsync(cancellationToken);
         return response;
@@ -716,6 +787,15 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         PreAuthSessionStatus previousStatus = session.Status;
         session.Status = PreAuthSessionStatus.Expired;
         session.CompletedAtUtc = now;
+        session.RawResponseJson = Serialize(new
+        {
+            status = "expired",
+            preauthId = session.ExternalReference,
+            correlationId = session.CorrelationId,
+            expiresAtUtc = session.ExpiresAtUtc,
+            message,
+        });
+        session.CanonicalResponseJson = BuildCanonicalResponseJson(session, failureMessage: message);
         session.TimelineJson = SerializeTimelineWithTransition(timeline, previousStatus, session.Status, now, "expiry", message);
 
         dbContext.LabEventLogs.Add(new LabEventLog
@@ -730,7 +810,7 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
             EventType = "PreAuthExpired",
             Message = message,
             RawPayloadJson = session.RawRequestJson,
-            CanonicalPayloadJson = session.RawResponseJson,
+            CanonicalPayloadJson = session.CanonicalResponseJson,
             MetadataJson = Serialize(new
             {
                 fromStatus = ToStatusName(previousStatus),
@@ -741,11 +821,105 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         });
     }
 
+    private string BuildCanonicalRequestJson(
+        SiteProfileContext context,
+        ParsedPreAuthRequest payload,
+        PumpNozzleMatch match,
+        PreAuthSession session)
+    {
+        return Serialize(new
+        {
+            siteCode = context.Site.SiteCode,
+            preAuthId = session.ExternalReference,
+            correlationId = session.CorrelationId,
+            pumpNumber = payload.PumpNumber,
+            nozzleNumber = payload.NozzleNumber,
+            productCode = match.ProductCode,
+            requestedAmountMinorUnits = ToMinorUnits(session.ReservedAmount),
+            unitPriceMinorPerLitre = ToMinorUnits(match.UnitPrice),
+            currencyCode = match.CurrencyCode,
+            status = ToStatusName(session.Status),
+            requestedAt = session.CreatedAtUtc,
+            expiresAt = session.ExpiresAtUtc,
+            customerName = payload.CustomerName,
+            customerTaxId = payload.CustomerTaxId,
+            customerTaxOffice = payload.CustomerTaxOffice,
+        });
+    }
+
+    private static string BuildCanonicalResponseJson(
+        PreAuthSession session,
+        string? errorCode = null,
+        string? failureMessage = null)
+    {
+        return Serialize(new
+        {
+            status = ToStatusName(session.Status),
+            preAuthId = session.ExternalReference,
+            correlationId = session.CorrelationId,
+            expiresAtUtc = session.ExpiresAtUtc,
+            authorizedAmountMinorUnits = session.AuthorizedAmount.HasValue ? (long?)ToMinorUnits(session.AuthorizedAmount.Value) : null,
+            finalAmountMinorUnits = session.FinalAmount.HasValue ? (long?)ToMinorUnits(session.FinalAmount.Value) : null,
+            finalVolumeMillilitres = session.FinalVolume.HasValue ? (int?)ToMillilitres(session.FinalVolume.Value) : null,
+            errorCode,
+            failureMessage,
+        });
+    }
+
+    private void LogContractValidation(
+        SiteProfileContext context,
+        PreAuthSession session,
+        string operation,
+        string scope,
+        string rawPayloadJson,
+        string canonicalPayloadJson)
+    {
+        PayloadContractValidationReport validation = contractValidationService.Validate(
+            context.Profile.Contract,
+            scope,
+            rawPayloadJson,
+            canonicalPayloadJson);
+
+        if (validation.ErrorCount == 0 && validation.WarningCount == 0)
+        {
+            return;
+        }
+
+        dbContext.LabEventLogs.Add(new LabEventLog
+        {
+            Id = Guid.NewGuid(),
+            SiteId = context.Site.Id,
+            FccSimulatorProfileId = context.ProfileId,
+            PreAuthSessionId = session.Id,
+            CorrelationId = session.CorrelationId,
+            Severity = validation.ErrorCount > 0 ? "Warning" : "Information",
+            Category = "ContractValidation",
+            EventType = scope == ContractValidationScopes.PreAuthRequest
+                ? "PreAuthRequestContractValidated"
+                : "PreAuthResponseContractValidated",
+            Message = $"Pre-auth contract validation for {operation} finished with outcome {validation.Outcome}.",
+            RawPayloadJson = rawPayloadJson,
+            CanonicalPayloadJson = canonicalPayloadJson,
+            MetadataJson = Serialize(new
+            {
+                validation.Scope,
+                validation.Outcome,
+                validation.ErrorCount,
+                validation.WarningCount,
+                validation.MissingCount,
+                validation.MismatchCount,
+                validation.Issues,
+                validation.Comparisons,
+            }),
+            OccurredAtUtc = DateTimeOffset.UtcNow,
+        });
+    }
+
     private async Task<PumpNozzleMatch?> LoadPumpNozzleMatchAsync(Guid siteId, int pumpNumber, int nozzleNumber, CancellationToken cancellationToken)
     {
         return await dbContext.Nozzles
             .Where(x => x.Pump.SiteId == siteId && x.Pump.PumpNumber == pumpNumber && x.NozzleNumber == nozzleNumber)
-            .Select(x => new PumpNozzleMatch(x.PumpId, x.Id))
+            .Select(x => new PumpNozzleMatch(x.PumpId, x.Id, x.Product.ProductCode, x.Product.UnitPrice, x.Product.CurrencyCode))
             .SingleOrDefaultAsync(cancellationToken);
     }
 
@@ -1030,7 +1204,10 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
             GetBool(fields, "simulateFailure"),
             GetInt(fields, "failureStatusCode", "statusCode"),
             GetString(fields, "failureMessage"),
-            GetString(fields, "failureCode"));
+            GetString(fields, "failureCode"),
+            GetString(fields, "customerName"),
+            GetString(fields, "customerTaxId"),
+            GetString(fields, "customerTaxOffice"));
     }
 
     private static int ResolveExpirySeconds(Site site, FccProfileContract contract, ParsedPreAuthRequest payload)
@@ -1118,6 +1295,16 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         }
 
         return json;
+    }
+
+    private static long ToMinorUnits(decimal value)
+    {
+        return decimal.ToInt64(decimal.Round(value * 100m, 0, MidpointRounding.AwayFromZero));
+    }
+
+    private static int ToMillilitres(decimal litres)
+    {
+        return decimal.ToInt32(decimal.Round(litres * 1000m, 0, MidpointRounding.AwayFromZero));
     }
 
     private static string ToEventType(string operation, string suffix)
@@ -1226,12 +1413,56 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         return false;
     }
 
+    private PreAuthSessionSummary MapSessionSummary(PreAuthSession session)
+    {
+        FccProfileContract contract = FccProfileService.ToRecord(session.Site.ActiveFccSimulatorProfile).Contract;
+        PayloadContractValidationReport requestValidation = contractValidationService.Validate(
+            contract,
+            ContractValidationScopes.PreAuthRequest,
+            session.RawRequestJson,
+            session.CanonicalRequestJson);
+        PayloadContractValidationReport responseValidation = contractValidationService.Validate(
+            contract,
+            ContractValidationScopes.PreAuthResponse,
+            session.RawResponseJson,
+            session.CanonicalResponseJson);
+
+        return new PreAuthSessionSummary(
+            session.Id,
+            session.Site.SiteCode,
+            session.Site.ActiveFccSimulatorProfile.ProfileKey,
+            session.CorrelationId,
+            session.ExternalReference,
+            ToModeName(session.Mode),
+            ToStatusName(session.Status),
+            session.ReservedAmount,
+            session.AuthorizedAmount,
+            session.FinalAmount,
+            session.FinalVolume,
+            session.CreatedAtUtc,
+            session.AuthorizedAtUtc,
+            session.CompletedAtUtc,
+            session.ExpiresAtUtc,
+            session.RawRequestJson,
+            session.CanonicalRequestJson,
+            requestValidation,
+            session.RawResponseJson,
+            session.CanonicalResponseJson,
+            responseValidation,
+            session.TimelineJson);
+    }
+
     private sealed record SiteProfileContext(Site Site, FccProfileRecord Profile)
     {
         public Guid ProfileId => Site.ActiveFccSimulatorProfileId;
     }
 
-    private sealed record PumpNozzleMatch(Guid PumpId, Guid NozzleId);
+    private sealed record PumpNozzleMatch(
+        Guid PumpId,
+        Guid NozzleId,
+        string ProductCode,
+        decimal UnitPrice,
+        string CurrencyCode);
 
     private sealed record ParsedPreAuthRequest(
         string? PreAuthId,
@@ -1243,7 +1474,10 @@ public sealed class PreAuthSimulationService(VirtualLabDbContext dbContext) : IP
         bool SimulateFailure,
         int? FailureStatusCode,
         string? FailureMessage,
-        string? FailureCode);
+        string? FailureCode,
+        string? CustomerName,
+        string? CustomerTaxId,
+        string? CustomerTaxOffice);
 
     private sealed record PreAuthTimelineEntry(
         DateTimeOffset OccurredAtUtc,

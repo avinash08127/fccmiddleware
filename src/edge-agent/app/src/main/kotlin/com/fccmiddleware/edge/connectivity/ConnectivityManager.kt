@@ -48,6 +48,9 @@ class ConnectivityManager(
         val probeIntervalMs: Long = 30_000L,
         val probeTimeoutMs: Long = 5_000L,
         val failureThreshold: Int = 3,
+        /** Consecutive successes required before transitioning from DOWN → UP.
+         *  Prevents oscillation under marginal networks (F,F,F,S,F,S...). */
+        val recoveryThreshold: Int = 2,
         val jitterRangeMs: Long = 3_000L,
     )
 
@@ -62,6 +65,8 @@ class ConnectivityManager(
     private var fccUp = false
     private var internetConsecFailures = 0
     private var fccConsecFailures = 0
+    private var internetConsecSuccesses = 0
+    private var fccConsecSuccesses = 0
 
     // Diagnostics timestamps (ms epoch, volatile for read outside mutex)
     @Volatile var lastInternetProbeMs: Long = 0L
@@ -130,8 +135,14 @@ class ConnectivityManager(
             if (isInternet) {
                 if (success) {
                     internetConsecFailures = 0
-                    internetUp = true
+                    internetConsecSuccesses++
+                    // Require recoveryThreshold consecutive successes before UP recovery
+                    // (prevents oscillation under marginal networks)
+                    if (internetConsecSuccesses >= config.recoveryThreshold) {
+                        internetUp = true
+                    }
                 } else {
+                    internetConsecSuccesses = 0
                     internetConsecFailures++
                     if (internetConsecFailures >= config.failureThreshold) {
                         internetUp = false
@@ -140,8 +151,12 @@ class ConnectivityManager(
             } else {
                 if (success) {
                     fccConsecFailures = 0
-                    fccUp = true
+                    fccConsecSuccesses++
+                    if (fccConsecSuccesses >= config.recoveryThreshold) {
+                        fccUp = true
+                    }
                 } else {
+                    fccConsecSuccesses = 0
                     fccConsecFailures++
                     if (fccConsecFailures >= config.failureThreshold) {
                         fccUp = false

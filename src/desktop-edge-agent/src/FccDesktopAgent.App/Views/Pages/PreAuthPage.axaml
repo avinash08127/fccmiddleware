@@ -1,0 +1,21 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FccDesktopAgent.App.Views.Pages.PreAuthPage">
+
+  <ScrollViewer Padding="24">
+    <StackPanel Spacing="16">
+      <TextBlock Text="Pre-Authorization" FontSize="22" FontWeight="SemiBold" />
+
+      <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+              CornerRadius="8" Padding="20" BorderThickness="1"
+              BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Pre-Auth Console" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
+          <TextBlock Text="Active pre-authorizations and history will be implemented in a future sprint."
+                     Opacity="0.5" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+
+</UserControl>

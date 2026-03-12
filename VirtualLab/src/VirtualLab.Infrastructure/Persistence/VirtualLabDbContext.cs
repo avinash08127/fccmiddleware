@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using VirtualLab.Domain.Diagnostics;
 using VirtualLab.Domain.Models;
 
 namespace VirtualLab.Infrastructure.Persistence;
@@ -43,6 +44,35 @@ public sealed class VirtualLabDbContext(DbContextOptions<VirtualLabDbContext> op
                 {
                     property.SetValueConverter(nullableDateTimeOffsetConverter);
                 }
+            }
+        }
+    }
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        ApplyLabEventLogConventions();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        ApplyLabEventLogConventions();
+        return base.SaveChangesAsync(cancellationToken);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        ApplyLabEventLogConventions();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void ApplyLabEventLogConventions()
+    {
+        foreach (Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry<LabEventLog> entry in ChangeTracker.Entries<LabEventLog>())
+        {
+            if (entry.State is EntityState.Added or EntityState.Modified)
+            {
+                LabDiagnosticsCatalog.ApplyConventions(entry.Entity);
             }
         }
     }

@@ -6,9 +6,13 @@ using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Ingestion;
 using FccDesktopAgent.Core.PreAuth;
+using FccDesktopAgent.Core.Registration;
+using FccDesktopAgent.Core.Security;
+using FccDesktopAgent.Core.Sync;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace FccDesktopAgent.Core.Runtime;
 
@@ -30,6 +34,19 @@ public static class ServiceCollectionExtensions
         services.AddAgentBufferServices();
         services.AddAgentConnectivity();
         services.AddAgentBackgroundWorkers();
+
+        // DEA-3.5: Platform-specific secure credential storage (DPAPI / Keychain / libsecret).
+        services.AddSingleton<ICredentialStore, PlatformCredentialStore>();
+
+        // DEA-3.5: Registration state manager — also overlays identity (DeviceId, SiteId, CloudBaseUrl)
+        // onto AgentConfiguration via IPostConfigureOptions so workers always see the current identity.
+        services.AddSingleton<RegistrationManager>();
+        services.AddSingleton<IRegistrationManager>(sp => sp.GetRequiredService<RegistrationManager>());
+        services.AddSingleton<IPostConfigureOptions<AgentConfiguration>>(
+            sp => sp.GetRequiredService<RegistrationManager>());
+
+        // DEA-3.5: Device registration service.
+        services.AddSingleton<IDeviceRegistrationService, DeviceRegistrationService>();
 
         // Bind AgentConfiguration from the "Agent" configuration section
         services.Configure<AgentConfiguration>(config.GetSection("Agent"));
@@ -55,9 +72,27 @@ public static class ServiceCollectionExtensions
         // DEA-2.6: Ingestion orchestrator — singleton, uses IServiceScopeFactory for scoped deps.
         services.AddSingleton<IIngestionOrchestrator, IngestionOrchestrator>();
 
-        // DEA-1.x: Uncomment as concrete implementations are built.
-        // services.AddSingleton<ICloudSyncService, CloudSyncService>();
-        // services.AddSingleton<ICredentialStore, PlatformCredentialStore>();
+        // DEA-3.1: Cloud upload pipeline.
+        services.AddSingleton<IDeviceTokenProvider, DeviceTokenProvider>();
+        services.AddSingleton<ICloudSyncService, CloudUploadWorker>();
+
+        // DEA-3.2: SYNCED_TO_ODOO status poller.
+        services.AddSingleton<ISyncedToOdooPoller, StatusPollWorker>();
+
+        // DEA-3.3: Config manager and config poll worker.
+        // ConfigManager is shared across IConfigManager, IOptionsChangeTokenSource, and IPostConfigureOptions
+        // so that cloud config changes flow through the .NET Options infrastructure (IOptionsMonitor).
+        services.AddSingleton<ConfigManager>();
+        services.AddSingleton<IConfigManager>(sp => sp.GetRequiredService<ConfigManager>());
+        services.AddSingleton<IOptionsChangeTokenSource<AgentConfiguration>>(
+            sp => sp.GetRequiredService<ConfigManager>());
+        services.AddSingleton<IPostConfigureOptions<AgentConfiguration>>(
+            sp => sp.GetRequiredService<ConfigManager>());
+        services.AddSingleton<IConfigPoller, ConfigPollWorker>();
+
+        // DEA-3.4: Telemetry reporter and error tracker.
+        services.AddSingleton<IErrorCountTracker, ErrorCountTracker>();
+        services.AddSingleton<ITelemetryReporter, TelemetryReporter>();
 
         return services;
     }

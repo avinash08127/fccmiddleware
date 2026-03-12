@@ -4,6 +4,7 @@ using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Ingestion;
 using FccDesktopAgent.Core.Runtime;
 using FccDesktopAgent.Core.Sync;
+using FccDesktopAgent.Core.Tests.Sync;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -21,11 +22,11 @@ public sealed class CadenceControllerTests
 {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static IOptions<AgentConfiguration> Config(
+    private static IOptionsMonitor<AgentConfiguration> Config(
         IngestionMode mode = IngestionMode.Relay,
         int syncIntervalSeconds = 60,
         int telemetryIntervalSeconds = 300) =>
-        Options.Create(new AgentConfiguration
+        new TestOptionsMonitor<AgentConfiguration>(new AgentConfiguration
         {
             IngestionMode = mode,
             CloudSyncIntervalSeconds = syncIntervalSeconds,

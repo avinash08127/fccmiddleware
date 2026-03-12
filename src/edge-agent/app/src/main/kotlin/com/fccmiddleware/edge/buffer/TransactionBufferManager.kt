@@ -1,5 +1,7 @@
 package com.fccmiddleware.edge.buffer
 
+import android.database.sqlite.SQLiteFullException
+import android.util.Log
 import com.fccmiddleware.edge.adapter.common.CanonicalTransaction
 import com.fccmiddleware.edge.adapter.common.SyncStatus
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
@@ -20,17 +22,63 @@ import java.time.Instant
  */
 class TransactionBufferManager(private val dao: TransactionBufferDao) {
 
+    companion object {
+        private const val TAG = "TransactionBufferMgr"
+
+        /** Emergency cleanup batch size when SQLITE_FULL is encountered. */
+        private const val EMERGENCY_CLEANUP_BATCH = 500
+    }
+
     /**
      * Buffer a canonical transaction from the FCC adapter.
      *
      * Silently deduplicates by fccTransactionId + siteCode (Room IGNORE strategy).
      *
+     * On [SQLiteFullException] (SQLITE_FULL — disk or database full):
+     * performs emergency cleanup by deleting the oldest ARCHIVED and SYNCED_TO_ODOO
+     * records, then retries the insert once. This prevents database corruption from
+     * unhandled write failures.
+     *
      * @return true if the transaction was newly inserted; false if it was a duplicate.
+     * @throws SQLiteFullException if the insert still fails after emergency cleanup.
      */
     suspend fun bufferTransaction(tx: CanonicalTransaction): Boolean {
         val entity = tx.toEntity()
-        val rowId = dao.insert(entity)
-        return rowId != -1L
+        return try {
+            val rowId = dao.insert(entity)
+            rowId != -1L
+        } catch (e: SQLiteFullException) {
+            Log.e(TAG, "SQLITE_FULL on insert — attempting emergency cleanup", e)
+            emergencyCleanup()
+            // Retry once after cleanup
+            val retryRowId = dao.insert(entity)
+            if (retryRowId == -1L) {
+                Log.w(TAG, "Insert was a duplicate after emergency cleanup")
+                false
+            } else {
+                Log.i(TAG, "Insert succeeded after emergency cleanup")
+                true
+            }
+        }
+    }
+
+    /**
+     * Emergency cleanup: free space by deleting expendable records.
+     * Called when a SQLITE_FULL error is encountered during insert.
+     * Deletes ARCHIVED first (already uploaded), then SYNCED_TO_ODOO (Odoo confirmed).
+     */
+    private suspend fun emergencyCleanup() {
+        try {
+            val archivedDeleted = dao.deleteOldestArchived(EMERGENCY_CLEANUP_BATCH)
+            Log.w(TAG, "Emergency cleanup: deleted $archivedDeleted ARCHIVED records")
+
+            if (archivedDeleted < EMERGENCY_CLEANUP_BATCH) {
+                val syncedDeleted = dao.deleteOldestSynced(EMERGENCY_CLEANUP_BATCH - archivedDeleted)
+                Log.w(TAG, "Emergency cleanup: deleted $syncedDeleted SYNCED_TO_ODOO records")
+            }
+        } catch (cleanupError: Exception) {
+            Log.e(TAG, "Emergency cleanup itself failed — database may be corrupted", cleanupError)
+        }
     }
 
     /**

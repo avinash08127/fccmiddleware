@@ -20,7 +20,8 @@ namespace FccDesktopAgent.Core.Runtime;
 ///   1. FCC poll           — if FCC is reachable and mode is Relay or BufferAlways
 ///   2. Cloud upload       — if internet is up
 ///   3. SYNCED_TO_ODOO poll — piggybacked on cloud-capable cycles (every N ticks)
-///   4. Telemetry report   — every N ticks based on configured telemetry interval
+///   4. Config poll        — piggybacked on cloud-capable cycles (every N ticks per config interval)
+///   5. Telemetry report   — every N ticks based on configured telemetry interval
 ///
 /// Responds to <see cref="IConnectivityMonitor.StateChanged"/> events for immediate triggers:
 ///   - Any → FullyOnline: wakes the loop immediately to start buffer replay and status sync.
@@ -30,12 +31,16 @@ namespace FccDesktopAgent.Core.Runtime;
 public sealed class CadenceController : BackgroundService
 {
     private readonly IConnectivityMonitor _connectivity;
-    private readonly IOptions<AgentConfiguration> _config;
+    private readonly IOptionsMonitor<AgentConfiguration> _config;
     private readonly ILogger<CadenceController> _logger;
 
     // Optional workers — resolved at construction time; null if not yet registered.
     private readonly IIngestionOrchestrator? _ingestion;
     private readonly ICloudSyncService? _cloudSync;
+    private readonly ISyncedToOdooPoller? _syncedToOdooPoller;
+    private readonly IConfigPoller? _configPoller;
+    private readonly IConfigManager? _configManager;
+    private readonly ITelemetryReporter? _telemetryReporter;
 
     // Wake-up gate: signalled by state-change events so the loop runs an immediate cycle
     // rather than waiting for the full tick interval. Bounded at 1 to avoid queuing.
@@ -44,12 +49,12 @@ public sealed class CadenceController : BackgroundService
     // Scope factory used to create scoped services (e.g. IPreAuthHandler) per tick.
     private readonly IServiceScopeFactory _scopeFactory;
 
-    // Monotonic tick counter for sub-interval scheduling (telemetry, status poll).
+    // Monotonic tick counter for sub-interval scheduling (telemetry, status poll, config poll).
     private int _tick;
 
     public CadenceController(
         IConnectivityMonitor connectivity,
-        IOptions<AgentConfiguration> config,
+        IOptionsMonitor<AgentConfiguration> config,
         ILogger<CadenceController> logger,
         IServiceProvider services)
     {
@@ -58,12 +63,29 @@ public sealed class CadenceController : BackgroundService
         _logger = logger;
         _ingestion = (IIngestionOrchestrator?)services.GetService(typeof(IIngestionOrchestrator));
         _cloudSync = (ICloudSyncService?)services.GetService(typeof(ICloudSyncService));
+        _syncedToOdooPoller = (ISyncedToOdooPoller?)services.GetService(typeof(ISyncedToOdooPoller));
+        _configPoller = (IConfigPoller?)services.GetService(typeof(IConfigPoller));
+        _configManager = (IConfigManager?)services.GetService(typeof(IConfigManager));
+        _telemetryReporter = (ITelemetryReporter?)services.GetService(typeof(ITelemetryReporter));
         _scopeFactory = services.GetRequiredService<IServiceScopeFactory>();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("CadenceController started");
+
+        // Load last-known-good config from database before starting the cadence loop.
+        if (_configManager is not null)
+        {
+            try
+            {
+                await _configManager.LoadFromDatabaseAsync(stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Failed to load config from database on startup");
+            }
+        }
 
         _connectivity.StateChanged += OnConnectivityStateChanged;
 
@@ -90,7 +112,7 @@ public sealed class CadenceController : BackgroundService
     private async Task RunCycleAsync(CancellationToken ct)
     {
         var snapshot = _connectivity.Current;
-        var config = _config.Value;
+        var config = _config.CurrentValue;
 
         _logger.LogDebug(
             "CadenceController tick {Tick}: state={State} mode={Mode} internet={Internet} fcc={Fcc}",
@@ -154,15 +176,72 @@ public sealed class CadenceController : BackgroundService
             // Architecture rule #10: coalesced with cloud health checks in this loop.
             if (IsSyncedToOdooPollTick(config))
             {
-                _logger.LogDebug("SYNCED_TO_ODOO poll tick {Tick}", _tick);
-                // TODO DEA-2.x: inject ISyncedToOdooPoller and call PollAsync here.
+                if (_syncedToOdooPoller is not null)
+                {
+                    try
+                    {
+                        var synced = await _syncedToOdooPoller.PollAsync(ct);
+                        if (synced > 0)
+                            _logger.LogInformation(
+                                "SYNCED_TO_ODOO poll tick {Tick}: {Count} record(s) advanced", _tick, synced);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "SYNCED_TO_ODOO poll failed on tick {Tick}", _tick);
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("SYNCED_TO_ODOO poll tick {Tick}: poller not registered (placeholder)", _tick);
+                }
+            }
+
+            // ── Config Poll ───────────────────────────────────────────────────
+            // Coalesced under internet-up check. Runs every N ticks per configPollIntervalSeconds.
+            if (IsConfigPollTick(config))
+            {
+                if (_configPoller is not null)
+                {
+                    try
+                    {
+                        var applied = await _configPoller.PollAsync(ct);
+                        if (applied)
+                            _logger.LogInformation(
+                                "Config poll tick {Tick}: new configuration applied", _tick);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Config poll failed on tick {Tick}", _tick);
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("Config poll tick {Tick}: config poller not registered (placeholder)", _tick);
+                }
             }
 
             // ── Telemetry ─────────────────────────────────────────────────────
             if (IsTelemetryTick(config))
             {
-                _logger.LogDebug("Telemetry report tick {Tick}", _tick);
-                // TODO DEA-2.x: inject ITelemetryReporter and call ReportAsync here.
+                if (_telemetryReporter is not null)
+                {
+                    try
+                    {
+                        var sent = await _telemetryReporter.ReportAsync(ct);
+                        if (sent)
+                            _logger.LogDebug("Telemetry report tick {Tick}: sent successfully", _tick);
+                        else
+                            _logger.LogDebug("Telemetry report tick {Tick}: skipped (send failed or no token)", _tick);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Telemetry report failed on tick {Tick}", _tick);
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("Telemetry report tick {Tick}: reporter not registered (placeholder)", _tick);
+                }
             }
         }
         else
@@ -195,7 +274,7 @@ public sealed class CadenceController : BackgroundService
 
     private async Task WaitForNextTickAsync(CancellationToken ct)
     {
-        var config = _config.Value;
+        var config = _config.CurrentValue;
         var baseInterval = TimeSpan.FromSeconds(
             config.CloudSyncIntervalSeconds > 0 ? config.CloudSyncIntervalSeconds : 30);
 
@@ -284,6 +363,18 @@ public sealed class CadenceController : BackgroundService
     {
         var cadence = Math.Max(1, config.CloudSyncIntervalSeconds);
         var every = Math.Max(1, cadence / 30);
+        return _tick % every == 0;
+    }
+
+    /// <summary>
+    /// Config poll runs every N ticks based on configPollIntervalSeconds / cadenceInterval.
+    /// Coalesced with cloud-capable cycle (architecture rule #10).
+    /// </summary>
+    private bool IsConfigPollTick(AgentConfiguration config)
+    {
+        var cadenceSeconds = Math.Max(1, config.CloudSyncIntervalSeconds);
+        var configPollInterval = Math.Max(30, config.ConfigPollIntervalSeconds);
+        var every = Math.Max(1, configPollInterval / cadenceSeconds);
         return _tick % every == 0;
     }
 

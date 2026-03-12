@@ -35,6 +35,9 @@ public sealed class PreAuthSimulationTests
         JsonElement listedSession = sessionsDocument.RootElement.EnumerateArray().Single();
         Assert.Equal("AUTHORIZED", listedSession.GetProperty("status").GetString());
         Assert.Contains("StateTransition", listedSession.GetProperty("timelineJson").GetString(), StringComparison.Ordinal);
+        Assert.True(listedSession.GetProperty("requestValidation").GetProperty("enabled").GetBoolean());
+        Assert.Equal("Passed", listedSession.GetProperty("requestValidation").GetProperty("outcome").GetString());
+        Assert.Equal("Passed", listedSession.GetProperty("responseValidation").GetProperty("outcome").GetString());
 
         await factory.WithDbContextAsync(async dbContext =>
         {
@@ -200,6 +203,76 @@ public sealed class PreAuthSimulationTests
         });
     }
 
+    [Fact]
+    public async Task LabConsoleEndpointCanCreateAuthorizeAndReturnInspectableSession()
+    {
+        using VirtualLabApiFactory factory = new();
+        using HttpClient client = factory.CreateClient();
+
+        await ConfigureSiteAsync(factory, "doms-like");
+        Guid siteId = await GetSiteIdAsync(factory);
+
+        using HttpResponseMessage createResponse = await PostJsonAsync(
+            client,
+            $"/api/sites/{siteId}/preauth/simulate",
+            """{"action":"create","pumpNumber":1,"nozzleNumber":1,"amount":15000,"correlationId":"corr-console","customerTaxId":"TIN-77831"}""");
+        string createBody = await createResponse.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        Assert.Equal("PENDING", ReadNestedString(createBody, "session", "status"));
+
+        string preAuthId = ReadNestedString(createBody, "session", "externalReference");
+
+        using HttpResponseMessage authorizeResponse = await PostJsonAsync(
+            client,
+            $"/api/sites/{siteId}/preauth/simulate",
+            $$"""{"action":"authorize","preAuthId":"{{preAuthId}}","amount":15000,"correlationId":"corr-console"}""");
+        string authorizeBody = await authorizeResponse.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, authorizeResponse.StatusCode);
+        Assert.Equal("AUTHORIZED", ReadNestedString(authorizeBody, "session", "status"));
+
+        await factory.WithDbContextAsync(async dbContext =>
+        {
+            PreAuthSession session = await dbContext.PreAuthSessions.SingleAsync(x => x.CorrelationId == "corr-console");
+
+            Assert.Equal(PreAuthSessionStatus.Authorized, session.Status);
+            Assert.Contains("TIN-77831", session.RawRequestJson, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task LabConsoleEndpointCanExpireSessionOnDemand()
+    {
+        using VirtualLabApiFactory factory = new();
+        using HttpClient client = factory.CreateClient();
+
+        await ConfigureSiteAsync(factory, "doms-like");
+        Guid siteId = await GetSiteIdAsync(factory);
+
+        using HttpResponseMessage createResponse = await PostJsonAsync(
+            client,
+            $"/api/sites/{siteId}/preauth/simulate",
+            """{"action":"create","pumpNumber":1,"nozzleNumber":1,"amount":12000,"correlationId":"corr-console-expire"}""");
+        string createBody = await createResponse.Content.ReadAsStringAsync();
+        string preAuthId = ReadNestedString(createBody, "session", "externalReference");
+
+        using HttpResponseMessage expireResponse = await PostJsonAsync(
+            client,
+            $"/api/sites/{siteId}/preauth/simulate",
+            $$"""{"action":"expire","preAuthId":"{{preAuthId}}","correlationId":"corr-console-expire"}""");
+        string expireBody = await expireResponse.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, expireResponse.StatusCode);
+        Assert.Equal("EXPIRED", ReadNestedString(expireBody, "session", "status"));
+
+        await factory.WithDbContextAsync(async dbContext =>
+        {
+            PreAuthSession session = await dbContext.PreAuthSessions.SingleAsync(x => x.CorrelationId == "corr-console-expire");
+            Assert.Equal(PreAuthSessionStatus.Expired, session.Status);
+        });
+    }
+
     private static async Task ConfigureSiteAsync(VirtualLabApiFactory factory, string profileKey)
     {
         await factory.WithDbContextAsync(async dbContext =>
@@ -230,5 +303,21 @@ public sealed class PreAuthSimulationTests
         using JsonDocument document = JsonDocument.Parse(json);
         return document.RootElement.GetProperty(propertyName).GetString()
             ?? throw new InvalidOperationException($"Missing '{propertyName}'.");
+    }
+
+    private static string ReadNestedString(string json, string parentPropertyName, string propertyName)
+    {
+        using JsonDocument document = JsonDocument.Parse(json);
+        return document.RootElement.GetProperty(parentPropertyName).GetProperty(propertyName).GetString()
+            ?? throw new InvalidOperationException($"Missing '{parentPropertyName}.{propertyName}'.");
+    }
+
+    private static async Task<Guid> GetSiteIdAsync(VirtualLabApiFactory factory)
+    {
+        return await factory.WithDbContextAsync(async dbContext =>
+        {
+            Site site = await dbContext.Sites.SingleAsync(x => x.SiteCode == "VL-MW-BT001");
+            return site.Id;
+        });
     }
 }

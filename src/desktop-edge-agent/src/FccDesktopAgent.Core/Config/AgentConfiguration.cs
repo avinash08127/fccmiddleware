@@ -73,4 +73,7 @@ public sealed class AgentConfiguration
     /// ±20% jitter is applied at runtime to prevent synchronized bursts across devices. Default 30s.
     /// </summary>
     public int ConnectivityProbeIntervalSeconds { get; set; } = 30;
+
+    /// <summary>Config poll interval in seconds (range 30–3600, default 60).</summary>
+    public int ConfigPollIntervalSeconds { get; set; } = 60;
 }

@@ -5,6 +5,8 @@ import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.SyncState
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 
 /**
@@ -72,24 +74,30 @@ class CloudUploadWorker(
         private const val TAG = "CloudUploadWorker"
         private const val DECOMMISSIONED_ERROR_CODE = "DEVICE_DECOMMISSIONED"
         private const val SYNCED_TO_ODOO_STATUS = "SYNCED_TO_ODOO"
+        private const val STATUS_NOT_FOUND = "NOT_FOUND"
+        private const val STATUS_STALE_PENDING = "STALE_PENDING"
+        private const val STATUS_DUPLICATE = "DUPLICATE"
 
         /** Cloud API rejects batches larger than this. */
         private const val CLOUD_MAX_BATCH_SIZE = 500
     }
 
+    /** Guards compound read-modify-write of [consecutiveFailureCount] + [nextRetryAt]. */
+    private val backoffMutex = Mutex()
+
     /**
      * Monotonically increasing count of consecutive upload batch transport failures.
      * Reset to zero on any successful batch upload.
+     * Must be read/written under [backoffMutex].
      */
-    @Volatile
     internal var consecutiveFailureCount: Int = 0
 
     /**
      * Earliest [Instant] at which the next upload attempt is permitted.
      * Set after a transport failure using exponential backoff.
      * Reset to [Instant.EPOCH] after a successful batch.
+     * Must be read/written under [backoffMutex].
      */
-    @Volatile
     internal var nextRetryAt: Instant = Instant.EPOCH
 
     // -------------------------------------------------------------------------
@@ -123,8 +131,9 @@ class CloudUploadWorker(
 
         // Exponential backoff check — skip if a recent failure still applies
         val now = Instant.now()
-        if (now.isBefore(nextRetryAt)) {
-            val waitMs = nextRetryAt.toEpochMilli() - now.toEpochMilli()
+        val currentNextRetry = backoffMutex.withLock { nextRetryAt }
+        if (now.isBefore(currentNextRetry)) {
+            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
             Log.d(TAG, "uploadPendingBatch() skipped — backoff active (${waitMs}ms remaining)")
             return
         }
@@ -132,14 +141,25 @@ class CloudUploadWorker(
         val batchSize = config.uploadBatchSize.coerceAtMost(CLOUD_MAX_BATCH_SIZE)
         val batch = bm.getPendingBatch(batchSize)
         if (batch.isEmpty()) {
-            Log.d(TAG, "uploadPendingBatch() — no PENDING records, nothing to upload")
+            // H-02 fix: reset backoff when buffer drains so new records upload immediately
+            backoffMutex.withLock {
+                consecutiveFailureCount = 0
+                nextRetryAt = Instant.EPOCH
+            }
+            Log.d(TAG, "uploadPendingBatch() — no PENDING records, backoff reset")
             return
         }
 
         Log.i(TAG, "Starting upload batch: ${batch.size} records")
 
         val token = provider.getAccessToken() ?: run {
-            Log.w(TAG, "uploadPendingBatch() skipped — no access token available (not provisioned)")
+            // H-05: Re-check decommission status — if device was decommissioned between
+            // the initial check and getAccessToken(), a null token is expected and permanent.
+            if (provider.isDecommissioned()) {
+                Log.w(TAG, "uploadPendingBatch() skipped — device decommissioned (detected on token fetch)")
+            } else {
+                Log.w(TAG, "uploadPendingBatch() skipped — no access token available (not provisioned)")
+            }
             return
         }
 
@@ -147,19 +167,22 @@ class CloudUploadWorker(
         handleUploadResult(bm, batch, result)
     }
 
+    /** Guards compound read-modify-write of status poll backoff state. */
+    private val statusPollBackoffMutex = Mutex()
+
     /**
      * Monotonically increasing count of consecutive status poll transport failures.
      * Reset to zero on any successful poll.
+     * Must be read/written under [statusPollBackoffMutex].
      */
-    @Volatile
     internal var statusPollConsecutiveFailureCount: Int = 0
 
     /**
      * Earliest [Instant] at which the next status poll attempt is permitted.
      * Set after a transport failure using exponential backoff.
      * Reset to [Instant.EPOCH] after a successful poll.
+     * Must be read/written under [statusPollBackoffMutex].
      */
-    @Volatile
     internal var statusPollNextRetryAt: Instant = Instant.EPOCH
 
     /**
@@ -197,8 +220,9 @@ class CloudUploadWorker(
 
         // Backoff check
         val now = Instant.now()
-        if (now.isBefore(statusPollNextRetryAt)) {
-            val waitMs = statusPollNextRetryAt.toEpochMilli() - now.toEpochMilli()
+        val currentNextRetry = statusPollBackoffMutex.withLock { statusPollNextRetryAt }
+        if (now.isBefore(currentNextRetry)) {
+            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
             Log.d(TAG, "pollSyncedToOdooStatus() skipped — backoff active (${waitMs}ms remaining)")
             return
         }
@@ -210,7 +234,11 @@ class CloudUploadWorker(
         }
 
         val token = provider.getAccessToken() ?: run {
-            Log.w(TAG, "pollSyncedToOdooStatus() skipped — no access token available")
+            if (provider.isDecommissioned()) {
+                Log.w(TAG, "pollSyncedToOdooStatus() skipped — device decommissioned (detected on token fetch)")
+            } else {
+                Log.w(TAG, "pollSyncedToOdooStatus() skipped — no access token available")
+            }
             return
         }
 
@@ -252,7 +280,11 @@ class CloudUploadWorker(
         }
 
         val token = provider.getAccessToken() ?: run {
-            Log.w(TAG, "reportTelemetry() skipped — no access token available")
+            if (provider.isDecommissioned()) {
+                Log.w(TAG, "reportTelemetry() skipped — device decommissioned (detected on token fetch)")
+            } else {
+                Log.w(TAG, "reportTelemetry() skipped — no access token available")
+            }
             return
         }
 
@@ -370,19 +402,78 @@ class CloudUploadWorker(
     ) {
         when (result) {
             is StatusPollAttemptResult.Success -> {
-                val syncedIds = result.response.statuses
-                    .filter { it.status == SYNCED_TO_ODOO_STATUS }
-                    .map { it.id }
+                val syncedIds = mutableListOf<String>()
+                var notFoundCount = 0
+                var stalePendingCount = 0
+                var duplicateCount = 0
+                var otherCount = 0
+
+                for (entry in result.response.statuses) {
+                    when (entry.status) {
+                        SYNCED_TO_ODOO_STATUS -> syncedIds += entry.id
+
+                        STATUS_NOT_FOUND -> {
+                            notFoundCount++
+                            Log.w(
+                                TAG,
+                                "Status poll: fccTransactionId='${entry.id}' returned NOT_FOUND — " +
+                                    "record may have been lost in cloud or never persisted.",
+                            )
+                        }
+
+                        STATUS_STALE_PENDING -> {
+                            stalePendingCount++
+                            Log.w(
+                                TAG,
+                                "Status poll: fccTransactionId='${entry.id}' returned STALE_PENDING — " +
+                                    "record is stuck in cloud processing.",
+                            )
+                        }
+
+                        STATUS_DUPLICATE -> {
+                            duplicateCount++
+                            Log.i(
+                                TAG,
+                                "Status poll: fccTransactionId='${entry.id}' returned DUPLICATE — " +
+                                    "cloud dedup confirmed.",
+                            )
+                        }
+
+                        else -> {
+                            otherCount++
+                            Log.w(
+                                TAG,
+                                "Status poll: fccTransactionId='${entry.id}' returned " +
+                                    "unrecognised status '${entry.status}'.",
+                            )
+                        }
+                    }
+                }
 
                 if (syncedIds.isNotEmpty()) {
                     bm.markSyncedToOdoo(syncedIds)
                     Log.i(TAG, "Marked ${syncedIds.size} records SYNCED_TO_ODOO")
-                } else {
-                    Log.d(TAG, "Status poll returned no SYNCED_TO_ODOO entries")
                 }
 
-                statusPollConsecutiveFailureCount = 0
-                statusPollNextRetryAt = Instant.EPOCH
+                if (notFoundCount > 0 || stalePendingCount > 0) {
+                    Log.w(
+                        TAG,
+                        "Status poll anomalies: notFound=$notFoundCount stalePending=$stalePendingCount " +
+                            "duplicate=$duplicateCount other=$otherCount",
+                    )
+                    telemetryReporter?.cloudUploadErrors?.addAndGet(notFoundCount + stalePendingCount)
+                }
+
+                if (syncedIds.isEmpty() && notFoundCount == 0 && stalePendingCount == 0 &&
+                    duplicateCount == 0 && otherCount == 0
+                ) {
+                    Log.d(TAG, "Status poll returned no actionable entries")
+                }
+
+                statusPollBackoffMutex.withLock {
+                    statusPollConsecutiveFailureCount = 0
+                    statusPollNextRetryAt = Instant.EPOCH
+                }
                 updateLastStatusPollAt()
             }
 
@@ -395,14 +486,16 @@ class CloudUploadWorker(
             }
 
             is StatusPollAttemptResult.TransportFailure -> {
-                statusPollConsecutiveFailureCount++
-                val backoffMs = calculateBackoffMs(statusPollConsecutiveFailureCount)
-                statusPollNextRetryAt = Instant.now().plusMillis(backoffMs)
-                Log.w(
-                    TAG,
-                    "Status poll failed (failure #$statusPollConsecutiveFailureCount); " +
-                        "next retry after ${backoffMs}ms. Error: ${result.message}",
-                )
+                statusPollBackoffMutex.withLock {
+                    statusPollConsecutiveFailureCount++
+                    val backoffMs = calculateBackoffMs(statusPollConsecutiveFailureCount)
+                    statusPollNextRetryAt = Instant.now().plusMillis(backoffMs)
+                    Log.w(
+                        TAG,
+                        "Status poll failed (failure #$statusPollConsecutiveFailureCount); " +
+                            "next retry after ${backoffMs}ms. Error: ${result.message}",
+                    )
+                }
             }
         }
     }
@@ -494,8 +587,10 @@ class CloudUploadWorker(
         when (result) {
             is UploadAttemptResult.Success -> {
                 processUploadResponse(bm, batch, result.response)
-                consecutiveFailureCount = 0
-                nextRetryAt = Instant.EPOCH
+                backoffMutex.withLock {
+                    consecutiveFailureCount = 0
+                    nextRetryAt = Instant.EPOCH
+                }
                 updateLastUploadAt()
             }
 
@@ -511,14 +606,16 @@ class CloudUploadWorker(
             }
 
             is UploadAttemptResult.TransportFailure -> {
-                consecutiveFailureCount++
-                val backoffMs = calculateBackoffMs(consecutiveFailureCount)
-                nextRetryAt = Instant.now().plusMillis(backoffMs)
-                Log.w(
-                    TAG,
-                    "Batch upload failed (failure #$consecutiveFailureCount); " +
-                        "next retry after ${backoffMs}ms. Error: ${result.message}",
-                )
+                backoffMutex.withLock {
+                    consecutiveFailureCount++
+                    val backoffMs = calculateBackoffMs(consecutiveFailureCount)
+                    nextRetryAt = Instant.now().plusMillis(backoffMs)
+                    Log.w(
+                        TAG,
+                        "Batch upload failed (failure #$consecutiveFailureCount); " +
+                            "next retry after ${backoffMs}ms. Error: ${result.message}",
+                    )
+                }
                 // Record the failure against every record in the batch so the diagnostics
                 // screen and telemetry can surface upload error details.
                 val attemptAt = Instant.now().toString()
@@ -556,8 +653,20 @@ class CloudUploadWorker(
         // O(1) lookup: fccTransactionId → local record
         val batchByFccId = batch.associateBy { it.fccTransactionId }
 
+        var unmatchedCount = 0
+
         for (result in response.results) {
-            val local = batchByFccId[result.fccTransactionId] ?: continue
+            val local = batchByFccId[result.fccTransactionId]
+            if (local == null) {
+                unmatchedCount++
+                Log.w(
+                    TAG,
+                    "Cloud returned result for fccTransactionId='${result.fccTransactionId}' " +
+                        "which does not match any record in the local batch. " +
+                        "Outcome=${result.outcome}. Record may be orphaned in PENDING state.",
+                )
+                continue
+            }
             when (result.outcome) {
                 UploadOutcome.ACCEPTED.name,
                 UploadOutcome.DUPLICATE.name -> uploadedIds += local.id
@@ -568,7 +677,25 @@ class CloudUploadWorker(
                         ?: "REJECTED (no error detail)"
                     rejectedPairs += local to errorMsg
                 }
+
+                else -> {
+                    Log.w(
+                        TAG,
+                        "Cloud returned unknown outcome '${result.outcome}' for " +
+                            "fccTransactionId='${result.fccTransactionId}'. Record left PENDING.",
+                    )
+                }
             }
+        }
+
+        if (unmatchedCount > 0) {
+            Log.e(
+                TAG,
+                "$unmatchedCount cloud response result(s) did not match any local batch record. " +
+                    "Batch had ${batch.size} records, response had ${response.results.size} results. " +
+                    "Unmatched records remain PENDING and may be orphaned.",
+            )
+            telemetryReporter?.cloudUploadErrors?.addAndGet(unmatchedCount)
         }
 
         if (uploadedIds.isNotEmpty()) {

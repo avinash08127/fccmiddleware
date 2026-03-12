@@ -1,0 +1,153 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>WebSocket Dashboard</title>
+    <style>
+        body {
+            font-family: "Segoe UI", sans-serif;
+            background: #121212;
+            color: #eee;
+            padding: 20px;
+        }
+
+        .status {
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+
+        .online {
+            background-color: #2e7d32;
+            color: white;
+        }
+
+        .offline {
+            background-color: #c62828;
+            color: white;
+        }
+
+        #log {
+            background: #1e1e1e;
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 20px;
+            height: 350px;
+            overflow-y: auto;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h2>
+        WebSocket Dashboard
+        <span id="status" class="status offline">Offline</span>
+    </h2>
+    <div id="endpoint"></div>
+    <div id="log"></div>
+
+    <script>const statusEl = document.getElementById("status");
+    const logEl = document.getElementById("log");
+    const endpointEl = document.getElementById("endpoint");
+
+    function getServerHost() {
+      const hostname = window.location.hostname;
+      
+      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '') {
+        return hostname || 'localhost';
+      }
+      
+      return hostname;
+    }
+
+    const serverHost = getServerHost();
+    const serverPort = 2004;
+    const path = window.location.pathname || "/sitemanager";
+    const wsUrl = `wss://${serverHost}:${serverPort}${path}`;
+    
+    endpointEl.textContent = "Connecting to: " + wsUrl;
+    endpointEl.style.color = "#4CAF50";
+    endpointEl.style.marginBottom = "10px";
+    endpointEl.style.fontFamily = "monospace";
+
+    const log = (msg) => {
+      const ts = new Date().toLocaleTimeString();
+      logEl.textContent += `[${ts}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    const setStatus = (online) => {
+      if (online) {
+        statusEl.textContent = "Online";
+        statusEl.classList.add("online");
+        statusEl.classList.remove("offline");
+      } else {
+        statusEl.textContent = "Offline";
+        statusEl.classList.add("offline");
+        statusEl.classList.remove("online");
+      }
+    };
+
+    let socket;
+    let pingInterval;
+
+    function connect() {
+      log("🔄 Attempting to connect to " + wsUrl + "...");
+      socket = new WebSocket(wsUrl);
+
+      socket.onopen = () => {
+        setStatus(true);
+        log("✅ Connected to " + wsUrl);
+        
+        if (pingInterval) {
+          clearInterval(pingInterval);
+        }
+        
+        pingInterval = setInterval(() => {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ command: "ping", source: "browser" }));
+            log("📤 Sent ping");
+          }
+        }, 10000);
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          log("📩 Received: " + JSON.stringify(data, null, 2));
+        } catch (e) {
+          log("📩 Received: " + event.data);
+        }
+      };
+
+      socket.onclose = (event) => {
+        setStatus(false);
+        if (pingInterval) {
+          clearInterval(pingInterval);
+          pingInterval = null;
+        }
+        
+        const reason = event.code === 1006 ? " (Connection closed abnormally)" : 
+                      event.reason ? ` (${event.reason})` : "";
+        log("❌ Disconnected" + reason + " — retrying in 3s...");
+        setTimeout(connect, 3000);
+      };
+
+      socket.onerror = (err) => {
+        log("⚠️ WebSocket error occurred");
+        log("💡 Tip: Make sure you're connecting to the correct server IP address");
+        log("💡 The server should display available IP addresses in its logs");
+        console.error("WebSocket error:", err);
+      };
+    }
+
+    connect();
+    
+    log("🌐 Server Host: " + serverHost);
+    log("🔌 Port: " + serverPort);
+    log("📁 Path: " + path);
+    log("🔗 Full URL: " + wsUrl);
+    log("💡 Note: If connection fails, ensure you're using the server's actual IP address");</script>
+</body>
+</html>

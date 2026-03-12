@@ -28,6 +28,9 @@ import kotlinx.serialization.json.Json
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Embedded Ktor CIO server exposing the Edge Agent local REST API.
@@ -62,6 +65,10 @@ class LocalApiServer(
         val enableLanApi: Boolean = false,
         /** Required when [enableLanApi] = true. Validated with constant-time comparison. */
         val lanApiKey: String? = null,
+        /** Max requests per second for mutating endpoints (preauth, pull). */
+        val rateLimitMutatingRps: Int = 10,
+        /** Max requests per second for read endpoints (transactions, status, pump-status). */
+        val rateLimitReadRps: Int = 30,
     ) {
         val bindAddress: String get() = if (enableLanApi) "0.0.0.0" else "127.0.0.1"
     }
@@ -78,6 +85,7 @@ class LocalApiServer(
         server = embeddedServer(CIO, port = config.port, host = config.bindAddress) {
             configureContentNegotiation()
             configureLanApiKeyAuth()
+            configureRateLimiting()
             configureStatusPages()
             configureRouting()
         }.also {
@@ -108,9 +116,25 @@ class LocalApiServer(
 
     private fun Application.configureLanApiKeyAuth() {
         if (!config.enableLanApi) return
-        val storedKey = config.lanApiKey ?: return
+        val storedKey = config.lanApiKey
+        if (storedKey == null) {
+            // LAN mode requested but no API key configured — reject ALL non-localhost
+            // requests to prevent unauthenticated access from the local network.
+            Log.e(tag, "LAN API enabled but lanApiKey is null — all LAN requests will be rejected")
+            install(LanApiBlockPlugin)
+            return
+        }
 
         install(LanApiKeyAuthPlugin(storedKey))
+    }
+
+    private fun Application.configureRateLimiting() {
+        install(
+            RateLimitPlugin(
+                mutatingRps = config.rateLimitMutatingRps,
+                readRps = config.rateLimitReadRps,
+            )
+        )
     }
 
     private fun Application.configureStatusPages() {
@@ -185,6 +209,33 @@ private fun LanApiKeyAuthPlugin(storedKey: String): ApplicationPlugin<Unit> =
     }
 
 /**
+ * Ktor plugin that rejects ALL non-localhost requests when LAN mode is enabled
+ * but no API key is configured. This is a safety net — prevents unauthenticated
+ * access until a proper lanApiKey is provisioned.
+ */
+private val LanApiBlockPlugin: ApplicationPlugin<Unit> =
+    createApplicationPlugin("LanApiBlock") {
+        onCall { call ->
+            val remoteAddress = call.request.origin.remoteHost
+            val isLocalhost = remoteAddress == "127.0.0.1" ||
+                remoteAddress == "::1" ||
+                remoteAddress == "0:0:0:0:0:0:0:1"
+
+            if (!isLocalhost) {
+                call.respond(
+                    HttpStatusCode.Forbidden,
+                    ErrorResponse(
+                        errorCode = "LAN_API_KEY_NOT_CONFIGURED",
+                        message = "LAN access is enabled but no API key is configured. All non-localhost requests are rejected.",
+                        traceId = UUID.randomUUID().toString(),
+                        timestamp = Instant.now().toString(),
+                    )
+                )
+            }
+        }
+    }
+
+/**
  * Constant-time string equality check to prevent timing attacks on the API key.
  */
 private fun lanApiKeyEquals(provided: String, stored: String): Boolean =
@@ -192,3 +243,70 @@ private fun lanApiKeyEquals(provided: String, stored: String): Boolean =
         provided.toByteArray(Charsets.UTF_8),
         stored.toByteArray(Charsets.UTF_8),
     )
+
+// -------------------------------------------------------------------------
+// Rate limiting — per-endpoint sliding window (1-second resolution)
+// -------------------------------------------------------------------------
+
+/**
+ * Simple per-bucket rate limiter using a sliding 1-second window.
+ *
+ * Buckets:
+ *   - "mutating" — POST endpoints that cause FCC interaction (preauth, pull)
+ *   - "read"     — GET endpoints and acknowledge (local-only, idempotent)
+ *
+ * When the limit is exceeded, responds 429 with a Retry-After: 1 header.
+ * Thread-safe via AtomicLong (window epoch-second) + AtomicInteger (counter).
+ */
+private class SlidingWindowCounter(private val maxPerSecond: Int) {
+    private val windowSecond = AtomicLong(0)
+    private val counter = AtomicInteger(0)
+
+    /** Returns true if the request is allowed, false if rate-limited. */
+    fun tryAcquire(): Boolean {
+        val nowSecond = System.currentTimeMillis() / 1000L
+        val currentWindow = windowSecond.get()
+        if (nowSecond != currentWindow) {
+            // New window — reset. Race is benign: worst case two threads both reset,
+            // which slightly under-counts for one second (safe direction).
+            if (windowSecond.compareAndSet(currentWindow, nowSecond)) {
+                counter.set(1)
+                return true
+            }
+        }
+        return counter.incrementAndGet() <= maxPerSecond
+    }
+}
+
+/** Mutating paths that interact with the FCC or modify state. */
+private val MUTATING_PATHS = setOf(
+    "/api/v1/preauth",
+    "/api/v1/preauth/cancel",
+    "/api/v1/transactions/pull",
+)
+
+private fun RateLimitPlugin(
+    mutatingRps: Int,
+    readRps: Int,
+): ApplicationPlugin<Unit> = createApplicationPlugin("RateLimit") {
+    val mutatingLimiter = SlidingWindowCounter(mutatingRps)
+    val readLimiter = SlidingWindowCounter(readRps)
+
+    onCall { call ->
+        val path = call.request.local.uri
+        val limiter = if (path in MUTATING_PATHS) mutatingLimiter else readLimiter
+
+        if (!limiter.tryAcquire()) {
+            call.response.headers.append("Retry-After", "1")
+            call.respond(
+                HttpStatusCode.TooManyRequests,
+                ErrorResponse(
+                    errorCode = "RATE_LIMITED",
+                    message = "Too many requests. Try again in 1 second.",
+                    traceId = UUID.randomUUID().toString(),
+                    timestamp = Instant.now().toString(),
+                )
+            )
+        }
+    }
+}

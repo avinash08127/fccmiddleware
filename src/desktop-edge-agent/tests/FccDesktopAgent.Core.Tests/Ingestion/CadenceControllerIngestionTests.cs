@@ -4,6 +4,7 @@ using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Ingestion;
 using FccDesktopAgent.Core.Runtime;
 using FccDesktopAgent.Core.Sync;
+using FccDesktopAgent.Core.Tests.Sync;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -51,7 +52,7 @@ public sealed class CadenceControllerIngestionTests
 
         var controller = new CadenceController(
             monitor,
-            Options.Create(config),
+            new TestOptionsMonitor<AgentConfiguration>(config),
             NullLogger<CadenceController>.Instance,
             services);
 
@@ -240,7 +241,7 @@ public sealed class CadenceControllerIngestionTests
 
         var controller = new CadenceController(
             monitor,
-            Options.Create(config),
+            new TestOptionsMonitor<AgentConfiguration>(config),
             NullLogger<CadenceController>.Instance,
             services);
 
@@ -276,7 +277,7 @@ public sealed class CadenceControllerIngestionTests
 
         var controller = new CadenceController(
             monitor,
-            Options.Create(config),
+            new TestOptionsMonitor<AgentConfiguration>(config),
             NullLogger<CadenceController>.Instance,
             services);
 

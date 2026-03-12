@@ -8,7 +8,11 @@ using VirtualLab.Application;
 using VirtualLab.Application.Diagnostics;
 using VirtualLab.Application.FccProfiles;
 using VirtualLab.Application.Forecourt;
+using VirtualLab.Application.Management;
+using VirtualLab.Application.Observability;
 using VirtualLab.Application.PreAuth;
+using VirtualLab.Application.Callbacks;
+using VirtualLab.Application.Scenarios;
 using VirtualLab.Domain.Benchmarking;
 using VirtualLab.Domain.Enums;
 using VirtualLab.Domain.Models;
@@ -19,6 +23,7 @@ using VirtualLab.Infrastructure.FccProfiles;
 using VirtualLab.Infrastructure.Persistence;
 using VirtualLab.Infrastructure.Persistence.Seed;
 using VirtualLab.Api.Hubs;
+using VirtualLab.Api;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -63,60 +68,171 @@ app.MapGet("/healthz", () => Results.Ok(new
     environment = app.Environment.EnvironmentName,
 }));
 
-app.MapGet("/api/dashboard", async (VirtualLabDbContext dbContext, IOptions<BenchmarkSeedProfile> profile) =>
+app.MapGet("/api/dashboard", async (
+    VirtualLabDbContext dbContext,
+    IVirtualLabManagementService managementService,
+    IOptions<BenchmarkSeedProfile> profile,
+    CancellationToken cancellationToken) =>
 {
     BenchmarkSeedProfile seed = profile.Value;
-    int siteCount = await dbContext.Sites.CountAsync();
-    int pumpCount = await dbContext.Pumps.CountAsync();
-    int nozzleCount = await dbContext.Nozzles.CountAsync();
-    int transactionCount = await dbContext.SimulatedTransactions.CountAsync();
-    int callbackTargetCount = await dbContext.CallbackTargets.CountAsync();
+    DateTimeOffset now = DateTimeOffset.UtcNow;
+    DateTimeOffset sinceUtc = now.AddHours(-24);
+
+    IReadOnlyList<SiteListItemView> sites = await managementService.ListSitesAsync(true, cancellationToken);
+
+    SimulatedTransactionStatus[] activeStatuses =
+    [
+        SimulatedTransactionStatus.Created,
+        SimulatedTransactionStatus.ReadyForDelivery,
+        SimulatedTransactionStatus.Delivered,
+    ];
+
+    int activeTransactionCount = await dbContext.SimulatedTransactions
+        .AsNoTracking()
+        .CountAsync(x => activeStatuses.Contains(x.Status), cancellationToken);
+
+    var activeTransactions = await dbContext.SimulatedTransactions
+        .AsNoTracking()
+        .Include(x => x.Site)
+        .Include(x => x.Pump)
+        .Include(x => x.Nozzle)
+        .Include(x => x.Product)
+        .Where(x => activeStatuses.Contains(x.Status))
+        .OrderByDescending(x => x.OccurredAtUtc)
+        .Take(8)
+        .Select(x => new
+        {
+            x.Id,
+            SiteCode = x.Site.SiteCode,
+            x.CorrelationId,
+            x.ExternalTransactionId,
+            x.Status,
+            x.DeliveryMode,
+            PumpNumber = x.Pump.PumpNumber,
+            NozzleNumber = x.Nozzle.NozzleNumber,
+            ProductCode = x.Product.ProductCode,
+            x.Volume,
+            x.TotalAmount,
+            x.OccurredAtUtc,
+        })
+        .ToListAsync(cancellationToken);
+
+    int authFailureCount = await dbContext.LabEventLogs
+        .AsNoTracking()
+        .CountAsync(x => x.Category == "AuthFailure" && x.OccurredAtUtc >= sinceUtc, cancellationToken);
+
+    var authFailures = await dbContext.LabEventLogs
+        .AsNoTracking()
+        .Include(x => x.Site)
+        .Where(x => x.Category == "AuthFailure")
+        .OrderByDescending(x => x.OccurredAtUtc)
+        .Take(6)
+        .Select(x => new
+        {
+            x.Id,
+            SiteCode = x.Site != null ? x.Site.SiteCode : null,
+            x.EventType,
+            x.Message,
+            x.CorrelationId,
+            x.OccurredAtUtc,
+        })
+        .ToListAsync(cancellationToken);
+
+    int callbackSucceeded = await dbContext.CallbackAttempts
+        .AsNoTracking()
+        .CountAsync(x => x.AttemptedAtUtc >= sinceUtc && x.Status == CallbackAttemptStatus.Succeeded, cancellationToken);
+
+    int callbackFailed = await dbContext.CallbackAttempts
+        .AsNoTracking()
+        .CountAsync(x => x.AttemptedAtUtc >= sinceUtc && x.Status == CallbackAttemptStatus.Failed, cancellationToken);
+
+    int callbackPending = await dbContext.CallbackAttempts
+        .AsNoTracking()
+        .CountAsync(
+            x => x.AttemptedAtUtc >= sinceUtc &&
+                 (x.Status == CallbackAttemptStatus.Pending || x.Status == CallbackAttemptStatus.InProgress),
+            cancellationToken);
+
+    double callbackSuccessRate = callbackSucceeded + callbackFailed == 0
+        ? 100
+        : Math.Round((double)callbackSucceeded / (callbackSucceeded + callbackFailed) * 100, 1);
+
+    var recentCallbackAttempts = await dbContext.CallbackAttempts
+        .AsNoTracking()
+        .Include(x => x.CallbackTarget)
+        .Include(x => x.SimulatedTransaction)
+            .ThenInclude(x => x.Site)
+        .OrderByDescending(x => x.AttemptedAtUtc)
+        .Take(6)
+        .Select(x => new
+        {
+            x.Id,
+            SiteCode = x.SimulatedTransaction.Site.SiteCode,
+            TargetKey = x.CallbackTarget.TargetKey,
+            x.CorrelationId,
+            x.AttemptNumber,
+            x.Status,
+            x.ResponseStatusCode,
+            x.ErrorMessage,
+            x.AttemptedAtUtc,
+            x.NextRetryAtUtc,
+        })
+        .ToListAsync(cancellationToken);
+
+    var recentAlerts = await dbContext.LabEventLogs
+        .AsNoTracking()
+        .Include(x => x.Site)
+        .Where(x => x.OccurredAtUtc >= sinceUtc && (x.Severity != "Information" || x.Category == "AuthFailure" || x.Category == "CallbackFailure"))
+        .OrderByDescending(x => x.OccurredAtUtc)
+        .Take(10)
+        .Select(x => new
+        {
+            x.Id,
+            SiteCode = x.Site != null ? x.Site.SiteCode : null,
+            x.Category,
+            x.EventType,
+            x.Severity,
+            x.Message,
+            x.CorrelationId,
+            x.OccurredAtUtc,
+        })
+        .ToListAsync(cancellationToken);
 
     return Results.Ok(new
     {
-        seed.ProfileName,
-        SeedTargets = new
+        refreshedAtUtc = now,
+        profileName = seed.ProfileName,
+        seedTargets = new
         {
-            seed.Sites,
-            Pumps = seed.TotalPumps,
-            Nozzles = seed.TotalNozzles,
-            seed.Transactions,
+            sites = seed.Sites,
+            pumps = seed.TotalPumps,
+            nozzles = seed.TotalNozzles,
+            transactions = seed.Transactions,
         },
-        Current = new
+        sites = sites,
+        activeTransactions = new
         {
-            Sites = siteCount,
-            Pumps = pumpCount,
-            Nozzles = nozzleCount,
-            Transactions = transactionCount,
-            CallbackTargets = callbackTargetCount,
+            total = activeTransactionCount,
+            items = activeTransactions,
         },
+        authFailures = new
+        {
+            last24Hours = authFailureCount,
+            items = authFailures,
+        },
+        callbackDelivery = new
+        {
+            succeededLast24Hours = callbackSucceeded,
+            failedLast24Hours = callbackFailed,
+            pending = callbackPending,
+            successRatePercent = callbackSuccessRate,
+            items = recentCallbackAttempts,
+        },
+        recentAlerts,
     });
 });
 
-app.MapGet("/api/sites", async (VirtualLabDbContext dbContext) =>
-{
-    var sites = await dbContext.Sites
-        .AsNoTracking()
-        .Include(site => site.ActiveFccSimulatorProfile)
-        .Include(site => site.Pumps)
-            .ThenInclude(pump => pump.Nozzles)
-        .OrderBy(site => site.SiteCode)
-        .Select(index => new
-        {
-            index.Id,
-            index.SiteCode,
-            index.Name,
-            index.DeliveryMode,
-            index.PreAuthMode,
-            index.InboundAuthMode,
-            ActiveProfile = index.ActiveFccSimulatorProfile.Name,
-            Pumps = index.Pumps.Count,
-            Nozzles = index.Pumps.SelectMany(pump => pump.Nozzles).Count(),
-        })
-        .ToListAsync();
-
-    return Results.Ok(sites);
-});
+app.MapVirtualLabManagementEndpoints();
 
 app.MapGet("/api/fcc-profiles", async (IFccProfileService profileService, CancellationToken cancellationToken) =>
 {
@@ -255,49 +371,67 @@ fccGroup.MapPost("/preauth/authorize", async (string siteCode, HttpContext httpC
 fccGroup.MapPost("/preauth/cancel", async (string siteCode, HttpContext httpContext, IPreAuthSimulationService preAuthService, CancellationToken cancellationToken) =>
     await HandlePreAuthAsync(siteCode, "preauth-cancel", httpContext, preAuthService, cancellationToken));
 
-app.MapGet("/api/transactions", async (string? siteCode, string? correlationId, int? limit, VirtualLabDbContext dbContext) =>
+app.MapGet("/api/transactions", async (
+    Guid? siteId,
+    string? siteCode,
+    string? correlationId,
+    string? search,
+    TransactionDeliveryMode? deliveryMode,
+    SimulatedTransactionStatus? status,
+    int? limit,
+    IObservabilityService observabilityService,
+    CancellationToken cancellationToken) =>
 {
-    int take = Math.Clamp(limit ?? 100, 1, 100);
-    IQueryable<VirtualLab.Domain.Models.SimulatedTransaction> query = dbContext.SimulatedTransactions
-        .AsNoTracking()
-        .Include(x => x.Site)
-        .Include(x => x.Product)
-        .OrderByDescending(x => x.OccurredAtUtc);
-
-    if (!string.IsNullOrWhiteSpace(siteCode))
-    {
-        query = query.Where(x => x.Site.SiteCode == siteCode);
-    }
-
-    if (!string.IsNullOrWhiteSpace(correlationId))
-    {
-        query = query.Where(x => x.CorrelationId == correlationId);
-    }
-
-    var transactions = await query
-        .Take(take)
-        .Select(x => new
+    IReadOnlyList<TransactionListItemView> transactions = await observabilityService.ListTransactionsAsync(
+        new TransactionListQuery
         {
-            x.Id,
-            x.ExternalTransactionId,
-            x.CorrelationId,
-            SiteCode = x.Site.SiteCode,
-            PumpNumber = x.Pump.PumpNumber,
-            NozzleNumber = x.Nozzle.NozzleNumber,
-            ProductCode = x.Product.ProductCode,
-            x.DeliveryMode,
-            x.Status,
-            x.Volume,
-            x.TotalAmount,
-            x.OccurredAtUtc,
-            x.RawPayloadJson,
-            x.CanonicalPayloadJson,
-            x.MetadataJson,
-            x.TimelineJson,
-        })
-        .ToListAsync();
+            SiteId = siteId,
+            SiteCode = siteCode,
+            CorrelationId = correlationId,
+            Search = search,
+            DeliveryMode = deliveryMode,
+            Status = status,
+            Limit = limit ?? 50,
+        },
+        cancellationToken);
 
     return Results.Ok(transactions);
+});
+
+app.MapGet("/api/transactions/{id:guid}", async (Guid id, IObservabilityService observabilityService, CancellationToken cancellationToken) =>
+{
+    TransactionDetailView? transaction = await observabilityService.GetTransactionAsync(id, cancellationToken);
+    return transaction is null ? Results.NotFound() : Results.Ok(transaction);
+});
+
+app.MapPost("/api/transactions/{id:guid}/replay", async (
+    Guid id,
+    TransactionReplayRequest? request,
+    IObservabilityService observabilityService,
+    CancellationToken cancellationToken) =>
+{
+    TransactionReplayResult? result = await observabilityService.ReplayTransactionAsync(
+        id,
+        request ?? new TransactionReplayRequest(null),
+        cancellationToken);
+
+    return result is null
+        ? Results.NotFound()
+        : Results.Created($"/api/transactions/{result.TransactionId:D}", result);
+});
+
+app.MapPost("/api/transactions/{id:guid}/re-push", async (
+    Guid id,
+    PushTransactionsRequest? request,
+    IObservabilityService observabilityService,
+    CancellationToken cancellationToken) =>
+{
+    PushTransactionsResult result = await observabilityService.RepushTransactionAsync(
+        id,
+        request?.TargetKey,
+        cancellationToken);
+
+    return Results.Json(result, statusCode: result.StatusCode);
 });
 
 app.MapPost("/api/sites/{siteId:guid}/pumps/{pumpId:guid}/nozzles/{nozzleId:guid}/lift", async (
@@ -354,6 +488,159 @@ app.MapPost("/api/sites/{siteId:guid}/pumps/{pumpId:guid}/nozzles/{nozzleId:guid
     return Results.Json(result, statusCode: result.StatusCode);
 });
 
+app.MapPost("/api/sites/{siteId:guid}/preauth/simulate", async (
+    Guid siteId,
+    LabPreAuthActionRequest? request,
+    VirtualLabDbContext dbContext,
+    IPreAuthSimulationService preAuthService,
+    IHubContext<LabLiveHub> hubContext,
+    HttpContext httpContext,
+    CancellationToken cancellationToken) =>
+{
+    Site? site = await dbContext.Sites
+        .AsNoTracking()
+        .SingleOrDefaultAsync(x => x.Id == siteId && x.IsActive, cancellationToken);
+
+    if (site is null)
+    {
+        return Results.NotFound();
+    }
+
+    LabPreAuthActionRequest actionRequest = request ?? new LabPreAuthActionRequest();
+    string action = string.IsNullOrWhiteSpace(actionRequest.Action)
+        ? "create"
+        : actionRequest.Action.Trim().ToLowerInvariant();
+    string correlationId = string.IsNullOrWhiteSpace(actionRequest.CorrelationId)
+        ? httpContext.TraceIdentifier
+        : actionRequest.CorrelationId;
+
+    if (action == "expire")
+    {
+        if (string.IsNullOrWhiteSpace(actionRequest.PreAuthId))
+        {
+            LabPreAuthActionResult invalidResult = new(
+                StatusCodes.Status400BadRequest,
+                action,
+                "preAuthId is required for expire.",
+                site.SiteCode,
+                correlationId,
+                """{"message":"preAuthId is required for expire."}""",
+                null);
+
+            return Results.Json(invalidResult, statusCode: invalidResult.StatusCode);
+        }
+
+        PreAuthSessionSummary? expiredSession = await preAuthService.ExpireSessionAsync(
+            new PreAuthManualExpiryRequest
+            {
+                SiteCode = site.SiteCode,
+                PreAuthId = actionRequest.PreAuthId,
+                CorrelationId = correlationId,
+            },
+            cancellationToken);
+
+        if (expiredSession is null)
+        {
+            LabPreAuthActionResult notFoundResult = new(
+                StatusCodes.Status404NotFound,
+                action,
+                $"Pre-auth id '{actionRequest.PreAuthId}' was not found.",
+                site.SiteCode,
+                correlationId,
+                JsonSerializer.Serialize(new { message = $"Pre-auth id '{actionRequest.PreAuthId}' was not found." }),
+                null);
+
+            return Results.Json(notFoundResult, statusCode: notFoundResult.StatusCode);
+        }
+
+        int statusCode = string.Equals(expiredSession.Status, "EXPIRED", StringComparison.OrdinalIgnoreCase)
+            ? StatusCodes.Status200OK
+            : StatusCodes.Status409Conflict;
+        string message = statusCode == StatusCodes.Status200OK
+            ? "Pre-auth session expired."
+            : $"Session '{expiredSession.ExternalReference}' is already {expiredSession.Status}.";
+        string responseBody = JsonSerializer.Serialize(new
+        {
+            status = expiredSession.Status.ToLowerInvariant(),
+            preauthId = expiredSession.ExternalReference,
+            correlationId = expiredSession.CorrelationId,
+            message,
+        });
+
+        LabPreAuthActionResult expireResult = new(
+            statusCode,
+            action,
+            message,
+            site.SiteCode,
+            expiredSession.CorrelationId,
+            responseBody,
+            expiredSession);
+
+        if (statusCode is >= 200 and < 300)
+        {
+            await BroadcastPreAuthUpdateAsync(hubContext, expireResult, cancellationToken);
+        }
+
+        return Results.Json(expireResult, statusCode: expireResult.StatusCode);
+    }
+
+    string? operation = action switch
+    {
+        "create" => "preauth-create",
+        "authorize" => "preauth-authorize",
+        "cancel" => "preauth-cancel",
+        _ => null,
+    };
+
+    if (operation is null)
+    {
+        LabPreAuthActionResult invalidActionResult = new(
+            StatusCodes.Status400BadRequest,
+            action,
+            $"Unsupported pre-auth action '{actionRequest.Action}'.",
+            site.SiteCode,
+            correlationId,
+            JsonSerializer.Serialize(new { message = $"Unsupported pre-auth action '{actionRequest.Action}'." }),
+            null);
+
+        return Results.Json(invalidActionResult, statusCode: invalidActionResult.StatusCode);
+    }
+
+    string requestBody = BuildLabPreAuthPayload(actionRequest, correlationId);
+    Dictionary<string, string> fields = ExtractSampleValues(requestBody);
+    PreAuthSimulationResponse response = await preAuthService.HandleAsync(
+        new PreAuthSimulationRequest(
+            site.SiteCode,
+            operation,
+            HttpMethods.Post,
+            httpContext.Request.Path,
+            httpContext.TraceIdentifier,
+            requestBody,
+            fields),
+        cancellationToken);
+
+    PreAuthSessionSummary? session = await preAuthService.GetSessionAsync(
+        site.SiteCode,
+        correlationId,
+        actionRequest.PreAuthId,
+        cancellationToken);
+    LabPreAuthActionResult result = new(
+        response.StatusCode,
+        action,
+        ResolveLabPreAuthMessage(action, response.Body),
+        site.SiteCode,
+        session?.CorrelationId ?? correlationId,
+        response.Body,
+        session);
+
+    if (session is not null)
+    {
+        await BroadcastPreAuthUpdateAsync(hubContext, result, cancellationToken);
+    }
+
+    return Results.Json(result, statusCode: result.StatusCode);
+});
+
 app.MapPost("/api/sites/{siteId:guid}/transactions/push", async (
     Guid siteId,
     PushTransactionsRequest? request,
@@ -364,47 +651,39 @@ app.MapPost("/api/sites/{siteId:guid}/transactions/push", async (
     return Results.Json(result, statusCode: result.StatusCode);
 });
 
-app.MapGet("/api/logs", async (string? category, string? siteCode, string? correlationId, int? limit, VirtualLabDbContext dbContext) =>
+app.MapGet("/api/logs", async (
+    Guid? siteId,
+    string? siteCode,
+    Guid? profileId,
+    string? category,
+    string? severity,
+    string? correlationId,
+    string? search,
+    int? limit,
+    IObservabilityService observabilityService,
+    CancellationToken cancellationToken) =>
 {
-    int take = Math.Clamp(limit ?? 100, 1, 200);
-    IQueryable<VirtualLab.Domain.Models.LabEventLog> query = dbContext.LabEventLogs
-        .AsNoTracking()
-        .Include(x => x.Site)
-        .OrderByDescending(x => x.OccurredAtUtc);
-
-    if (!string.IsNullOrWhiteSpace(category))
-    {
-        query = query.Where(x => x.Category == category);
-    }
-
-    if (!string.IsNullOrWhiteSpace(siteCode))
-    {
-        query = query.Where(x => x.Site != null && x.Site.SiteCode == siteCode);
-    }
-
-    if (!string.IsNullOrWhiteSpace(correlationId))
-    {
-        query = query.Where(x => x.CorrelationId == correlationId);
-    }
-
-    var logs = await query
-        .Take(take)
-        .Select(x => new
+    IReadOnlyList<LogListItemView> logs = await observabilityService.ListLogsAsync(
+        new LogListQuery
         {
-            x.Id,
-            SiteCode = x.Site != null ? x.Site.SiteCode : null,
-            x.Category,
-            x.EventType,
-            x.Severity,
-            x.Message,
-            x.CorrelationId,
-            x.OccurredAtUtc,
-            x.RawPayloadJson,
-            x.CanonicalPayloadJson,
-        })
-        .ToListAsync();
+            SiteId = siteId,
+            SiteCode = siteCode,
+            ProfileId = profileId,
+            Category = category,
+            Severity = severity,
+            CorrelationId = correlationId,
+            Search = search,
+            Limit = limit ?? 100,
+        },
+        cancellationToken);
 
     return Results.Ok(logs);
+});
+
+app.MapGet("/api/logs/{id:guid}", async (Guid id, IObservabilityService observabilityService, CancellationToken cancellationToken) =>
+{
+    LogDetailView? log = await observabilityService.GetLogAsync(id, cancellationToken);
+    return log is null ? Results.NotFound() : Results.Ok(log);
 });
 
 app.MapGet("/api/preauth-sessions", async (string? siteCode, string? correlationId, int? limit, IPreAuthSimulationService preAuthService, CancellationToken cancellationToken) =>
@@ -414,172 +693,92 @@ app.MapGet("/api/preauth-sessions", async (string? siteCode, string? correlation
     return Results.Ok(sessions);
 });
 
-app.MapPost("/callbacks/{targetKey}", async (string targetKey, HttpContext httpContext, VirtualLabDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapGet("/api/scenarios", async (IScenarioService scenarioService, CancellationToken cancellationToken) =>
 {
-    var target = await dbContext.CallbackTargets
-        .AsNoTracking()
-        .Where(x => x.TargetKey == targetKey && x.IsActive)
-        .Select(x => new
-        {
-            x.Id,
-            x.TargetKey,
-            x.SiteId,
-            ActiveProfileId = x.Site != null ? (Guid?)x.Site.ActiveFccSimulatorProfileId : null,
-        })
-        .SingleOrDefaultAsync(cancellationToken);
-
-    if (target is null)
+    return Results.Ok(new
     {
-        return Results.NotFound();
-    }
+        definitions = await scenarioService.ListScenariosAsync(cancellationToken),
+        runs = await scenarioService.ListRunsAsync(20, cancellationToken),
+    });
+});
 
-    DateTimeOffset capturedAtUtc = DateTimeOffset.UtcNow;
+app.MapPost("/api/scenarios/run", async (ScenarioRunRequest request, IScenarioService scenarioService, CancellationToken cancellationToken) =>
+{
+    ScenarioRunDetailView run = await scenarioService.RunAsync(request, cancellationToken);
+    return Results.Created($"/api/scenarios/runs/{run.Id:D}", run);
+});
+
+app.MapGet("/api/scenarios/runs/{id:guid}", async (Guid id, IScenarioService scenarioService, CancellationToken cancellationToken) =>
+{
+    ScenarioRunDetailView? run = await scenarioService.GetRunAsync(id, cancellationToken);
+    return run is null ? Results.NotFound() : Results.Ok(run);
+});
+
+app.MapGet("/api/scenarios/export", async (IScenarioService scenarioService, CancellationToken cancellationToken) =>
+{
+    IReadOnlyList<ScenarioDefinitionImportRecord> definitions = await scenarioService.ExportAsync(cancellationToken);
+    return Results.Ok(definitions);
+});
+
+app.MapPost("/api/scenarios/import", async (ScenarioImportRequest request, IScenarioService scenarioService, CancellationToken cancellationToken) =>
+{
+    return Results.Ok(await scenarioService.ImportAsync(request, cancellationToken));
+});
+
+app.MapPost("/callbacks/{targetKey}", async (string targetKey, HttpContext httpContext, ICallbackCaptureService callbackCaptureService, CancellationToken cancellationToken) =>
+{
     string requestBody = await ReadRequestBodyAsync(httpContext.Request, cancellationToken);
-    Dictionary<string, string> sampleValues = ExtractSampleValues(requestBody);
-    string correlationId = sampleValues.TryGetValue("correlationId", out string? bodyCorrelationId) && !string.IsNullOrWhiteSpace(bodyCorrelationId)
-        ? bodyCorrelationId
-        : InboundAuthRequestSanitizer.ResolveCorrelationId(httpContext);
-
-    SimulatedTransaction? transaction = null;
-    Guid? matchedAttemptId = null;
-
-    if (httpContext.Request.Headers.TryGetValue("X-VirtualLab-Attempt-Id", out Microsoft.Extensions.Primitives.StringValues attemptHeaderValue) &&
-        Guid.TryParse(attemptHeaderValue.ToString(), out Guid parsedAttemptId))
-    {
-        CallbackAttempt? matchedAttempt = await dbContext.CallbackAttempts
-            .AsNoTracking()
-            .Include(x => x.SimulatedTransaction)
-            .SingleOrDefaultAsync(x => x.Id == parsedAttemptId && x.CallbackTargetId == target.Id, cancellationToken);
-
-        if (matchedAttempt is not null)
-        {
-            matchedAttemptId = matchedAttempt.Id;
-            transaction = matchedAttempt.SimulatedTransaction;
-            correlationId = matchedAttempt.CorrelationId;
-        }
-    }
-
-    if (!string.IsNullOrWhiteSpace(correlationId))
-    {
-        transaction = await dbContext.SimulatedTransactions
-            .AsNoTracking()
-            .Where(x => x.CorrelationId == correlationId)
-            .OrderByDescending(x => x.OccurredAtUtc)
-            .FirstOrDefaultAsync(cancellationToken);
-    }
-
-    if (transaction is null &&
-        sampleValues.TryGetValue("transactionId", out string? externalTransactionId) &&
-        !string.IsNullOrWhiteSpace(externalTransactionId))
-    {
-        transaction = await dbContext.SimulatedTransactions
-            .AsNoTracking()
-            .Where(x => x.ExternalTransactionId == externalTransactionId)
-            .OrderByDescending(x => x.OccurredAtUtc)
-            .FirstOrDefaultAsync(cancellationToken);
-    }
-
     string responsePayload = JsonSerializer.Serialize(new
     {
         accepted = true,
         targetKey,
-        capturedAtUtc,
+        capturedAtUtc = DateTimeOffset.UtcNow,
     });
 
-    if (transaction is not null && matchedAttemptId is null)
+    Guid? linkedAttemptId = null;
+    if (httpContext.Request.Headers.TryGetValue("X-VirtualLab-Attempt-Id", out Microsoft.Extensions.Primitives.StringValues attemptHeaderValue) &&
+        Guid.TryParse(attemptHeaderValue.ToString(), out Guid parsedAttemptId))
     {
-        int nextAttemptNumber = await dbContext.CallbackAttempts
-            .Where(x => x.CallbackTargetId == target.Id && x.SimulatedTransactionId == transaction.Id)
-            .Select(x => (int?)x.AttemptNumber)
-            .MaxAsync(cancellationToken) ?? 0;
+        linkedAttemptId = parsedAttemptId;
+    }
 
-        dbContext.CallbackAttempts.Add(new CallbackAttempt
+    CallbackCaptureResult? capture = await callbackCaptureService.CaptureAsync(
+        targetKey,
+        new CallbackCaptureRequest
         {
-            Id = Guid.NewGuid(),
-            CallbackTargetId = target.Id,
-            SimulatedTransactionId = transaction.Id,
-            CorrelationId = correlationId,
-            AttemptNumber = nextAttemptNumber + 1,
-            Status = CallbackAttemptStatus.Succeeded,
-            ResponseStatusCode = StatusCodes.Status202Accepted,
+            HttpMethod = httpContext.Request.Method,
             RequestUrl = httpContext.Request.Path.Value ?? $"/callbacks/{targetKey}",
             RequestHeadersJson = InboundAuthRequestSanitizer.SerializeHeaders(httpContext.Request.Headers),
             RequestPayloadJson = string.IsNullOrWhiteSpace(requestBody) ? "{}" : requestBody,
+            AuthOutcome = "Authorized",
+            AuthMode = "Inherited",
+            ResponseStatusCode = StatusCodes.Status202Accepted,
             ResponseHeadersJson = """{"content-type":"application/json"}""",
             ResponsePayloadJson = responsePayload,
-            RetryCount = 0,
-            MaxRetryCount = 0,
-            AttemptedAtUtc = capturedAtUtc,
-            CompletedAtUtc = capturedAtUtc,
-            NextRetryAtUtc = null,
-            AcknowledgedAtUtc = capturedAtUtc,
-        });
-    }
+            LinkedAttemptId = linkedAttemptId,
+        },
+        cancellationToken);
 
-    dbContext.LabEventLogs.Add(new LabEventLog
-    {
-        Id = Guid.NewGuid(),
-        SiteId = target.SiteId,
-        FccSimulatorProfileId = target.ActiveProfileId,
-        SimulatedTransactionId = transaction?.Id,
-        CorrelationId = correlationId,
-        Severity = "Information",
-        Category = "CallbackAttempt",
-        EventType = "CallbackCaptured",
-        Message = $"Captured callback payload for target '{target.TargetKey}'.",
-        RawPayloadJson = string.IsNullOrWhiteSpace(requestBody) ? "{}" : requestBody,
-        CanonicalPayloadJson = transaction?.CanonicalPayloadJson ?? "{}",
-        MetadataJson = JsonSerializer.Serialize(new
-        {
-            targetKey = target.TargetKey,
-            matchedTransactionId = transaction?.ExternalTransactionId,
-            linkedAttemptId = matchedAttemptId,
-            storedAttempt = transaction is not null && matchedAttemptId is null,
-            requestHeaders = JsonSerializer.Deserialize<object>(InboundAuthRequestSanitizer.SerializeHeaders(httpContext.Request.Headers)),
-        }),
-        OccurredAtUtc = capturedAtUtc,
-    });
-
-    await dbContext.SaveChangesAsync(cancellationToken);
-    return Results.Accepted($"/api/callbacks/{targetKey}/history", JsonSerializer.Deserialize<object>(responsePayload));
+    return capture is null
+        ? Results.NotFound()
+        : Results.Accepted($"/api/callbacks/{targetKey}/history", JsonSerializer.Deserialize<object>(capture.ResponsePayloadJson));
 });
 
-app.MapGet("/api/callbacks/{targetKey}/history", async (string targetKey, VirtualLabDbContext dbContext) =>
+app.MapGet("/api/callbacks/{targetKey}/history", async (string targetKey, int? limit, ICallbackCaptureService callbackCaptureService, CancellationToken cancellationToken) =>
 {
-    var attempts = await dbContext.CallbackAttempts
-        .AsNoTracking()
-        .Include(x => x.CallbackTarget)
-        .Include(x => x.SimulatedTransaction)
-        .Where(x => x.CallbackTarget.TargetKey == targetKey)
-        .OrderByDescending(x => x.AttemptedAtUtc)
-        .Select(x => new
-        {
-            x.Id,
-            x.CorrelationId,
-            x.AttemptNumber,
-            x.Status,
-            x.ResponseStatusCode,
-            x.RequestUrl,
-            x.RetryCount,
-            x.MaxRetryCount,
-            x.AttemptedAtUtc,
-            x.CompletedAtUtc,
-            x.NextRetryAtUtc,
-            x.AcknowledgedAtUtc,
-            x.RequestPayloadJson,
-            x.ResponsePayloadJson,
-            x.ErrorMessage,
-            TransactionId = x.SimulatedTransaction.ExternalTransactionId,
-        })
-        .ToListAsync();
-
-    return Results.Ok(attempts);
+    return Results.Ok(await callbackCaptureService.ListHistoryAsync(targetKey, limit ?? 100, cancellationToken));
 });
 
-app.MapPost("/api/admin/seed", async (bool? reset, IVirtualLabSeedService seedService) =>
+app.MapPost("/api/callbacks/{targetKey}/history/{id:guid}/replay", async (
+    string targetKey,
+    Guid id,
+    ICallbackCaptureService callbackCaptureService,
+    CancellationToken cancellationToken) =>
 {
-    await seedService.SeedAsync(reset ?? false);
-    return Results.Accepted();
+    CallbackReplayResult? result = await callbackCaptureService.ReplayAsync(targetKey, id, cancellationToken);
+    return result is null
+        ? Results.NotFound()
+        : Results.Created($"/api/callbacks/{targetKey}/history/{result.CaptureId:D}", result);
 });
 
 app.MapGet("/api/diagnostics/latency", (int? iterations, DiagnosticProbeService probeService, ApiTimingStore timingStore) =>
@@ -643,8 +842,33 @@ static async Task BroadcastForecourtUpdateAsync(
             action,
             occurredAtUtc = DateTimeOffset.UtcNow,
             correlationId = result.CorrelationId,
+            message = result.Message,
+            transactionGenerated = result.TransactionGenerated,
+            faulted = result.Faulted,
             nozzle = result.Nozzle,
             transaction = result.Transaction,
+        },
+        cancellationToken);
+}
+
+static async Task BroadcastPreAuthUpdateAsync(
+    IHubContext<LabLiveHub> hubContext,
+    LabPreAuthActionResult result,
+    CancellationToken cancellationToken)
+{
+    await hubContext.Clients.All.SendAsync(
+        "lab-event",
+        new
+        {
+            eventType = "preauth-action",
+            action = result.Action,
+            occurredAtUtc = DateTimeOffset.UtcNow,
+            siteCode = result.SiteCode,
+            correlationId = result.CorrelationId,
+            responseStatusCode = result.StatusCode,
+            message = result.Message,
+            responseBody = result.ResponseBody,
+            session = result.Session,
         },
         cancellationToken);
 }
@@ -722,6 +946,26 @@ static async Task<string> ReadRequestBodyAsync(HttpRequest request, Cancellation
     return body;
 }
 
+static string BuildLabPreAuthPayload(LabPreAuthActionRequest request, string correlationId)
+{
+    return JsonSerializer.Serialize(new
+    {
+        preauthId = request.PreAuthId,
+        correlationId,
+        pump = request.PumpNumber,
+        nozzle = request.NozzleNumber,
+        amount = request.Amount,
+        expiresInSeconds = request.ExpiresInSeconds,
+        simulateFailure = request.SimulateFailure,
+        failureStatusCode = request.FailureStatusCode,
+        failureMessage = request.FailureMessage,
+        failureCode = request.FailureCode,
+        customerName = request.CustomerName,
+        customerTaxId = request.CustomerTaxId,
+        customerTaxOffice = request.CustomerTaxOffice,
+    });
+}
+
 static Dictionary<string, string> ExtractSampleValues(string body)
 {
     Dictionary<string, string> values = new(StringComparer.OrdinalIgnoreCase);
@@ -756,6 +1000,37 @@ static Dictionary<string, string> ExtractSampleValues(string body)
     }
 
     return values;
+}
+
+static string ResolveLabPreAuthMessage(string action, string responseBody)
+{
+    if (!string.IsNullOrWhiteSpace(responseBody))
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(responseBody);
+            if (document.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                if (document.RootElement.TryGetProperty("message", out JsonElement messageElement) &&
+                    messageElement.ValueKind == JsonValueKind.String)
+                {
+                    return messageElement.GetString() ?? $"Pre-auth {action} completed.";
+                }
+
+                if (document.RootElement.TryGetProperty("status", out JsonElement statusElement) &&
+                    statusElement.ValueKind == JsonValueKind.String)
+                {
+                    string status = statusElement.GetString() ?? "completed";
+                    return $"Pre-auth {action} returned {status}.";
+                }
+            }
+        }
+        catch (JsonException)
+        {
+        }
+    }
+
+    return $"Pre-auth {action} completed.";
 }
 
 public partial class Program

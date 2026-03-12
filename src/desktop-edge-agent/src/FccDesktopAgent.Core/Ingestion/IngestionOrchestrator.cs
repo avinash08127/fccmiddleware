@@ -11,12 +11,16 @@ namespace FccDesktopAgent.Core.Ingestion;
 
 /// <summary>
 /// Polls the FCC for new transactions and buffers them locally.
-/// Invoked on each cadence tick by <see cref="Runtime.CadenceController"/>.
+/// Invoked on each cadence tick by <see cref="Runtime.CadenceController"/>
+/// and on-demand via <see cref="ManualPullAsync"/> (DEA-2.7).
 ///
 /// Architecture rules satisfied:
 /// - Rule #2: No transaction left behind — every polled transaction is buffered before cursor advance.
 /// - Rule #8: FCC transaction IDs preserved as opaque strings.
 /// - Rule #10: No independent timer loop — scheduling entirely owned by the cadence controller.
+///
+/// DEA-2.7: A single <see cref="SemaphoreSlim"/> serializes scheduled and manual pulls so
+/// they never race on cursor state or the buffer.
 /// </summary>
 public sealed class IngestionOrchestrator : IIngestionOrchestrator
 {
@@ -24,6 +28,10 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IOptions<AgentConfiguration> _config;
     private readonly ILogger<IngestionOrchestrator> _logger;
+
+    // Serializes scheduled (CadenceController) and manual (API) poll cycles.
+    // SemaphoreSlim(1,1) = mutual exclusion; WaitAsync accepts CancellationToken so shutdown is clean.
+    private readonly SemaphoreSlim _pollLock = new(1, 1);
 
     public IngestionOrchestrator(
         IFccAdapterFactory adapterFactory,
@@ -39,6 +47,38 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
 
     /// <inheritdoc />
     public async Task<IngestionResult> PollAndBufferAsync(CancellationToken ct)
+    {
+        await _pollLock.WaitAsync(ct);
+        try
+        {
+            return await DoPollAndBufferAsync(ct);
+        }
+        finally
+        {
+            _pollLock.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<IngestionResult> ManualPullAsync(int? pumpNumber, CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "Manual FCC pull requested (pumpNumber={PumpNumber})", pumpNumber);
+
+        await _pollLock.WaitAsync(ct);
+        try
+        {
+            return await DoPollAndBufferAsync(ct);
+        }
+        finally
+        {
+            _pollLock.Release();
+        }
+    }
+
+    // ── Core fetch-and-buffer loop ────────────────────────────────────────────
+
+    private async Task<IngestionResult> DoPollAndBufferAsync(CancellationToken ct)
     {
         var config = _config.Value;
 
@@ -69,6 +109,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
 
         int newCount = 0;
         int dupCount = 0;
+        int fetchCycles = 0;
         string? advancedSequence = syncState.LastFccSequence;
 
         // Fetch-and-buffer loop. Architecture rule #2: buffer ALL records before advancing cursor.
@@ -78,6 +119,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
             try
             {
                 batch = await adapter.FetchTransactionsAsync(cursor, ct);
+                fetchCycles++;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -141,6 +183,6 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
             _logger.LogDebug("FCC cursor advanced to {Cursor}", advancedSequence);
         }
 
-        return new IngestionResult(newCount, dupCount, advancedSequence);
+        return new IngestionResult(newCount, dupCount, advancedSequence, fetchCycles);
     }
 }

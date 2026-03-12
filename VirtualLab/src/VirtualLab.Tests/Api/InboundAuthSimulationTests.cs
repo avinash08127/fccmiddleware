@@ -152,6 +152,13 @@ internal sealed class VirtualLabApiFactory : WebApplicationFactory<Program>
         await action(dbContext);
     }
 
+    public async Task<TResult> WithDbContextAsync<TResult>(Func<VirtualLabDbContext, Task<TResult>> action)
+    {
+        await using AsyncServiceScope scope = Services.CreateAsyncScope();
+        VirtualLabDbContext dbContext = scope.ServiceProvider.GetRequiredService<VirtualLabDbContext>();
+        return await action(dbContext);
+    }
+
     public async Task AssertLatestAuthFailureAsync(string eventType, IReadOnlyList<string> forbiddenFragments)
     {
         await using AsyncServiceScope scope = Services.CreateAsyncScope();

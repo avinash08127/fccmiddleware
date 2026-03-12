@@ -118,6 +118,30 @@ public sealed class TransactionBufferManager
     }
 
     /// <summary>
+    /// Increments upload attempt counter and records the failure reason.
+    /// Records remain Pending so they are retried on the next cadence tick.
+    /// </summary>
+    public async Task<int> RecordUploadFailureAsync(
+        IReadOnlyList<string> ids,
+        string error,
+        CancellationToken ct = default)
+    {
+        if (ids.Count == 0) return 0;
+
+        var now = DateTimeOffset.UtcNow;
+        // Truncate error message to avoid storing excessively large strings.
+        var truncatedError = error.Length > 500 ? error[..500] : error;
+
+        return await _db.Transactions
+            .Where(t => ids.Contains(t.Id))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.UploadAttempts, t => t.UploadAttempts + 1)
+                .SetProperty(t => t.LastUploadAttemptAt, now)
+                .SetProperty(t => t.LastUploadError, truncatedError)
+                .SetProperty(t => t.UpdatedAt, now), ct);
+    }
+
+    /// <summary>
     /// Marks transactions as SyncedToOdoo based on FCC transaction IDs from cloud status poll.
     /// </summary>
     public async Task<int> MarkSyncedToOdooAsync(IReadOnlyList<string> fccTransactionIds, CancellationToken ct = default)
@@ -155,7 +179,8 @@ public sealed class TransactionBufferManager
     }
 
     /// <summary>
-    /// Returns transaction counts grouped by SyncStatus for telemetry.
+    /// Returns transaction counts grouped by SyncStatus for telemetry,
+    /// plus the oldest pending record timestamp for sync lag calculation.
     /// </summary>
     public async Task<BufferStats> GetBufferStatsAsync(CancellationToken ct = default)
     {
@@ -164,6 +189,12 @@ public sealed class TransactionBufferManager
             .Select(g => new { Status = g.Key, Count = g.Count() })
             .ToListAsync(ct);
 
+        var oldestPending = await _db.Transactions
+            .Where(t => t.SyncStatus == SyncStatus.Pending)
+            .OrderBy(t => t.CreatedAt)
+            .Select(t => (DateTimeOffset?)t.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+
         return new BufferStats
         {
             Pending = counts.FirstOrDefault(c => c.Status == SyncStatus.Pending)?.Count ?? 0,
@@ -171,6 +202,7 @@ public sealed class TransactionBufferManager
             DuplicateConfirmed = counts.FirstOrDefault(c => c.Status == SyncStatus.DuplicateConfirmed)?.Count ?? 0,
             SyncedToOdoo = counts.FirstOrDefault(c => c.Status == SyncStatus.SyncedToOdoo)?.Count ?? 0,
             Archived = counts.FirstOrDefault(c => c.Status == SyncStatus.Archived)?.Count ?? 0,
+            OldestPendingAtUtc = oldestPending,
         };
     }
 
@@ -192,4 +224,7 @@ public sealed class BufferStats
     public int SyncedToOdoo { get; init; }
     public int Archived { get; init; }
     public int Total => Pending + Uploaded + DuplicateConfirmed + SyncedToOdoo + Archived;
+
+    /// <summary>CreatedAt of the oldest Pending record. Null if no pending records.</summary>
+    public DateTimeOffset? OldestPendingAtUtc { get; init; }
 }

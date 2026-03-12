@@ -122,6 +122,7 @@ com.fccmiddleware.edge/
 | Security Plan | `docs/specs/security/tier-2-5-security-implementation-plan.md` | Android Keystore, EncryptedSharedPreferences, LAN API key |
 | Device Registration Spec | `docs/specs/data-models/tier-1-1-device-registration-spec.md` | QR bootstrap, registration flow |
 | Edge Agent Development Plan | `docs/plans/dev-plan-edge-agent.md` | Task sequencing, performance guardrails, and implementation priorities |
+| Mobile Pre-Deployment Checklist | `docs/checklists/mobile-pre-deployment.md` | Gate checklist for production APK releases — security, build, performance sign-offs |
 
 ## Connectivity States
 
@@ -165,3 +166,11 @@ Upload is in `created_at ASC` order. Never skip past a failed record.
 - Prefer one coalesced cadence loop over multiple recurring timers
 - Optimize first for Odoo-visible latency: pre-auth, offline transaction reads, status endpoint, then pump-status fallback behavior
 - Treat manual FCC pull as a core requirement, not an optional convenience feature
+
+## Production Deployment
+
+Before promoting any APK to production, complete every item in the **Mobile Pre-Deployment Checklist** (`docs/checklists/mobile-pre-deployment.md`). Key rules:
+
+1. **Always review the checklist** when your task touches security, build configuration, adapter wiring, or performance-sensitive code paths. If your change introduces a new production gate (e.g., a new credential, a new environment-specific constant, a new vendor adapter), add a corresponding item to the checklist.
+2. **Certificate pins are placeholders until replaced.** The bootstrap pins in `AppModule.kt` are dummy hashes bundled so that cert pinning is structurally active from day one. They **must** be swapped for real intermediate CA public key hashes before the first production build. The checklist documents the exact `openssl` command to generate them.
+3. **Keep the checklist up to date.** Treat it as a living document — when you add a feature that has a production prerequisite (new secret, new hardware dependency, new config flag), add a checklist item so it is not missed at release time.

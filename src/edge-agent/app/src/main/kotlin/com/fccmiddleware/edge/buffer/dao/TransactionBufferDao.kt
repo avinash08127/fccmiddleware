@@ -165,6 +165,59 @@ interface TransactionBufferDao {
     suspend fun countForLocalApi(): Int
 
     /**
+     * Total record count across all statuses.
+     * Used by quota enforcement to decide whether emergency cleanup is needed.
+     */
+    @Query("SELECT COUNT(*) FROM buffered_transactions")
+    suspend fun countAll(): Int
+
+    /**
+     * Force-archive the oldest PENDING records beyond [keepCount].
+     * Transitions PENDING → ARCHIVED so the buffer does not grow unbounded
+     * when the cloud is unreachable for an extended period.
+     * Records are ordered by created_at ASC so the oldest are archived first.
+     * Returns the number of records archived.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET sync_status = 'ARCHIVED', updated_at = :now " +
+        "WHERE id IN (" +
+        "  SELECT id FROM buffered_transactions " +
+        "  WHERE sync_status = 'PENDING' " +
+        "  ORDER BY created_at ASC " +
+        "  LIMIT (SELECT MAX(0, COUNT(*) - :keepCount) FROM buffered_transactions WHERE sync_status = 'PENDING')" +
+        ")"
+    )
+    suspend fun archiveOldestPending(keepCount: Int, now: String): Int
+
+    /**
+     * Delete the oldest ARCHIVED records to bring total count under quota.
+     * Returns the number of rows deleted.
+     */
+    @Query(
+        "DELETE FROM buffered_transactions WHERE id IN (" +
+        "  SELECT id FROM buffered_transactions " +
+        "  WHERE sync_status = 'ARCHIVED' " +
+        "  ORDER BY created_at ASC " +
+        "  LIMIT :deleteCount" +
+        ")"
+    )
+    suspend fun deleteOldestArchived(deleteCount: Int): Int
+
+    /**
+     * Delete the oldest SYNCED_TO_ODOO records to free space.
+     * Returns the number of rows deleted.
+     */
+    @Query(
+        "DELETE FROM buffered_transactions WHERE id IN (" +
+        "  SELECT id FROM buffered_transactions " +
+        "  WHERE sync_status = 'SYNCED_TO_ODOO' " +
+        "  ORDER BY created_at ASC " +
+        "  LIMIT :deleteCount" +
+        ")"
+    )
+    suspend fun deleteOldestSynced(deleteCount: Int): Int
+
+    /**
      * Time-filtered variant of [getForLocalApi]: returns records with completed_at >= [since].
      * [since] must be an ISO 8601 UTC string. Uses ix_bt_local_api index for p95 <= 150 ms.
      */

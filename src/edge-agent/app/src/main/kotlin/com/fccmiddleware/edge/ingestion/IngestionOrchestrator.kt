@@ -233,18 +233,24 @@ class IngestionOrchestrator(
                     try {
                         advanceCursor(dao, initialSyncState, newCursorValue)
                         cursorAdvanced = true
+
+                        // Build next cursor for continuation fetch within this poll cycle.
+                        // CRITICAL: only advance the in-memory cursor AFTER the DB persist
+                        // succeeds. If advanceCursor() threw, we must NOT move past this
+                        // batch — next poll will re-fetch from the old cursor, and local
+                        // dedup ensures no duplicates.
+                        cursor = FetchCursor(
+                            cursorToken = batch.nextCursorToken,
+                            sinceUtc = if (batch.nextCursorToken == null) batch.highWatermarkUtc else null,
+                            limit = FETCH_BATCH_SIZE,
+                        )
                     } catch (e: Exception) {
                         // Non-fatal: cursor will not advance; next poll may re-fetch the same batch.
                         // Cloud and local dedup ensure no duplicates are stored.
-                        Log.e(TAG, "Failed to persist cursor; next poll may re-fetch this batch", e)
+                        // Break out of the fetch loop since we can't safely advance.
+                        Log.e(TAG, "Failed to persist cursor; stopping poll cycle to prevent data loss", e)
+                        break
                     }
-
-                    // Build next cursor for continuation fetch within this poll cycle
-                    cursor = FetchCursor(
-                        cursorToken = batch.nextCursorToken,
-                        sinceUtc = if (batch.nextCursorToken == null) batch.highWatermarkUtc else null,
-                        limit = FETCH_BATCH_SIZE,
-                    )
                 }
 
                 lastBatchHasMore = batch.hasMore

@@ -64,6 +64,8 @@ public sealed class ForecourtSimulationTests
             Assert.Contains("\"fccTransactionId\"", transaction.GetProperty("canonicalPayloadJson").GetString(), StringComparison.Ordinal);
             Assert.Contains("TransactionGenerated", transaction.GetProperty("timelineJson").GetString(), StringComparison.Ordinal);
             Assert.Contains("\"flowRateLitresPerMinute\": 30", transaction.GetProperty("metadataJson").GetString(), StringComparison.Ordinal);
+            Assert.Equal("Passed", transaction.GetProperty("contractValidation").GetProperty("outcome").GetString());
+            Assert.True(transaction.GetProperty("contractValidation").GetProperty("matchedCount").GetInt32() >= 6);
         }
 
         await factory.WithDbContextAsync(async dbContext =>

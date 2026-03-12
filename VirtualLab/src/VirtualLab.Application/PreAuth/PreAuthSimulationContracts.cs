@@ -1,3 +1,5 @@
+using VirtualLab.Application.ContractValidation;
+
 namespace VirtualLab.Application.PreAuth;
 
 public sealed record PreAuthSimulationRequest(
@@ -32,9 +34,18 @@ public sealed record PreAuthSessionSummary(
     DateTimeOffset? ExpiresAtUtc,
     string RawRequestJson,
     string CanonicalRequestJson,
+    PayloadContractValidationReport RequestValidation,
     string RawResponseJson,
     string CanonicalResponseJson,
+    PayloadContractValidationReport ResponseValidation,
     string TimelineJson);
+
+public sealed class PreAuthManualExpiryRequest
+{
+    public string SiteCode { get; init; } = string.Empty;
+    public string PreAuthId { get; init; } = string.Empty;
+    public string? CorrelationId { get; init; }
+}
 
 public interface IPreAuthSimulationService
 {
@@ -43,6 +54,14 @@ public interface IPreAuthSimulationService
         string? siteCode,
         string? correlationId,
         int limit,
+        CancellationToken cancellationToken = default);
+    Task<PreAuthSessionSummary?> GetSessionAsync(
+        string siteCode,
+        string? correlationId,
+        string? preAuthId,
+        CancellationToken cancellationToken = default);
+    Task<PreAuthSessionSummary?> ExpireSessionAsync(
+        PreAuthManualExpiryRequest request,
         CancellationToken cancellationToken = default);
     Task<int> ExpireSessionsAsync(CancellationToken cancellationToken = default);
 }

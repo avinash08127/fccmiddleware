@@ -152,6 +152,19 @@ class CloudUploadWorkerTest {
     }
 
     @Test
+    fun `empty batch resets backoff so new records upload immediately (H-02)`() = runTest {
+        // Seed prior failure state
+        worker.consecutiveFailureCount = 3
+        worker.nextRetryAt = Instant.EPOCH // expired so we pass the guard
+
+        coEvery { bufferManager.getPendingBatch(any()) } returns emptyList()
+        worker.uploadPendingBatch()
+
+        assertEquals("Failure count should be reset", 0, worker.consecutiveFailureCount)
+        assertEquals("nextRetryAt should be reset", Instant.EPOCH, worker.nextRetryAt)
+    }
+
+    @Test
     fun `returns early when access token is null`() = runTest {
         every { tokenProvider.getAccessToken() } returns null
         coEvery { bufferManager.getPendingBatch(any()) } returns listOf(makeTransaction())
@@ -518,6 +531,106 @@ class CloudUploadWorkerTest {
         worker.uploadPendingBatch()
 
         assertFalse(requestSlot.captured.transactions.first().isDuplicate)
+    }
+
+    // -------------------------------------------------------------------------
+    // H-03: Unmatched cloud response results are logged, not silently dropped
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `H-03 unmatched fccTransactionId in cloud response is logged not silently skipped`() = runTest {
+        val tx = makeTransaction()
+        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
+        // Cloud returns a result with a different fccTransactionId that does not match the batch
+        coEvery { cloudApiClient.uploadBatch(any(), any()) } returns CloudUploadResult.Success(
+            makeResponse(
+                listOf(makeResult("MISMATCHED-FCC-ID", "ACCEPTED")),
+                acceptedCount = 1,
+            ),
+        )
+
+        worker.uploadPendingBatch()
+
+        // The local record should NOT be marked as uploaded since it didn't match
+        coVerify(exactly = 0) { bufferManager.markUploaded(any()) }
+        // Backoff should still be reset (it was a successful HTTP call)
+        assertEquals(0, worker.consecutiveFailureCount)
+    }
+
+    @Test
+    fun `H-03 unknown outcome in cloud response does not mark record uploaded`() = runTest {
+        val tx = makeTransaction()
+        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
+        coEvery { cloudApiClient.uploadBatch(any(), any()) } returns CloudUploadResult.Success(
+            makeResponse(
+                listOf(makeResult(tx.fccTransactionId, "UNKNOWN_OUTCOME")),
+            ),
+        )
+
+        worker.uploadPendingBatch()
+
+        coVerify(exactly = 0) { bufferManager.markUploaded(any()) }
+        coVerify(exactly = 0) { bufferManager.recordUploadFailure(any(), any(), any(), any()) }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-04: Status poll processes non-SYNCED_TO_ODOO statuses
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `H-04 status poll logs NOT_FOUND entries`() = runTest {
+        coEvery { bufferManager.getUploadedFccTransactionIds(any()) } returns listOf("fcc-1")
+        coEvery { cloudApiClient.getSyncedStatus(any(), any()) } returns
+            CloudStatusPollResult.Success(
+                SyncedStatusResponse(
+                    statuses = listOf(TransactionStatusEntry(id = "fcc-1", status = "NOT_FOUND")),
+                ),
+            )
+
+        worker.pollSyncedToOdooStatus()
+
+        // NOT_FOUND should NOT trigger markSyncedToOdoo
+        coVerify(exactly = 0) { bufferManager.markSyncedToOdoo(any()) }
+        // Should still update lastStatusPollAt (successful HTTP response)
+        coVerify { syncStateDao.upsert(any()) }
+    }
+
+    @Test
+    fun `H-04 status poll processes mixed statuses correctly`() = runTest {
+        coEvery { bufferManager.getUploadedFccTransactionIds(any()) } returns
+            listOf("fcc-1", "fcc-2", "fcc-3")
+        coEvery { cloudApiClient.getSyncedStatus(any(), any()) } returns
+            CloudStatusPollResult.Success(
+                SyncedStatusResponse(
+                    statuses = listOf(
+                        TransactionStatusEntry(id = "fcc-1", status = "SYNCED_TO_ODOO"),
+                        TransactionStatusEntry(id = "fcc-2", status = "NOT_FOUND"),
+                        TransactionStatusEntry(id = "fcc-3", status = "STALE_PENDING"),
+                    ),
+                ),
+            )
+
+        worker.pollSyncedToOdooStatus()
+
+        // Only SYNCED_TO_ODOO should be marked
+        coVerify { bufferManager.markSyncedToOdoo(listOf("fcc-1")) }
+    }
+
+    // -------------------------------------------------------------------------
+    // H-05: Decommission race — null token after decommission
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `H-05 null token with decommission detected does not attempt upload`() = runTest {
+        val tx = makeTransaction()
+        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
+        // First isDecommissioned check returns false; second (after getAccessToken) returns true
+        every { tokenProvider.isDecommissioned() } returnsMany listOf(false, true)
+        every { tokenProvider.getAccessToken() } returns null
+
+        worker.uploadPendingBatch()
+
+        coVerify(exactly = 0) { cloudApiClient.uploadBatch(any(), any()) }
     }
 
     // -------------------------------------------------------------------------

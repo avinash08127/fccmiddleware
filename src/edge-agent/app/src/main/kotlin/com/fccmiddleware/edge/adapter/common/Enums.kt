@@ -59,5 +59,12 @@ enum class ReconciliationStatus {
 
 /** Outcome status of a pre-auth command sent to the FCC. */
 enum class PreAuthResultStatus {
-    AUTHORIZED, DECLINED, TIMEOUT, ERROR
+    AUTHORIZED, DECLINED, TIMEOUT, ERROR,
+
+    /**
+     * Returned when a duplicate pre-auth request arrives for an order that already has
+     * an in-flight (PENDING) request. Odoo should treat this as "wait and retry" rather
+     * than a permanent failure.
+     */
+    IN_PROGRESS,
 }

@@ -4,13 +4,23 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using VirtualLab.Application.FccProfiles;
 using VirtualLab.Application.Forecourt;
+using VirtualLab.Application.Management;
+using VirtualLab.Application.Observability;
 using VirtualLab.Application.PreAuth;
+using VirtualLab.Application.Callbacks;
+using VirtualLab.Application.Scenarios;
+using VirtualLab.Application.ContractValidation;
+using VirtualLab.Infrastructure.Callbacks;
+using VirtualLab.Infrastructure.ContractValidation;
 using VirtualLab.Infrastructure.Forecourt;
 using VirtualLab.Infrastructure.FccProfiles;
+using VirtualLab.Infrastructure.Observability;
+using VirtualLab.Infrastructure.Management;
 using VirtualLab.Infrastructure.Persistence;
 using VirtualLab.Infrastructure.Persistence.Seed;
 using VirtualLab.Infrastructure.Diagnostics;
 using VirtualLab.Infrastructure.PreAuth;
+using VirtualLab.Infrastructure.Scenarios;
 
 namespace VirtualLab.Infrastructure;
 
@@ -50,6 +60,12 @@ public static class DependencyInjection
         });
         services.AddScoped<IVirtualLabSeedService, VirtualLabSeedService>();
         services.AddScoped<IFccProfileService, FccProfileService>();
+        services.AddScoped<IVirtualLabManagementService, VirtualLabManagementService>();
+        services.AddScoped<IContractValidationService, ContractValidationService>();
+        services.AddScoped<IObservabilityService, ObservabilityService>();
+        services.AddSingleton<IVirtualLabTelemetry, VirtualLabTelemetry>();
+        services.AddScoped<ICallbackCaptureService, CallbackCaptureService>();
+        services.AddScoped<IScenarioService, ScenarioService>();
         services.AddScoped<CallbackDeliveryService>();
         services.AddScoped<IForecourtSimulationService, ForecourtSimulationService>();
         services.AddScoped<IPreAuthSimulationService, PreAuthSimulationService>();

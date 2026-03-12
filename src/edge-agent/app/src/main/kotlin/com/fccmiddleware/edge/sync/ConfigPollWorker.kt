@@ -6,6 +6,8 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.config.ConfigApplyResult
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import java.time.Instant
 
@@ -49,10 +51,11 @@ class ConfigPollWorker(
         isLenient = true
     }
 
-    @Volatile
+    /** Guards compound read-modify-write of [consecutiveFailureCount] + [nextRetryAt]. */
+    private val backoffMutex = Mutex()
+
     internal var consecutiveFailureCount: Int = 0
 
-    @Volatile
     internal var nextRetryAt: Instant = Instant.EPOCH
 
     /**
@@ -80,8 +83,9 @@ class ConfigPollWorker(
 
         // Backoff check
         val now = Instant.now()
-        if (now.isBefore(nextRetryAt)) {
-            val waitMs = nextRetryAt.toEpochMilli() - now.toEpochMilli()
+        val currentNextRetry = backoffMutex.withLock { nextRetryAt }
+        if (now.isBefore(currentNextRetry)) {
+            val waitMs = currentNextRetry.toEpochMilli() - now.toEpochMilli()
             Log.d(TAG, "pollConfig() skipped — backoff active (${waitMs}ms remaining)")
             return
         }
@@ -174,29 +178,33 @@ class ConfigPollWorker(
                 when (applyResult) {
                     is ConfigApplyResult.Applied -> {
                         Log.i(TAG, "Config version ${parsed.configVersion} applied successfully")
-                        consecutiveFailureCount = 0
-                        nextRetryAt = Instant.EPOCH
+                        backoffMutex.withLock {
+                            consecutiveFailureCount = 0
+                            nextRetryAt = Instant.EPOCH
+                        }
                         updateSyncState(parsed.configVersion)
                     }
                     is ConfigApplyResult.Skipped -> {
                         Log.d(TAG, "Config version ${parsed.configVersion} skipped (not newer)")
-                        consecutiveFailureCount = 0
-                        nextRetryAt = Instant.EPOCH
+                        backoffMutex.withLock {
+                            consecutiveFailureCount = 0
+                            nextRetryAt = Instant.EPOCH
+                        }
                         updateLastConfigPullAt()
                     }
                     is ConfigApplyResult.Rejected -> {
                         Log.w(TAG, "Config version ${parsed.configVersion} rejected: ${applyResult.reason}")
-                        consecutiveFailureCount = 0
-                        nextRetryAt = Instant.EPOCH
-                        updateLastConfigPullAt()
+                        recordFailure("Config rejected: ${applyResult.reason}")
                     }
                 }
             }
 
             is ConfigPollAttemptResult.Unchanged -> {
                 Log.d(TAG, "Config unchanged (304 Not Modified)")
-                consecutiveFailureCount = 0
-                nextRetryAt = Instant.EPOCH
+                backoffMutex.withLock {
+                    consecutiveFailureCount = 0
+                    nextRetryAt = Instant.EPOCH
+                }
                 updateLastConfigPullAt()
             }
 
@@ -211,15 +219,17 @@ class ConfigPollWorker(
         }
     }
 
-    private fun recordFailure(message: String) {
-        consecutiveFailureCount++
-        val backoffMs = calculateBackoffMs(consecutiveFailureCount)
-        nextRetryAt = Instant.now().plusMillis(backoffMs)
-        Log.w(
-            TAG,
-            "Config poll failed (failure #$consecutiveFailureCount); " +
-                "next retry after ${backoffMs}ms. Error: $message",
-        )
+    private suspend fun recordFailure(message: String) {
+        backoffMutex.withLock {
+            consecutiveFailureCount++
+            val backoffMs = calculateBackoffMs(consecutiveFailureCount)
+            nextRetryAt = Instant.now().plusMillis(backoffMs)
+            Log.w(
+                TAG,
+                "Config poll failed (failure #$consecutiveFailureCount); " +
+                    "next retry after ${backoffMs}ms. Error: $message",
+            )
+        }
     }
 
     internal fun calculateBackoffMs(failureCount: Int): Long {

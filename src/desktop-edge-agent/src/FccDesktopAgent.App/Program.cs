@@ -3,6 +3,7 @@ using FccDesktopAgent.Api;
 using FccDesktopAgent.App;
 using FccDesktopAgent.App.Services;
 using FccDesktopAgent.Core.Config;
+using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Runtime;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -55,42 +56,66 @@ try
     webApp.MapHealthChecks("/health");
     webApp.MapLocalApi();
 
-    // Expose the DI container to the Avalonia App before it initializes
+    // Expose the DI container and WebApp to Avalonia
     AgentAppContext.ServiceProvider = webApp.Services;
+    AgentAppContext.WebApp = webApp;
 
-    // Start Kestrel + all IHostedService workers (non-blocking)
-    webApp.Start();
-    Log.Information("FCC Desktop Agent host started — listening on port 8585");
+    // ── Registration gate — route based on device state ──────────────────────
+    var registrationManager = webApp.Services.GetRequiredService<IRegistrationManager>();
+    var registrationState = registrationManager.LoadState();
 
-    // ── Non-blocking startup update check ──────────────────────────────────────
-    _ = Task.Run(async () =>
+    if (registrationState.IsDecommissioned)
     {
-        try
+        // Dead end: show decommission window, never start services
+        Log.Warning("Device is decommissioned — showing decommission screen");
+        AgentAppContext.Mode = StartupMode.Decommissioned;
+        return RunAvalonia(args);
+    }
+
+    if (registrationState.IsRegistered)
+    {
+        // Normal operational mode — start all services, then show dashboard
+        webApp.Start();
+        Log.Information("FCC Desktop Agent host started — listening on port 8585");
+
+        // Non-blocking startup update check
+        _ = Task.Run(async () =>
         {
-            var updateService = webApp.Services.GetRequiredService<IUpdateService>();
-            var result = await updateService.CheckForUpdatesAsync();
-            if (result.UpdateAvailable && result.Downloaded)
-                Log.Information("Update {Version} staged — will apply on next restart", result.AvailableVersion);
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Startup update check failed (non-fatal)");
-        }
-    });
+            try
+            {
+                var updateService = webApp.Services.GetRequiredService<IUpdateService>();
+                var result = await updateService.CheckForUpdatesAsync();
+                if (result.UpdateAvailable && result.Downloaded)
+                    Log.Information("Update {Version} staged — will apply on next restart", result.AvailableVersion);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Startup update check failed (non-fatal)");
+            }
+        });
 
-    // ── Run Avalonia on the main thread (blocks until Shutdown() is called) ──
-    int exitCode = AppBuilder
-        .Configure<App>()
-        .UsePlatformDetect()
-        .WithInterFont()
-        .LogToTrace()
-        .StartWithClassicDesktopLifetime(args);
+        AgentAppContext.Mode = StartupMode.Normal;
+        var exitCode = RunAvalonia(args);
 
-    // ── Graceful shutdown after Avalonia exits ────────────────────────────────
-    Log.Information("Avalonia exited (code {ExitCode}), stopping host", exitCode);
-    webApp.StopAsync().GetAwaiter().GetResult();
+        // Graceful shutdown after Avalonia exits
+        Log.Information("Avalonia exited (code {ExitCode}), stopping host", exitCode);
+        webApp.StopAsync().GetAwaiter().GetResult();
+        return exitCode;
+    }
 
-    return exitCode;
+    // Not registered — show provisioning wizard first
+    Log.Information("Device not registered — showing provisioning wizard");
+    AgentAppContext.Mode = StartupMode.Provisioning;
+    var provisioningExitCode = RunAvalonia(args);
+
+    // After provisioning + normal operation, stop the host if it was started
+    if (registrationManager.LoadState().IsRegistered)
+    {
+        Log.Information("Avalonia exited (code {ExitCode}), stopping host", provisioningExitCode);
+        webApp.StopAsync().GetAwaiter().GetResult();
+    }
+
+    return provisioningExitCode;
 }
 catch (Exception ex) when (ex is not OperationCanceledException)
 {
@@ -101,6 +126,16 @@ finally
 {
     Log.CloseAndFlushAsync().GetAwaiter().GetResult();
 }
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+static int RunAvalonia(string[] args) =>
+    AppBuilder
+        .Configure<App>()
+        .UsePlatformDetect()
+        .WithInterFont()
+        .LogToTrace()
+        .StartWithClassicDesktopLifetime(args);
 
 static string GetLogPath()
 {

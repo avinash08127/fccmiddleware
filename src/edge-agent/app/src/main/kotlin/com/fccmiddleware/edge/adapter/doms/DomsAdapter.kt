@@ -18,28 +18,31 @@ import com.fccmiddleware.edge.adapter.common.*
 class DomsAdapter(private val config: AgentFccConfig) : IFccAdapter {
 
     override suspend fun normalize(rawPayload: RawPayloadEnvelope): CanonicalTransaction {
-        TODO("Implement DOMS normalize — EA-1.x")
+        throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }
 
     override suspend fun sendPreAuth(command: PreAuthCommand): PreAuthResult {
-        TODO("Implement DOMS pre-auth relay — EA-1.x")
+        throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }
 
     override suspend fun getPumpStatus(): List<PumpStatus> {
-        TODO("Implement DOMS pump status fetch — EA-1.x")
+        throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }
 
     override suspend fun heartbeat(): Boolean {
-        TODO("Implement DOMS heartbeat probe — EA-1.x")
+        throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }
 
     override suspend fun fetchTransactions(cursor: FetchCursor): TransactionBatch {
-        TODO("Implement DOMS transaction fetch — EA-1.x")
+        throw UnsupportedOperationException("DOMS adapter is not yet implemented (EA-1.x). Select a supported FCC vendor.")
     }
 
     companion object {
         val VENDOR = FccVendor.DOMS
         const val ADAPTER_VERSION = "1.0.0"
         const val PROTOCOL = "REST"
+
+        /** Returns true if this adapter has a working implementation. */
+        const val IS_IMPLEMENTED = false
     }
 }
