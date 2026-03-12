@@ -2,6 +2,7 @@ namespace FccMiddleware.Contracts.Registration;
 
 public sealed class DeviceRegistrationApiRequest
 {
+    public string? ProvisioningToken { get; set; }
     public string SiteCode { get; set; } = null!;
     public string DeviceSerialNumber { get; set; } = null!;
     public string DeviceModel { get; set; } = null!;

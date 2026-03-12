@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   RX-3.5 — Mode management (ON_DEMAND caching)
  *   RX-4.1 — Pre-auth (AUTH_DATA to auth port with ACKCODE mapping)
  *   RX-4.3 — TOKEN correlation (pre-auth -> transaction matching)
+ *   RX-5.1 — Unsolicited push listener (PUSH/HYBRID ingestion via RadixPushListener)
  */
 class RadixAdapter(
     private val config: AgentFccConfig,
@@ -123,6 +124,119 @@ class RadixAdapter(
     /** Reset cached mode on connectivity loss. */
     private fun resetModeState() {
         currentMode = MODE_UNKNOWN
+    }
+
+    // -----------------------------------------------------------------------
+    // Push listener (RX-5.1)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Unsolicited push listener for PUSH/HYBRID ingestion modes.
+     *
+     * When non-null, the FDC is configured to push transactions to this
+     * listener's HTTP endpoint instead of (or in addition to) the agent polling.
+     * Lazily created on first fetchTransactions() call when ingestion mode
+     * is PUSH or HYBRID.
+     */
+    @Volatile
+    var radixPushListener: RadixPushListener? = null
+        private set
+
+    /** Default port for the push listener. Configurable via pushListenerPort. */
+    private val pushListenerPort: Int
+        get() = (config.authPort ?: config.port) + 2
+
+    /**
+     * Starts the push listener and sets FDC to UNSOLICITED mode.
+     *
+     * @return true if both the listener started and the mode was set successfully
+     */
+    private suspend fun ensurePushListenerRunning(): Boolean {
+        // Create listener if not yet initialized
+        if (radixPushListener == null) {
+            radixPushListener = RadixPushListener(
+                listenPort = pushListenerPort,
+                expectedUsnCode = usnCode,
+                sharedSecret = sharedSecret,
+            )
+        }
+
+        val listener = radixPushListener!!
+
+        // Start the HTTP server if not already running
+        if (!listener.isRunning) {
+            if (!listener.start()) {
+                Log.w(TAG, "Failed to start push listener on port $pushListenerPort")
+                return false
+            }
+        }
+
+        // Set FDC to UNSOLICITED mode
+        if (!ensureMode(MODE_UNSOLICITED)) {
+            Log.w(TAG, "Failed to set UNSOLICITED mode on FDC")
+            return false
+        }
+
+        return true
+    }
+
+    /**
+     * Stops the push listener and resets mode state.
+     *
+     * Called when the adapter is being shut down or when switching back to pull mode.
+     */
+    fun stopPushListener() {
+        radixPushListener?.stop()
+        radixPushListener = null
+        resetModeState()
+    }
+
+    /**
+     * Collects transactions pushed by the FDC via the [RadixPushListener].
+     *
+     * Drains the listener's queue, wraps each raw XML payload in a
+     * [RawPayloadEnvelope], normalizes it, and returns the batch.
+     *
+     * @param limit Maximum number of transactions to collect
+     * @return List of normalized [CanonicalTransaction] from pushed payloads
+     */
+    private suspend fun collectPushedTransactions(limit: Int): List<CanonicalTransaction> {
+        val listener = radixPushListener ?: return emptyList()
+        val pushed = listener.drainQueue(limit)
+        if (pushed.isEmpty()) return emptyList()
+
+        val transactions = mutableListOf<CanonicalTransaction>()
+        for (item in pushed) {
+            try {
+                val rawEnvelope = RawPayloadEnvelope(
+                    vendor = FccVendor.RADIX,
+                    siteCode = config.hostAddress,
+                    receivedAtUtc = item.receivedAt.toString(),
+                    contentType = "text/xml",
+                    payload = item.rawXml,
+                )
+
+                when (val normResult = normalize(rawEnvelope)) {
+                    is NormalizationResult.Success -> {
+                        // Override ingestion source to FCC_PUSH for pushed transactions
+                        transactions.add(
+                            normResult.transaction.copy(
+                                ingestionSource = IngestionSource.FCC_PUSH,
+                            )
+                        )
+                    }
+                    is NormalizationResult.Failure -> {
+                        Log.w(TAG, "collectPushedTransactions: normalization failed: ${normResult.errorCode} — ${normResult.message}")
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "collectPushedTransactions: error processing pushed transaction: ${e.message}")
+            }
+        }
+
+        return transactions
     }
 
     // -----------------------------------------------------------------------
@@ -248,121 +362,56 @@ class RadixAdapter(
     // -----------------------------------------------------------------------
 
     /**
-     * Fetches transactions from the Radix FCC using FIFO drain.
+     * Fetches transactions from the Radix FCC.
      *
+     * Supports three ingestion strategies based on config:
+     *
+     * **PULL (default / CLOUD_DIRECT / RELAY / BUFFER_ALWAYS):**
      * 1. Ensure ON_DEMAND mode (CMD_CODE=20, MODE=0)
-     * 2. Loop: send CMD_CODE=10 (request next transaction) -> parse response
-     * 3. RESP_CODE=201: transaction available -> parse TRN data -> ACK with CMD_CODE=201 -> continue
-     * 4. RESP_CODE=205: FIFO empty -> break
-     * 5. Stop at cursor.limit transactions
+     * 2. FIFO drain loop: CMD_CODE=10 -> parse -> ACK CMD_CODE=201 -> repeat
+     * 3. RESP_CODE=205: FIFO empty -> break
      *
-     * ACK is sent inline during the fetch loop — acknowledgeTransactions() is a no-op.
+     * **PUSH (config.ingestionMode indicates push-capable):**
+     * 1. Start [RadixPushListener] on port P+2
+     * 2. Set FDC to UNSOLICITED mode (CMD_CODE=20, MODE=2)
+     * 3. Drain the push listener's queue of received transactions
+     *
+     * **HYBRID (both push and pull):**
+     * 1. Start push listener and set UNSOLICITED mode
+     * 2. Drain push queue first
+     * 3. If under limit, also FIFO drain any remaining transactions in pull mode
+     *
+     * ACK is sent inline during the pull fetch loop — acknowledgeTransactions() is a no-op.
+     * Push transactions are ACKed by the listener's HTTP response.
      */
     override suspend fun fetchTransactions(cursor: FetchCursor): TransactionBatch {
         val limit = cursor.limit.coerceIn(1, MAX_FETCH_LIMIT)
         val transactions = mutableListOf<CanonicalTransaction>()
 
         try {
-            // Step 1: Ensure ON_DEMAND mode
-            if (!ensureMode(MODE_ON_DEMAND)) {
-                Log.w(TAG, "fetchTransactions: failed to set ON_DEMAND mode")
+            // Determine ingestion strategy from config
+            val isPushCapable = config.ingestionMode == IngestionMode.BUFFER_ALWAYS
+
+            if (isPushCapable) {
+                // PUSH/HYBRID mode — start listener and set UNSOLICITED mode
+                if (!ensurePushListenerRunning()) {
+                    Log.w(TAG, "fetchTransactions: push listener startup failed, falling back to pull")
+                    return fetchTransactionsPull(limit)
+                }
+
+                // Drain pushed transactions
+                val pushed = collectPushedTransactions(limit)
+                transactions.addAll(pushed)
+
+                val hasMore = radixPushListener?.queueSize?.let { it > 0 } ?: false
                 return TransactionBatch(
-                    transactions = emptyList(),
-                    hasMore = false,
+                    transactions = transactions,
+                    hasMore = hasMore,
                 )
             }
 
-            // Step 2: FIFO drain loop
-            for (i in 0 until limit) {
-                val token = nextToken()
-                val tokenStr = token.toString()
-
-                // Send CMD_CODE=10 — request next transaction
-                val requestBody = RadixXmlBuilder.buildTransactionRequest(tokenStr, sharedSecret)
-                val headers = RadixXmlBuilder.buildHttpHeaders(usnCode, RadixXmlBuilder.OPERATION_TRANSACTION)
-                val url = "http://${config.hostAddress}:$transactionPort"
-
-                val response = httpClient.post(url) {
-                    headers.forEach { (key, value) -> header(key, value) }
-                    setBody(requestBody)
-                }
-
-                val responseBody = response.bodyAsText()
-                val parseResult = RadixXmlParser.parseTransactionResponse(responseBody)
-
-                when (parseResult) {
-                    is RadixParseResult.Success -> {
-                        val txnResp = parseResult.value
-
-                        when (txnResp.respCode) {
-                            RESP_CODE_SUCCESS -> {
-                                // Transaction available — parse and normalize
-                                val trn = txnResp.transaction
-                                if (trn != null) {
-                                    val rawEnvelope = RawPayloadEnvelope(
-                                        vendor = FccVendor.RADIX,
-                                        siteCode = config.hostAddress,
-                                        receivedAtUtc = Instant.now().toString(),
-                                        contentType = "text/xml",
-                                        payload = responseBody,
-                                    )
-
-                                    when (val normResult = normalize(rawEnvelope)) {
-                                        is NormalizationResult.Success -> {
-                                            transactions.add(normResult.transaction)
-                                        }
-                                        is NormalizationResult.Failure -> {
-                                            Log.w(TAG, "fetchTransactions: normalization failed: ${normResult.errorCode} — ${normResult.message}")
-                                        }
-                                    }
-                                }
-
-                                // ACK with CMD_CODE=201 to dequeue from FCC FIFO
-                                val ackBody = RadixXmlBuilder.buildTransactionAck(tokenStr, sharedSecret)
-                                httpClient.post(url) {
-                                    headers.forEach { (key, value) -> header(key, value) }
-                                    setBody(ackBody)
-                                }
-                            }
-                            RESP_CODE_FIFO_EMPTY -> {
-                                // FIFO empty — no more transactions
-                                Log.d(TAG, "fetchTransactions: FIFO empty after ${transactions.size} transactions")
-                                return TransactionBatch(
-                                    transactions = transactions,
-                                    hasMore = false,
-                                )
-                            }
-                            RESP_CODE_SIGNATURE_ERROR -> {
-                                Log.w(TAG, "fetchTransactions: signature error (RESP_CODE=251) — check sharedSecret")
-                                return TransactionBatch(
-                                    transactions = transactions,
-                                    hasMore = false,
-                                )
-                            }
-                            else -> {
-                                Log.w(TAG, "fetchTransactions: unexpected RESP_CODE=${txnResp.respCode}: ${txnResp.respMsg}")
-                                return TransactionBatch(
-                                    transactions = transactions,
-                                    hasMore = false,
-                                )
-                            }
-                        }
-                    }
-                    is RadixParseResult.Error -> {
-                        Log.w(TAG, "fetchTransactions: parse error: ${parseResult.message}")
-                        return TransactionBatch(
-                            transactions = transactions,
-                            hasMore = false,
-                        )
-                    }
-                }
-            }
-
-            // Reached limit — there may be more transactions
-            return TransactionBatch(
-                transactions = transactions,
-                hasMore = true,
-            )
+            // Standard PULL mode
+            return fetchTransactionsPull(limit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -373,6 +422,117 @@ class RadixAdapter(
                 hasMore = false,
             )
         }
+    }
+
+    /**
+     * Pull-mode transaction fetch via FIFO drain (original logic).
+     *
+     * 1. Ensure ON_DEMAND mode
+     * 2. Loop: CMD_CODE=10 -> parse -> ACK -> repeat until FIFO empty or limit reached
+     */
+    private suspend fun fetchTransactionsPull(limit: Int): TransactionBatch {
+        val transactions = mutableListOf<CanonicalTransaction>()
+
+        // Step 1: Ensure ON_DEMAND mode
+        if (!ensureMode(MODE_ON_DEMAND)) {
+            Log.w(TAG, "fetchTransactionsPull: failed to set ON_DEMAND mode")
+            return TransactionBatch(
+                transactions = emptyList(),
+                hasMore = false,
+            )
+        }
+
+        // Step 2: FIFO drain loop
+        for (i in 0 until limit) {
+            val token = nextToken()
+            val tokenStr = token.toString()
+
+            // Send CMD_CODE=10 — request next transaction
+            val requestBody = RadixXmlBuilder.buildTransactionRequest(tokenStr, sharedSecret)
+            val headers = RadixXmlBuilder.buildHttpHeaders(usnCode, RadixXmlBuilder.OPERATION_TRANSACTION)
+            val url = "http://${config.hostAddress}:$transactionPort"
+
+            val response = httpClient.post(url) {
+                headers.forEach { (key, value) -> header(key, value) }
+                setBody(requestBody)
+            }
+
+            val responseBody = response.bodyAsText()
+            val parseResult = RadixXmlParser.parseTransactionResponse(responseBody)
+
+            when (parseResult) {
+                is RadixParseResult.Success -> {
+                    val txnResp = parseResult.value
+
+                    when (txnResp.respCode) {
+                        RESP_CODE_SUCCESS -> {
+                            // Transaction available — parse and normalize
+                            val trn = txnResp.transaction
+                            if (trn != null) {
+                                val rawEnvelope = RawPayloadEnvelope(
+                                    vendor = FccVendor.RADIX,
+                                    siteCode = config.hostAddress,
+                                    receivedAtUtc = Instant.now().toString(),
+                                    contentType = "text/xml",
+                                    payload = responseBody,
+                                )
+
+                                when (val normResult = normalize(rawEnvelope)) {
+                                    is NormalizationResult.Success -> {
+                                        transactions.add(normResult.transaction)
+                                    }
+                                    is NormalizationResult.Failure -> {
+                                        Log.w(TAG, "fetchTransactions: normalization failed: ${normResult.errorCode} — ${normResult.message}")
+                                    }
+                                }
+                            }
+
+                            // ACK with CMD_CODE=201 to dequeue from FCC FIFO
+                            val ackBody = RadixXmlBuilder.buildTransactionAck(tokenStr, sharedSecret)
+                            httpClient.post(url) {
+                                headers.forEach { (key, value) -> header(key, value) }
+                                setBody(ackBody)
+                            }
+                        }
+                        RESP_CODE_FIFO_EMPTY -> {
+                            // FIFO empty — no more transactions
+                            Log.d(TAG, "fetchTransactions: FIFO empty after ${transactions.size} transactions")
+                            return TransactionBatch(
+                                transactions = transactions,
+                                hasMore = false,
+                            )
+                        }
+                        RESP_CODE_SIGNATURE_ERROR -> {
+                            Log.w(TAG, "fetchTransactions: signature error (RESP_CODE=251) — check sharedSecret")
+                            return TransactionBatch(
+                                transactions = transactions,
+                                hasMore = false,
+                            )
+                        }
+                        else -> {
+                            Log.w(TAG, "fetchTransactions: unexpected RESP_CODE=${txnResp.respCode}: ${txnResp.respMsg}")
+                            return TransactionBatch(
+                                transactions = transactions,
+                                hasMore = false,
+                            )
+                        }
+                    }
+                }
+                is RadixParseResult.Error -> {
+                    Log.w(TAG, "fetchTransactions: parse error: ${parseResult.message}")
+                    return TransactionBatch(
+                        transactions = transactions,
+                        hasMore = false,
+                    )
+                }
+            }
+        }
+
+        // Reached limit — there may be more transactions
+        return TransactionBatch(
+            transactions = transactions,
+            hasMore = true,
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -967,6 +1127,12 @@ class RadixAdapter(
 
         /** ON_DEMAND (pull) mode — host requests transactions. */
         const val MODE_ON_DEMAND = 0
+
+        /** UNSOLICITED (push) mode — FDC posts transactions to the listener. */
+        const val MODE_UNSOLICITED = 2
+
+        /** RESP_CODE for unsolicited push transactions from the FDC. */
+        const val RESP_CODE_UNSOLICITED = 30
 
         /** Volume conversion factor: 1 litre = 1,000,000 microlitres. */
         private val MICROLITRES_PER_LITRE = BigDecimal(1_000_000)

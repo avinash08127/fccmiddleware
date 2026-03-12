@@ -153,6 +153,12 @@ public sealed class PreAuthExpiryWorkerTests
                 },
                 legalEntityId));
         }
+
+        public Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByUsnCodeAsync(int usnCode, CancellationToken ct = default)
+            => Task.FromResult<(SiteFccConfig Config, Guid LegalEntityId)?>(null);
+
+        public Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByWebhookSecretAsync(string webhookSecret, CancellationToken ct = default)
+            => Task.FromResult<(SiteFccConfig Config, Guid LegalEntityId)?>(null);
     }
 
     private sealed class NoOpFccAdapterFactory : IFccAdapterFactory

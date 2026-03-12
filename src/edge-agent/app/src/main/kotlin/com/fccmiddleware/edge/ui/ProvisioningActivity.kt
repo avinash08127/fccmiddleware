@@ -251,6 +251,11 @@ class ProvisioningActivity : AppCompatActivity() {
         showProgress("Storing credentials securely...")
 
         withContext(Dispatchers.IO) {
+            // 0. Update the singleton CloudApiClient base URL so all post-registration
+            //    calls (upload, config poll, telemetry, token refresh) use the real endpoint
+            //    instead of the "https://not-yet-provisioned" stub.
+            cloudApiClient.updateBaseUrl(qrData.cloudBaseUrl)
+
             // 1. Store tokens in Android Keystore
             val tokenProvider = KeystoreDeviceTokenProvider(keystoreManager, encryptedPrefs, cloudApiClient)
             tokenProvider.storeTokens(response.deviceToken, response.refreshToken)

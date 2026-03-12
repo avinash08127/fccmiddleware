@@ -105,6 +105,7 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                     currencyCode = "CDF",
                     taxAuthorityCode = "DGI",
                     defaultFiscalizationMode = "NONE",
+                    fiscalizationProvider = (string?)null,
                     defaultTimezone = "Africa/Kinshasa",
                     isActive = true
                 }
@@ -290,6 +291,7 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                     connectivityMode = "CONNECTED",
                     companyTaxPayerId = "TIN-SYNC-001",
                     fiscalizationMode = "FCC_DIRECT",
+                    taxAuthorityEndpoint = (string?)null,
                     requireCustomerTaxId = true,
                     fiscalReceiptRequired = true,
                     odooSiteId = "ODOO-SYNC-001",

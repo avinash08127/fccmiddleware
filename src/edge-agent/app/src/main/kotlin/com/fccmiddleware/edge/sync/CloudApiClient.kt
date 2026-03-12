@@ -179,6 +179,15 @@ interface CloudApiClient {
      * @param refreshToken Current opaque refresh token.
      */
     suspend fun refreshToken(refreshToken: String): CloudTokenRefreshResult
+
+    /**
+     * Update the cloud base URL at runtime.
+     *
+     * Called after device registration to replace the stub "not-yet-provisioned" URL
+     * with the real cloud endpoint, avoiding the need to restart the process or
+     * recreate the DI graph.
+     */
+    fun updateBaseUrl(newBaseUrl: String)
 }
 
 // ---------------------------------------------------------------------------
@@ -196,9 +205,14 @@ interface CloudApiClient {
  *   Use [create] factory for the standard production setup.
  */
 class HttpCloudApiClient(
-    private val cloudBaseUrl: String,
+    @Volatile private var cloudBaseUrl: String,
     private val httpClient: HttpClient,
 ) : CloudApiClient {
+
+    override fun updateBaseUrl(newBaseUrl: String) {
+        Log.i(TAG, "Updating cloud base URL")
+        cloudBaseUrl = newBaseUrl.trimEnd('/')
+    }
 
     override suspend fun uploadBatch(
         request: CloudUploadRequest,

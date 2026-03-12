@@ -100,17 +100,23 @@ public sealed class AgentController : ControllerBase
         [FromBody] DeviceRegistrationApiRequest request,
         CancellationToken cancellationToken)
     {
-        // Extract bootstrap token from X-Provisioning-Token header
-        if (!Request.Headers.TryGetValue("X-Provisioning-Token", out var tokenHeader)
-            || string.IsNullOrWhiteSpace(tokenHeader.FirstOrDefault()))
+        // Extract bootstrap token from JSON body; fall back to X-Provisioning-Token header
+        var provisioningToken = request.ProvisioningToken;
+        if (string.IsNullOrWhiteSpace(provisioningToken)
+            && Request.Headers.TryGetValue("X-Provisioning-Token", out var tokenHeader))
+        {
+            provisioningToken = tokenHeader.ToString();
+        }
+
+        if (string.IsNullOrWhiteSpace(provisioningToken))
         {
             return Unauthorized(BuildError("BOOTSTRAP_TOKEN_MISSING",
-                "X-Provisioning-Token header is required."));
+                "Provisioning token is required (in request body or X-Provisioning-Token header)."));
         }
 
         var command = new RegisterDeviceCommand
         {
-            ProvisioningToken = tokenHeader.ToString(),
+            ProvisioningToken = provisioningToken,
             SiteCode = request.SiteCode,
             DeviceSerialNumber = request.DeviceSerialNumber,
             DeviceModel = request.DeviceModel,

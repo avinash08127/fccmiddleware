@@ -68,6 +68,18 @@ public sealed class RadixAdapter : IFccAdapter
     /// </summary>
     private readonly Lazy<Dictionary<string, int>> _reversePumpAddressMap;
 
+    // ── Push listener (RX-5.1) ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Unsolicited push listener for PUSH/HYBRID ingestion modes.
+    /// When non-null, the FDC is configured to push transactions to this
+    /// listener's HTTP endpoint instead of (or in addition to) the agent polling.
+    /// </summary>
+    private RadixPushListener? _pushListener;
+
+    /// <summary>Push listener port = AuthPort + 2.</summary>
+    private int PushListenerPort => (_config.AuthPort ?? 0) + 2;
+
     // ── Derived config helpers ──────────────────────────────────────────────
 
     /// <summary>Transaction management port = AuthPort + 1.</summary>
@@ -140,18 +152,25 @@ public sealed class RadixAdapter : IFccAdapter
     }
 
     // =====================================================================
-    // IFccAdapter — FetchTransactionsAsync (RX-3.2)
+    // IFccAdapter — FetchTransactionsAsync (RX-3.2, RX-5.1)
     // =====================================================================
 
     /// <inheritdoc/>
     /// <remarks>
-    /// FIFO drain loop:
+    /// Supports three ingestion strategies based on config:
+    ///
+    /// <b>PULL (default / Relay / CloudDirect):</b>
     /// 1. Ensure ON_DEMAND mode (CMD_CODE=20 if not cached)
-    /// 2. Loop: send CMD_CODE=10 -> parse response
-    /// 3. RESP_CODE=201: parse TRN -> ACK CMD_CODE=201 -> continue
-    /// 4. RESP_CODE=205: FIFO empty -> break
-    /// 5. Token counter (0-65535 wrapping)
-    /// 6. Stop at cursor.MaxCount transactions
+    /// 2. FIFO drain loop: CMD_CODE=10 -> parse -> ACK CMD_CODE=201 -> repeat
+    /// 3. RESP_CODE=205: FIFO empty -> break
+    ///
+    /// <b>PUSH (BufferAlways — push-capable):</b>
+    /// 1. Start RadixPushListener on port P+2
+    /// 2. Set FDC to UNSOLICITED mode (CMD_CODE=20, MODE=2)
+    /// 3. Drain the push listener's queue of received transactions
+    ///
+    /// Pull-mode ACK is sent inline during fetch loop — AcknowledgeTransactionsAsync() is a no-op.
+    /// Push transactions are ACKed by the listener's HTTP response.
     /// </remarks>
     public async Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken ct)
     {
@@ -160,87 +179,29 @@ public sealed class RadixAdapter : IFccAdapter
 
         try
         {
-            // Step 1: Ensure ON_DEMAND mode
-            if (!await EnsureModeAsync(ModeOnDemand, ct).ConfigureAwait(false))
+            // Determine ingestion strategy from config
+            // BufferAlways is used for push-capable sites where the FDC should push to us
+            var isPushCapable = _config.ConnectionProtocol?.Equals("PUSH", StringComparison.OrdinalIgnoreCase) == true;
+
+            if (isPushCapable)
             {
-                _logger.LogWarning("FetchTransactions: failed to set ON_DEMAND mode");
-                return new TransactionBatch(records, null, false);
+                // PUSH mode — start listener and set UNSOLICITED mode
+                if (!await EnsurePushListenerRunningAsync(ct).ConfigureAwait(false))
+                {
+                    _logger.LogWarning("FetchTransactions: push listener startup failed, falling back to pull");
+                    return await FetchTransactionsPullAsync(limit, ct).ConfigureAwait(false);
+                }
+
+                // Drain pushed transactions
+                var pushed = CollectPushedEnvelopes(limit);
+                records.AddRange(pushed);
+
+                var hasMore = _pushListener?.QueueSize > 0;
+                return new TransactionBatch(records, null, hasMore);
             }
 
-            // Step 2: FIFO drain loop
-            for (var i = 0; i < limit; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                var token = NextToken();
-                var tokenStr = token.ToString();
-
-                // Send CMD_CODE=10 — request next transaction
-                var requestBody = RadixXmlBuilder.BuildTransactionRequest(UsnCode, token, SharedSecret);
-                var responseBody = await PostXmlAsync(
-                    TransactionPortUrl,
-                    requestBody,
-                    RadixXmlBuilder.OperationTransaction,
-                    ct).ConfigureAwait(false);
-
-                if (responseBody is null)
-                {
-                    _logger.LogWarning("FetchTransactions: HTTP request failed");
-                    ResetModeState();
-                    return new TransactionBatch(records, null, false);
-                }
-
-                var txnResp = RadixXmlParser.ParseTransactionResponse(responseBody);
-                if (txnResp is null)
-                {
-                    _logger.LogWarning("FetchTransactions: failed to parse response XML");
-                    return new TransactionBatch(records, null, false);
-                }
-
-                switch (txnResp.RespCode)
-                {
-                    case RespCodeSuccess:
-                    {
-                        // Transaction available — wrap as RawPayloadEnvelope
-                        if (txnResp.Transaction is not null)
-                        {
-                            var envelope = new RawPayloadEnvelope(
-                                FccVendor: Vendor,
-                                SiteCode: _siteCode,
-                                RawJson: responseBody,
-                                ReceivedAt: DateTimeOffset.UtcNow);
-
-                            records.Add(envelope);
-                        }
-
-                        // ACK with CMD_CODE=201 to dequeue from FCC FIFO
-                        var ackBody = RadixXmlBuilder.BuildTransactionAck(UsnCode, token, SharedSecret);
-                        await PostXmlAsync(
-                            TransactionPortUrl,
-                            ackBody,
-                            RadixXmlBuilder.OperationTransaction,
-                            ct).ConfigureAwait(false);
-
-                        break;
-                    }
-                    case RespCodeFifoEmpty:
-                        // FIFO empty — no more transactions
-                        _logger.LogDebug("FetchTransactions: FIFO empty after {Count} transactions", records.Count);
-                        return new TransactionBatch(records, null, false);
-
-                    case RespCodeSignatureError:
-                        _logger.LogWarning("FetchTransactions: signature error (RESP_CODE=251) — check sharedSecret");
-                        return new TransactionBatch(records, null, false);
-
-                    default:
-                        _logger.LogWarning("FetchTransactions: unexpected RESP_CODE={RespCode}: {RespMsg}",
-                            txnResp.RespCode, txnResp.RespMsg);
-                        return new TransactionBatch(records, null, false);
-                }
-            }
-
-            // Reached limit — there may be more transactions
-            return new TransactionBatch(records, null, true);
+            // Standard PULL mode
+            return await FetchTransactionsPullAsync(limit, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -253,6 +214,97 @@ public sealed class RadixAdapter : IFccAdapter
             ResetModeState();
             return new TransactionBatch(records, null, false);
         }
+    }
+
+    /// <summary>
+    /// Pull-mode transaction fetch via FIFO drain (original logic).
+    /// 1. Ensure ON_DEMAND mode
+    /// 2. Loop: CMD_CODE=10 -> parse -> ACK -> repeat until FIFO empty or limit reached
+    /// </summary>
+    private async Task<TransactionBatch> FetchTransactionsPullAsync(int limit, CancellationToken ct)
+    {
+        var records = new List<RawPayloadEnvelope>();
+
+        // Step 1: Ensure ON_DEMAND mode
+        if (!await EnsureModeAsync(ModeOnDemand, ct).ConfigureAwait(false))
+        {
+            _logger.LogWarning("FetchTransactionsPull: failed to set ON_DEMAND mode");
+            return new TransactionBatch(records, null, false);
+        }
+
+        // Step 2: FIFO drain loop
+        for (var i = 0; i < limit; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var token = NextToken();
+
+            // Send CMD_CODE=10 — request next transaction
+            var requestBody = RadixXmlBuilder.BuildTransactionRequest(UsnCode, token, SharedSecret);
+            var responseBody = await PostXmlAsync(
+                TransactionPortUrl,
+                requestBody,
+                RadixXmlBuilder.OperationTransaction,
+                ct).ConfigureAwait(false);
+
+            if (responseBody is null)
+            {
+                _logger.LogWarning("FetchTransactionsPull: HTTP request failed");
+                ResetModeState();
+                return new TransactionBatch(records, null, false);
+            }
+
+            var txnResp = RadixXmlParser.ParseTransactionResponse(responseBody);
+            if (txnResp is null)
+            {
+                _logger.LogWarning("FetchTransactionsPull: failed to parse response XML");
+                return new TransactionBatch(records, null, false);
+            }
+
+            switch (txnResp.RespCode)
+            {
+                case RespCodeSuccess:
+                {
+                    // Transaction available — wrap as RawPayloadEnvelope
+                    if (txnResp.Transaction is not null)
+                    {
+                        var envelope = new RawPayloadEnvelope(
+                            FccVendor: Vendor,
+                            SiteCode: _siteCode,
+                            RawJson: responseBody,
+                            ReceivedAt: DateTimeOffset.UtcNow);
+
+                        records.Add(envelope);
+                    }
+
+                    // ACK with CMD_CODE=201 to dequeue from FCC FIFO
+                    var ackBody = RadixXmlBuilder.BuildTransactionAck(UsnCode, token, SharedSecret);
+                    await PostXmlAsync(
+                        TransactionPortUrl,
+                        ackBody,
+                        RadixXmlBuilder.OperationTransaction,
+                        ct).ConfigureAwait(false);
+
+                    break;
+                }
+                case RespCodeFifoEmpty:
+                    // FIFO empty — no more transactions
+                    _logger.LogDebug("FetchTransactionsPull: FIFO empty after {Count} transactions", records.Count);
+                    return new TransactionBatch(records, null, false);
+
+                case RespCodeSignatureError:
+                    _logger.LogWarning("FetchTransactionsPull: signature error (RESP_CODE=251) — check sharedSecret");
+                    return new TransactionBatch(records, null, false);
+
+                default:
+                    _logger.LogWarning("FetchTransactionsPull: unexpected RESP_CODE={RespCode}: {RespMsg}",
+                        txnResp.RespCode, txnResp.RespMsg);
+                    return new TransactionBatch(records, null, false);
+            }
+        }
+
+        // Reached limit — there may be more transactions
+        return new TransactionBatch(records, null, true);
     }
 
     // =====================================================================
@@ -769,6 +821,84 @@ public sealed class RadixAdapter : IFccAdapter
     }
 
     // =====================================================================
+    // Push listener lifecycle (RX-5.1)
+    // =====================================================================
+
+    /// <summary>
+    /// Starts the push listener and sets the FDC to UNSOLICITED mode.
+    /// </summary>
+    /// <returns>true if both the listener started and the mode was set successfully.</returns>
+    private async Task<bool> EnsurePushListenerRunningAsync(CancellationToken ct)
+    {
+        // Create listener if not yet initialized
+        _pushListener ??= new RadixPushListener(
+            listenPort: PushListenerPort,
+            expectedUsnCode: UsnCode,
+            sharedSecret: SharedSecret,
+            logger: _logger);
+
+        // Start the HTTP listener if not already running
+        if (!_pushListener.IsRunning)
+        {
+            if (!await _pushListener.StartAsync().ConfigureAwait(false))
+            {
+                _logger.LogWarning("Failed to start push listener on port {Port}", PushListenerPort);
+                return false;
+            }
+        }
+
+        // Set FDC to UNSOLICITED mode
+        if (!await EnsureModeAsync(ModeUnsolicited, ct).ConfigureAwait(false))
+        {
+            _logger.LogWarning("Failed to set UNSOLICITED mode on FDC");
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Stops the push listener and resets mode state.
+    /// Called when the adapter is being shut down or switching back to pull mode.
+    /// </summary>
+    public async Task StopPushListenerAsync()
+    {
+        if (_pushListener is not null)
+        {
+            await _pushListener.StopAsync().ConfigureAwait(false);
+            _pushListener = null;
+        }
+        ResetModeState();
+    }
+
+    /// <summary>
+    /// Collects transactions pushed by the FDC via the <see cref="RadixPushListener"/>.
+    /// Drains the listener's queue and wraps each raw XML payload in a
+    /// <see cref="RawPayloadEnvelope"/>.
+    /// </summary>
+    /// <param name="limit">Maximum number of transactions to collect.</param>
+    /// <returns>List of raw payload envelopes from pushed payloads.</returns>
+    private List<RawPayloadEnvelope> CollectPushedEnvelopes(int limit)
+    {
+        if (_pushListener is null) return [];
+
+        var pushed = _pushListener.DrainQueue(limit);
+        if (pushed.Count == 0) return [];
+
+        var envelopes = new List<RawPayloadEnvelope>(pushed.Count);
+        foreach (var item in pushed)
+        {
+            envelopes.Add(new RawPayloadEnvelope(
+                FccVendor: Vendor,
+                SiteCode: _siteCode,
+                RawJson: item.RawXml,
+                ReceivedAt: item.ReceivedAt));
+        }
+
+        return envelopes;
+    }
+
+    // =====================================================================
     // Private — Token counter
     // =====================================================================
 
@@ -1086,6 +1216,12 @@ public sealed class RadixAdapter : IFccAdapter
 
     /// <summary>ON_DEMAND (pull) mode — host requests transactions.</summary>
     public const int ModeOnDemand = 0;
+
+    /// <summary>UNSOLICITED (push) mode — FDC posts transactions to the listener.</summary>
+    public const int ModeUnsolicited = 2;
+
+    /// <summary>RESP_CODE for unsolicited push transactions from the FDC.</summary>
+    public const int RespCodeUnsolicited = 30;
 }
 
 // ---------------------------------------------------------------------------

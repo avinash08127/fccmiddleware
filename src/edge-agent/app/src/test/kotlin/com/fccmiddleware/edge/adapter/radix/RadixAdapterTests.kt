@@ -5,9 +5,13 @@ import com.fccmiddleware.edge.adapter.common.*
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.mockk.*
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.*
@@ -79,14 +83,24 @@ class RadixAdapterTests {
     // -----------------------------------------------------------------------
 
     @Test
-    fun `heartbeat returns true when RESP_CODE is 201`() = runTest {
+    fun `ktor mock engine returns body correctly`() = runTest {
+        val xml = productResponseXml(201, "SUCCESS")
+        val mockEngine = MockEngine { respond(
+            content = xml,
+            status = HttpStatusCode.OK,
+            headers = headersOf("Content-Type" to listOf("Application/xml")),
+        ) }
+        val client = HttpClient(mockEngine)
+        val response = client.post("http://localhost:9999") {
+            setBody("test")
+        }
+        val body = response.bodyAsText()
+        assertEquals(xml, body)
+    }
+
+    @Test
+    fun `heartbeat returns true when RESP_CODE is 201`() = runTest(UnconfinedTestDispatcher()) {
         val xml = productResponseXml(201, "SUCCESS", """<PRODUCT ID="0" NAME="UNLEADED" PRICE="1930" />""")
-
-        // Verify XML parsing works independently
-        val parseResult = RadixXmlParser.parseProductResponse(xml)
-        assertTrue("Parse should succeed", parseResult is RadixParseResult.Success)
-        assertEquals(201, (parseResult as RadixParseResult.Success).value.respCode)
-
         val mockEngine = MockEngine { respond(
             content = xml,
             status = HttpStatusCode.OK,
@@ -94,8 +108,7 @@ class RadixAdapterTests {
         ) }
         val adapter = RadixAdapter(createConfig(), HttpClient(mockEngine))
 
-        val result = adapter.heartbeat()
-        assertTrue("Heartbeat should return true for RESP_CODE=201 but got false", result)
+        assertTrue(adapter.heartbeat())
     }
 
     // -----------------------------------------------------------------------

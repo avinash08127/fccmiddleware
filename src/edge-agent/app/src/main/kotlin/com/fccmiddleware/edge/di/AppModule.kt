@@ -23,8 +23,13 @@ import com.fccmiddleware.edge.sync.TelemetryReporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.koin.android.ext.koin.androidContext
 import org.koin.dsl.module
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.concurrent.TimeUnit
 
 val appModule = module {
 
@@ -93,24 +98,52 @@ val appModule = module {
     // -------------------------------------------------------------------------
     // Connectivity Manager
     //
-    // Internet probe: HTTP GET to cloud /health with 5s timeout.
-    // FCC probe: calls IFccAdapter.heartbeat() with 5s timeout.
+    // Internet probe: HTTP GET to cloud /health with 4s timeout.
+    // FCC probe: TCP socket connect to fccHost:fccPort with 4s timeout.
     //
-    // Both probes are registered as no-op stubs until the adapter factory and
-    // cloud URL are available from ConfigManager (EA-2.x). The agent starts in
-    // FULLY_OFFLINE and will transition once probes return real results.
+    // Both probes read connection info from EncryptedPrefs on each invocation,
+    // so they automatically start returning real results after registration
+    // populates the cloud URL and FCC host/port.
     // -------------------------------------------------------------------------
     single {
+        val encryptedPrefs = get<EncryptedPrefsManager>()
+        val probeHttpClient = OkHttpClient.Builder()
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(4, TimeUnit.SECONDS)
+            .build()
+
         ConnectivityManager(
             internetProbe = {
-                // TODO (EA-2.x): replace with real HTTP GET to cloud GET /health
-                // e.g.: httpClient.get(cloudHealthUrl).status.isSuccess()
-                false
+                val baseUrl = encryptedPrefs.cloudBaseUrl
+                if (baseUrl.isNullOrBlank()) {
+                    false
+                } else {
+                    try {
+                        val request = Request.Builder()
+                            .url("${baseUrl.trimEnd('/')}/health")
+                            .get()
+                            .build()
+                        probeHttpClient.newCall(request).execute().use { it.isSuccessful }
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
             },
             fccProbe = {
-                // TODO (EA-2.x): replace with fccAdapterFactory.resolve(...).heartbeat()
-                // The ConfigManager will update this probe once site config is loaded
-                false
+                val host = encryptedPrefs.fccHost
+                val port = encryptedPrefs.fccPort
+                if (host.isNullOrBlank() || port <= 0) {
+                    false
+                } else {
+                    try {
+                        Socket().use { socket ->
+                            socket.connect(InetSocketAddress(host, port), 4_000)
+                            true
+                        }
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
             },
             auditLogDao = get(),
             listener = null, // CadenceController registers itself after construction
