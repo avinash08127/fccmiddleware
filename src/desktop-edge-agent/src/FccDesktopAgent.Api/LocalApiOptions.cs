@@ -1,3 +1,5 @@
+using FccDesktopAgent.Core.Security;
+
 namespace FccDesktopAgent.Api;
 
 /// <summary>
@@ -16,5 +18,6 @@ public sealed class LocalApiOptions
     /// Unlike the Android agent, there is no localhost bypass — Odoo POS is always
     /// on a separate HHT. Leave empty to disable auth (development only).
     /// </summary>
+    [SensitiveData]
     public string ApiKey { get; set; } = string.Empty;
 }

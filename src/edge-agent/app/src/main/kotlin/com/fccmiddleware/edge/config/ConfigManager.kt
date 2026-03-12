@@ -95,7 +95,17 @@ class ConfigManager(
             return ConfigApplyResult.Skipped
         }
 
-        // 3. Provisioning-only field immutability check
+        // 3. Numeric field bounds validation
+        val boundsViolations = validateNumericBounds(newConfig)
+        if (boundsViolations.isNotEmpty()) {
+            Log.e(
+                TAG,
+                "Config rejected — numeric fields out of bounds: $boundsViolations",
+            )
+            return ConfigApplyResult.Rejected("INVALID_NUMERIC_BOUNDS")
+        }
+
+        // 4. Provisioning-only field immutability check
         val current = _config.value
         if (current != null) {
             val violations = checkProvisioningFields(current, newConfig)
@@ -107,7 +117,7 @@ class ConfigManager(
                 return ConfigApplyResult.Rejected("REPROVISION_REQUIRED")
             }
 
-            // 4. Detect restart-required field changes
+            // 5. Detect restart-required field changes
             val restartFields = detectRestartRequiredChanges(current, newConfig)
             if (restartFields.isNotEmpty()) {
                 Log.w(
@@ -118,7 +128,7 @@ class ConfigManager(
             }
         }
 
-        // 5. Persist to Room (staged → active atomically for single-row table)
+        // 6. Persist to Room (staged → active atomically for single-row table)
         try {
             val entity = AgentConfig(
                 configJson = rawJson,
@@ -132,7 +142,7 @@ class ConfigManager(
             return ConfigApplyResult.Rejected("PERSISTENCE_FAILURE")
         }
 
-        // 6. Apply in memory (hot-reload takes effect on next scheduler cycle)
+        // 7. Apply in memory (hot-reload takes effect on next scheduler cycle)
         _config.value = newConfig
         Log.i(
             TAG,
@@ -140,6 +150,67 @@ class ConfigManager(
         )
 
         return ConfigApplyResult.Applied
+    }
+
+    /**
+     * Validate that all numeric config fields are within safe operational bounds.
+     * Returns list of violation descriptions (empty = all OK).
+     */
+    private fun validateNumericBounds(cfg: EdgeAgentConfigDto): List<String> {
+        val violations = mutableListOf<String>()
+
+        // polling
+        if (cfg.polling.pullIntervalSeconds !in 5..3600) {
+            violations += "polling.pullIntervalSeconds=${cfg.polling.pullIntervalSeconds} (must be 5..3600)"
+        }
+        if (cfg.polling.batchSize !in 1..1000) {
+            violations += "polling.batchSize=${cfg.polling.batchSize} (must be 1..1000)"
+        }
+
+        // sync
+        if (cfg.sync.uploadBatchSize !in 1..500) {
+            violations += "sync.uploadBatchSize=${cfg.sync.uploadBatchSize} (must be 1..500)"
+        }
+        if (cfg.sync.syncIntervalSeconds !in 5..3600) {
+            violations += "sync.syncIntervalSeconds=${cfg.sync.syncIntervalSeconds} (must be 5..3600)"
+        }
+        if (cfg.sync.statusPollIntervalSeconds !in 5..3600) {
+            violations += "sync.statusPollIntervalSeconds=${cfg.sync.statusPollIntervalSeconds} (must be 5..3600)"
+        }
+        if (cfg.sync.configPollIntervalSeconds !in 10..86400) {
+            violations += "sync.configPollIntervalSeconds=${cfg.sync.configPollIntervalSeconds} (must be 10..86400)"
+        }
+
+        // buffer
+        if (cfg.buffer.retentionDays !in 1..365) {
+            violations += "buffer.retentionDays=${cfg.buffer.retentionDays} (must be 1..365)"
+        }
+        if (cfg.buffer.maxRecords !in 100..500_000) {
+            violations += "buffer.maxRecords=${cfg.buffer.maxRecords} (must be 100..500000)"
+        }
+        if (cfg.buffer.cleanupIntervalHours !in 1..168) {
+            violations += "buffer.cleanupIntervalHours=${cfg.buffer.cleanupIntervalHours} (must be 1..168)"
+        }
+
+        // fccConnection
+        if (cfg.fccConnection.heartbeatIntervalSeconds !in 5..300) {
+            violations += "fccConnection.heartbeatIntervalSeconds=${cfg.fccConnection.heartbeatIntervalSeconds} (must be 5..300)"
+        }
+        if (cfg.fccConnection.port !in 1..65535) {
+            violations += "fccConnection.port=${cfg.fccConnection.port} (must be 1..65535)"
+        }
+
+        // telemetry
+        if (cfg.telemetry.telemetryIntervalSeconds !in 10..3600) {
+            violations += "telemetry.telemetryIntervalSeconds=${cfg.telemetry.telemetryIntervalSeconds} (must be 10..3600)"
+        }
+
+        // api
+        if (cfg.api.localApiPort !in 1..65535) {
+            violations += "api.localApiPort=${cfg.api.localApiPort} (must be 1..65535)"
+        }
+
+        return violations
     }
 
     /**

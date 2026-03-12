@@ -89,7 +89,13 @@ class EncryptedPrefsManager(context: Context) {
 
     var isDecommissioned: Boolean
         get() = prefs.getBoolean(KEY_IS_DECOMMISSIONED, false)
-        set(value) = prefs.edit().putBoolean(KEY_IS_DECOMMISSIONED, value).apply()
+        set(value) {
+            // M-01: Use commit() (synchronous) instead of apply() (async) to ensure the
+            // decommission flag is durably persisted before any caller proceeds. A crash
+            // between an async apply() and the disk flush could allow the device to restart
+            // and resume sync despite being decommissioned.
+            prefs.edit().putBoolean(KEY_IS_DECOMMISSIONED, value).commit()
+        }
 
     // ---- Encrypted token blobs (Keystore-encrypted, stored as Base64) ----
 

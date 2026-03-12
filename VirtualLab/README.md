@@ -19,6 +19,13 @@ Phase 0 scaffolding plus the initial persistence baseline for the FCC simulator 
 
 The Angular dev server proxies `/api`, `/fcc`, `/callbacks`, and `/hubs` to the API.
 
+## Azure deployment
+
+- UI deployment guidance lives in [`docs/azure-deployment.md`](/mnt/c/Users/a0812/fccmiddleware/VirtualLab/docs/azure-deployment.md).
+- The Angular build reads `ui/virtual-lab/public/assets/config/runtime-config.json` at startup, so the same UI artifact can point at different API environments without rebuilding.
+- The API publish output now carries `config/benchmark-seed.json`, which removes the old dependency on the repository directory layout after deployment.
+- Azure Web App should run with `DOTNET_ENVIRONMENT=Production` and explicit `VirtualLab__Persistence__*` plus `VirtualLab__Cors__AllowedOrigins__*` app settings.
+
 ## Seeded demo environment
 
 On local and development startup the API applies migrations and seeds a deterministic default environment into SQLite.

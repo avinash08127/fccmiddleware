@@ -1,3 +1,5 @@
+using FccDesktopAgent.Core.Security;
+
 namespace FccDesktopAgent.Core.Adapter.Common;
 
 /// <summary>Raw FCC payload envelope wrapping unparsed JSON received from the FCC.</summary>
@@ -44,6 +46,6 @@ public sealed record PreAuthResult(
 /// <summary>Connection configuration for a FCC adapter instance.</summary>
 public sealed record FccConnectionConfig(
     string BaseUrl,
-    string ApiKey,
+    [property: SensitiveData] string ApiKey,
     TimeSpan RequestTimeout,
     string SiteCode = "");

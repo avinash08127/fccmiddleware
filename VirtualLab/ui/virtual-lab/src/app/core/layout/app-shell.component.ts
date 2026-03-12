@@ -1,8 +1,8 @@
 import { CommonModule } from '@angular/common';
 import { Component, OnInit, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { runtimeConfig } from '../config/runtime-config';
 import { LiveUpdatesService } from '../services/live-updates.service';
-import { environment } from '../../../environments/environment';
 
 interface NavItem {
   label: string;
@@ -153,7 +153,7 @@ interface NavItem {
 })
 export class AppShellComponent implements OnInit {
   readonly connectionState = inject(LiveUpdatesService).connectionState;
-  readonly environmentName = environment.environmentName;
+  readonly environmentName = runtimeConfig.environmentName;
   readonly navItems: NavItem[] = [
     { label: 'Dashboard', path: '/dashboard' },
     { label: 'Sites', path: '/sites' },

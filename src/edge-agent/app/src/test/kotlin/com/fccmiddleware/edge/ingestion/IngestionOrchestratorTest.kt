@@ -12,6 +12,7 @@ import com.fccmiddleware.edge.adapter.common.TransactionStatus
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.SyncState
+import android.os.SystemClock
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -39,7 +40,7 @@ import java.util.UUID
  *   - poll() no-ops when adapter or config is null
  *   - RELAY/BUFFER_ALWAYS: polls every tick regardless of elapsed time
  *   - CLOUD_DIRECT: skips poll until CLOUD_DIRECT_MIN_POLL_INTERVAL_MS has elapsed
- *   - CLOUD_DIRECT: first-ever poll always executes (no lastScheduledPollAt)
+ *   - CLOUD_DIRECT: first-ever poll always executes (no lastScheduledPollElapsedMs)
  *   - CLOUD_DIRECT: pollNow() bypasses the interval gate
  *   - buildCursor: null → empty catch-up cursor
  *   - buildCursor: "token:X" → cursorToken = X
@@ -149,7 +150,7 @@ class IngestionOrchestratorTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `CLOUD_DIRECT - first-ever poll always executes (no lastScheduledPollAt)`() = runTest {
+    fun `CLOUD_DIRECT - first-ever poll always executes (no lastScheduledPollElapsedMs)`() = runTest {
         coEvery { adapter.fetchTransactions(any()) } returns emptyBatch()
         val orchestrator = makeOrchestrator(adapter = adapter, config = cloudDirectConfig)
 
@@ -163,8 +164,8 @@ class IngestionOrchestratorTest {
         coEvery { adapter.fetchTransactions(any()) } returns emptyBatch()
         val orchestrator = makeOrchestrator(adapter = adapter, config = cloudDirectConfig)
 
-        // Simulate a poll that just completed
-        orchestrator.lastScheduledPollAt = Instant.now()
+        // Simulate a poll that just completed (monotonic clock)
+        orchestrator.lastScheduledPollElapsedMs = SystemClock.elapsedRealtime()
 
         orchestrator.poll() // should be gated
 
@@ -176,10 +177,9 @@ class IngestionOrchestratorTest {
         coEvery { adapter.fetchTransactions(any()) } returns emptyBatch()
         val orchestrator = makeOrchestrator(adapter = adapter, config = cloudDirectConfig)
 
-        // Simulate last poll was 6 minutes ago (past the 5-min gate)
-        val sixMinutesAgo = Instant.now()
-            .minusMillis(IngestionOrchestrator.CLOUD_DIRECT_MIN_POLL_INTERVAL_MS + 60_000L)
-        orchestrator.lastScheduledPollAt = sixMinutesAgo
+        // Simulate last poll was 6 minutes ago (past the 5-min gate) using monotonic clock
+        orchestrator.lastScheduledPollElapsedMs = SystemClock.elapsedRealtime() -
+            IngestionOrchestrator.CLOUD_DIRECT_MIN_POLL_INTERVAL_MS - 60_000L
 
         orchestrator.poll()
 
@@ -191,8 +191,8 @@ class IngestionOrchestratorTest {
         coEvery { adapter.fetchTransactions(any()) } returns emptyBatch()
         val orchestrator = makeOrchestrator(adapter = adapter, config = cloudDirectConfig)
 
-        // Gate would block a scheduled poll
-        orchestrator.lastScheduledPollAt = Instant.now()
+        // Gate would block a scheduled poll (monotonic clock)
+        orchestrator.lastScheduledPollElapsedMs = SystemClock.elapsedRealtime()
 
         // But pollNow bypasses the gate
         orchestrator.pollNow(pumpNumber = null)
@@ -201,17 +201,17 @@ class IngestionOrchestratorTest {
     }
 
     @Test
-    fun `CLOUD_DIRECT - pollNow does not update lastScheduledPollAt`() = runTest {
+    fun `CLOUD_DIRECT - pollNow does not update lastScheduledPollElapsedMs`() = runTest {
         coEvery { adapter.fetchTransactions(any()) } returns emptyBatch()
         val orchestrator = makeOrchestrator(adapter = adapter, config = cloudDirectConfig)
-        val before = Instant.now()
-        orchestrator.lastScheduledPollAt = before
+        val before = SystemClock.elapsedRealtime()
+        orchestrator.lastScheduledPollElapsedMs = before
 
         orchestrator.pollNow(pumpNumber = 2)
 
-        // lastScheduledPollAt must remain unchanged so the next scheduled poll
-        // is still gated by the original timestamp
-        assertEquals(before, orchestrator.lastScheduledPollAt)
+        // lastScheduledPollElapsedMs must remain unchanged so the next scheduled poll
+        // is still gated by the original monotonic timestamp
+        assertEquals(before, orchestrator.lastScheduledPollElapsedMs)
     }
 
     // -------------------------------------------------------------------------
@@ -605,15 +605,15 @@ class IngestionOrchestratorTest {
     }
 
     @Test
-    fun `pollNow - does not update lastScheduledPollAt`() = runTest {
+    fun `pollNow - does not update lastScheduledPollElapsedMs`() = runTest {
         coEvery { adapter.fetchTransactions(any()) } returns emptyBatch()
         val orchestrator = makeOrchestrator(adapter = adapter, config = cloudDirectConfig)
-        val before = Instant.now()
-        orchestrator.lastScheduledPollAt = before
+        val before = SystemClock.elapsedRealtime()
+        orchestrator.lastScheduledPollElapsedMs = before
 
         orchestrator.pollNow(pumpNumber = 2)
 
-        assertEquals(before, orchestrator.lastScheduledPollAt)
+        assertEquals(before, orchestrator.lastScheduledPollElapsedMs)
     }
 
     @Test

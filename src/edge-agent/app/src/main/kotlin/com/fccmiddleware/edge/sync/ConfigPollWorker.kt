@@ -128,8 +128,9 @@ class ConfigPollWorker(
                 }
                 val freshToken = provider.getAccessToken()
                 if (freshToken == null) {
-                    Log.e(TAG, "Token refresh succeeded but getAccessToken() returned null")
-                    return ConfigPollAttemptResult.TransportFailure("401 Unauthorized — no token after refresh")
+                    // M-04: Critical state bug — refresh reported success but token store is empty/corrupt
+                    Log.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
+                    return ConfigPollAttemptResult.TransportFailure("CRITICAL: token store inconsistency — refresh succeeded but no token available")
                 }
                 Log.i(TAG, "Token refreshed; retrying config poll")
                 when (val retryResult = client.getConfig(currentVersion, freshToken)) {

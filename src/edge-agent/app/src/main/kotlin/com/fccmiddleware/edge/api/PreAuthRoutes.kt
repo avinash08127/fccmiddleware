@@ -27,6 +27,8 @@ import java.util.UUID
 fun Routing.preAuthRoutes(
     handler: PreAuthHandler,
     connectivityManager: ConnectivityManager,
+    lanApiKey: String? = null,
+    enableLanApi: Boolean = false,
 ) {
 
     /**
@@ -36,6 +38,7 @@ fun Routing.preAuthRoutes(
      * Rejects immediately if FCC is unreachable (503) — Odoo POS must handle this.
      */
     post("/api/v1/preauth") {
+        if (!routeRequiresAuth(call, lanApiKey, enableLanApi)) return@post
         val fccState = connectivityManager.state.value
         val fccReachable = fccState == ConnectivityState.FULLY_ONLINE ||
             fccState == ConnectivityState.INTERNET_DOWN
@@ -79,6 +82,7 @@ fun Routing.preAuthRoutes(
      * Returns 200 even if the pre-auth was not found (idempotent).
      */
     post("/api/v1/preauth/cancel") {
+        if (!routeRequiresAuth(call, lanApiKey, enableLanApi)) return@post
         val request = try {
             call.receive<CancelPreAuthRequest>()
         } catch (_: Exception) {

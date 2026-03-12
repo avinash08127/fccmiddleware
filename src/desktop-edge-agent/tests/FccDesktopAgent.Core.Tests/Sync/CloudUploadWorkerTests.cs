@@ -69,7 +69,7 @@ public sealed class CloudUploadWorkerTests : IDisposable
         var factory = new TestHttpClientFactory(httpHandler);
         var config = Options.Create(new AgentConfiguration
         {
-            CloudBaseUrl = "http://cloud.test",
+            CloudBaseUrl = "https://cloud.test",
             SiteId = "SITE-A",
             UploadBatchSize = 50,
         });

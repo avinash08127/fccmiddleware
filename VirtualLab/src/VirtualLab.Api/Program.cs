@@ -27,7 +27,7 @@ using VirtualLab.Api;
 
 var builder = WebApplication.CreateBuilder(args);
 
-string benchmarkSeedPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", "config", "benchmark-seed.json"));
+string benchmarkSeedPath = ResolveBenchmarkSeedPath(builder.Environment.ContentRootPath);
 builder.Configuration.AddJsonFile(benchmarkSeedPath, optional: false, reloadOnChange: false);
 builder.Services.Configure<BenchmarkSeedProfile>(builder.Configuration);
 builder.Services.AddVirtualLabApplication();
@@ -58,6 +58,7 @@ await using (AsyncServiceScope scope = app.Services.CreateAsyncScope())
 
 app.UseSwagger();
 app.UseSwaggerUI();
+app.UseCors(VirtualLabCorsOptions.PolicyName);
 app.UseMiddleware<ApiTimingMiddleware>();
 app.UseMiddleware<InboundAuthSimulationMiddleware>();
 
@@ -827,6 +828,25 @@ app.MapPost("/api/diagnostics/live-broadcast", async (IHubContext<LabLiveHub> hu
 app.MapHub<LabLiveHub>("/hubs/live");
 
 app.Run();
+
+static string ResolveBenchmarkSeedPath(string contentRootPath)
+{
+    string[] candidatePaths =
+    [
+        Path.Combine(contentRootPath, "config", "benchmark-seed.json"),
+        Path.GetFullPath(Path.Combine(contentRootPath, "..", "..", "config", "benchmark-seed.json")),
+    ];
+
+    string? benchmarkSeedPath = candidatePaths.FirstOrDefault(File.Exists);
+    if (benchmarkSeedPath is null)
+    {
+        throw new FileNotFoundException(
+            "Unable to locate benchmark-seed.json for Virtual Lab startup.",
+            candidatePaths[0]);
+    }
+
+    return benchmarkSeedPath;
+}
 
 static async Task BroadcastForecourtUpdateAsync(
     IHubContext<LabLiveHub> hubContext,

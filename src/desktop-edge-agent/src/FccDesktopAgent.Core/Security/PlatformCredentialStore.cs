@@ -365,6 +365,8 @@ public sealed class PlatformCredentialStore : ICredentialStore
     {
         var dir = Path.Combine(AgentDataDirectory.Resolve(), "secrets");
         Directory.CreateDirectory(dir);
+        // DEA-6.2: Restrictive permissions on secrets directory (owner-only)
+        AgentDataDirectory.SetRestrictivePermissions(dir);
         return Path.Combine(dir, "credentials.dat");
     }
 

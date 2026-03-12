@@ -199,6 +199,7 @@ val appModule = module {
             preAuthHandler = get(),
             configPollWorker = get(),
             preAuthCloudForwardWorker = get(),
+            tokenProvider = get(),
         )
     }
 

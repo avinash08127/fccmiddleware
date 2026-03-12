@@ -31,6 +31,7 @@ public static class DependencyInjection
         services.Configure<VirtualLabPersistenceOptions>(configuration.GetSection(VirtualLabPersistenceOptions.SectionName));
         services.Configure<VirtualLabSeedOptions>(configuration.GetSection(VirtualLabSeedOptions.SectionName));
         services.Configure<CallbackDeliveryOptions>(configuration.GetSection(CallbackDeliveryOptions.SectionName));
+        services.Configure<VirtualLabCorsOptions>(configuration.GetSection(VirtualLabCorsOptions.SectionName));
 
         services.AddDbContext<VirtualLabDbContext>((serviceProvider, options) =>
         {
@@ -38,15 +39,59 @@ public static class DependencyInjection
                 .GetRequiredService<Microsoft.Extensions.Options.IOptions<VirtualLabPersistenceOptions>>()
                 .Value;
 
-            if (!string.Equals(persistenceOptions.Provider, "Sqlite", StringComparison.OrdinalIgnoreCase))
+            switch (persistenceOptions.Provider.Trim())
             {
-                throw new InvalidOperationException($"Unsupported VirtualLab provider '{persistenceOptions.Provider}'.");
+                case "Sqlite":
+                case "sqlite":
+                    options.UseSqlite(
+                        persistenceOptions.ConnectionString,
+                        sqliteOptions => sqliteOptions.MigrationsAssembly(typeof(VirtualLabDbContext).Assembly.FullName));
+                    break;
+                case "SqlServer":
+                case "sqlserver":
+                case "Sql Server":
+                case "sql server":
+                    options.UseSqlServer(
+                        persistenceOptions.ConnectionString,
+                        sqlServerOptions =>
+                        {
+                            sqlServerOptions.MigrationsAssembly(typeof(VirtualLabDbContext).Assembly.FullName);
+                            sqlServerOptions.EnableRetryOnFailure();
+                        });
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported VirtualLab provider '{persistenceOptions.Provider}'. Supported providers are Sqlite and SqlServer.");
             }
 
-            options.UseSqlite(
-                persistenceOptions.ConnectionString,
-                sqliteOptions => sqliteOptions.MigrationsAssembly(typeof(VirtualLabDbContext).Assembly.FullName));
             options.ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.PendingModelChangesWarning));
+        });
+
+        services.AddCors(options =>
+        {
+            options.AddPolicy(VirtualLabCorsOptions.PolicyName, policy =>
+            {
+                VirtualLabCorsOptions corsOptions = configuration
+                    .GetSection(VirtualLabCorsOptions.SectionName)
+                    .Get<VirtualLabCorsOptions>()
+                    ?? new VirtualLabCorsOptions();
+
+                string[] allowedOrigins = corsOptions.AllowedOrigins
+                    .Select(origin => origin.Trim().TrimEnd('/'))
+                    .Where(origin => !string.IsNullOrWhiteSpace(origin))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+
+                if (allowedOrigins.Length == 0)
+                {
+                    return;
+                }
+
+                policy.WithOrigins(allowedOrigins)
+                    .AllowAnyHeader()
+                    .AllowAnyMethod()
+                    .AllowCredentials();
+            });
         });
 
         services.AddSingleton<ApiTimingStore>();

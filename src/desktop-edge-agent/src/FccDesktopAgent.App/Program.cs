@@ -5,6 +5,7 @@ using FccDesktopAgent.App.Services;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Runtime;
+using FccDesktopAgent.Core.Security;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -35,6 +36,7 @@ try
 
     builder.Host.UseSerilog((_, cfg) => cfg
         .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+        .Destructure.With<SensitiveDataDestructuringPolicy>()
         .WriteTo.Console()
         .WriteTo.File(path: GetLogPath(), rollingInterval: RollingInterval.Day));
 

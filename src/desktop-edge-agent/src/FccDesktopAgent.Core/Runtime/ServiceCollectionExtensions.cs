@@ -57,10 +57,17 @@ public static class ServiceCollectionExtensions
             client.Timeout = TimeSpan.FromSeconds(10);
         });
 
-        // Named HTTP client for cloud backend calls — longer timeout, internet-facing
+        // Named HTTP client for cloud backend calls — longer timeout, internet-facing.
+        // DEA-6.2: Enforce TLS for all cloud communication.
         services.AddHttpClient("cloud", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(30);
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            // Enforce TLS 1.2+ for all cloud communication (architecture rule: TLS enforced)
+            SslProtocols = System.Security.Authentication.SslProtocols.Tls12
+                         | System.Security.Authentication.SslProtocols.Tls13,
         });
 
         // FCC adapter factory (DEA-2.5: pre-auth handler support)

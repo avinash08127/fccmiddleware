@@ -1,4 +1,5 @@
 using FccDesktopAgent.Core.Adapter.Common;
+using FccDesktopAgent.Core.Security;
 
 namespace FccDesktopAgent.Core.Config;
 
@@ -55,8 +56,10 @@ public sealed class AgentConfiguration
 
     /// <summary>
     /// FCC API key for LAN authentication.
-    /// TODO: Replace with ICredentialStore when DEA security task is implemented.
+    /// Stored in <see cref="ICredentialStore"/> at rest — this in-memory copy is populated
+    /// on startup from the credential store. Never persisted to appsettings or SQLite.
     /// </summary>
+    [SensitiveData]
     public string FccApiKey { get; set; } = string.Empty;
 
     /// <summary>Timeout in seconds for FCC pre-auth calls (default 30s per architecture spec).</summary>

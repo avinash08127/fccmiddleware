@@ -120,18 +120,43 @@ public sealed class InboundAuthSimulationTests
         Assert.Equal(HttpStatusCode.Accepted, authorizedResponse.StatusCode);
         Assert.Contains("\"accepted\":true", responseBody);
     }
+
+    [Fact]
+    public async Task OptionsRequestReturnsCorsHeadersForConfiguredUiOrigin()
+    {
+        using VirtualLabApiFactory factory = new(new Dictionary<string, string?>
+        {
+            ["VirtualLab:Cors:AllowedOrigins:0"] = "https://virtual-lab-ui.example.com",
+        });
+        using HttpClient client = factory.CreateClient();
+        using HttpRequestMessage request = new(HttpMethod.Options, "/fcc/VL-MW-BT001/health");
+
+        request.Headers.Add("Origin", "https://virtual-lab-ui.example.com");
+        request.Headers.Add("Access-Control-Request-Method", "GET");
+
+        using HttpResponseMessage response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal("https://virtual-lab-ui.example.com", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+    }
 }
 
 internal sealed class VirtualLabApiFactory : WebApplicationFactory<Program>
 {
+    private readonly IReadOnlyDictionary<string, string?> configurationOverrides;
     private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"virtual-lab-tests-{Guid.NewGuid():N}.db");
+
+    public VirtualLabApiFactory(IReadOnlyDictionary<string, string?>? configurationOverrides = null)
+    {
+        this.configurationOverrides = configurationOverrides ?? new Dictionary<string, string?>();
+    }
 
     protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
         builder.ConfigureAppConfiguration((_, configurationBuilder) =>
         {
-            configurationBuilder.AddInMemoryCollection(new Dictionary<string, string?>
+            Dictionary<string, string?> settings = new()
             {
                 ["VirtualLab:Persistence:ConnectionString"] = $"Data Source={databasePath}",
                 ["VirtualLab:Seed:ApplyOnStartup"] = "true",
@@ -141,7 +166,14 @@ internal sealed class VirtualLabApiFactory : WebApplicationFactory<Program>
                 ["VirtualLab:Callbacks:RetryDelaysSeconds:0"] = "30",
                 ["VirtualLab:Callbacks:RetryDelaysSeconds:1"] = "30",
                 ["VirtualLab:Callbacks:RequestTimeoutSeconds"] = "2",
-            });
+            };
+
+            foreach ((string key, string? value) in configurationOverrides)
+            {
+                settings[key] = value;
+            }
+
+            configurationBuilder.AddInMemoryCollection(settings);
         });
     }
 

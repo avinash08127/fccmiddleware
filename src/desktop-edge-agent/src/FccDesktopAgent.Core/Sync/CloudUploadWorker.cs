@@ -6,6 +6,7 @@ using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
+using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.Sync.Models;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -121,6 +122,13 @@ public sealed class CloudUploadWorker : ICloudSyncService
         if (token is null)
         {
             _logger.LogWarning("Cloud upload skipped: no device token available (device not yet registered?)");
+            return 0;
+        }
+
+        // DEA-6.2: Enforce HTTPS for cloud communication
+        if (!CloudUrlGuard.IsSecure(config.CloudBaseUrl))
+        {
+            _logger.LogWarning("Cloud upload blocked: CloudBaseUrl {Url} does not use HTTPS", config.CloudBaseUrl);
             return 0;
         }
 

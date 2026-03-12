@@ -293,7 +293,9 @@ class CloudUploadWorker(
         try {
             when (val result = client.submitTelemetry(payload, token)) {
                 is CloudTelemetryResult.Success -> {
-                    reporter.resetErrorCounts()
+                    // M-05: Use atomic snapshot+reset so no increments are lost between
+                    // the read in buildPayload() and the reset here.
+                    reporter.snapshotAndResetErrorCounts()
                     Log.i(TAG, "Telemetry submitted (seq=${payload.sequenceNumber})")
                 }
 
@@ -306,7 +308,7 @@ class CloudUploadWorker(
                         if (freshToken != null) {
                             when (client.submitTelemetry(payload, freshToken)) {
                                 is CloudTelemetryResult.Success -> {
-                                    reporter.resetErrorCounts()
+                                    reporter.snapshotAndResetErrorCounts()
                                     Log.i(TAG, "Telemetry submitted after token refresh (seq=${payload.sequenceNumber})")
                                 }
                                 else -> {
@@ -364,8 +366,10 @@ class CloudUploadWorker(
                 }
                 val freshToken = provider.getAccessToken()
                 if (freshToken == null) {
-                    Log.e(TAG, "Token refresh succeeded but getAccessToken() returned null")
-                    return StatusPollAttemptResult.TransportFailure("401 Unauthorized — no token after refresh")
+                    // M-04: Critical state bug — refresh reported success but token store is empty/corrupt
+                    Log.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
+                    telemetryReporter?.cloudAuthErrors?.incrementAndGet()
+                    return StatusPollAttemptResult.TransportFailure("CRITICAL: token store inconsistency — refresh succeeded but no token available")
                 }
                 Log.i(TAG, "Token refreshed; retrying status poll")
                 when (val retryResult = client.getSyncedStatus(ids, freshToken)) {
@@ -470,11 +474,16 @@ class CloudUploadWorker(
                     Log.d(TAG, "Status poll returned no actionable entries")
                 }
 
-                statusPollBackoffMutex.withLock {
-                    statusPollConsecutiveFailureCount = 0
-                    statusPollNextRetryAt = Instant.EPOCH
+                // M-03: Write SyncState before resetting in-memory backoff (same rationale as upload)
+                val dbWriteSucceeded = updateLastStatusPollAt()
+                if (dbWriteSucceeded) {
+                    statusPollBackoffMutex.withLock {
+                        statusPollConsecutiveFailureCount = 0
+                        statusPollNextRetryAt = Instant.EPOCH
+                    }
+                } else {
+                    Log.w(TAG, "SyncState write failed after successful status poll; backoff NOT reset")
                 }
-                updateLastStatusPollAt()
             }
 
             is StatusPollAttemptResult.Decommissioned -> {
@@ -500,11 +509,11 @@ class CloudUploadWorker(
         }
     }
 
-    /** Update [SyncState.lastStatusPollAt] after a successful status poll. */
-    private suspend fun updateLastStatusPollAt() {
-        val dao = syncStateDao ?: return
+    /** Update [SyncState.lastStatusPollAt] after a successful status poll. Returns true on success. */
+    private suspend fun updateLastStatusPollAt(): Boolean {
+        val dao = syncStateDao ?: return false
         val now = Instant.now().toString()
-        try {
+        return try {
             val current = dao.get()
             val updated = current?.copy(lastStatusPollAt = now, updatedAt = now)
                 ?: SyncState(
@@ -516,8 +525,10 @@ class CloudUploadWorker(
                     updatedAt = now,
                 )
             dao.upsert(updated)
+            true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update lastStatusPollAt in SyncState", e)
+            false
         }
     }
 
@@ -550,8 +561,12 @@ class CloudUploadWorker(
                 }
                 val freshToken = provider.getAccessToken()
                 if (freshToken == null) {
-                    Log.e(TAG, "Token refresh succeeded but getAccessToken() returned null")
-                    return UploadAttemptResult.TransportFailure("401 Unauthorized — no token after refresh")
+                    // M-04: This is a critical internal state bug — refresh reported success but
+                    // the token store is empty/corrupt. Escalate via telemetry and do NOT apply
+                    // transport backoff since the problem is local, not network-related.
+                    Log.e(TAG, "CRITICAL: Token refresh succeeded but getAccessToken() returned null — token store may be corrupt")
+                    telemetryReporter?.cloudAuthErrors?.incrementAndGet()
+                    return UploadAttemptResult.TransportFailure("CRITICAL: token store inconsistency — refresh succeeded but no token available")
                 }
                 Log.i(TAG, "Token refreshed; retrying upload batch")
                 when (val retryResult = client.uploadBatch(request, freshToken)) {
@@ -587,11 +602,22 @@ class CloudUploadWorker(
         when (result) {
             is UploadAttemptResult.Success -> {
                 processUploadResponse(bm, batch, result.response)
-                backoffMutex.withLock {
-                    consecutiveFailureCount = 0
-                    nextRetryAt = Instant.EPOCH
+                // M-03: Write SyncState to disk BEFORE resetting in-memory backoff counters.
+                // If the process crashes after an in-memory reset but before the DB write,
+                // on restart the counters re-initialize to 0/EPOCH anyway (harmless), but
+                // SyncState.lastUploadAt would be stale. Writing first ensures the durable
+                // state is consistent before we loosen the in-memory guard.
+                val dbWriteSucceeded = updateLastUploadAt()
+                if (dbWriteSucceeded) {
+                    backoffMutex.withLock {
+                        consecutiveFailureCount = 0
+                        nextRetryAt = Instant.EPOCH
+                    }
+                } else {
+                    // DB write failed — keep backoff active so the next tick retries the write.
+                    // The batch itself was accepted by cloud, so records are already UPLOADED.
+                    Log.w(TAG, "SyncState write failed after successful upload; backoff NOT reset")
                 }
-                updateLastUploadAt()
             }
 
             is UploadAttemptResult.Decommissioned -> {
@@ -786,11 +812,11 @@ class CloudUploadWorker(
         return minOf(exponential, config.maxBackoffMs)
     }
 
-    /** Update [SyncState.lastUploadAt] after a successful batch upload. */
-    private suspend fun updateLastUploadAt() {
-        val dao = syncStateDao ?: return
+    /** Update [SyncState.lastUploadAt] after a successful batch upload. Returns true on success. */
+    private suspend fun updateLastUploadAt(): Boolean {
+        val dao = syncStateDao ?: return false
         val now = Instant.now().toString()
-        try {
+        return try {
             val current = dao.get()
             val updated = current?.copy(lastUploadAt = now, updatedAt = now)
                 ?: SyncState(
@@ -802,8 +828,10 @@ class CloudUploadWorker(
                     updatedAt = now,
                 )
             dao.upsert(updated)
+            true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update lastUploadAt in SyncState", e)
+            false
         }
     }
 

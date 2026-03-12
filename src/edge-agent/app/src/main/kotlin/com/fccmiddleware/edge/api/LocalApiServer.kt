@@ -156,8 +156,19 @@ class LocalApiServer(
 
     private fun Application.configureRouting() {
         routing {
-            transactionRoutes(transactionDao, ingestionOrchestrator, connectivityManager)
-            preAuthRoutes(preAuthHandler, connectivityManager)
+            transactionRoutes(
+                dao = transactionDao,
+                ingestionOrchestrator = ingestionOrchestrator,
+                connectivityManager = connectivityManager,
+                lanApiKey = config.lanApiKey,
+                enableLanApi = config.enableLanApi,
+            )
+            preAuthRoutes(
+                handler = preAuthHandler,
+                connectivityManager = connectivityManager,
+                lanApiKey = config.lanApiKey,
+                enableLanApi = config.enableLanApi,
+            )
             pumpStatusRoutes(pumpStatusCache)
             statusRoutes(
                 connectivityManager = connectivityManager,
@@ -170,6 +181,76 @@ class LocalApiServer(
             )
         }
     }
+}
+
+// -------------------------------------------------------------------------
+// Route-level auth verification (defense-in-depth)
+// -------------------------------------------------------------------------
+
+/**
+ * Defense-in-depth auth check callable from individual route handlers.
+ *
+ * Returns true if the request is authorized (localhost or valid API key).
+ * If unauthorized, responds with 401 and returns false — the caller must `return`.
+ *
+ * This supplements the global [LanApiKeyAuthPlugin] so that even if the global
+ * plugin is misconfigured or bypassed, each route independently verifies access.
+ */
+internal suspend fun routeRequiresAuth(
+    call: io.ktor.server.application.ApplicationCall,
+    lanApiKey: String?,
+    enableLanApi: Boolean,
+): Boolean {
+    val remoteAddress = call.request.origin.remoteHost
+    val isLocalhost = remoteAddress == "127.0.0.1" ||
+        remoteAddress == "::1" ||
+        remoteAddress == "0:0:0:0:0:0:0:1"
+
+    // Localhost is always trusted (same-device Odoo POS)
+    if (isLocalhost) return true
+
+    // Non-localhost: LAN mode must be enabled AND key must match
+    if (!enableLanApi) {
+        call.respond(
+            HttpStatusCode.Forbidden,
+            ErrorResponse(
+                errorCode = "LAN_ACCESS_DISABLED",
+                message = "LAN access is not enabled on this agent",
+                traceId = UUID.randomUUID().toString(),
+                timestamp = Instant.now().toString(),
+            )
+        )
+        return false
+    }
+
+    if (lanApiKey == null) {
+        call.respond(
+            HttpStatusCode.Forbidden,
+            ErrorResponse(
+                errorCode = "LAN_API_KEY_NOT_CONFIGURED",
+                message = "LAN access is enabled but no API key is configured",
+                traceId = UUID.randomUUID().toString(),
+                timestamp = Instant.now().toString(),
+            )
+        )
+        return false
+    }
+
+    val headerKey = call.request.headers["X-Api-Key"]
+    if (headerKey == null || !lanApiKeyEquals(headerKey, lanApiKey)) {
+        call.respond(
+            HttpStatusCode.Unauthorized,
+            ErrorResponse(
+                errorCode = "UNAUTHORIZED",
+                message = "Valid X-Api-Key header required for LAN access",
+                traceId = UUID.randomUUID().toString(),
+                timestamp = Instant.now().toString(),
+            )
+        )
+        return false
+    }
+
+    return true
 }
 
 // -------------------------------------------------------------------------

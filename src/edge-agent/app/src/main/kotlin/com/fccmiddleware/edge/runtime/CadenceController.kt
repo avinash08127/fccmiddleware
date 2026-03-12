@@ -51,6 +51,8 @@ class CadenceController(
     private val configPollWorker: ConfigPollWorker? = null,
     /** Pre-auth cloud forward worker — forwards unsynced pre-auth records to cloud. */
     private val preAuthCloudForwardWorker: PreAuthCloudForwardWorker? = null,
+    /** Token provider — checked between worker calls to short-circuit on decommission. */
+    private val tokenProvider: com.fccmiddleware.edge.sync.DeviceTokenProvider? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) : ConnectivityTransitionListener {
 
@@ -193,15 +195,30 @@ class CadenceController(
         }
     }
 
+    /**
+     * M-02: Check decommission state between worker calls so that when one worker
+     * detects decommission mid-tick, remaining workers are immediately skipped
+     * instead of continuing until their own internal check on the next tick.
+     */
+    private fun isDecommissioned(): Boolean = tokenProvider?.isDecommissioned() == true
+
     private suspend fun runTick(state: ConnectivityState, backlogDepth: Int) {
+        if (isDecommissioned()) {
+            Log.w(TAG, "runTick() skipped — device decommissioned")
+            return
+        }
+
         when (state) {
             ConnectivityState.FULLY_ONLINE -> {
                 ingestionOrchestrator.poll()
                 cloudUploadWorker.uploadPendingBatch()
+                if (isDecommissioned()) return
                 preAuthCloudForwardWorker?.forwardUnsyncedPreAuths()
+                if (isDecommissioned()) return
                 if (tickCount % config.syncedToOdooTickFrequency == 0L) {
                     // SYNCED_TO_ODOO polling shares the cadence loop with cloud health checks
                     cloudUploadWorker.pollSyncedToOdooStatus()
+                    if (isDecommissioned()) return
                 }
                 if (tickCount % config.telemetryTickFrequency == 0L) {
                     // Telemetry piggybacks on a successful cloud cycle
@@ -218,9 +235,12 @@ class CadenceController(
             ConnectivityState.FCC_UNREACHABLE -> {
                 // FCC unreachable: internet up — upload existing buffer, sync status from cloud
                 cloudUploadWorker.uploadPendingBatch()
+                if (isDecommissioned()) return
                 preAuthCloudForwardWorker?.forwardUnsyncedPreAuths()
+                if (isDecommissioned()) return
                 if (tickCount % config.syncedToOdooTickFrequency == 0L) {
                     cloudUploadWorker.pollSyncedToOdooStatus()
+                    if (isDecommissioned()) return
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
                     configPollWorker?.pollConfig()

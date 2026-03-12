@@ -29,6 +29,8 @@ fun Routing.transactionRoutes(
     dao: TransactionBufferDao,
     ingestionOrchestrator: IngestionOrchestrator? = null,
     connectivityManager: ConnectivityManager? = null,
+    lanApiKey: String? = null,
+    enableLanApi: Boolean = false,
 ) {
 
     /**
@@ -41,6 +43,7 @@ fun Routing.transactionRoutes(
      *   offset     (Int, default 0)
      */
     get("/api/v1/transactions") {
+        if (!routeRequiresAuth(call, lanApiKey, enableLanApi)) return@get
         val pumpNumber = call.request.queryParameters["pumpNumber"]?.toIntOrNull()
         val sinceParam = call.request.queryParameters["since"]
         val limit = (call.request.queryParameters["limit"]?.toIntOrNull() ?: 50).coerceIn(1, 100)
@@ -93,6 +96,7 @@ fun Routing.transactionRoutes(
      * Returns full transaction detail. 404 if not found.
      */
     get("/api/v1/transactions/{id}") {
+        if (!routeRequiresAuth(call, lanApiKey, enableLanApi)) return@get
         val id = call.parameters["id"] ?: run {
             call.respond(
                 HttpStatusCode.BadRequest,
@@ -131,6 +135,7 @@ fun Routing.transactionRoutes(
      * Idempotent: always returns 200 with count of recognized IDs.
      */
     post("/api/v1/transactions/acknowledge") {
+        if (!routeRequiresAuth(call, lanApiKey, enableLanApi)) return@post
         val request = try {
             call.receive<BatchAcknowledgeRequest>()
         } catch (_: Exception) {
@@ -173,6 +178,7 @@ fun Routing.transactionRoutes(
      *   503 — FCC is unreachable or ingestion is not yet configured.
      */
     post("/api/v1/transactions/pull") {
+        if (!routeRequiresAuth(call, lanApiKey, enableLanApi)) return@post
         // Check FCC reachability via ConnectivityManager when available
         val cm = connectivityManager
         if (cm != null) {

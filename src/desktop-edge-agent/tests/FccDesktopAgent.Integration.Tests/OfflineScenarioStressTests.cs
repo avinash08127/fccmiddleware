@@ -167,7 +167,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             new TestHttpClientFactory(handler),
             Options.Create(new AgentConfiguration
             {
-                CloudBaseUrl = "http://cloud.test",
+                CloudBaseUrl = "https://cloud.test",
                 SiteId = "SITE-A",
                 UploadBatchSize = 50,
             }),
@@ -802,7 +802,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
         var mgr = new ConnectivityManager(
             _ => Task.FromResult(true),
             _ => Task.FromResult(true),
-            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "http://test" }),
+            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
             NullLogger<ConnectivityManager>.Instance);
 
         await mgr.RunSingleCycleAsync(CancellationToken.None);
@@ -815,7 +815,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
         var mgr2 = new ConnectivityManager(
             _ => Task.FromResult(internetResults.Count > 0 ? internetResults.Dequeue() : false),
             _ => Task.FromResult(true),
-            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "http://test" }),
+            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
             NullLogger<ConnectivityManager>.Instance);
 
         // Initial cycle to establish UP state first.
@@ -827,7 +827,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
         var mgr3 = new ConnectivityManager(
             _ => Task.FromResult(iResults.Dequeue()),
             _ => Task.FromResult(true),
-            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "http://test" }),
+            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
             NullLogger<ConnectivityManager>.Instance);
 
         var stateChanges = new List<ConnectivityState>();

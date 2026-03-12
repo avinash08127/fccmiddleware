@@ -1,7 +1,7 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
-import { environment } from '../../../environments/environment';
+import { runtimeConfig } from '../config/runtime-config';
 
 export type SimulatedAuthMode = 'None' | 'ApiKey' | 'BasicAuth';
 export type TransactionDeliveryMode = 'Push' | 'Pull' | 'Hybrid';
@@ -1237,6 +1237,6 @@ export class LabApiService {
   }
 
   private url(path: string): string {
-    return `${environment.apiBaseUrl}${path}`;
+    return `${runtimeConfig.apiBaseUrl}${path}`;
   }
 }

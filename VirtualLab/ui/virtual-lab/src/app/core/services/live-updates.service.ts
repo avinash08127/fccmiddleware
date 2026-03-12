@@ -1,7 +1,7 @@
 import { Injectable, signal } from '@angular/core';
 import { HubConnection, HubConnectionBuilder, HubConnectionState } from '@microsoft/signalr';
 import { Observable, Subject } from 'rxjs';
-import { environment } from '../../../environments/environment';
+import { runtimeConfig } from '../config/runtime-config';
 import {
   type NozzleSimulationSnapshot,
   type PreAuthSessionRecord,
@@ -60,7 +60,7 @@ export class LiveUpdatesService {
 
     this.connectionState.set('connecting');
     this.connection = new HubConnectionBuilder()
-      .withUrl(environment.signalRHubUrl)
+      .withUrl(runtimeConfig.signalRHubUrl)
       .withAutomaticReconnect()
       .build();
 

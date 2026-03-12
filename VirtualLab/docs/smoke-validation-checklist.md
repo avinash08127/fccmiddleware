@@ -15,7 +15,8 @@
 ## Azure-hosted smoke run
 
 - [ ] API configuration points at the intended database provider and environment name.
-- [ ] UI environment points at the Azure API origin and SignalR hub origin.
+- [ ] Azure Web App app settings include the intended `VirtualLab__Persistence__*` values and `VirtualLab__Cors__AllowedOrigins__*` entries.
+- [ ] UI `assets/config/runtime-config.json` points at the Azure API origin and SignalR hub origin.
 - [ ] Seed/reset path uses the default benchmark profile or an explicitly documented override.
 - [ ] `/healthz` succeeds from the Azure-hosted deployment.
 - [ ] Diagnostics latency probe runs against the hosted API and stays within the same guardrails unless a deployment note documents a justified variance.

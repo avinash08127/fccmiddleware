@@ -8,6 +8,7 @@ import com.fccmiddleware.edge.adapter.common.IngestionMode
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.SyncState
+import android.os.SystemClock
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
@@ -86,13 +87,14 @@ class IngestionOrchestrator(
     }
 
     /**
-     * Wall-clock time of the last completed scheduled poll.
-     * Used for CLOUD_DIRECT interval gating inside [poll].
+     * Monotonic elapsed-realtime millis of the last completed scheduled poll.
+     * Uses [SystemClock.elapsedRealtime] so system clock adjustments (NTP, user,
+     * daylight-saving) cannot make the elapsed interval negative or skip polls.
      * Volatile so the CadenceController coroutine and a concurrent [pollNow] see a
      * consistent value; not a full mutex since double-polling is safe (cloud dedup handles it).
      */
     @Volatile
-    internal var lastScheduledPollAt: Instant? = null
+    internal var lastScheduledPollElapsedMs: Long? = null
 
     /**
      * Mutex that serializes [poll] and [pollNow] so manual and scheduled polls
@@ -127,9 +129,10 @@ class IngestionOrchestrator(
         }
 
         if (fccConfig.ingestionMode == IngestionMode.CLOUD_DIRECT) {
-            val last = lastScheduledPollAt
+            val last = lastScheduledPollElapsedMs
             if (last != null) {
-                val elapsedMs = Instant.now().toEpochMilli() - last.toEpochMilli()
+                val nowMonotonic = SystemClock.elapsedRealtime()
+                val elapsedMs = nowMonotonic - last
                 if (elapsedMs < CLOUD_DIRECT_MIN_POLL_INTERVAL_MS) {
                     Log.d(
                         TAG,
@@ -144,7 +147,7 @@ class IngestionOrchestrator(
         pollMutex.withLock {
             doPoll(fccAdapter, fccConfig, pumpNumber = null, isManual = false)
         }
-        lastScheduledPollAt = Instant.now()
+        lastScheduledPollElapsedMs = SystemClock.elapsedRealtime()
     }
 
     /**

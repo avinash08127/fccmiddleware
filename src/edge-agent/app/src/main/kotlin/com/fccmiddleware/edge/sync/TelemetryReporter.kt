@@ -13,6 +13,8 @@ import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
@@ -49,6 +51,12 @@ class TelemetryReporter(
     companion object {
         private const val TAG = "TelemetryReporter"
     }
+
+    /**
+     * Mutex serializing [nextSequenceNumber] so concurrent callers cannot
+     * read-increment-persist the same sequence value (prevents duplicate sequence numbers).
+     */
+    private val sequenceMutex = Mutex()
 
     // -------------------------------------------------------------------------
     // Error counters — accumulated since last successful telemetry submission.
@@ -100,6 +108,10 @@ class TelemetryReporter(
     /**
      * Reset all error counters to zero.
      * Called after a successful telemetry submission (HTTP 204).
+     *
+     * @deprecated Prefer [snapshotAndResetErrorCounts] which atomically captures and resets
+     * each counter via getAndSet(0), preventing increments between snapshot and reset from
+     * being silently lost. Retained for backward compatibility where reset-only is needed.
      */
     fun resetErrorCounts() {
         fccConnectionErrors.set(0)
@@ -110,6 +122,21 @@ class TelemetryReporter(
         adapterNormalizationErrors.set(0)
         preAuthErrors.set(0)
     }
+
+    /**
+     * M-05: Atomically snapshot and reset all error counters in one pass.
+     * Uses getAndSet(0) on each AtomicInteger so increments that land between
+     * individual counter reads are captured in the snapshot (not silently lost).
+     */
+    fun snapshotAndResetErrorCounts(): ErrorCountsDto = ErrorCountsDto(
+        fccConnectionErrors = fccConnectionErrors.getAndSet(0),
+        cloudUploadErrors = cloudUploadErrors.getAndSet(0),
+        cloudAuthErrors = cloudAuthErrors.getAndSet(0),
+        localApiErrors = localApiErrors.getAndSet(0),
+        bufferWriteErrors = bufferWriteErrors.getAndSet(0),
+        adapterNormalizationErrors = adapterNormalizationErrors.getAndSet(0),
+        preAuthErrors = preAuthErrors.getAndSet(0),
+    )
 
     // -------------------------------------------------------------------------
     // Device metrics
@@ -271,7 +298,12 @@ class TelemetryReporter(
     // Error counts snapshot
     // -------------------------------------------------------------------------
 
-    private fun snapshotErrorCounts(): ErrorCountsDto = ErrorCountsDto(
+    /**
+     * Read-only snapshot of current error counts (does not reset).
+     * Used by [buildPayload] to assemble the telemetry payload.
+     * The actual reset happens via [snapshotAndResetErrorCounts] after successful submission.
+     */
+    internal fun snapshotErrorCounts(): ErrorCountsDto = ErrorCountsDto(
         fccConnectionErrors = fccConnectionErrors.get(),
         cloudUploadErrors = cloudUploadErrors.get(),
         cloudAuthErrors = cloudAuthErrors.get(),
@@ -285,8 +317,8 @@ class TelemetryReporter(
     // Sequence number (monotonic, persisted in SyncState)
     // -------------------------------------------------------------------------
 
-    private suspend fun nextSequenceNumber(): Long {
-        return try {
+    private suspend fun nextSequenceNumber(): Long = sequenceMutex.withLock {
+        try {
             val current = syncStateDao.get()
             val next = (current?.telemetrySequence ?: 0L) + 1L
             val now = Instant.now().toString()
