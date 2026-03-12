@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -28,6 +29,7 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
     public async Task<MasterDataSyncResult> Handle(SyncLegalEntitiesCommand command, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
+        var errors = new List<string>();
         var incomingIds = command.Items.Select(i => i.Id).ToList();
 
         var existing = await _db.GetLegalEntitiesByIdsAsync(incomingIds, ct);
@@ -37,11 +39,14 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
 
         foreach (var item in command.Items)
         {
+            if (!TryParseFiscalizationMode(item, errors, out var defaultMode))
+                continue;
+
             if (byId.TryGetValue(item.Id, out var entity))
             {
-                if (HasChanges(entity, item))
+                if (HasChanges(entity, item, defaultMode))
                 {
-                    ApplyChanges(entity, item, now);
+                    ApplyChanges(entity, item, defaultMode, now);
                     upserted++;
                 }
                 else
@@ -52,7 +57,7 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
             }
             else
             {
-                _db.AddLegalEntity(CreateNew(item, now));
+                _db.AddLegalEntity(CreateNew(item, defaultMode, now));
                 upserted++;
             }
         }
@@ -92,42 +97,84 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
         {
             UpsertedCount    = upserted,
             UnchangedCount   = unchanged,
-            DeactivatedCount = deactivated
+            DeactivatedCount = deactivated,
+            ErrorCount       = errors.Count,
+            Errors           = errors
         };
     }
 
-    private static bool HasChanges(LegalEntity e, LegalEntitySyncItem i) =>
-        e.CountryCode  != i.Code     ||
-        e.Name         != i.Name     ||
-        e.CurrencyCode != i.CurrencyCode ||
-        e.IsActive     != i.IsActive;
+    private static bool HasChanges(LegalEntity e, LegalEntitySyncItem i, FiscalizationMode defaultMode) =>
+        e.CountryCode               != i.Code ||
+        e.Name                      != i.Name ||
+        e.CurrencyCode              != i.CurrencyCode ||
+        e.TaxAuthorityCode          != i.TaxAuthorityCode ||
+        e.DefaultFiscalizationMode  != defaultMode ||
+        e.FiscalizationProvider     != i.FiscalizationProvider ||
+        e.DefaultTimezone           != i.DefaultTimezone ||
+        e.IsActive                  != i.IsActive;
 
-    private static void ApplyChanges(LegalEntity e, LegalEntitySyncItem i, DateTimeOffset now)
+    private static void ApplyChanges(LegalEntity e, LegalEntitySyncItem i, FiscalizationMode defaultMode, DateTimeOffset now)
     {
-        e.CountryCode  = i.Code;
-        e.Name         = i.Name;
-        e.CurrencyCode = i.CurrencyCode;
-        e.IsActive     = i.IsActive;
-        if (!i.IsActive) e.DeactivatedAt = now;
+        e.CountryCode              = i.Code;
+        e.Name                     = i.Name;
+        e.CurrencyCode             = i.CurrencyCode;
+        e.TaxAuthorityCode         = i.TaxAuthorityCode;
+        e.DefaultFiscalizationMode = defaultMode;
+        e.FiscalizationProvider    = NormalizeOptional(i.FiscalizationProvider);
+        e.DefaultTimezone          = i.DefaultTimezone;
+        e.IsActive                 = i.IsActive;
+        e.DeactivatedAt            = i.IsActive ? null : now;
         e.SyncedAt  = now;
         e.UpdatedAt = now;
     }
 
-    private static LegalEntity CreateNew(LegalEntitySyncItem i, DateTimeOffset now) => new()
+    private static LegalEntity CreateNew(LegalEntitySyncItem i, FiscalizationMode defaultMode, DateTimeOffset now) => new()
     {
-        Id                    = i.Id,
-        CountryCode           = i.Code,
-        Name                  = i.Name,
-        CurrencyCode          = i.CurrencyCode,
-        TaxAuthorityCode      = string.Empty,
-        FiscalizationRequired = false,
-        DefaultTimezone       = "UTC",
-        IsActive              = i.IsActive,
-        DeactivatedAt         = i.IsActive ? null : now,
-        SyncedAt              = now,
-        CreatedAt             = now,
-        UpdatedAt             = now
+        Id                       = i.Id,
+        CountryCode              = i.Code,
+        Name                     = i.Name,
+        CurrencyCode             = i.CurrencyCode,
+        TaxAuthorityCode         = i.TaxAuthorityCode,
+        DefaultFiscalizationMode = defaultMode,
+        FiscalizationProvider    = NormalizeOptional(i.FiscalizationProvider),
+        DefaultTimezone          = i.DefaultTimezone,
+        IsActive                 = i.IsActive,
+        DeactivatedAt            = i.IsActive ? null : now,
+        SyncedAt                 = now,
+        CreatedAt                = now,
+        UpdatedAt                = now
     };
+
+    private static bool TryParseFiscalizationMode(
+        LegalEntitySyncItem item,
+        List<string> errors,
+        out FiscalizationMode mode)
+    {
+        if (string.IsNullOrWhiteSpace(item.TaxAuthorityCode))
+        {
+            errors.Add($"Legal entity {item.Id}: taxAuthorityCode is required.");
+            mode = default;
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(item.DefaultTimezone))
+        {
+            errors.Add($"Legal entity {item.Id}: defaultTimezone is required.");
+            mode = default;
+            return false;
+        }
+
+        if (!Enum.TryParse<FiscalizationMode>(item.DefaultFiscalizationMode, true, out mode))
+        {
+            errors.Add($"Legal entity {item.Id}: unknown defaultFiscalizationMode '{item.DefaultFiscalizationMode}'.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string? NormalizeOptional(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static OutboxMessage BuildOutboxMessage(string eventType, int total, int upserted, int deactivated, DateTimeOffset now) =>
         new()

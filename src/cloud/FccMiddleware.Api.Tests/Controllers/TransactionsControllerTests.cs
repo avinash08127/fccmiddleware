@@ -1,8 +1,10 @@
+using System.Security.Claims;
 using System.Text.Json;
 using FccMiddleware.Api.Controllers;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.Observability;
+using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Ingestion;
 using FccMiddleware.Domain.Enums;
 using MediatR;
@@ -16,6 +18,7 @@ namespace FccMiddleware.Api.Tests.Controllers;
 public sealed class TransactionsControllerTests
 {
     private readonly IMediator _mediator = Substitute.For<IMediator>();
+    private readonly ISiteFccConfigProvider _siteFccConfigProvider = Substitute.For<ISiteFccConfigProvider>();
     private readonly ILogger<TransactionsController> _logger = Substitute.For<ILogger<TransactionsController>>();
     private readonly IObservabilityMetrics _metrics = Substitute.For<IObservabilityMetrics>();
 
@@ -158,13 +161,85 @@ public sealed class TransactionsControllerTests
         response.Results[1].FccTransactionId.Should().BeNull();
     }
 
-    private TransactionsController CreateController()
+    [Fact]
+    public async Task Ingest_WithScopedSiteClaimMismatch_ReturnsForbidden_AndDoesNotSendCommand()
     {
-        var controller = new TransactionsController(_mediator, _logger, _metrics)
+        var controller = CreateController(
+            new Claim("site", "SITE-ALLOWED"));
+
+        var request = new IngestRequest
+        {
+            FccVendor = "DOMS",
+            SiteCode = "SITE-BLOCKED",
+            CapturedAt = DateTimeOffset.Parse("2026-03-11T14:25:00Z"),
+            RawPayload = ParseJson("""{ "transactionId": "TX-3001" }""")
+        };
+
+        var actionResult = await controller.Ingest(request, CancellationToken.None);
+
+        var forbidden = actionResult.Should().BeOfType<ObjectResult>().Subject;
+        forbidden.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
+        var error = forbidden.Value.Should().BeOfType<ErrorResponse>().Subject;
+        error.ErrorCode.Should().Be("FORBIDDEN.SITE_SCOPE");
+
+        await _mediator.DidNotReceive().Send(Arg.Any<IngestTransactionCommand>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Ingest_WithScopedLeiClaimMismatch_ReturnsForbidden_AndDoesNotSendCommand()
+    {
+        var credentialLei = Guid.Parse("40000000-0000-0000-0000-000000000001");
+        var requestLei = Guid.Parse("40000000-0000-0000-0000-000000000002");
+
+        _siteFccConfigProvider.GetBySiteCodeAsync("SITE-001", Arg.Any<CancellationToken>())
+            .Returns((new Domain.Models.Adapter.SiteFccConfig
+            {
+                SiteCode = "SITE-001",
+                FccVendor = FccVendor.DOMS,
+                ConnectionProtocol = ConnectionProtocol.REST,
+                HostAddress = "127.0.0.1",
+                Port = 8080,
+                ApiKey = string.Empty,
+                IngestionMethod = IngestionMethod.PUSH,
+                CurrencyCode = "GHS",
+                Timezone = "UTC",
+                PumpNumberOffset = 0,
+                ProductCodeMapping = new Dictionary<string, string>()
+            }, requestLei));
+
+        var controller = CreateController(
+            new Claim("lei", credentialLei.ToString()));
+
+        var request = new IngestRequest
+        {
+            FccVendor = "DOMS",
+            SiteCode = "SITE-001",
+            CapturedAt = DateTimeOffset.Parse("2026-03-11T14:25:00Z"),
+            RawPayload = ParseJson("""{ "transactionId": "TX-3002" }""")
+        };
+
+        var actionResult = await controller.Ingest(request, CancellationToken.None);
+
+        var forbidden = actionResult.Should().BeOfType<ObjectResult>().Subject;
+        forbidden.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
+        var error = forbidden.Value.Should().BeOfType<ErrorResponse>().Subject;
+        error.ErrorCode.Should().Be("FORBIDDEN.LEGAL_ENTITY_SCOPE");
+
+        await _mediator.DidNotReceive().Send(Arg.Any<IngestTransactionCommand>(), Arg.Any<CancellationToken>());
+    }
+
+    private TransactionsController CreateController(params Claim[] claims)
+    {
+        var controller = new TransactionsController(_mediator, _siteFccConfigProvider, _logger, _metrics)
         {
             ControllerContext = new ControllerContext
             {
-                HttpContext = new DefaultHttpContext()
+                HttpContext = new DefaultHttpContext
+                {
+                    User = claims.Length == 0
+                        ? new ClaimsPrincipal(new ClaimsIdentity())
+                        : new ClaimsPrincipal(new ClaimsIdentity(claims, "test"))
+                }
             }
         };
 

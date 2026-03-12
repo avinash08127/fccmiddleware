@@ -1,3 +1,5 @@
+using FccMiddleware.Domain.Enums;
+
 namespace FccMiddleware.Domain.Entities;
 
 /// <summary>
@@ -12,7 +14,7 @@ public class LegalEntity
     public string Name { get; set; } = null!;
     public string CurrencyCode { get; set; } = null!;
     public string TaxAuthorityCode { get; set; } = null!;
-    public bool FiscalizationRequired { get; set; }
+    public FiscalizationMode DefaultFiscalizationMode { get; set; } = FiscalizationMode.NONE;
     public string? FiscalizationProvider { get; set; }
     public string DefaultTimezone { get; set; } = null!;
     public decimal? AmountTolerancePercent { get; set; }
@@ -23,6 +25,13 @@ public class LegalEntity
     public DateTimeOffset SyncedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+
+    // Backward-compatible convenience property used throughout existing code/tests.
+    public bool FiscalizationRequired
+    {
+        get => DefaultFiscalizationMode != FiscalizationMode.NONE;
+        set => DefaultFiscalizationMode = value ? FiscalizationMode.FCC_DIRECT : FiscalizationMode.NONE;
+    }
 
     // Navigation properties
     public ICollection<Site> Sites { get; set; } = [];

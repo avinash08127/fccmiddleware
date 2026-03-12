@@ -53,27 +53,32 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
                 continue;
             }
 
+            if (!item.FccPumpNumber.HasValue)
+            {
+                errors.Add($"Pump {item.Id}: fccPumpNumber is required.");
+                continue;
+            }
+
             Pump pump;
             bool pumpChanged;
 
             if (pumpById.TryGetValue(item.Id, out var existing))
             {
-                pumpChanged = existing.PumpNumber != item.PumpNumber
-                           || existing.IsActive   != item.IsActive;
+                pumpChanged = existing.SiteId        != site.Id
+                           || existing.LegalEntityId != site.LegalEntityId
+                           || existing.PumpNumber    != item.PumpNumber
+                           || existing.FccPumpNumber != item.FccPumpNumber.Value
+                           || existing.IsActive      != item.IsActive;
 
                 if (pumpChanged)
                 {
+                    existing.SiteId        = site.Id;
+                    existing.LegalEntityId = site.LegalEntityId;
                     existing.PumpNumber    = item.PumpNumber;
-                    existing.FccPumpNumber = item.PumpNumber; // default 1-to-1 mapping
+                    existing.FccPumpNumber = item.FccPumpNumber.Value;
                     existing.IsActive      = item.IsActive;
                     existing.SyncedAt      = now;
                     existing.UpdatedAt     = now;
-                    upserted++;
-                }
-                else
-                {
-                    existing.SyncedAt = now;
-                    unchanged++;
                 }
 
                 pump = existing;
@@ -86,19 +91,29 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
                     SiteId         = site.Id,
                     LegalEntityId  = site.LegalEntityId,
                     PumpNumber     = item.PumpNumber,
-                    FccPumpNumber  = item.PumpNumber,
+                    FccPumpNumber  = item.FccPumpNumber.Value,
                     IsActive       = item.IsActive,
                     SyncedAt       = now,
                     CreatedAt      = now,
                     UpdatedAt      = now
                 };
                 _db.AddPump(pump);
-                upserted++;
                 pumpChanged = true;
             }
 
             // Sync nozzles for this pump.
-            await SyncNozzlesAsync(pump, item.Nozzles, nozzlesByPump, now, errors, ct);
+            var nozzlesChanged = await SyncNozzlesAsync(pump, item.Nozzles, nozzlesByPump, now, errors, ct);
+
+            if (pumpChanged || nozzlesChanged)
+            {
+                pump.SyncedAt = now;
+                upserted++;
+            }
+            else
+            {
+                pump.SyncedAt = now;
+                unchanged++;
+            }
         }
 
         int deactivated  = 0;
@@ -148,7 +163,7 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
         };
     }
 
-    private async Task SyncNozzlesAsync(
+    private async Task<bool> SyncNozzlesAsync(
         Pump pump,
         List<NozzleSyncItem> incomingNozzles,
         Dictionary<Guid, List<Nozzle>> nozzlesByPump,
@@ -159,9 +174,16 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
         nozzlesByPump.TryGetValue(pump.Id, out var existing);
         var existingByNumber = (existing ?? []).ToDictionary(n => n.OdooNozzleNumber);
         var incomingNumbers  = incomingNozzles.Select(n => n.NozzleNumber).ToHashSet();
+        var changed = false;
 
         foreach (var nozzleItem in incomingNozzles)
         {
+            if (!nozzleItem.FccNozzleNumber.HasValue)
+            {
+                errors.Add($"Pump {pump.Id} nozzle {nozzleItem.NozzleNumber}: fccNozzleNumber is required.");
+                continue;
+            }
+
             var product = await _db.FindProductByCodeAsync(pump.LegalEntityId, nozzleItem.CanonicalProductCode, ct);
             if (product is null)
             {
@@ -171,12 +193,16 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
 
             if (existingByNumber.TryGetValue(nozzleItem.NozzleNumber, out var existingNozzle))
             {
-                if (existingNozzle.ProductId != product.Id || !existingNozzle.IsActive)
+                if (existingNozzle.ProductId != product.Id
+                    || existingNozzle.FccNozzleNumber != nozzleItem.FccNozzleNumber.Value
+                    || !existingNozzle.IsActive)
                 {
                     existingNozzle.ProductId       = product.Id;
-                    existingNozzle.IsActive         = true;
-                    existingNozzle.SyncedAt         = now;
-                    existingNozzle.UpdatedAt        = now;
+                    existingNozzle.FccNozzleNumber = nozzleItem.FccNozzleNumber.Value;
+                    existingNozzle.IsActive        = true;
+                    existingNozzle.SyncedAt        = now;
+                    existingNozzle.UpdatedAt       = now;
+                    changed = true;
                 }
                 else
                 {
@@ -192,13 +218,14 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
                     SiteId           = pump.SiteId,
                     LegalEntityId    = pump.LegalEntityId,
                     OdooNozzleNumber = nozzleItem.NozzleNumber,
-                    FccNozzleNumber  = nozzleItem.NozzleNumber,
+                    FccNozzleNumber  = nozzleItem.FccNozzleNumber.Value,
                     ProductId        = product.Id,
                     IsActive         = true,
                     SyncedAt         = now,
                     CreatedAt        = now,
                     UpdatedAt        = now
                 });
+                changed = true;
             }
         }
 
@@ -208,6 +235,9 @@ public sealed class SyncPumpsHandler : IRequestHandler<SyncPumpsCommand, MasterD
             nozzle.IsActive   = false;
             nozzle.SyncedAt   = now;
             nozzle.UpdatedAt  = now;
+            changed = true;
         }
+
+        return changed;
     }
 }

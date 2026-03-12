@@ -51,7 +51,7 @@ public sealed class AgentController : ControllerBase
     /// Generates a single-use bootstrap token for Edge Agent provisioning.
     /// </summary>
     [HttpPost("api/v1/admin/bootstrap-tokens")]
-    [AllowAnonymous] // TODO: Replace with [Authorize(Policy="PortalAdmin")] when Azure Entra auth is implemented
+    [Authorize(Policy = "PortalAdminWrite")]
     [ProducesResponseType(typeof(GenerateBootstrapTokenResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
@@ -131,6 +131,8 @@ public sealed class AgentController : ControllerBase
                     Conflict(BuildError(result.Error.Code, result.Error.Message)),
                 "ACTIVE_AGENT_EXISTS" =>
                     Conflict(BuildError(result.Error.Code, result.Error.Message)),
+                "CONFIG_NOT_FOUND" =>
+                    Conflict(BuildError(result.Error.Code, result.Error.Message)),
                 "SITE_NOT_FOUND" or "SITE_MISMATCH" =>
                     BadRequest(BuildError(result.Error.Code, result.Error.Message)),
                 _ => StatusCode(StatusCodes.Status500InternalServerError,
@@ -139,6 +141,28 @@ public sealed class AgentController : ControllerBase
         }
 
         var value = result.Value!;
+        var siteConfigResult = await _mediator.Send(new GetAgentConfigQuery
+        {
+            DeviceId = value.DeviceId,
+            SiteCode = value.SiteCode,
+            LegalEntityId = value.LegalEntityId
+        }, cancellationToken);
+
+        if (siteConfigResult.IsFailure || siteConfigResult.Value?.Config is null)
+        {
+            _logger.LogError(
+                "Device {DeviceId} registered for site {SiteCode} but initial site config could not be loaded. ErrorCode={ErrorCode}",
+                value.DeviceId,
+                value.SiteCode,
+                siteConfigResult.Error?.Code ?? "CONFIG_UNAVAILABLE");
+
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                BuildError(
+                    "INITIAL_SITE_CONFIG_UNAVAILABLE",
+                    "Device registration completed, but the initial site configuration could not be loaded.",
+                    retryable: true));
+        }
+
         return StatusCode(StatusCodes.Status201Created, new DeviceRegistrationApiResponse
         {
             DeviceId = value.DeviceId,
@@ -148,7 +172,7 @@ public sealed class AgentController : ControllerBase
             SiteCode = value.SiteCode,
             LegalEntityId = value.LegalEntityId,
             RegisteredAt = value.RegisteredAt,
-            SiteConfig = new { } // Placeholder — full site config will be populated when config distribution is implemented
+            SiteConfig = siteConfigResult.Value.Config
         });
     }
 
@@ -194,7 +218,7 @@ public sealed class AgentController : ControllerBase
     /// Decommissions a device — sets status to DECOMMISSIONED and revokes all refresh tokens.
     /// </summary>
     [HttpPost("api/v1/admin/agent/{deviceId}/decommission")]
-    [AllowAnonymous] // TODO: Replace with [Authorize(Policy="PortalAdmin")] when Azure Entra auth is implemented
+    [Authorize(Policy = "PortalAdminWrite")]
     [ProducesResponseType(typeof(DecommissionResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status409Conflict)]

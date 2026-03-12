@@ -217,4 +217,41 @@ data class AgentFccConfig(
 
     /** Radix: JSON string mapping canonical pump numbers to (PUMP_ADDR, FP) pairs. */
     val fccPumpAddressMap: String? = null,
+
+    // ── DOMS TCP/JPL fields ──────────────────────────────────────────────────
+
+    /** DOMS TCP: JPL binary-framed port number. */
+    val jplPort: Int? = null,
+
+    /** DOMS TCP: FcLogon access code credential. */
+    @Sensitive val fcAccessCode: String? = null,
+
+    /** DOMS TCP: Country code for locale-specific formatting. */
+    val domsCountryCode: String? = null,
+
+    /** DOMS TCP: POS version identifier sent during FcLogon handshake. */
+    val posVersionId: String? = null,
+
+    /** DOMS TCP: Heartbeat interval in seconds (default 30). */
+    val heartbeatIntervalSeconds: Int? = null,
+
+    /** DOMS TCP: Maximum reconnection backoff in seconds. */
+    val reconnectBackoffMaxSeconds: Int? = null,
+
+    /** DOMS TCP: Comma-separated list of configured pump numbers (e.g., "1,2,3,4"). */
+    val configuredPumps: String? = null,
+
+    // ── Petronite OAuth2 fields ──────────────────────────────────────────────
+
+    /** Petronite: OAuth2 client ID for Client Credentials flow. */
+    @Sensitive val clientId: String? = null,
+
+    /** Petronite: OAuth2 client secret for Client Credentials flow. */
+    @Sensitive val clientSecret: String? = null,
+
+    /** Petronite: Webhook HMAC secret for payload validation. */
+    @Sensitive val webhookSecret: String? = null,
+
+    /** Petronite: OAuth2 token endpoint URL. */
+    val oauthTokenEndpoint: String? = null,
 )

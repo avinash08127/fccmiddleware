@@ -15,5 +15,9 @@ public sealed class LegalEntitySyncItem
     public string Name { get; init; } = null!;
     public string CurrencyCode { get; init; } = null!;
     public string? Country { get; init; }
+    public string TaxAuthorityCode { get; init; } = null!;
+    public string DefaultFiscalizationMode { get; init; } = null!;
+    public string? FiscalizationProvider { get; init; }
+    public string DefaultTimezone { get; init; } = null!;
     public bool IsActive { get; init; }
 }

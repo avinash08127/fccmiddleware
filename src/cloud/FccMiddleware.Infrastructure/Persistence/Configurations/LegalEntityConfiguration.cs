@@ -1,4 +1,5 @@
 using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -28,7 +29,13 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
         builder.Property(e => e.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
         builder.Property(e => e.CurrencyCode).HasColumnName("currency_code").HasMaxLength(3).IsRequired();
         builder.Property(e => e.TaxAuthorityCode).HasColumnName("tax_authority_code").HasMaxLength(50).IsRequired();
-        builder.Property(e => e.FiscalizationRequired).HasColumnName("fiscalization_required").HasDefaultValue(false);
+        builder.Ignore(e => e.FiscalizationRequired);
+        builder.Property(e => e.DefaultFiscalizationMode)
+            .HasColumnName("default_fiscalization_mode")
+            .HasMaxLength(30)
+            .HasConversion<string>()
+            .HasDefaultValue(FiscalizationMode.NONE)
+            .IsRequired();
         builder.Property(e => e.FiscalizationProvider).HasColumnName("fiscalization_provider").HasMaxLength(50);
         builder.Property(e => e.DefaultTimezone).HasColumnName("default_timezone").HasMaxLength(50).IsRequired();
         builder.Property(e => e.AmountTolerancePercent).HasColumnName("amount_tolerance_percent").HasPrecision(5, 2);
@@ -44,6 +51,10 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             .IsUnique()
             .HasDatabaseName("uq_legal_entities_country_code");
 
+        builder.ToTable(t => t.HasCheckConstraint(
+            "chk_legal_entities_default_fiscalization_mode",
+            "default_fiscalization_mode IN ('FCC_DIRECT','EXTERNAL_INTEGRATION','NONE')"));
+
         // NOTE: LegalEntity is the tenant root — no global query filter here.
 
         // Seed data: initial 5 legal entities per REQ-1 / AC-1.1.
@@ -56,7 +67,7 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
                 CurrencyCode = "MWK",
                 TaxAuthorityCode = "MRA",
                 DefaultTimezone = "Africa/Blantyre",
-                FiscalizationRequired = true,
+                DefaultFiscalizationMode = FiscalizationMode.FCC_DIRECT,
                 IsActive = true,
                 SyncedAt = _seedDate,
                 CreatedAt = _seedDate,
@@ -70,7 +81,7 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
                 CurrencyCode = "TZS",
                 TaxAuthorityCode = "TRA",
                 DefaultTimezone = "Africa/Dar_es_Salaam",
-                FiscalizationRequired = true,
+                DefaultFiscalizationMode = FiscalizationMode.FCC_DIRECT,
                 IsActive = true,
                 SyncedAt = _seedDate,
                 CreatedAt = _seedDate,
@@ -84,7 +95,7 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
                 CurrencyCode = "BWP",
                 TaxAuthorityCode = "BURS",
                 DefaultTimezone = "Africa/Gaborone",
-                FiscalizationRequired = false,
+                DefaultFiscalizationMode = FiscalizationMode.NONE,
                 IsActive = true,
                 SyncedAt = _seedDate,
                 CreatedAt = _seedDate,
@@ -98,7 +109,7 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
                 CurrencyCode = "ZMW",
                 TaxAuthorityCode = "ZRA",
                 DefaultTimezone = "Africa/Lusaka",
-                FiscalizationRequired = false,
+                DefaultFiscalizationMode = FiscalizationMode.NONE,
                 IsActive = true,
                 SyncedAt = _seedDate,
                 CreatedAt = _seedDate,
@@ -112,7 +123,7 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
                 CurrencyCode = "NAD",
                 TaxAuthorityCode = "NamRA",
                 DefaultTimezone = "Africa/Windhoek",
-                FiscalizationRequired = false,
+                DefaultFiscalizationMode = FiscalizationMode.NONE,
                 IsActive = true,
                 SyncedAt = _seedDate,
                 CreatedAt = _seedDate,

@@ -2,6 +2,11 @@ package com.fccmiddleware.edge.runtime
 
 import android.util.Log
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
+import com.fccmiddleware.edge.adapter.common.IFccAdapter
+import com.fccmiddleware.edge.adapter.common.IFccConnectionLifecycle
+import com.fccmiddleware.edge.adapter.common.IFccEventListener
+import com.fccmiddleware.edge.adapter.common.PumpState
+import com.fccmiddleware.edge.adapter.common.TransactionNotification
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
@@ -53,6 +58,8 @@ class CadenceController(
     private val preAuthCloudForwardWorker: PreAuthCloudForwardWorker? = null,
     /** Token provider — checked between worker calls to short-circuit on decommission. */
     private val tokenProvider: com.fccmiddleware.edge.sync.DeviceTokenProvider? = null,
+    /** FCC adapter — used for lifecycle management if it implements IFccConnectionLifecycle. */
+    private val fccAdapter: IFccAdapter? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) {
 
@@ -76,6 +83,34 @@ class CadenceController(
 
     private var cadenceJob: Job? = null
     private var tickCount = 0L
+
+    /**
+     * Resolved at construction: non-null only when the adapter supports persistent connections.
+     * Used to call connect/disconnect and wire event listener callbacks.
+     */
+    private val connectionLifecycle: IFccConnectionLifecycle? =
+        fccAdapter as? IFccConnectionLifecycle
+
+    /** Event listener that bridges unsolicited FCC events into the cadence controller. */
+    private val fccEventListener = object : IFccEventListener {
+        override fun onPumpStatusChanged(pumpNumber: Int, newState: PumpState, fccStatusCode: String?) {
+            Log.d(TAG, "FCC pump $pumpNumber status -> $newState (fccCode=$fccStatusCode)")
+        }
+
+        override fun onTransactionAvailable(notification: TransactionNotification) {
+            Log.i(TAG, "FCC transaction available: fp=${notification.fpId}, idx=${notification.transactionBufferIndex}")
+            triggerImmediateFccPoll()
+        }
+
+        override fun onFuellingUpdate(pumpNumber: Int, volumeMicrolitres: Long, amountMinorUnits: Long) {
+            Log.d(TAG, "FCC fuelling update: pump=$pumpNumber, vol=$volumeMicrolitres µL, amt=$amountMinorUnits")
+        }
+
+        override fun onConnectionLost(reason: String) {
+            Log.w(TAG, "FCC connection lost: $reason — marking unreachable, scheduling reconnect")
+            scope.launch { attemptReconnect() }
+        }
+    }
 
     /**
      * L-07: Tick modulus — tickCount wraps at LCM of all tick frequencies to prevent
@@ -107,16 +142,40 @@ class CadenceController(
     fun start() {
         cadenceJob?.cancel()
         cadenceJob = scope.launch {
+            // If adapter has persistent connection, establish it before starting cadence
+            if (connectionLifecycle != null) {
+                try {
+                    connectionLifecycle.setEventListener(fccEventListener)
+                    connectionLifecycle.connect()
+                    Log.i(TAG, "FCC persistent connection established")
+                } catch (e: Exception) {
+                    Log.e(TAG, "FCC persistent connection failed on startup — will retry: ${e.message}")
+                    launch { attemptReconnect() }
+                }
+            }
+
             // Observe connectivity transitions for immediate side effects
             launch { observeConnectivityTransitions() }
             // Main scheduled cadence loop
             runCadenceLoop()
         }
-        Log.i(TAG, "CadenceController started")
+        Log.i(TAG, "CadenceController started (persistentConnection=${connectionLifecycle != null})")
     }
 
     fun stop() {
         cadenceJob?.cancel()
+        // Gracefully disconnect persistent connection if active
+        if (connectionLifecycle != null) {
+            scope.launch {
+                try {
+                    connectionLifecycle.setEventListener(null)
+                    connectionLifecycle.disconnect()
+                    Log.i(TAG, "FCC persistent connection closed")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error during FCC disconnect: ${e.message}")
+                }
+            }
+        }
         Log.i(TAG, "CadenceController stopped")
     }
 
@@ -310,6 +369,35 @@ class CadenceController(
         }
         val jitter = if (config.jitterRangeMs <= 0L) 0L else Random.nextLong(0L, config.jitterRangeMs)
         return base + jitter
+    }
+
+    // -------------------------------------------------------------------------
+    // Persistent connection reconnect logic
+    // -------------------------------------------------------------------------
+
+    /**
+     * Attempt to re-establish a lost persistent FCC connection with exponential backoff.
+     * Called from onConnectionLost callback and from startup failure recovery.
+     */
+    private suspend fun attemptReconnect() {
+        val lifecycle = connectionLifecycle ?: return
+        var attempt = 0
+        val maxBackoffMs = 60_000L
+
+        while (currentCoroutineContext().isActive && !lifecycle.isConnected) {
+            attempt++
+            val backoffMs = (1_000L * (1L shl attempt.coerceAtMost(6))).coerceAtMost(maxBackoffMs)
+            Log.i(TAG, "FCC reconnect attempt $attempt in ${backoffMs}ms")
+            delay(backoffMs)
+
+            try {
+                lifecycle.connect()
+                Log.i(TAG, "FCC reconnect succeeded on attempt $attempt")
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "FCC reconnect attempt $attempt failed: ${e.message}")
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

@@ -29,9 +29,13 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     private const string TestSigningKey = "TestSigningKey-Registration-Integration-256bits!!";
     private const string TestIssuer     = "fcc-middleware-cloud";
     private const string TestAudience   = "fcc-middleware-api";
+    private const string TestPortalSigningKey = "TestSigningKey-Portal-Registration-256bits!!";
+    private const string TestPortalIssuer = "https://login.microsoftonline.com/test-tenant-id/v2.0";
+    private const string TestPortalAudience = "00000000-0000-0000-0000-000000000321";
 
     private static readonly Guid TestLegalEntityId = Guid.Parse("99000000-0000-0000-0000-000000000021");
     private static readonly Guid TestSiteId        = Guid.Parse("99000000-0000-0000-0000-000000000022");
+    private static readonly Guid TestFccConfigId   = Guid.Parse("99000000-0000-0000-0000-000000000023");
     private const string TestSiteCode = "REG-SITE-001";
 
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()
@@ -57,7 +61,11 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
                         ["ConnectionStrings:Redis"]         = _redis.GetConnectionString(),
                         ["DeviceJwt:SigningKey"]             = TestSigningKey,
                         ["DeviceJwt:Issuer"]                 = TestIssuer,
-                        ["DeviceJwt:Audience"]               = TestAudience
+                        ["DeviceJwt:Audience"]               = TestAudience,
+                        ["PortalJwt:SigningKey"]             = TestPortalSigningKey,
+                        ["PortalJwt:Authority"]              = TestPortalIssuer,
+                        ["PortalJwt:Audience"]               = TestPortalAudience,
+                        ["PortalJwt:ClientId"]               = TestPortalAudience
                     });
                 });
             });
@@ -70,6 +78,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         await SeedTestDataAsync(db);
 
         _client = _factory.CreateClient();
+        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
     }
 
     public async Task DisposeAsync()
@@ -94,6 +103,30 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         body.GetProperty("rawToken").GetString().Should().NotBeNullOrEmpty();
         body.GetProperty("expiresAt").GetString().Should().NotBeNullOrEmpty();
         body.GetProperty("siteCode").GetString().Should().Be(TestSiteCode);
+    }
+
+    [Fact]
+    public async Task GenerateBootstrapToken_WithoutPortalAuth_Returns401()
+    {
+        _client.DefaultRequestHeaders.Authorization = null;
+
+        var response = await _client.PostAsJsonAsync("/api/v1/admin/bootstrap-tokens",
+            new { siteCode = TestSiteCode, legalEntityId = TestLegalEntityId });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
+    }
+
+    [Fact]
+    public async Task GenerateBootstrapToken_PortalUserWithoutAdminRole_Returns403()
+    {
+        SetPortalAuth("SiteSupervisor", "portal-user", TestLegalEntityId);
+
+        var response = await _client.PostAsJsonAsync("/api/v1/admin/bootstrap-tokens",
+            new { siteCode = TestSiteCode, legalEntityId = TestLegalEntityId });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
     }
 
     [Fact]
@@ -140,6 +173,9 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         body.GetProperty("refreshToken").GetString().Should().NotBeNullOrEmpty();
         body.GetProperty("siteCode").GetString().Should().Be(TestSiteCode);
         body.GetProperty("legalEntityId").GetString().Should().Be(TestLegalEntityId.ToString());
+        body.GetProperty("siteConfig").GetProperty("configId").GetString().Should().Be(TestFccConfigId.ToString());
+        body.GetProperty("siteConfig").GetProperty("configVersion").GetInt32().Should().Be(1);
+        body.GetProperty("siteConfig").GetProperty("identity").GetProperty("siteCode").GetString().Should().Be(TestSiteCode);
 
         // Verify JWT claims
         var jwt = body.GetProperty("deviceToken").GetString()!;
@@ -442,6 +478,18 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Decommission_WithoutPortalAuth_Returns401()
+    {
+        var (deviceId, _) = await RegisterDeviceAsync("SN-DECOM-NOAUTH-001");
+        _client.DefaultRequestHeaders.Authorization = null;
+
+        var response = await _client.PostAsync($"/api/v1/admin/agent/{deviceId}/decommission", null);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
+    }
+
+    [Fact]
     public async Task Decommission_AlreadyDecommissioned_Returns409()
     {
         var (deviceId, _) = await RegisterDeviceAsync("SN-DECOM-TWICE-001");
@@ -489,6 +537,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
 
     private async Task<string> GenerateBootstrapTokenAsync()
     {
+        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
         var request = new { siteCode = TestSiteCode, legalEntityId = TestLegalEntityId };
         var response = await _client.PostAsJsonAsync("/api/v1/admin/bootstrap-tokens", request);
         response.StatusCode.Should().Be(HttpStatusCode.Created);
@@ -533,6 +582,32 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
+    private void SetPortalAuth(string role, string oid, params Guid[] legalEntityIds)
+    {
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var key = Encoding.UTF8.GetBytes(TestPortalSigningKey);
+
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, oid),
+            new("oid", oid),
+            new("roles", role),
+            new("legal_entities", string.Join(",", legalEntityIds))
+        };
+
+        var token = tokenHandler.CreateToken(new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(claims),
+            Expires = DateTime.UtcNow.AddHours(1),
+            Issuer = TestPortalIssuer,
+            Audience = TestPortalAudience,
+            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256)
+        });
+
+        _client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", tokenHandler.WriteToken(token));
+    }
+
     private static async Task SeedTestDataAsync(FccMiddlewareDbContext db)
     {
         if (await db.LegalEntities.IgnoreQueryFilters().AnyAsync(e => e.Id == TestLegalEntityId)) return;
@@ -564,6 +639,26 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
             SyncedAt          = DateTimeOffset.UtcNow,
             CreatedAt         = DateTimeOffset.UtcNow,
             UpdatedAt         = DateTimeOffset.UtcNow
+        });
+
+        db.FccConfigs.Add(new FccConfig
+        {
+            Id                 = TestFccConfigId,
+            SiteId             = TestSiteId,
+            LegalEntityId      = TestLegalEntityId,
+            FccVendor          = FccVendor.DOMS,
+            ConnectionProtocol = ConnectionProtocol.REST,
+            HostAddress        = "127.0.0.1",
+            Port               = 8080,
+            CredentialRef      = "reg-test-cred",
+            IngestionMethod    = IngestionMethod.PULL,
+            IngestionMode      = IngestionMode.CLOUD_DIRECT,
+            IsActive           = true,
+            ConfigVersion      = 1,
+            PullIntervalSeconds = 30,
+            HeartbeatIntervalSeconds = 30,
+            CreatedAt          = DateTimeOffset.UtcNow,
+            UpdatedAt          = DateTimeOffset.UtcNow
         });
 
         await db.SaveChangesAsync();

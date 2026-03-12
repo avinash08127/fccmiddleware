@@ -1,5 +1,7 @@
 using FccMiddleware.Application.Common;
 using FccMiddleware.Contracts.Config;
+using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
 using MediatR;
 using Microsoft.Extensions.Configuration;
 
@@ -114,7 +116,7 @@ public sealed class GetAgentConfigHandler
             Buffer = BuildBufferDto(),
             LocalApi = BuildLocalApiDto(),
             Telemetry = BuildTelemetryDto(),
-            Fiscalization = BuildFiscalizationDto(legalEntity),
+            Fiscalization = BuildFiscalizationDto(site),
             Mappings = BuildMappingsDto(site),
             Rollout = BuildRolloutDto()
         };
@@ -218,15 +220,15 @@ public sealed class GetAgentConfigHandler
         };
     }
 
-    private static FiscalizationDto BuildFiscalizationDto(Domain.Entities.LegalEntity legalEntity)
+    private static FiscalizationDto BuildFiscalizationDto(Site site)
     {
-        var mode = legalEntity.FiscalizationRequired ? "FCC_DIRECT" : "NONE";
+        var mode = site.FiscalizationMode;
         return new FiscalizationDto
         {
-            Mode = mode,
-            TaxAuthorityEndpoint = null,
-            RequireCustomerTaxId = false,
-            FiscalReceiptRequired = legalEntity.FiscalizationRequired
+            Mode = mode.ToString(),
+            TaxAuthorityEndpoint = site.TaxAuthorityEndpoint,
+            RequireCustomerTaxId = site.RequireCustomerTaxId,
+            FiscalReceiptRequired = site.FiscalReceiptRequired || mode == FiscalizationMode.FCC_DIRECT
         };
     }
 

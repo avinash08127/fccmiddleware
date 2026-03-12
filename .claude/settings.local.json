@@ -131,7 +131,10 @@
       "Bash(find /c/Users/a0812/fccmiddleware/src/cloud -name \"*adix*\" -o -name \"*etronite*\" 2>/dev/null | head -20)",
       "Bash(grep -r \"PETRONITE\\\\|Petronite\\\\|petronite\" /c/Users/a0812/fccmiddleware/src --include=\"*.kt\" --include=\"*.cs\" 2>/dev/null | head -20)",
       "Bash(./gradlew compileDebugKotlin 2>&1 | tail -20)",
-      "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixXmlBuilderTests\" 2>&1 | tail -50)"
+      "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixXmlBuilderTests\" 2>&1 | tail -50)",
+      "Bash(cd \"C:/Users/a0812/fccmiddleware/src/edge-agent\" && ./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixXmlParserTests\" --no-daemon 2>&1 | tail -60)",
+      "Bash(find /c/Users/a0812/fccmiddleware -name \"VirtualLab*\" -o -name \"virtual-lab*\" 2>/dev/null | head -10)",
+      "Bash(./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.adapter.radix.RadixAdapterTests\" 2>&1 | tail -60)"
     ]
   }
 }

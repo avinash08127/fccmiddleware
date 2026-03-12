@@ -112,6 +112,12 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
         identity.GetProperty("deviceId").GetString().Should().Be(TestDeviceId.ToString());
         identity.GetProperty("currencyCode").GetString().Should().Be("ZWL");
 
+        var site = body.GetProperty("site");
+        site.GetProperty("connectivityMode").GetString().Should().Be("CONNECTED");
+        site.GetProperty("companyTaxPayerId").GetString().Should().Be("TAX-CFG-001");
+        site.GetProperty("operatorName").GetString().Should().Be("Dealer Config Operator");
+        site.GetProperty("operatorTaxPayerId").GetString().Should().Be("OP-TIN-CFG-001");
+
         // Verify FCC section
         var fcc = body.GetProperty("fcc");
         fcc.GetProperty("enabled").GetBoolean().Should().BeTrue();
@@ -125,10 +131,16 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
         var nozzles = mappings.GetProperty("nozzles").EnumerateArray().ToList();
         nozzles.Should().HaveCount(1);
         nozzles[0].GetProperty("odooPumpNumber").GetInt32().Should().Be(1);
-        nozzles[0].GetProperty("fccPumpNumber").GetInt32().Should().Be(1);
+        nozzles[0].GetProperty("fccPumpNumber").GetInt32().Should().Be(101);
         nozzles[0].GetProperty("odooNozzleNumber").GetInt32().Should().Be(1);
-        nozzles[0].GetProperty("fccNozzleNumber").GetInt32().Should().Be(1);
+        nozzles[0].GetProperty("fccNozzleNumber").GetInt32().Should().Be(201);
         nozzles[0].GetProperty("productCode").GetString().Should().Be("PMS");
+
+        var fiscalization = body.GetProperty("fiscalization");
+        fiscalization.GetProperty("mode").GetString().Should().Be("EXTERNAL_INTEGRATION");
+        fiscalization.GetProperty("taxAuthorityEndpoint").GetString().Should().Be("https://zimra.example.test/fiscalize");
+        fiscalization.GetProperty("requireCustomerTaxId").GetBoolean().Should().BeTrue();
+        fiscalization.GetProperty("fiscalReceiptRequired").GetBoolean().Should().BeFalse();
 
         var products = mappings.GetProperty("products").EnumerateArray().ToList();
         products.Should().HaveCount(1);
@@ -349,7 +361,14 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
             SiteCode          = TestSiteCode,
             SiteName          = "Config Test Station",
             OperatingModel    = SiteOperatingModel.COCO,
+            ConnectivityMode  = "CONNECTED",
             CompanyTaxPayerId = "TAX-CFG-001",
+            OperatorName      = "Dealer Config Operator",
+            OperatorTaxPayerId = "OP-TIN-CFG-001",
+            FiscalizationMode = FiscalizationMode.EXTERNAL_INTEGRATION,
+            TaxAuthorityEndpoint = "https://zimra.example.test/fiscalize",
+            RequireCustomerTaxId = true,
+            FiscalReceiptRequired = false,
             OdooSiteId        = "ODOO-CFG-001",
             IsActive          = true,
             SyncedAt          = DateTimeOffset.UtcNow,
@@ -376,7 +395,7 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
             SiteId        = TestSiteId,
             LegalEntityId = TestLegalEntityId,
             PumpNumber    = 1,
-            FccPumpNumber = 1,
+            FccPumpNumber = 101,
             IsActive      = true,
             SyncedAt      = DateTimeOffset.UtcNow,
             CreatedAt     = DateTimeOffset.UtcNow,
@@ -390,7 +409,7 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
             SiteId           = TestSiteId,
             LegalEntityId    = TestLegalEntityId,
             OdooNozzleNumber = 1,
-            FccNozzleNumber  = 1,
+            FccNozzleNumber  = 201,
             ProductId        = TestProductId,
             IsActive         = true,
             SyncedAt         = DateTimeOffset.UtcNow,

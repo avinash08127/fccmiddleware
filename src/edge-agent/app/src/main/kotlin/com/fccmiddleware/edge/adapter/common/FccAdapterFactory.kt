@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.adapter.common
 
 import android.util.Log
 import com.fccmiddleware.edge.adapter.doms.DomsAdapter
+import com.fccmiddleware.edge.adapter.petronite.PetroniteAdapter
 import com.fccmiddleware.edge.adapter.radix.RadixAdapter
 
 /**
@@ -39,6 +40,7 @@ class FccAdapterFactory : IFccAdapterFactory {
         return when (vendor) {
             FccVendor.DOMS -> DomsAdapter(config)
             FccVendor.RADIX -> RadixAdapter(config)
+            FccVendor.PETRONITE -> PetroniteAdapter(config)
             else -> throw AdapterNotRegisteredException(vendor)
         }
     }

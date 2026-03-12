@@ -1,4 +1,5 @@
 using FccMiddleware.Domain.Common;
+using FccMiddleware.Contracts.Config;
 
 namespace FccMiddleware.Contracts.Registration;
 
@@ -13,5 +14,5 @@ public sealed class DeviceRegistrationApiResponse
     public string SiteCode { get; set; } = null!;
     public Guid LegalEntityId { get; set; }
     public DateTimeOffset RegisteredAt { get; set; }
-    public object? SiteConfig { get; set; }
+    public SiteConfigResponse SiteConfig { get; set; } = null!;
 }

@@ -653,7 +653,8 @@ public sealed class SitesController : PortalControllerBase
                 Mode = site.FiscalizationMode.ToString(),
                 TaxAuthorityEndpoint = site.TaxAuthorityEndpoint,
                 RequireCustomerTaxId = site.RequireCustomerTaxId,
-                FiscalReceiptRequired = site.FiscalReceiptRequired || site.LegalEntity.FiscalizationRequired
+                FiscalReceiptRequired = site.FiscalReceiptRequired
+                    || site.FiscalizationMode == FiscalizationMode.FCC_DIRECT
             },
             Tolerance = new SiteToleranceDto
             {

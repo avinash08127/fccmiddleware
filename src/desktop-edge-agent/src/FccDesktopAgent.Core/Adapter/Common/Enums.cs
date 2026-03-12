@@ -50,7 +50,9 @@ public enum IngestionMode
 public enum FccVendor
 {
     Doms,
-    Radix
+    Radix,
+    Advatec,
+    Petronite
 }
 
 /// <summary>Origin of a transaction's ingestion into the middleware.</summary>

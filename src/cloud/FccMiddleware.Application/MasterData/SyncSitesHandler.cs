@@ -39,11 +39,36 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
                 continue;
             }
 
+            if (!Enum.TryParse<FiscalizationMode>(item.FiscalizationMode, true, out var fiscalizationMode))
+            {
+                errors.Add($"Site {item.Id}: unknown fiscalizationMode '{item.FiscalizationMode}'.");
+                continue;
+            }
+
+            if (!IsValidConnectivityMode(item.ConnectivityMode))
+            {
+                errors.Add($"Site {item.Id}: unknown connectivityMode '{item.ConnectivityMode}'.");
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(item.CompanyTaxPayerId))
+            {
+                errors.Add($"Site {item.Id}: companyTaxPayerId is required.");
+                continue;
+            }
+
+            if (IsDealerOperated(model)
+                && (string.IsNullOrWhiteSpace(item.OperatorName) || string.IsNullOrWhiteSpace(item.OperatorTaxPayerId)))
+            {
+                errors.Add($"Site {item.Id}: dealer-operated sites require operatorName and operatorTaxPayerId.");
+                continue;
+            }
+
             if (byId.TryGetValue(item.Id, out var entity))
             {
-                if (HasChanges(entity, item, model))
+                if (HasChanges(entity, item, model, fiscalizationMode))
                 {
-                    ApplyChanges(entity, item, model, now);
+                    ApplyChanges(entity, item, model, fiscalizationMode, now);
                     upserted++;
                 }
                 else
@@ -54,7 +79,7 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
             }
             else
             {
-                _db.AddSite(CreateNew(item, model, now));
+                _db.AddSite(CreateNew(item, model, fiscalizationMode, now));
                 upserted++;
             }
         }
@@ -106,38 +131,81 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
         };
     }
 
-    private static bool HasChanges(Site e, SiteSyncItem i, SiteOperatingModel model) =>
-        e.SiteCode      != i.SiteCode      ||
-        e.LegalEntityId != i.LegalEntityId ||
-        e.SiteName      != i.SiteName      ||
-        e.OperatingModel != model           ||
-        e.IsActive      != i.IsActive;
+    private static bool HasChanges(Site e, SiteSyncItem i, SiteOperatingModel model, FiscalizationMode fiscalizationMode) =>
+        e.SiteCode              != i.SiteCode ||
+        e.LegalEntityId         != i.LegalEntityId ||
+        e.SiteName              != i.SiteName ||
+        e.OperatingModel        != model ||
+        e.ConnectivityMode      != i.ConnectivityMode ||
+        e.CompanyTaxPayerId     != i.CompanyTaxPayerId ||
+        e.OperatorName          != NormalizeOptional(i.OperatorName) ||
+        e.OperatorTaxPayerId    != NormalizeOptional(i.OperatorTaxPayerId) ||
+        e.FiscalizationMode     != fiscalizationMode ||
+        e.TaxAuthorityEndpoint  != NormalizeOptional(i.TaxAuthorityEndpoint) ||
+        e.RequireCustomerTaxId  != i.RequireCustomerTaxId ||
+        e.FiscalReceiptRequired != i.FiscalReceiptRequired ||
+        e.OdooSiteId            != NormalizeOptional(i.OdooSiteId) ||
+        e.IsActive              != i.IsActive;
 
-    private static void ApplyChanges(Site e, SiteSyncItem i, SiteOperatingModel model, DateTimeOffset now)
+    private static void ApplyChanges(
+        Site e,
+        SiteSyncItem i,
+        SiteOperatingModel model,
+        FiscalizationMode fiscalizationMode,
+        DateTimeOffset now)
     {
-        e.SiteCode       = i.SiteCode;
-        e.LegalEntityId  = i.LegalEntityId;
-        e.SiteName       = i.SiteName;
-        e.OperatingModel = model;
-        e.IsActive       = i.IsActive;
-        if (!i.IsActive) e.DeactivatedAt = now;
+        e.SiteCode              = i.SiteCode;
+        e.LegalEntityId         = i.LegalEntityId;
+        e.SiteName              = i.SiteName;
+        e.OperatingModel        = model;
+        e.ConnectivityMode      = i.ConnectivityMode;
+        e.CompanyTaxPayerId     = i.CompanyTaxPayerId;
+        e.OperatorName          = NormalizeOptional(i.OperatorName);
+        e.OperatorTaxPayerId    = NormalizeOptional(i.OperatorTaxPayerId);
+        e.FiscalizationMode     = fiscalizationMode;
+        e.TaxAuthorityEndpoint  = NormalizeOptional(i.TaxAuthorityEndpoint);
+        e.RequireCustomerTaxId  = i.RequireCustomerTaxId;
+        e.FiscalReceiptRequired = i.FiscalReceiptRequired;
+        e.OdooSiteId            = NormalizeOptional(i.OdooSiteId);
+        e.IsActive              = i.IsActive;
+        e.DeactivatedAt         = i.IsActive ? null : now;
         e.SyncedAt  = now;
         e.UpdatedAt = now;
     }
 
-    private static Site CreateNew(SiteSyncItem i, SiteOperatingModel model, DateTimeOffset now) => new()
+    private static Site CreateNew(
+        SiteSyncItem i,
+        SiteOperatingModel model,
+        FiscalizationMode fiscalizationMode,
+        DateTimeOffset now) => new()
     {
-        Id              = i.Id,
-        LegalEntityId   = i.LegalEntityId,
-        SiteCode        = i.SiteCode,
-        SiteName        = i.SiteName,
-        OperatingModel  = model,
-        ConnectivityMode = "CONNECTED",
-        CompanyTaxPayerId = string.Empty,
-        IsActive        = i.IsActive,
-        DeactivatedAt   = i.IsActive ? null : now,
-        SyncedAt        = now,
-        CreatedAt       = now,
-        UpdatedAt       = now
+        Id                     = i.Id,
+        LegalEntityId          = i.LegalEntityId,
+        SiteCode               = i.SiteCode,
+        SiteName               = i.SiteName,
+        OperatingModel         = model,
+        ConnectivityMode       = i.ConnectivityMode,
+        CompanyTaxPayerId      = i.CompanyTaxPayerId,
+        OperatorName           = NormalizeOptional(i.OperatorName),
+        OperatorTaxPayerId     = NormalizeOptional(i.OperatorTaxPayerId),
+        FiscalizationMode      = fiscalizationMode,
+        TaxAuthorityEndpoint   = NormalizeOptional(i.TaxAuthorityEndpoint),
+        RequireCustomerTaxId   = i.RequireCustomerTaxId,
+        FiscalReceiptRequired  = i.FiscalReceiptRequired,
+        OdooSiteId             = NormalizeOptional(i.OdooSiteId),
+        IsActive               = i.IsActive,
+        DeactivatedAt          = i.IsActive ? null : now,
+        SyncedAt               = now,
+        CreatedAt              = now,
+        UpdatedAt              = now
     };
+
+    private static bool IsDealerOperated(SiteOperatingModel model) =>
+        model is SiteOperatingModel.CODO or SiteOperatingModel.DODO;
+
+    private static bool IsValidConnectivityMode(string connectivityMode) =>
+        connectivityMode is "CONNECTED" or "DISCONNECTED";
+
+    private static string? NormalizeOptional(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

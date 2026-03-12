@@ -28,6 +28,10 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
             _loggerFactory.CreateLogger<DomsAdapter>()),
         FccVendor.Radix => throw new NotImplementedException(
             "Radix adapter is not yet implemented"),
+        FccVendor.Petronite => throw new NotImplementedException(
+            "Petronite adapter is not yet implemented"),
+        FccVendor.Advatec => throw new NotImplementedException(
+            "Advatec adapter is not yet implemented"),
         _ => throw new ArgumentException($"Unknown FCC vendor: {vendor}", nameof(vendor))
     };
 }

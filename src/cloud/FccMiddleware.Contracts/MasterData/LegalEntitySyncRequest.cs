@@ -34,6 +34,18 @@ public sealed class LegalEntityRecord
     /// <summary>Optional ISO 3166-1 alpha-2 country code.</summary>
     public string? Country { get; init; }
 
+    /// <summary>Tax authority code for the legal entity (e.g., ZIMRA, MRA).</summary>
+    public string TaxAuthorityCode { get; init; } = null!;
+
+    /// <summary>Default fiscalization mode inherited by sites unless their site sync overrides it.</summary>
+    public string DefaultFiscalizationMode { get; init; } = null!;
+
+    /// <summary>Optional external fiscalization provider/system code.</summary>
+    public string? FiscalizationProvider { get; init; }
+
+    /// <summary>Default IANA timezone for the legal entity.</summary>
+    public string DefaultTimezone { get; init; } = null!;
+
     public bool IsActive { get; init; }
 
     public DateTimeOffset? UpdatedAt { get; init; }

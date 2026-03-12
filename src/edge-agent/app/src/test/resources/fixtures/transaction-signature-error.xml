@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FDC_RESP>
+  <TABLE VERSION="1.0">
+    <ANS RESP_CODE="251" RESP_MSG="SIGNATURE ERROR" TOKEN="12345" />
+    <TRN />
+    <RFID_CARD />
+    <DISCOUNT />
+  </TABLE>
+  <SIGNATURE>d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5</SIGNATURE>
+</FDC_RESP>

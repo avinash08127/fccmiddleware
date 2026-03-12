@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FDCMS>
+  <FDCACK>
+    <DATE>2021-03-01</DATE>
+    <TIME>09:42:00</TIME>
+    <ACKCODE>251</ACKCODE>
+    <ACKMSG>Signature error</ACKMSG>
+  </FDCACK>
+  <FDCSIGNATURE>b2c3d4e5a1b2c3d4e5a1b2c3d4e5a1b2c3d4e5a1</FDCSIGNATURE>
+</FDCMS>

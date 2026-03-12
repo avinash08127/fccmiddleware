@@ -27,8 +27,30 @@ public sealed class SiteRecord
     /// <summary>Operating model: COCO, CODO, DODO, DOCO.</summary>
     public string OperatingModel { get; init; } = null!;
 
-    /// <summary>Optional IANA timezone name (e.g., Africa/Lagos).</summary>
-    public string? Timezone { get; init; }
+    /// <summary>Connectivity state: CONNECTED or DISCONNECTED.</summary>
+    public string ConnectivityMode { get; init; } = null!;
+
+    /// <summary>Company taxpayer ID used for fiscalized documents for the site.</summary>
+    public string CompanyTaxPayerId { get; init; } = null!;
+
+    /// <summary>Dealer/operator name for dealer-operated sites.</summary>
+    public string? OperatorName { get; init; }
+
+    /// <summary>Dealer/operator taxpayer ID for dealer-operated sites.</summary>
+    public string? OperatorTaxPayerId { get; init; }
+
+    /// <summary>Effective fiscalization mode for this site.</summary>
+    public string FiscalizationMode { get; init; } = null!;
+
+    /// <summary>Optional tax authority endpoint used by the site.</summary>
+    public string? TaxAuthorityEndpoint { get; init; }
+
+    public bool RequireCustomerTaxId { get; init; }
+
+    public bool FiscalReceiptRequired { get; init; }
+
+    /// <summary>Optional Odoo-side site identifier.</summary>
+    public string? OdooSiteId { get; init; }
 
     public bool IsActive { get; init; }
 

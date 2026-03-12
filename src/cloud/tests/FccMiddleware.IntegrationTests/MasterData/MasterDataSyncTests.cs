@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
 using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -84,8 +85,29 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         {
             legalEntities = new[]
             {
-                new { id = newId, code = "KE", name = "Kenya Ltd", currencyCode = "KES", isActive = true },
-                new { id = TestLegalEntityId, code = "CD", name = "Congo Ltd", currencyCode = "CDF", isActive = true }
+                new
+                {
+                    id = newId,
+                    code = "KE",
+                    name = "Kenya Ltd",
+                    currencyCode = "KES",
+                    taxAuthorityCode = "KRA",
+                    defaultFiscalizationMode = "EXTERNAL_INTEGRATION",
+                    fiscalizationProvider = "ETIMS",
+                    defaultTimezone = "Africa/Nairobi",
+                    isActive = true
+                },
+                new
+                {
+                    id = TestLegalEntityId,
+                    code = "CD",
+                    name = "Congo Ltd",
+                    currencyCode = "CDF",
+                    taxAuthorityCode = "DGI",
+                    defaultFiscalizationMode = "NONE",
+                    defaultTimezone = "Africa/Kinshasa",
+                    isActive = true
+                }
             }
         };
 
@@ -104,6 +126,10 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         entity.Should().NotBeNull();
         entity!.CountryCode.Should().Be("KE");
         entity.Name.Should().Be("Kenya Ltd");
+        entity.TaxAuthorityCode.Should().Be("KRA");
+        entity.DefaultFiscalizationMode.Should().Be(FiscalizationMode.EXTERNAL_INTEGRATION);
+        entity.FiscalizationProvider.Should().Be("ETIMS");
+        entity.DefaultTimezone.Should().Be("Africa/Nairobi");
         entity.IsActive.Should().BeTrue();
     }
 
@@ -115,7 +141,17 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         {
             legalEntities = new[]
             {
-                new { id = TestLegalEntityId, code = "CD", name = "Congo Ltd (updated)", currencyCode = "CDF", isActive = true }
+                new
+                {
+                    id = TestLegalEntityId,
+                    code = "CD",
+                    name = "Congo Ltd (updated)",
+                    currencyCode = "CDF",
+                    taxAuthorityCode = "DGI-UPD",
+                    defaultFiscalizationMode = "FCC_DIRECT",
+                    defaultTimezone = "Africa/Lubumbashi",
+                    isActive = true
+                }
             }
         };
 
@@ -130,6 +166,9 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
         var entity = await db.LegalEntities.IgnoreQueryFilters().FirstAsync(e => e.Id == TestLegalEntityId);
         entity.Name.Should().Be("Congo Ltd (updated)");
+        entity.TaxAuthorityCode.Should().Be("DGI-UPD");
+        entity.DefaultFiscalizationMode.Should().Be(FiscalizationMode.FCC_DIRECT);
+        entity.DefaultTimezone.Should().Be("Africa/Lubumbashi");
     }
 
     [Fact]
@@ -147,7 +186,17 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         {
             legalEntities = new[]
             {
-                new { id = TestLegalEntityId, code = "CD", name = "Congo Ltd", currencyCode = "CDF", isActive = true }
+                new
+                {
+                    id = TestLegalEntityId,
+                    code = "CD",
+                    name = "Congo Ltd",
+                    currencyCode = "CDF",
+                    taxAuthorityCode = "DGI",
+                    defaultFiscalizationMode = "NONE",
+                    defaultTimezone = "Africa/Kinshasa",
+                    isActive = true
+                }
             }
         };
 
@@ -182,7 +231,17 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
             isFullSnapshot = true,
             legalEntities = new[]
             {
-                new { id = TestLegalEntityId, code = "CD", name = "Congo Ltd", currencyCode = "CDF", isActive = true }
+                new
+                {
+                    id = TestLegalEntityId,
+                    code = "CD",
+                    name = "Congo Ltd",
+                    currencyCode = "CDF",
+                    taxAuthorityCode = "DGI",
+                    defaultFiscalizationMode = "NONE",
+                    defaultTimezone = "Africa/Kinshasa",
+                    isActive = true
+                }
             }
         };
 
@@ -213,13 +272,28 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                 {
                     id = newSiteId, siteCode = $"SYNC-SITE-{newSiteId:N}".Substring(0, 20),
                     legalEntityId = TestLegalEntityId, siteName = "Test Sync Site",
-                    operatingModel = "COCO", isActive = true
+                    operatingModel = "COCO",
+                    connectivityMode = "DISCONNECTED",
+                    companyTaxPayerId = "TIN-SYNC-NEW",
+                    fiscalizationMode = "EXTERNAL_INTEGRATION",
+                    taxAuthorityEndpoint = "https://tax.new.example.test",
+                    requireCustomerTaxId = true,
+                    fiscalReceiptRequired = false,
+                    odooSiteId = "ODOO-SYNC-NEW",
+                    isActive = true
                 },
                 new
                 {
                     id = SiteId1, siteCode = "SYNC-SITE-001",
                     legalEntityId = TestLegalEntityId, siteName = "Existing Site",
-                    operatingModel = "COCO", isActive = true
+                    operatingModel = "COCO",
+                    connectivityMode = "CONNECTED",
+                    companyTaxPayerId = "TIN-SYNC-001",
+                    fiscalizationMode = "FCC_DIRECT",
+                    requireCustomerTaxId = true,
+                    fiscalReceiptRequired = true,
+                    odooSiteId = "ODOO-SYNC-001",
+                    isActive = true
                 }
             }
         };
@@ -235,6 +309,12 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         var site = await db.Sites.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.Id == newSiteId);
         site.Should().NotBeNull();
         site!.SiteName.Should().Be("Test Sync Site");
+        site.ConnectivityMode.Should().Be("DISCONNECTED");
+        site.CompanyTaxPayerId.Should().Be("TIN-SYNC-NEW");
+        site.FiscalizationMode.Should().Be(FiscalizationMode.EXTERNAL_INTEGRATION);
+        site.TaxAuthorityEndpoint.Should().Be("https://tax.new.example.test");
+        site.RequireCustomerTaxId.Should().BeTrue();
+        site.OdooSiteId.Should().Be("ODOO-SYNC-NEW");
         site.SyncedAt.Should().BeCloseTo(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(10));
     }
 
@@ -253,7 +333,7 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                 SiteName         = "Extra Sync Site",
                 OperatingModel   = Domain.Enums.SiteOperatingModel.COCO,
                 ConnectivityMode = "CONNECTED",
-                CompanyTaxPayerId = string.Empty,
+                CompanyTaxPayerId = "TIN-SYNC-EXTRA",
                 IsActive         = true,
                 SyncedAt         = DateTimeOffset.UtcNow.AddDays(-1),
                 CreatedAt        = DateTimeOffset.UtcNow.AddDays(-1),
@@ -270,7 +350,14 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                 {
                     id = SiteId1, siteCode = "SYNC-SITE-001",
                     legalEntityId = TestLegalEntityId, siteName = "Existing Site",
-                    operatingModel = "COCO", isActive = true
+                    operatingModel = "COCO",
+                    connectivityMode = "CONNECTED",
+                    companyTaxPayerId = "TIN-SYNC-001",
+                    fiscalizationMode = "FCC_DIRECT",
+                    requireCustomerTaxId = true,
+                    fiscalReceiptRequired = true,
+                    odooSiteId = "ODOO-SYNC-001",
+                    isActive = true
                 }
             }
         };
@@ -459,7 +546,23 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
     public async Task SyncLegalEntities_WithoutApiKey_Returns401()
     {
         var client = _factory.CreateClient(); // no X-Api-Key header
-        var body = new { legalEntities = new[] { new { id = Guid.NewGuid(), code = "NG", name = "Nigeria", currencyCode = "NGN", isActive = true } } };
+        var body = new
+        {
+            legalEntities = new[]
+            {
+                new
+                {
+                    id = Guid.NewGuid(),
+                    code = "NG",
+                    name = "Nigeria",
+                    currencyCode = "NGN",
+                    taxAuthorityCode = "FIRS",
+                    defaultFiscalizationMode = "EXTERNAL_INTEGRATION",
+                    defaultTimezone = "Africa/Lagos",
+                    isActive = true
+                }
+            }
+        };
 
         var response = await client.PutAsJsonAsync("/api/v1/master-data/legal-entities", body);
 
@@ -472,7 +575,23 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-Api-Key", WrongRoleApiKey);
 
-        var body = new { legalEntities = new[] { new { id = Guid.NewGuid(), code = "NG", name = "Nigeria", currencyCode = "NGN", isActive = true } } };
+        var body = new
+        {
+            legalEntities = new[]
+            {
+                new
+                {
+                    id = Guid.NewGuid(),
+                    code = "NG",
+                    name = "Nigeria",
+                    currencyCode = "NGN",
+                    taxAuthorityCode = "FIRS",
+                    defaultFiscalizationMode = "EXTERNAL_INTEGRATION",
+                    defaultTimezone = "Africa/Lagos",
+                    isActive = true
+                }
+            }
+        };
 
         var response = await client.PutAsJsonAsync("/api/v1/master-data/legal-entities", body);
 
@@ -502,9 +621,10 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                     id         = newPumpId,
                     siteCode   = "SYNC-SITE-001",
                     pumpNumber = 1,
+                    fccPumpNumber = 11,
                     nozzles    = new[]
                     {
-                        new { nozzleNumber = 1, canonicalProductCode = "PMS" }
+                        new { nozzleNumber = 1, fccNozzleNumber = 101, canonicalProductCode = "PMS" }
                     },
                     isActive   = true
                 },
@@ -513,9 +633,10 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                     id         = PumpId1,
                     siteCode   = "SYNC-SITE-001",
                     pumpNumber = 2,
+                    fccPumpNumber = 22,
                     nozzles    = new[]
                     {
-                        new { nozzleNumber = 1, canonicalProductCode = "PMS" }
+                        new { nozzleNumber = 1, fccNozzleNumber = 202, canonicalProductCode = "PMS" }
                     },
                     isActive   = true
                 }
@@ -538,6 +659,10 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
         var nozzle = await db.Nozzles.IgnoreQueryFilters().FirstOrDefaultAsync(n => n.PumpId == newPumpId);
         nozzle.Should().NotBeNull();
         nozzle!.OdooNozzleNumber.Should().Be(1);
+        nozzle.FccNozzleNumber.Should().Be(101);
+
+        var newPump = await db.Pumps.IgnoreQueryFilters().FirstAsync(p => p.Id == newPumpId);
+        newPump.FccPumpNumber.Should().Be(11);
     }
 
     [Fact]
@@ -571,7 +696,8 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
                     id         = PumpId1,
                     siteCode   = "SYNC-SITE-001",
                     pumpNumber = 2,
-                    nozzles    = new[] { new { nozzleNumber = 1, canonicalProductCode = "PMS" } },
+                    fccPumpNumber = 22,
+                    nozzles    = new[] { new { nozzleNumber = 1, fccNozzleNumber = 202, canonicalProductCode = "PMS" } },
                     isActive   = true
                 }
             }
@@ -663,7 +789,7 @@ public sealed class MasterDataSyncTests : IAsyncLifetime
             SiteName         = "Sync Test Site 001",
             OperatingModel   = Domain.Enums.SiteOperatingModel.COCO,
             ConnectivityMode = "CONNECTED",
-            CompanyTaxPayerId = string.Empty,
+            CompanyTaxPayerId = "TIN-SYNC-SEED",
             IsActive         = true,
             SyncedAt         = DateTimeOffset.UtcNow,
             CreatedAt        = DateTimeOffset.UtcNow,

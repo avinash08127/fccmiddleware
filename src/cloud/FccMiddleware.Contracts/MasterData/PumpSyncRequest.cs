@@ -28,6 +28,9 @@ public sealed class PumpRecord
     /// <summary>Odoo pump number (source of truth from Databricks).</summary>
     public int PumpNumber { get; init; }
 
+    /// <summary>FCC pump number forwarded to the site controller.</summary>
+    public int? FccPumpNumber { get; init; }
+
     /// <summary>Nozzles on this pump.</summary>
     public List<NozzleRecord> Nozzles { get; init; } = [];
 
@@ -41,8 +44,11 @@ public sealed class PumpRecord
 /// </summary>
 public sealed class NozzleRecord
 {
-    /// <summary>Nozzle number (both Odoo and FCC use the same number unless remapped).</summary>
+    /// <summary>Odoo nozzle number sent by Odoo POS.</summary>
     public int NozzleNumber { get; init; }
+
+    /// <summary>FCC nozzle number forwarded to the site controller.</summary>
+    public int? FccNozzleNumber { get; init; }
 
     /// <summary>Canonical fuel product code (e.g., PMS, AGO, DPK).</summary>
     public string CanonicalProductCode { get; init; } = null!;

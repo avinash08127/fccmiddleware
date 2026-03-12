@@ -15,5 +15,14 @@ public sealed class SiteSyncItem
     public Guid LegalEntityId { get; init; }
     public string SiteName { get; init; } = null!;
     public string OperatingModel { get; init; } = null!;
+    public string ConnectivityMode { get; init; } = null!;
+    public string CompanyTaxPayerId { get; init; } = null!;
+    public string? OperatorName { get; init; }
+    public string? OperatorTaxPayerId { get; init; }
+    public string FiscalizationMode { get; init; } = null!;
+    public string? TaxAuthorityEndpoint { get; init; }
+    public bool RequireCustomerTaxId { get; init; }
+    public bool FiscalReceiptRequired { get; init; }
+    public string? OdooSiteId { get; init; }
     public bool IsActive { get; init; }
 }

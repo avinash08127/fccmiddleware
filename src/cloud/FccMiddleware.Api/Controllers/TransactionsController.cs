@@ -29,15 +29,18 @@ namespace FccMiddleware.Api.Controllers;
 public sealed class TransactionsController : ControllerBase
 {
     private readonly IMediator _mediator;
+    private readonly ISiteFccConfigProvider _siteFccConfigProvider;
     private readonly ILogger<TransactionsController> _logger;
     private readonly IObservabilityMetrics _metrics;
 
     public TransactionsController(
         IMediator mediator,
+        ISiteFccConfigProvider siteFccConfigProvider,
         ILogger<TransactionsController> logger,
         IObservabilityMetrics metrics)
     {
         _mediator = mediator;
+        _siteFccConfigProvider = siteFccConfigProvider;
         _logger = logger;
         _metrics = metrics;
     }
@@ -59,6 +62,7 @@ public sealed class TransactionsController : ControllerBase
     [ProducesResponseType(typeof(IngestResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
     public async Task<IActionResult> Ingest(
@@ -71,6 +75,12 @@ public sealed class TransactionsController : ControllerBase
                 "VALIDATION.INVALID_VENDOR",
                 $"Unknown FCC vendor '{request.FccVendor}'. Valid values: {string.Join(", ", Enum.GetNames<FccVendor>())}",
                 retryable: false));
+        }
+
+        var scopeValidationResult = await ValidateFccIngestScopeAsync(request.SiteCode, cancellationToken);
+        if (scopeValidationResult is not null)
+        {
+            return scopeValidationResult;
         }
 
         var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
@@ -308,6 +318,67 @@ public sealed class TransactionsController : ControllerBase
 
         transactions = transactionArray.EnumerateArray().ToArray();
         return true;
+    }
+
+    private async Task<IActionResult?> ValidateFccIngestScopeAsync(
+        string requestSiteCode,
+        CancellationToken cancellationToken)
+    {
+        var scopedSiteCode = User.FindFirstValue("site");
+        if (!string.IsNullOrWhiteSpace(scopedSiteCode)
+            && !string.Equals(scopedSiteCode, requestSiteCode, StringComparison.OrdinalIgnoreCase))
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                BuildError(
+                    "FORBIDDEN.SITE_SCOPE",
+                    "Authenticated FCC credential is not permitted to ingest transactions for the requested site.",
+                    new
+                    {
+                        credentialSite = scopedSiteCode,
+                        requestSiteCode
+                    }));
+        }
+
+        var scopedLei = User.FindFirstValue("lei");
+        if (string.IsNullOrWhiteSpace(scopedLei))
+        {
+            return null;
+        }
+
+        if (!Guid.TryParse(scopedLei, out var credentialLegalEntityId))
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                BuildError(
+                    "FORBIDDEN.LEGAL_ENTITY_SCOPE",
+                    "Authenticated FCC credential has an invalid legal-entity scope."));
+        }
+
+        var siteConfig = await _siteFccConfigProvider.GetBySiteCodeAsync(requestSiteCode, cancellationToken);
+        if (siteConfig is null)
+        {
+            return NotFound(BuildError(
+                "SITE_NOT_FOUND",
+                $"No active FCC configuration found for site '{requestSiteCode}'."));
+        }
+
+        if (siteConfig.Value.LegalEntityId != credentialLegalEntityId)
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                BuildError(
+                    "FORBIDDEN.LEGAL_ENTITY_SCOPE",
+                    "Authenticated FCC credential is not permitted to ingest transactions for the requested legal entity.",
+                    new
+                    {
+                        credentialLegalEntityId,
+                        requestSiteCode,
+                        requestLegalEntityId = siteConfig.Value.LegalEntityId
+                    }));
+        }
+
+        return null;
     }
 
     /// <summary>

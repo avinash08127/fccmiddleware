@@ -63,6 +63,10 @@ public sealed class MasterDataController : ControllerBase
                 Name         = r.Name,
                 CurrencyCode = r.CurrencyCode,
                 Country      = r.Country,
+                TaxAuthorityCode = r.TaxAuthorityCode,
+                DefaultFiscalizationMode = r.DefaultFiscalizationMode,
+                FiscalizationProvider = r.FiscalizationProvider,
+                DefaultTimezone = r.DefaultTimezone,
                 IsActive     = r.IsActive
             }).ToList()
         };
@@ -100,6 +104,15 @@ public sealed class MasterDataController : ControllerBase
                 LegalEntityId   = r.LegalEntityId,
                 SiteName        = r.SiteName,
                 OperatingModel  = r.OperatingModel,
+                ConnectivityMode = r.ConnectivityMode,
+                CompanyTaxPayerId = r.CompanyTaxPayerId,
+                OperatorName = r.OperatorName,
+                OperatorTaxPayerId = r.OperatorTaxPayerId,
+                FiscalizationMode = r.FiscalizationMode,
+                TaxAuthorityEndpoint = r.TaxAuthorityEndpoint,
+                RequireCustomerTaxId = r.RequireCustomerTaxId,
+                FiscalReceiptRequired = r.FiscalReceiptRequired,
+                OdooSiteId = r.OdooSiteId,
                 IsActive        = r.IsActive
             }).ToList()
         };
@@ -135,10 +148,12 @@ public sealed class MasterDataController : ControllerBase
                 Id         = r.Id,
                 SiteCode   = r.SiteCode,
                 PumpNumber = r.PumpNumber,
+                FccPumpNumber = r.FccPumpNumber,
                 IsActive   = r.IsActive,
                 Nozzles    = r.Nozzles.Select(n => new NozzleSyncItem
                 {
                     NozzleNumber         = n.NozzleNumber,
+                    FccNozzleNumber      = n.FccNozzleNumber,
                     CanonicalProductCode = n.CanonicalProductCode
                 }).ToList()
             }).ToList()

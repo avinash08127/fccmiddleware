@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
@@ -11,15 +12,18 @@ public sealed class RegisterDeviceHandler
     : IRequestHandler<RegisterDeviceCommand, Result<RegisterDeviceResult>>
 {
     private readonly IRegistrationDbContext _db;
+    private readonly IAgentConfigDbContext _agentConfigDb;
     private readonly IDeviceTokenService _tokenService;
     private readonly ILogger<RegisterDeviceHandler> _logger;
 
     public RegisterDeviceHandler(
         IRegistrationDbContext db,
+        IAgentConfigDbContext agentConfigDb,
         IDeviceTokenService tokenService,
         ILogger<RegisterDeviceHandler> logger)
     {
         _db = db;
+        _agentConfigDb = agentConfigDb;
         _tokenService = tokenService;
         _logger = logger;
     }
@@ -58,6 +62,15 @@ public sealed class RegisterDeviceHandler
         if (site is null)
             return Result<RegisterDeviceResult>.Failure("SITE_NOT_FOUND",
                 $"Site '{request.SiteCode}' not found.");
+
+        var existingConfig = await _agentConfigDb.GetFccConfigWithSiteDataAsync(
+            request.SiteCode,
+            bootstrapToken.LegalEntityId,
+            cancellationToken);
+
+        if (existingConfig is null)
+            return Result<RegisterDeviceResult>.Failure("CONFIG_NOT_FOUND",
+                "No active FCC configuration found for this site. Registration is blocked until site configuration is published.");
 
         // 3. Check for existing active agent
         var existingAgent = await _db.FindActiveAgentForSiteAsync(site.Id, cancellationToken);

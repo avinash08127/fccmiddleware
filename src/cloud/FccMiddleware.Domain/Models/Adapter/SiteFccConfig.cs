@@ -69,6 +69,50 @@ public sealed record SiteFccConfig
 
     /// <summary>Radix: Maps canonical pump numbers to (PumpAddr, Fp) pairs for Radix three-level addressing.</summary>
     public IReadOnlyDictionary<int, RadixPumpAddress>? FccPumpAddressMap { get; init; }
+
+    // ── DOMS TCP/JPL fields ──────────────────────────────────────────────────
+
+    /// <summary>DOMS TCP: JPL binary-framed port number.</summary>
+    public int? JplPort { get; init; }
+
+    /// <summary>DOMS TCP: DPP port list (comma-separated).</summary>
+    public string? DppPorts { get; init; }
+
+    /// <summary>DOMS TCP: FcLogon access code credential.</summary>
+    [Sensitive]
+    public string? FcAccessCode { get; init; }
+
+    /// <summary>DOMS TCP: Country code for locale-specific formatting.</summary>
+    public string? DomsCountryCode { get; init; }
+
+    /// <summary>DOMS TCP: POS version identifier sent during FcLogon handshake.</summary>
+    public string? PosVersionId { get; init; }
+
+    /// <summary>DOMS TCP: Heartbeat interval in seconds (default 30).</summary>
+    public int? HeartbeatIntervalSeconds { get; init; }
+
+    /// <summary>DOMS TCP: Maximum reconnection backoff in seconds.</summary>
+    public int? ReconnectBackoffMaxSeconds { get; init; }
+
+    /// <summary>DOMS TCP: Comma-separated list of configured pump numbers (e.g., "1,2,3,4").</summary>
+    public string? ConfiguredPumps { get; init; }
+
+    // ── Petronite OAuth2 fields ──────────────────────────────────────────────
+
+    /// <summary>Petronite: OAuth2 client ID for Client Credentials flow.</summary>
+    [Sensitive]
+    public string? ClientId { get; init; }
+
+    /// <summary>Petronite: OAuth2 client secret for Client Credentials flow.</summary>
+    [Sensitive]
+    public string? ClientSecret { get; init; }
+
+    /// <summary>Petronite: Webhook HMAC secret for payload validation.</summary>
+    [Sensitive]
+    public string? WebhookSecret { get; init; }
+
+    /// <summary>Petronite: OAuth2 token endpoint URL.</summary>
+    public string? OAuthTokenEndpoint { get; init; }
 }
 
 /// <summary>Radix pump addressing: maps to the (PUMP_ADDR, FP) pair in the Radix protocol.</summary>
