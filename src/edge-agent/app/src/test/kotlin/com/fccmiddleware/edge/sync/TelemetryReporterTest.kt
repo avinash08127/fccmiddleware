@@ -8,18 +8,9 @@ import com.fccmiddleware.edge.buffer.dao.StatusCount
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.buffer.entity.SyncState
-import com.fccmiddleware.edge.config.AgentDto
-import com.fccmiddleware.edge.config.ApiDto
-import com.fccmiddleware.edge.config.BufferDto
-import com.fccmiddleware.edge.config.CompatibilityDto
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
-import com.fccmiddleware.edge.config.FccConnectionDto
-import com.fccmiddleware.edge.config.FiscalizationDto
-import com.fccmiddleware.edge.config.PollingDto
-import com.fccmiddleware.edge.config.SiteDto
-import com.fccmiddleware.edge.config.SyncDto
-import com.fccmiddleware.edge.config.TelemetryDto
+import com.fccmiddleware.edge.config.canonicalEdgeConfig
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -75,34 +66,18 @@ class TelemetryReporterTest {
 
     private val connectivityStateFlow = MutableStateFlow(ConnectivityState.FULLY_ONLINE)
 
-    private val testConfig = EdgeAgentConfigDto(
-        schemaVersion = "2.0",
-        configVersion = 1,
-        configId = "test-config-id",
-        issuedAtUtc = "2026-01-01T00:00:00Z",
-        effectiveAtUtc = "2026-01-01T00:00:00Z",
-        compatibility = CompatibilityDto(minAgentVersion = "1.0.0"),
-        agent = AgentDto(deviceId = "device-001"),
-        site = SiteDto(
+    private val baseConfig = canonicalEdgeConfig(configVersion = 1)
+
+    private val testConfig: EdgeAgentConfigDto = baseConfig.copy(
+        identity = baseConfig.identity.copy(
+            deviceId = "device-001",
             siteCode = "SITE-A",
             legalEntityId = "10000000-0000-0000-0000-000000000001",
-            timezone = "Africa/Johannesburg",
-            currency = "ZAR",
-            operatingModel = "COCO",
-            connectivityMode = "RELAY",
         ),
-        fccConnection = FccConnectionDto(
-            vendor = "DOMS",
-            host = "192.168.1.100",
-            port = 8080,
-            credentialsRef = "secret/fcc-key",
+        site = baseConfig.site.copy(connectivityMode = "RELAY"),
+        fcc = baseConfig.fcc.copy(
+            credentialRef = "secret/fcc-key",
         ),
-        polling = PollingDto(),
-        sync = SyncDto(cloudBaseUrl = "https://api.fccmiddleware.io", uploadBatchSize = 50),
-        buffer = BufferDto(),
-        api = ApiDto(),
-        telemetry = TelemetryDto(),
-        fiscalization = FiscalizationDto(mode = "NONE"),
     )
 
     @Before
@@ -145,6 +120,7 @@ class TelemetryReporterTest {
             updatedAt = "2026-03-11T10:01:00Z",
         )
         coEvery { syncStateDao.upsert(any()) } returns Unit
+        coEvery { syncStateDao.incrementAndGetTelemetrySequence(any()) } returns 43L
 
         // Token provider defaults
         every { tokenProvider.isDecommissioned() } returns false
@@ -286,15 +262,13 @@ class TelemetryReporterTest {
         val payload = reporter.buildPayload()!!
         assertEquals(43L, payload.sequenceNumber) // 42 + 1
 
-        // Verify SyncState was upserted with incremented sequence
-        val slot = slot<SyncState>()
-        coVerify { syncStateDao.upsert(capture(slot)) }
-        assertEquals(43L, slot.captured.telemetrySequence)
+        coVerify { syncStateDao.incrementAndGetTelemetrySequence(any()) }
     }
 
     @Test
     fun `buildPayload sequence starts at 1 when no SyncState exists`() = runTest {
         coEvery { syncStateDao.get() } returns null
+        coEvery { syncStateDao.incrementAndGetTelemetrySequence(any()) } returns 1L
         val payload = reporter.buildPayload()!!
         assertEquals(1L, payload.sequenceNumber)
     }

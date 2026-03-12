@@ -120,7 +120,12 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
 
         var legalEntities = await _client.GetFromJsonAsync<List<PortalLegalEntityDto>>("/api/v1/master-data/legal-entities");
         legalEntities.Should().NotBeNull();
-        legalEntities!.Should().ContainSingle(item => item.Id == LegalEntityId);
+        legalEntities!.Should().ContainSingle(item =>
+            item.Id == LegalEntityId
+            && item.Code == "LS-001"
+            && item.CountryCode == "LS"
+            && item.CountryName == "Lesotho"
+            && item.OdooCompanyId == "ODOO-LS-001");
 
         var products = await _client.GetFromJsonAsync<List<ProductDto>>($"/api/v1/master-data/products?legalEntityId={LegalEntityId}");
         products.Should().NotBeNull();
@@ -167,10 +172,12 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
             $"/api/v1/sites?legalEntityId={LegalEntityId}&pageSize=20");
         list.Should().NotBeNull();
         list!.Data.Should().ContainSingle(item => item.Id == SiteId);
+        list.Data[0].SiteUsesPreAuth.Should().BeFalse();
 
         var detail = await _client.GetFromJsonAsync<SiteDetailDto>($"/api/v1/sites/{SiteId}");
         detail.Should().NotBeNull();
         detail!.Fcc.Should().NotBeNull();
+        detail.SiteUsesPreAuth.Should().BeFalse();
 
         var patchResponse = await _client.PatchAsJsonAsync(
             $"/api/v1/sites/{SiteId}",
@@ -178,6 +185,7 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
             {
                 ConnectivityMode = "DISCONNECTED",
                 OperatingModel = "CODO",
+                SiteUsesPreAuth = true,
                 Tolerance = new SiteTolerancePatchDto
                 {
                     AmountTolerancePct = 7.5m,
@@ -193,6 +201,9 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
                 }
             });
         patchResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var patched = await patchResponse.Content.ReadFromJsonAsync<SiteDetailDto>();
+        patched.Should().NotBeNull();
+        patched!.SiteUsesPreAuth.Should().BeTrue();
 
         var updateFccResponse = await _client.PutAsJsonAsync(
             $"/api/v1/sites/{SiteId}/fcc-config",
@@ -287,6 +298,28 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task UpdateFccConfig_RejectsUnsupportedVendor()
+    {
+        var response = await _client.PutAsJsonAsync(
+            $"/api/v1/sites/{SiteId}/fcc-config",
+            new UpdateFccConfigRequestDto
+            {
+                Enabled = true,
+                Vendor = "ADVATEC",
+                ConnectionProtocol = "REST",
+                HostAddress = "10.20.30.40",
+                Port = 9090,
+                TransactionMode = "PULL",
+                IngestionMode = "RELAY",
+            });
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("VALIDATION.UNSUPPORTED_FCC_VENDOR");
+    }
+
+    [Fact]
     public async Task DlqApis_ListDetailAndMutate()
     {
         var list = await _client.GetFromJsonAsync<PortalPagedResult<DeadLetterDto>>(
@@ -355,12 +388,15 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id = LegalEntityId,
-            CountryCode = "MW",
-            Name = "Malawi Test",
-            CurrencyCode = "MWK",
-            TaxAuthorityCode = "MRA",
-            DefaultTimezone = "Africa/Blantyre",
+            BusinessCode = "LS-001",
+            CountryCode = "LS",
+            CountryName = "Lesotho",
+            Name = "Lesotho Test",
+            CurrencyCode = "LSL",
+            TaxAuthorityCode = "RSL",
+            DefaultTimezone = "Africa/Maseru",
             FiscalizationRequired = true,
+            OdooCompanyId = "ODOO-LS-001",
             AmountTolerancePercent = 5,
             AmountToleranceAbsolute = 500,
             TimeWindowMinutes = 60,
@@ -389,6 +425,7 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
             SiteCode = "SITE-001",
             SiteName = "Portal Test Site",
             OperatingModel = SiteOperatingModel.COCO,
+            SiteUsesPreAuth = false,
             ConnectivityMode = "CONNECTED",
             CompanyTaxPayerId = "COMP-123",
             FiscalizationMode = FiscalizationMode.FCC_DIRECT,

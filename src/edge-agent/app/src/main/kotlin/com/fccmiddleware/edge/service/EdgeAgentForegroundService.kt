@@ -7,13 +7,26 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
+import com.fccmiddleware.edge.adapter.common.AgentFccConfig
+import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.api.LocalApiServer
+import com.fccmiddleware.edge.config.ConfigManager
+import com.fccmiddleware.edge.config.EdgeAgentConfigDto
+import com.fccmiddleware.edge.config.requiresFccRuntime
+import com.fccmiddleware.edge.config.toAgentFccConfig
+import com.fccmiddleware.edge.config.toLocalApiServerConfig
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
+import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.runtime.CadenceController
+import com.fccmiddleware.edge.runtime.FccRuntimeState
+import com.fccmiddleware.edge.security.EncryptedPrefsManager
+import com.fccmiddleware.edge.sync.CloudApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
 /**
@@ -38,6 +51,16 @@ class EdgeAgentForegroundService : Service() {
     private val localApiServer: LocalApiServer by inject()
     private val connectivityManager: ConnectivityManager by inject()
     private val cadenceController: CadenceController by inject()
+    private val configManager: ConfigManager by inject()
+    private val fccAdapterFactory: IFccAdapterFactory by inject()
+    private val cloudApiClient: CloudApiClient by inject()
+    private val encryptedPrefs: EncryptedPrefsManager by inject()
+    private val fccRuntimeState: FccRuntimeState by inject()
+    private val ingestionOrchestrator: IngestionOrchestrator by inject()
+    private val preAuthHandler: PreAuthHandler by inject()
+
+    @Volatile
+    private var lastAppliedConfigVersion: Int? = null
 
     companion object {
         const val CHANNEL_ID = "fcc_edge_agent_channel"
@@ -58,12 +81,21 @@ class EdgeAgentForegroundService : Service() {
 
         // Start connectivity probes immediately (initializes in FULLY_OFFLINE per spec)
         connectivityManager.start()
+        serviceScope.launch {
+            configManager.loadFromLocal()
+            val bootConfig = configManager.config.value
+            if (bootConfig != null) {
+                if (!applyRuntimeConfig(bootConfig, "startup")) {
+                    return@launch
+                }
+            } else {
+                configureBootstrapRuntime()
+            }
 
-        // Start local API — independent of connectivity, always serves requests
-        localApiServer.start()
-
-        // Start cadence controller — coordinates all recurring resident work
-        cadenceController.start()
+            localApiServer.start()
+            cadenceController.start()
+            observeConfigForRuntimeUpdates()
+        }
 
         return START_STICKY
     }
@@ -78,6 +110,95 @@ class EdgeAgentForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private suspend fun observeConfigForRuntimeUpdates() {
+        configManager.config.collect { cfg ->
+            if (cfg != null && cfg.configVersion != lastAppliedConfigVersion) {
+                applyRuntimeConfig(cfg, "config-update")
+            }
+        }
+    }
+
+    private fun configureBootstrapRuntime() {
+        clearFccRuntime()
+        localApiServer.reconfigure(
+            config = LocalApiServer.LocalApiServerConfig(),
+            deviceId = encryptedPrefs.deviceId ?: "00000000-0000-0000-0000-000000000000",
+            siteCode = encryptedPrefs.siteCode ?: "UNPROVISIONED",
+            agentVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0",
+        )
+        Log.i(TAG, "Bootstrap runtime configured without site config")
+    }
+
+    private fun applyRuntimeConfig(siteConfig: EdgeAgentConfigDto, source: String): Boolean {
+        val agentVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0"
+
+        cloudApiClient.updateBaseUrl(siteConfig.sync.cloudBaseUrl)
+        encryptedPrefs.cloudBaseUrl = siteConfig.sync.cloudBaseUrl
+
+        localApiServer.reconfigure(
+            config = siteConfig.toLocalApiServerConfig(),
+            deviceId = siteConfig.identity.deviceId,
+            siteCode = siteConfig.identity.siteCode,
+            agentVersion = agentVersion,
+        )
+
+        if (!siteConfig.requiresFccRuntime()) {
+            clearFccRuntime()
+            lastAppliedConfigVersion = siteConfig.configVersion
+            Log.i(TAG, "Applied config v${siteConfig.configVersion} from $source without FCC runtime")
+            return true
+        }
+
+        val agentFccConfig = try {
+            siteConfig.toAgentFccConfig()
+        } catch (e: Exception) {
+            return failRuntimeReadiness(
+                "Config v${siteConfig.configVersion} from $source cannot build AgentFccConfig: ${e.message}",
+            )
+        }
+
+        val adapter = try {
+            fccAdapterFactory.resolve(agentFccConfig.fccVendor, agentFccConfig)
+        } catch (e: Exception) {
+            return failRuntimeReadiness(
+                "Config v${siteConfig.configVersion} from $source cannot resolve FCC adapter: ${e.message}",
+            )
+        }
+
+        fccRuntimeState.wire(adapter, agentFccConfig)
+        ingestionOrchestrator.wireRuntime(adapter, agentFccConfig)
+        preAuthHandler.wireFccAdapter(adapter)
+        localApiServer.wireFccAdapter(adapter)
+        cadenceController.updateFccAdapter(adapter)
+
+        encryptedPrefs.fccHost = agentFccConfig.hostAddress
+        encryptedPrefs.fccPort = agentFccConfig.port
+        lastAppliedConfigVersion = siteConfig.configVersion
+
+        Log.i(
+            TAG,
+            "Applied config v${siteConfig.configVersion} from $source with FCC runtime " +
+                "vendor=${agentFccConfig.fccVendor} host=${agentFccConfig.hostAddress}:${agentFccConfig.port}",
+        )
+        return true
+    }
+
+    private fun clearFccRuntime() {
+        fccRuntimeState.clear()
+        ingestionOrchestrator.wireRuntime(adapter = null, config = null)
+        preAuthHandler.wireFccAdapter(null)
+        localApiServer.wireFccAdapter(null)
+        cadenceController.updateFccAdapter(null)
+    }
+
+    private fun failRuntimeReadiness(reason: String): Boolean {
+        Log.e(TAG, "Runtime readiness failure: $reason")
+        if (encryptedPrefs.isRegistered) {
+            stopSelf()
+        }
+        return false
+    }
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(

@@ -28,11 +28,14 @@ public sealed class LegalEntityRecord
     /// <summary>Full legal entity name.</summary>
     public string Name { get; init; } = null!;
 
+    /// <summary>ISO 3166-1 alpha-2/alpha-3 country code for the legal entity.</summary>
+    public string CountryCode { get; init; } = null!;
+
+    /// <summary>Human-readable country name.</summary>
+    public string CountryName { get; init; } = null!;
+
     /// <summary>ISO 4217 currency code (e.g., MWK, TZS).</summary>
     public string CurrencyCode { get; init; } = null!;
-
-    /// <summary>Optional ISO 3166-1 alpha-2 country code.</summary>
-    public string? Country { get; init; }
 
     /// <summary>Tax authority code for the legal entity (e.g., ZIMRA, MRA).</summary>
     public string TaxAuthorityCode { get; init; } = null!;
@@ -45,6 +48,9 @@ public sealed class LegalEntityRecord
 
     /// <summary>Default IANA timezone for the legal entity.</summary>
     public string DefaultTimezone { get; init; } = null!;
+
+    /// <summary>Required reference back to the Odoo company record.</summary>
+    public string OdooCompanyId { get; init; } = null!;
 
     public bool IsActive { get; init; }
 

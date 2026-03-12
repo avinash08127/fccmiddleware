@@ -23,6 +23,7 @@ public sealed class PreAuthHandler : IPreAuthHandler
     private readonly IFccAdapterFactory? _adapterFactory;
     private readonly IConnectivityMonitor _connectivity;
     private readonly IOptions<AgentConfiguration> _config;
+    private readonly IConfigManager? _configManager;
     private readonly ILogger<PreAuthHandler> _logger;
 
     public PreAuthHandler(
@@ -30,13 +31,15 @@ public sealed class PreAuthHandler : IPreAuthHandler
         IConnectivityMonitor connectivity,
         IOptions<AgentConfiguration> config,
         ILogger<PreAuthHandler> logger,
-        IFccAdapterFactory? adapterFactory = null)
+        IFccAdapterFactory? adapterFactory = null,
+        IConfigManager? configManager = null)
     {
         _db = db;
         _connectivity = connectivity;
         _config = config;
         _logger = logger;
         _adapterFactory = adapterFactory;
+        _configManager = configManager;
     }
 
     // ── HandleAsync ───────────────────────────────────────────────────────────
@@ -187,13 +190,26 @@ public sealed class PreAuthHandler : IPreAuthHandler
             VehicleNumber: request.VehicleNumber,
             FccCorrelationId: null);
 
-        var adapter = _adapterFactory.Create(
-            FccVendor.Doms,
-            new FccConnectionConfig(
-                BaseUrl: config.FccBaseUrl,
-                ApiKey: config.FccApiKey,
-                RequestTimeout: TimeSpan.FromSeconds(config.PreAuthTimeoutSeconds),
-                SiteCode: request.SiteCode));
+        IFccAdapter adapter;
+        try
+        {
+            var resolvedConfig = DesktopFccRuntimeConfiguration.Resolve(
+                config,
+                _configManager?.CurrentSiteConfig,
+                TimeSpan.FromSeconds(config.PreAuthTimeoutSeconds),
+                request.SiteCode);
+            adapter = _adapterFactory.Create(resolvedConfig.Vendor, resolvedConfig.ConnectionConfig);
+        }
+        catch (NotSupportedException ex)
+        {
+            _logger.LogWarning(ex, "Pre-auth rejected: unsupported FCC vendor for site {Site}", request.SiteCode);
+            return PreAuthHandlerResult.Fail(PreAuthHandlerError.UnsupportedVendor, ex.Message);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "Pre-auth rejected: FCC configuration incomplete for site {Site}", request.SiteCode);
+            return PreAuthHandlerResult.Fail(PreAuthHandlerError.AdapterNotConfigured, ex.Message);
+        }
 
         PreAuthResult fccResult;
 
@@ -357,13 +373,12 @@ public sealed class PreAuthHandler : IPreAuthHandler
         try
         {
             var config = _config.Value;
-            var adapter = _adapterFactory.Create(
-                FccVendor.Doms,
-                new FccConnectionConfig(
-                    BaseUrl: config.FccBaseUrl,
-                    ApiKey: config.FccApiKey,
-                    RequestTimeout: TimeSpan.FromSeconds(config.PreAuthTimeoutSeconds),
-                    SiteCode: record.SiteCode));
+            var resolvedConfig = DesktopFccRuntimeConfiguration.Resolve(
+                config,
+                _configManager?.CurrentSiteConfig,
+                TimeSpan.FromSeconds(config.PreAuthTimeoutSeconds),
+                record.SiteCode);
+            var adapter = _adapterFactory.Create(resolvedConfig.Vendor, resolvedConfig.ConnectionConfig);
 
             await adapter.CancelPreAuthAsync(record.FccCorrelationId, ct);
         }

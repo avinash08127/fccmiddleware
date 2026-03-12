@@ -45,10 +45,16 @@ class PreAuthHandler(
     private val connectivityManager: ConnectivityManager,
     private val auditLogDao: AuditLogDao,
     private val scope: CoroutineScope,
-    /** Nullable until adapter factory is wired (EA-2.x). Absent adapter → ERROR result. */
-    private val fccAdapter: IFccAdapter? = null,
+    fccAdapter: IFccAdapter? = null,
     val config: PreAuthHandlerConfig = PreAuthHandlerConfig(),
 ) {
+    /** Late-bound: wired when FCC config becomes available after startup. */
+    @Volatile
+    internal var fccAdapter: IFccAdapter? = fccAdapter
+
+    internal fun wireFccAdapter(adapter: IFccAdapter?) {
+        fccAdapter = adapter
+    }
 
     data class PreAuthHandlerConfig(
         /** FCC call timeout in milliseconds. Default 30 s per spec. */
@@ -89,6 +95,9 @@ class PreAuthHandler(
         val siteCode = command.siteCode
         val odooOrderId = command.odooOrderId
             ?: return error("odooOrderId is required")
+        if (command.unitPrice <= 0L) {
+            return error("INVALID_UNIT_PRICE")
+        }
 
         // ------------------------------------------------------------------
         // 1. Local dedup — prevent duplicate FCC calls for the same Odoo order
@@ -148,6 +157,7 @@ class PreAuthHandler(
             productCode = nozzle.productCode,
             currencyCode = command.currencyCode,
             requestedAmountMinorUnits = command.amountMinorUnits,
+            unitPrice = command.unitPrice,
             authorizedAmountMinorUnits = null,
             status = PreAuthStatus.PENDING.name,
             fccCorrelationId = null,
@@ -364,6 +374,7 @@ class PreAuthHandler(
                             siteCode = r.siteCode,
                             pumpNumber = r.pumpNumber,
                             amountMinorUnits = 0L,
+                            unitPrice = r.unitPrice ?: 1L,
                             currencyCode = r.currencyCode,
                             nozzleNumber = r.nozzleNumber,
                             odooOrderId = r.odooOrderId,

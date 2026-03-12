@@ -1,9 +1,11 @@
 package com.fccmiddleware.edge.buffer
 
 import android.content.Context
+import androidx.room.migration.Migration
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
 import com.fccmiddleware.edge.buffer.dao.AuditLogDao
 import com.fccmiddleware.edge.buffer.dao.NozzleDao
@@ -42,7 +44,7 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
         AgentConfig::class,
         AuditLog::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 abstract class BufferDatabase : RoomDatabase() {
@@ -55,6 +57,17 @@ abstract class BufferDatabase : RoomDatabase() {
     abstract fun auditLogDao(): AuditLogDao
 
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    ALTER TABLE pre_auth_records
+                    ADD COLUMN unit_price_minor_per_litre INTEGER
+                    """.trimIndent(),
+                )
+            }
+        }
+
         fun create(context: Context): BufferDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
@@ -62,6 +75,7 @@ abstract class BufferDatabase : RoomDatabase() {
                 "fcc_buffer.db"
             )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                .addMigrations(MIGRATION_1_2)
                 .build()
         }
     }

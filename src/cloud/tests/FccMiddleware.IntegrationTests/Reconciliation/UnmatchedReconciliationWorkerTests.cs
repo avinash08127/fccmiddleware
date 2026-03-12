@@ -158,12 +158,15 @@ public sealed class UnmatchedReconciliationWorkerTests
         db.LegalEntities.Add(new LegalEntity
         {
             Id = legalEntityId,
+            BusinessCode = $"GH-{siteCode}",
             CountryCode = "GH",
+            CountryName = "Ghana",
             Name = $"Recon {siteCode}",
             CurrencyCode = "GHS",
             TaxAuthorityCode = "GRA",
             FiscalizationRequired = false,
             DefaultTimezone = "Africa/Accra",
+            OdooCompanyId = $"ODOO-GH-{siteCode}",
             IsActive = true,
             SyncedAt = DateTimeOffset.UtcNow,
             CreatedAt = DateTimeOffset.UtcNow,

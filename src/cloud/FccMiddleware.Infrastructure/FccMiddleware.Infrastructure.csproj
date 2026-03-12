@@ -1,6 +1,9 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\FccMiddleware.Adapter.Doms\FccMiddleware.Adapter.Doms.csproj" />
+    <ProjectReference Include="..\FccMiddleware.Adapter.Petronite\FccMiddleware.Adapter.Petronite.csproj" />
+    <ProjectReference Include="..\FccMiddleware.Adapter.Radix\FccMiddleware.Adapter.Radix.csproj" />
     <ProjectReference Include="..\FccMiddleware.Application\FccMiddleware.Application.csproj" />
     <ProjectReference Include="..\FccMiddleware.Domain\FccMiddleware.Domain.csproj" />
   </ItemGroup>
@@ -11,6 +14,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
     <PackageReference Include="Parquet.Net" Version="5.3.0" />

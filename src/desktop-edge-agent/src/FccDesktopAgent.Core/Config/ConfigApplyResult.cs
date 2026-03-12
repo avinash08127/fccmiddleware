@@ -5,6 +5,8 @@ public enum ConfigApplyOutcome
 {
     /// <summary>Config was validated and applied (hot-reload and/or restart-required changes).</summary>
     Applied,
+    /// <summary>Config failed validation and was rejected.</summary>
+    Rejected,
     /// <summary>Config version was not strictly greater than the current version.</summary>
     StaleVersion,
     /// <summary>Config <c>effectiveAtUtc</c> is in the future; deferred to next poll.</summary>

@@ -60,11 +60,15 @@ fun Routing.pumpStatusRoutes(cache: PumpStatusCache) {
  * returns last-known data with [PumpStatusResponse.stale] = true.
  */
 class PumpStatusCache(
-    private val fccAdapter: IFccAdapter?,
+    fccAdapter: IFccAdapter? = null,
     private val connectivityManager: ConnectivityManager,
     private val scope: CoroutineScope,
     val liveTimeoutMs: Long = 1_000L,
 ) {
+    /** Late-bound: wired when FCC config becomes available after startup. */
+    @Volatile
+    internal var fccAdapter: IFccAdapter? = fccAdapter
+
     data class Result(
         val pumps: List<PumpStatus>,
         val stale: Boolean,
@@ -85,7 +89,8 @@ class PumpStatusCache(
             it == ConnectivityState.FULLY_ONLINE || it == ConnectivityState.INTERNET_DOWN
         }
 
-        if (!fccReachable || fccAdapter == null) {
+        val adapter = fccAdapter
+        if (!fccReachable || adapter == null) {
             return staleFallback()
         }
 
@@ -93,7 +98,7 @@ class PumpStatusCache(
         // Concurrent callers queue behind the mutex instead of fanning out to the FCC.
         return mutex.withLock {
             val result = try {
-                withTimeoutOrNull(liveTimeoutMs) { fccAdapter.getPumpStatus() }
+                withTimeoutOrNull(liveTimeoutMs) { adapter.getPumpStatus() }
             } catch (_: Exception) {
                 null
             }

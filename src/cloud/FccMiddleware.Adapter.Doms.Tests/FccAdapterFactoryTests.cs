@@ -83,22 +83,20 @@ public class FccAdapterFactoryTests
     }
 
     // -------------------------------------------------------------------------
-    // Radix vendor stub registration
+    // Multiple registered vendors
     // -------------------------------------------------------------------------
 
     [Fact]
-    public void Resolve_RadixRegistered_ThrowsNotImplementedException()
+    public void Resolve_AdditionalRegisteredVendor_UsesBoundCreator()
     {
         var factory = CreateFactory(
             (FccVendor.DOMS, DomsCreator),
-            (FccVendor.RADIX, _ => throw new NotImplementedException(
-                "Radix cloud adapter is not yet implemented")));
-        var config = TestHelpers.DefaultConfig();
+            (FccVendor.RADIX, DomsCreator));
+        var config = TestHelpers.DefaultConfig() with { FccVendor = FccVendor.RADIX };
 
-        var act = () => factory.Resolve(FccVendor.RADIX, config);
+        var adapter = factory.Resolve(FccVendor.RADIX, config);
 
-        act.Should().Throw<NotImplementedException>()
-           .WithMessage("*Radix*not yet implemented*");
+        adapter.Should().BeOfType<DomsCloudAdapter>();
     }
 
     // -------------------------------------------------------------------------

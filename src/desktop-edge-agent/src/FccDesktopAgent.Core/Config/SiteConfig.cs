@@ -53,6 +53,9 @@ public sealed class SiteConfigFcc
     public int? PullIntervalSeconds { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>Petronite: local HTTP port for the webhook listener (default 8090).</summary>
+    public int? WebhookListenerPort { get; set; }
 }
 
 public sealed class SiteConfigSync

@@ -3,6 +3,7 @@ using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Infrastructure.Adapters;
 using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -207,6 +208,11 @@ public sealed class SitesController : PortalControllerBase
             site.ConnectivityMode = request.ConnectivityMode;
         }
 
+        if (request.SiteUsesPreAuth.HasValue)
+        {
+            site.SiteUsesPreAuth = request.SiteUsesPreAuth.Value;
+        }
+
         if (request.Tolerance is not null)
         {
             if (request.Tolerance.AmountTolerancePct.HasValue)
@@ -288,6 +294,13 @@ public sealed class SitesController : PortalControllerBase
         if (!TryParseFccVendor(request.Vendor, out var vendor))
         {
             return BadRequest(BuildError("VALIDATION.INVALID_FCC_VENDOR", $"Unknown FCC vendor '{request.Vendor}'."));
+        }
+
+        if (vendor.HasValue && !CloudFccAdapterFactoryRegistration.IsSupported(vendor.Value))
+        {
+            return BadRequest(BuildError(
+                "VALIDATION.UNSUPPORTED_FCC_VENDOR",
+                $"FCC vendor '{vendor.Value}' is not supported by the current cloud runtimes."));
         }
 
         if (!TryParseConnectionProtocol(request.ConnectionProtocol, out var protocol))
@@ -623,6 +636,7 @@ public sealed class SitesController : PortalControllerBase
             LegalEntityId = site.LegalEntityId,
             SiteName = site.SiteName,
             OperatingModel = site.OperatingModel.ToString(),
+            SiteUsesPreAuth = site.SiteUsesPreAuth,
             ConnectivityMode = site.ConnectivityMode,
             IngestionMode = config?.IngestionMode.ToString(),
             FccVendor = config?.FccVendor.ToString(),
@@ -640,6 +654,7 @@ public sealed class SitesController : PortalControllerBase
             LegalEntityId = site.LegalEntityId,
             SiteName = site.SiteName,
             OperatingModel = site.OperatingModel.ToString(),
+            SiteUsesPreAuth = site.SiteUsesPreAuth,
             ConnectivityMode = site.ConnectivityMode,
             IngestionMode = site.FccConfigs.OrderByDescending(item => item.UpdatedAt).FirstOrDefault()?.IngestionMode.ToString(),
             FccVendor = site.FccConfigs.OrderByDescending(item => item.UpdatedAt).FirstOrDefault()?.FccVendor.ToString(),

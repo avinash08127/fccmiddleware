@@ -20,6 +20,15 @@ public interface IIngestionOrchestrator
     /// since the last cursor are fetched so no data is lost for other pumps.
     /// </summary>
     Task<IngestionResult> ManualPullAsync(int? pumpNumber, CancellationToken ct);
+
+    /// <summary>
+    /// Ensures push-mode adapters (e.g. Petronite) have their webhook listeners started
+    /// and startup reconciliation completed. Called once by the cadence controller on startup,
+    /// independent of FCC connectivity state — push listeners are local HTTP servers that
+    /// must be ready to receive callbacks as soon as the agent boots.
+    /// No-op if the configured vendor is not push-mode.
+    /// </summary>
+    Task EnsurePushListenersInitializedAsync(CancellationToken ct);
 }
 
 public sealed record IngestionResult(

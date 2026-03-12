@@ -105,21 +105,26 @@ data class CloudUploadResponse(
 @Serializable
 data class CloudUploadRecordResult(
     val fccTransactionId: String,
-    val siteCode: String,
 
     /**
      * Per-record outcome:
-     *   ACCEPTED  — persisted; id is the cloud UUID.
-     *   DUPLICATE — already exists; id is the existing cloud UUID.
-     *   REJECTED  — validation or adapter error; error contains details.
+     *   ACCEPTED  — persisted; transactionId is the cloud UUID.
+     *   DUPLICATE — already exists; originalTransactionId is the existing cloud UUID.
+     *   REJECTED  — validation or adapter error; errorCode/errorMessage contain details.
      */
     val outcome: String,
 
-    /** Cloud UUID on ACCEPTED/DUPLICATE; null on REJECTED. */
-    val id: String? = null,
+    /** Cloud UUID on ACCEPTED; null on DUPLICATE/REJECTED. */
+    val transactionId: String? = null,
+
+    /** Existing cloud UUID on DUPLICATE; null on ACCEPTED/REJECTED. */
+    val originalTransactionId: String? = null,
 
     /** Populated only on REJECTED outcome. */
-    val error: CloudErrorResponse? = null,
+    val errorCode: String? = null,
+
+    /** Populated only on REJECTED outcome. */
+    val errorMessage: String? = null,
 )
 
 @Serializable
@@ -138,25 +143,13 @@ enum class UploadOutcome {
 // ---------------------------------------------------------------------------
 
 /**
- * Response from `GET /api/v1/transactions/synced-status?ids=...`.
+ * Response from `GET /api/v1/transactions/synced-status?since=...`.
  *
- * Returns the cloud-side status for each requested transaction ID.
+ * Returns FCC transaction IDs that reached SYNCED_TO_ODOO since the requested timestamp.
  */
 @Serializable
 data class SyncedStatusResponse(
-    val statuses: List<TransactionStatusEntry>,
-)
-
-/**
- * Per-transaction status entry within a [SyncedStatusResponse].
- *
- * [id] is the FCC transaction ID (dedup key).
- * [status] is one of: PENDING, SYNCED, SYNCED_TO_ODOO, STALE_PENDING, DUPLICATE, ARCHIVED, NOT_FOUND.
- */
-@Serializable
-data class TransactionStatusEntry(
-    val id: String,
-    val status: String,
+    val fccTransactionIds: List<String>,
 )
 
 // ---------------------------------------------------------------------------

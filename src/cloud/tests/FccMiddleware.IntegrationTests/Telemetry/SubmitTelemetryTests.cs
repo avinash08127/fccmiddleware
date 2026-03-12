@@ -260,11 +260,16 @@ public sealed class SubmitTelemetryTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id = TestLegalEntityId,
+            BusinessCode = "ZW-001",
             CountryCode = "ZW",
+            CountryName = "Zimbabwe",
             Name = "Telemetry Test LE",
             CurrencyCode = "ZWL",
+            TaxAuthorityCode = "ZIMRA",
             DefaultTimezone = "Africa/Harare",
+            OdooCompanyId = "ODOO-ZW-001",
             IsActive = true,
+            SyncedAt = DateTimeOffset.UtcNow,
             CreatedAt = DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow
         });

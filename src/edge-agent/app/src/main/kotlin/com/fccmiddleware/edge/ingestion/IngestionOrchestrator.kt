@@ -50,15 +50,26 @@ data class PollResult(
  *   - null — first boot; full catch-up required
  */
 class IngestionOrchestrator(
-    /** Nullable until the adapter factory is wired (EA-2.x). Polls are no-ops until set. */
-    private val adapter: IFccAdapter? = null,
+    adapter: IFccAdapter? = null,
     /** Nullable until TransactionBufferManager is wired. Polls are no-ops until set. */
     private val bufferManager: TransactionBufferManager? = null,
     /** Nullable until Room DB is available. Polls are no-ops until set. */
     private val syncStateDao: SyncStateDao? = null,
-    /** Nullable until ConfigManager is wired (EA-2.x). Polls are no-ops until set. */
-    private val config: AgentFccConfig? = null,
+    config: AgentFccConfig? = null,
 ) {
+    /** Late-bound: wired when FCC config becomes available after startup. */
+    @Volatile
+    internal var adapter: IFccAdapter? = adapter
+
+    /** Late-bound: wired when FCC config becomes available after startup. */
+    @Volatile
+    internal var config: AgentFccConfig? = config
+
+    internal fun wireRuntime(adapter: IFccAdapter?, config: AgentFccConfig?) {
+        this.adapter = adapter
+        this.config = config
+    }
+
     companion object {
         private const val TAG = "IngestionOrchestrator"
 

@@ -1,7 +1,4 @@
 using System.Text;
-using FccMiddleware.Adapter.Doms;
-using FccMiddleware.Adapter.Radix;
-using FccMiddleware.Adapter.Petronite;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Api.Portal;
@@ -346,32 +343,7 @@ try
     builder.Services.AddSingleton<IRawPayloadArchiver, S3RawPayloadArchiver>();
 
     // ── Infrastructure: FCC Adapter Factory ──────────────────────────────────
-    builder.Services.AddHttpClient();
-    builder.Services.AddSingleton<IFccAdapterFactory>(sp =>
-        FccAdapterFactory.Create(registry =>
-        {
-            var hcf = sp.GetRequiredService<IHttpClientFactory>();
-            registry[FccVendor.DOMS] = cfg =>
-            {
-                var client = hcf.CreateClient();
-                if (!string.IsNullOrEmpty(cfg.HostAddress))
-                {
-                    client.BaseAddress = new Uri($"http://{cfg.HostAddress}:{cfg.Port}/api/v1/");
-                    client.DefaultRequestHeaders.Add("X-API-Key", cfg.ApiKey);
-                }
-                return new DomsCloudAdapter(client, cfg);
-            };
-            registry[FccVendor.RADIX] = cfg =>
-            {
-                var client = hcf.CreateClient();
-                if (!string.IsNullOrEmpty(cfg.HostAddress))
-                {
-                    client.BaseAddress = new Uri($"http://{cfg.HostAddress}:{cfg.Port}/");
-                }
-                return new RadixCloudAdapter(client, cfg);
-            };
-            registry[FccVendor.PETRONITE] = cfg => new PetroniteCloudAdapter(cfg);
-        }));
+    builder.Services.AddCloudFccAdapterFactory();
 
     // Health checks: PostgreSQL + Redis (registered here; liveness stub registered in ServiceDefaults)
     // Use factory overloads so connection strings are resolved lazily at health-check execution

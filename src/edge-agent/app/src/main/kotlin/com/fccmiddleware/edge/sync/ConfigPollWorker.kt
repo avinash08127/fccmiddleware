@@ -6,7 +6,6 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.config.ConfigApplyResult
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
-import kotlinx.serialization.json.Json
 import java.time.Instant
 
 /**
@@ -26,9 +25,8 @@ import java.time.Instant
  * Called by [CadenceController] every `configPollTickFrequency` ticks when
  * internet is available (FULLY_ONLINE or FCC_UNREACHABLE).
  *
- * All constructor parameters are nullable so the worker can be registered in DI
- * before security and config modules are wired. Poll calls are no-ops until all
- * required dependencies are non-null.
+ * The worker can bootstrap before runtime FCC wiring exists, but cloud auth and
+ * config persistence dependencies must be present before polls can proceed.
  */
 class ConfigPollWorker(
     private val configManager: ConfigManager? = null,
@@ -42,11 +40,6 @@ class ConfigPollWorker(
         private const val DECOMMISSIONED_ERROR_CODE = "DEVICE_DECOMMISSIONED"
         private const val BASE_BACKOFF_MS = 1_000L
         private const val MAX_BACKOFF_MS = 60_000L
-    }
-
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
     }
 
     /**
@@ -174,7 +167,7 @@ class ConfigPollWorker(
         when (result) {
             is ConfigPollAttemptResult.NewConfig -> {
                 val parsed = try {
-                    json.decodeFromString<EdgeAgentConfigDto>(result.rawJson)
+                    com.fccmiddleware.edge.config.EdgeAgentConfigJson.decode(result.rawJson)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to parse config JSON from cloud", e)
                     recordFailure("JSON parse error: ${e.message}")

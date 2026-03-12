@@ -90,4 +90,16 @@ public sealed record FccConnectionConfig(
     /// <summary>Petronite: Webhook HMAC secret for payload validation.</summary>
     [property: SensitiveData] string? WebhookSecret = null,
     /// <summary>Petronite: OAuth2 token endpoint URL.</summary>
-    string? OAuthTokenEndpoint = null);
+    string? OAuthTokenEndpoint = null,
+    /// <summary>Petronite: HTTP port for the local webhook listener that receives transaction callbacks (default 8090).</summary>
+    int? WebhookListenerPort = null,
+    /// <summary>Resolved legal entity identifier used by normalization and correlation flows.</summary>
+    string? LegalEntityId = null,
+    /// <summary>Resolved ISO 4217 currency code for the site.</summary>
+    string? CurrencyCode = null,
+    /// <summary>Resolved IANA timezone for the site.</summary>
+    string? Timezone = null,
+    /// <summary>Resolved pump number offset applied during normalization.</summary>
+    int PumpNumberOffset = 0,
+    /// <summary>Resolved FCC product code mapping.</summary>
+    IReadOnlyDictionary<string, string>? ProductCodeMapping = null);

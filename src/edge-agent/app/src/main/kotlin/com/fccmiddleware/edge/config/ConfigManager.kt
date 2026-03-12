@@ -8,7 +8,6 @@ import com.fccmiddleware.edge.security.KeystoreManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.serialization.json.Json
 import java.time.Instant
 
 /**
@@ -32,12 +31,7 @@ class ConfigManager(
 
     companion object {
         private const val TAG = "ConfigManager"
-        private const val SUPPORTED_MAJOR_VERSION = "2"
-    }
-
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
+        private const val SUPPORTED_MAJOR_VERSION = "1"
     }
 
     private val _config = MutableStateFlow<EdgeAgentConfigDto?>(null)
@@ -65,7 +59,7 @@ class ConfigManager(
                 Log.e(TAG, "Config integrity check failed — stored config may be tampered. Awaiting fresh config from cloud.")
                 return
             }
-            val parsed = json.decodeFromString<EdgeAgentConfigDto>(configJsonPlain)
+            val parsed = EdgeAgentConfigJson.decode(configJsonPlain)
             _config.value = parsed
             Log.i(
                 TAG,
@@ -124,6 +118,18 @@ class ConfigManager(
             return ConfigApplyResult.Rejected("INSECURE_URL")
         }
 
+        val runtimeViolations = validateRuntimePrerequisites(newConfig)
+        if (runtimeViolations.isNotEmpty()) {
+            Log.e(TAG, "Config rejected — runtime prerequisites missing: $runtimeViolations")
+            return ConfigApplyResult.Rejected("INCOMPLETE_RUNTIME_CONFIGURATION")
+        }
+
+        val fccSupportViolation = validateFccSupport(newConfig)
+        if (fccSupportViolation != null) {
+            Log.e(TAG, "Config rejected — unsupported FCC configuration: $fccSupportViolation")
+            return ConfigApplyResult.Rejected("UNSUPPORTED_FCC_CONFIGURATION")
+        }
+
         // 4. Provisioning-only field immutability check
         val current = _config.value
         if (current != null) {
@@ -180,31 +186,63 @@ class ConfigManager(
     private fun validateNumericBounds(cfg: EdgeAgentConfigDto): List<String> {
         val violations = mutableListOf<String>()
 
-        // polling
-        if (cfg.polling.pullIntervalSeconds !in 5..3600) {
-            violations += "polling.pullIntervalSeconds=${cfg.polling.pullIntervalSeconds} (must be 5..3600)"
+        // fcc
+        cfg.fcc.pullIntervalSeconds?.let {
+            if (it !in 5..3600) {
+                violations += "fcc.pullIntervalSeconds=$it (must be 5..3600)"
+            }
         }
-        if (cfg.polling.batchSize !in 1..1000) {
-            violations += "polling.batchSize=${cfg.polling.batchSize} (must be 1..1000)"
+        cfg.fcc.catchUpPullIntervalSeconds?.let {
+            if (it !in 5..3600) {
+                violations += "fcc.catchUpPullIntervalSeconds=$it (must be 5..3600)"
+            }
+        }
+        cfg.fcc.hybridCatchUpIntervalSeconds?.let {
+            if (it !in 5..3600) {
+                violations += "fcc.hybridCatchUpIntervalSeconds=$it (must be 5..3600)"
+            }
+        }
+        if (cfg.fcc.heartbeatIntervalSeconds !in 5..300) {
+            violations += "fcc.heartbeatIntervalSeconds=${cfg.fcc.heartbeatIntervalSeconds} (must be 5..300)"
+        }
+        if (cfg.fcc.heartbeatTimeoutSeconds !in 5..600) {
+            violations += "fcc.heartbeatTimeoutSeconds=${cfg.fcc.heartbeatTimeoutSeconds} (must be 5..600)"
+        }
+        cfg.fcc.port?.let {
+            if (it !in 1..65535) {
+                violations += "fcc.port=$it (must be 1..65535)"
+            }
         }
 
         // sync
         if (cfg.sync.uploadBatchSize !in 1..500) {
             violations += "sync.uploadBatchSize=${cfg.sync.uploadBatchSize} (must be 1..500)"
         }
-        if (cfg.sync.syncIntervalSeconds !in 5..3600) {
-            violations += "sync.syncIntervalSeconds=${cfg.sync.syncIntervalSeconds} (must be 5..3600)"
+        if (cfg.sync.uploadIntervalSeconds !in 5..3600) {
+            violations += "sync.uploadIntervalSeconds=${cfg.sync.uploadIntervalSeconds} (must be 5..3600)"
         }
-        if (cfg.sync.statusPollIntervalSeconds !in 5..3600) {
-            violations += "sync.statusPollIntervalSeconds=${cfg.sync.statusPollIntervalSeconds} (must be 5..3600)"
+        if (cfg.sync.syncedStatusPollIntervalSeconds !in 5..3600) {
+            violations += "sync.syncedStatusPollIntervalSeconds=${cfg.sync.syncedStatusPollIntervalSeconds} (must be 5..3600)"
         }
         if (cfg.sync.configPollIntervalSeconds !in 10..86400) {
             violations += "sync.configPollIntervalSeconds=${cfg.sync.configPollIntervalSeconds} (must be 10..86400)"
+        }
+        if (cfg.sync.maxReplayBackoffSeconds !in 1..86400) {
+            violations += "sync.maxReplayBackoffSeconds=${cfg.sync.maxReplayBackoffSeconds} (must be 1..86400)"
+        }
+        if (cfg.sync.initialReplayBackoffSeconds !in 1..3600) {
+            violations += "sync.initialReplayBackoffSeconds=${cfg.sync.initialReplayBackoffSeconds} (must be 1..3600)"
+        }
+        if (cfg.sync.maxRecordsPerUploadWindow !in 1..100_000) {
+            violations += "sync.maxRecordsPerUploadWindow=${cfg.sync.maxRecordsPerUploadWindow} (must be 1..100000)"
         }
 
         // buffer
         if (cfg.buffer.retentionDays !in 1..365) {
             violations += "buffer.retentionDays=${cfg.buffer.retentionDays} (must be 1..365)"
+        }
+        if (cfg.buffer.stalePendingDays !in 1..90) {
+            violations += "buffer.stalePendingDays=${cfg.buffer.stalePendingDays} (must be 1..90)"
         }
         if (cfg.buffer.maxRecords !in 100..500_000) {
             violations += "buffer.maxRecords=${cfg.buffer.maxRecords} (must be 100..500000)"
@@ -213,22 +251,20 @@ class ConfigManager(
             violations += "buffer.cleanupIntervalHours=${cfg.buffer.cleanupIntervalHours} (must be 1..168)"
         }
 
-        // fccConnection
-        if (cfg.fccConnection.heartbeatIntervalSeconds !in 5..300) {
-            violations += "fccConnection.heartbeatIntervalSeconds=${cfg.fccConnection.heartbeatIntervalSeconds} (must be 5..300)"
-        }
-        if (cfg.fccConnection.port !in 1..65535) {
-            violations += "fccConnection.port=${cfg.fccConnection.port} (must be 1..65535)"
-        }
-
         // telemetry
         if (cfg.telemetry.telemetryIntervalSeconds !in 10..3600) {
             violations += "telemetry.telemetryIntervalSeconds=${cfg.telemetry.telemetryIntervalSeconds} (must be 10..3600)"
         }
+        if (cfg.telemetry.metricsWindowSeconds !in 10..86_400) {
+            violations += "telemetry.metricsWindowSeconds=${cfg.telemetry.metricsWindowSeconds} (must be 10..86400)"
+        }
 
-        // api
-        if (cfg.api.localApiPort !in 1..65535) {
-            violations += "api.localApiPort=${cfg.api.localApiPort} (must be 1..65535)"
+        // localApi
+        if (cfg.localApi.localhostPort !in 1..65535) {
+            violations += "localApi.localhostPort=${cfg.localApi.localhostPort} (must be 1..65535)"
+        }
+        if (cfg.localApi.rateLimitPerMinute !in 1..60_000) {
+            violations += "localApi.rateLimitPerMinute=${cfg.localApi.rateLimitPerMinute} (must be 1..60000)"
         }
 
         return violations
@@ -243,6 +279,65 @@ class ConfigManager(
         if (!cfg.sync.cloudBaseUrl.startsWith("https://")) {
             violations += "sync.cloudBaseUrl must use HTTPS (got: ${cfg.sync.cloudBaseUrl.take(8)}…)"
         }
+        cfg.fiscalization.taxAuthorityEndpoint?.let { endpoint ->
+            if (endpoint.isNotBlank() && !endpoint.startsWith("https://")) {
+                violations += "fiscalization.taxAuthorityEndpoint must use HTTPS"
+            }
+        }
+        return violations
+    }
+
+    private fun validateFccSupport(cfg: EdgeAgentConfigDto): String? {
+        if (!cfg.requiresFccRuntime()) {
+            return null
+        }
+
+        val vendor = try {
+            com.fccmiddleware.edge.adapter.common.FccVendor.valueOf(
+                requireNotNull(cfg.fcc.vendor).uppercase(),
+            )
+        } catch (_: IllegalArgumentException) {
+            return "fcc.vendor=${cfg.fcc.vendor} is unknown"
+        }
+
+        if (!com.fccmiddleware.edge.adapter.common.FccVendorSupportMatrix.isSupported(
+                vendor,
+                requireNotNull(cfg.fcc.connectionProtocol),
+            )
+        ) {
+            return com.fccmiddleware.edge.adapter.common.FccVendorSupportMatrix.unsupportedMessage(
+                vendor,
+                requireNotNull(cfg.fcc.connectionProtocol),
+            )
+        }
+
+        return null
+    }
+
+    private fun validateRuntimePrerequisites(cfg: EdgeAgentConfigDto): List<String> {
+        val violations = mutableListOf<String>()
+
+        if (cfg.localApi.enableLanApi && cfg.localApi.lanApiKeyRef.isNullOrBlank()) {
+            violations += "localApi.lanApiKeyRef is required when localApi.enableLanApi=true"
+        }
+
+        if (!cfg.requiresFccRuntime()) {
+            return violations
+        }
+
+        if (cfg.fcc.vendor.isNullOrBlank()) {
+            violations += "fcc.vendor is required when fcc.enabled=true"
+        }
+        if (cfg.fcc.connectionProtocol.isNullOrBlank()) {
+            violations += "fcc.connectionProtocol is required when fcc.enabled=true"
+        }
+        if (cfg.fcc.hostAddress.isNullOrBlank()) {
+            violations += "fcc.hostAddress is required when fcc.enabled=true"
+        }
+        if (cfg.fcc.port == null) {
+            violations += "fcc.port is required when fcc.enabled=true"
+        }
+
         return violations
     }
 
@@ -255,20 +350,20 @@ class ConfigManager(
         incoming: EdgeAgentConfigDto,
     ): List<String> {
         val violations = mutableListOf<String>()
-        if (current.agent.deviceId != incoming.agent.deviceId) {
-            violations += "agent.deviceId"
+        if (current.identity.deviceId != incoming.identity.deviceId) {
+            violations += "identity.deviceId"
         }
-        if (current.agent.isPrimaryAgent != incoming.agent.isPrimaryAgent) {
-            violations += "agent.isPrimaryAgent"
+        if (current.identity.isPrimaryAgent != incoming.identity.isPrimaryAgent) {
+            violations += "identity.isPrimaryAgent"
         }
-        if (current.site.siteCode != incoming.site.siteCode) {
-            violations += "site.siteCode"
+        if (current.identity.siteCode != incoming.identity.siteCode) {
+            violations += "identity.siteCode"
         }
-        if (current.site.legalEntityId != incoming.site.legalEntityId) {
-            violations += "site.legalEntityId"
+        if (current.identity.legalEntityId != incoming.identity.legalEntityId) {
+            violations += "identity.legalEntityId"
         }
-        if (current.api.localApiPort != incoming.api.localApiPort) {
-            violations += "api.localApiPort"
+        if (current.localApi.localhostPort != incoming.localApi.localhostPort) {
+            violations += "localApi.localhostPort"
         }
         return violations
     }
@@ -327,32 +422,31 @@ class ConfigManager(
     ): List<String> {
         val changed = mutableListOf<String>()
 
-        // fccConnection restart-required fields
-        val cc = current.fccConnection
-        val ic = incoming.fccConnection
-        if (cc.vendor != ic.vendor) changed += "fccConnection.vendor"
-        if (cc.host != ic.host) changed += "fccConnection.host"
-        if (cc.port != ic.port) changed += "fccConnection.port"
-        if (cc.credentialsRef != ic.credentialsRef) changed += "fccConnection.credentialsRef"
-        if (cc.protocolType != ic.protocolType) changed += "fccConnection.protocolType"
-        if (cc.transactionMode != ic.transactionMode) changed += "fccConnection.transactionMode"
-
-        // polling restart-required
-        if (current.polling.cursorStrategy != incoming.polling.cursorStrategy) {
-            changed += "polling.cursorStrategy"
-        }
+        // fcc restart-required fields
+        val cc = current.fcc
+        val ic = incoming.fcc
+        if (cc.vendor != ic.vendor) changed += "fcc.vendor"
+        if (cc.hostAddress != ic.hostAddress) changed += "fcc.hostAddress"
+        if (cc.port != ic.port) changed += "fcc.port"
+        if (cc.credentialRef != ic.credentialRef) changed += "fcc.credentialRef"
+        if (cc.connectionProtocol != ic.connectionProtocol) changed += "fcc.connectionProtocol"
+        if (cc.transactionMode != ic.transactionMode) changed += "fcc.transactionMode"
 
         // sync restart-required
+        if (current.sync.cursorStrategy != incoming.sync.cursorStrategy) {
+            changed += "sync.cursorStrategy"
+        }
+
         if (current.sync.cloudBaseUrl != incoming.sync.cloudBaseUrl) {
             changed += "sync.cloudBaseUrl"
         }
 
-        // api restart-required
-        if (current.api.enableLanApi != incoming.api.enableLanApi) {
-            changed += "api.enableLanApi"
+        // localApi restart-required
+        if (current.localApi.enableLanApi != incoming.localApi.enableLanApi) {
+            changed += "localApi.enableLanApi"
         }
-        if (current.api.lanApiKeyRef != incoming.api.lanApiKeyRef) {
-            changed += "api.lanApiKeyRef"
+        if (current.localApi.lanApiKeyRef != incoming.localApi.lanApiKeyRef) {
+            changed += "localApi.lanApiKeyRef"
         }
 
         return changed

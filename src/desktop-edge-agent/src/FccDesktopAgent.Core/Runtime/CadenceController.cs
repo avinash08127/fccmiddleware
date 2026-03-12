@@ -87,6 +87,22 @@ public sealed class CadenceController : BackgroundService
             }
         }
 
+        // PN-4.1 + PN-3.4: Ensure push-mode adapters (e.g. Petronite webhook listener)
+        // are started early, before the main cadence loop begins. This is independent of
+        // FCC connectivity state — push listeners are local HTTP servers that must be ready
+        // to receive callbacks as soon as the agent boots.
+        if (_ingestion is not null)
+        {
+            try
+            {
+                await _ingestion.EnsurePushListenersInitializedAsync(stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Push listener initialization failed on startup (non-fatal)");
+            }
+        }
+
         _connectivity.StateChanged += OnConnectivityStateChanged;
 
         try

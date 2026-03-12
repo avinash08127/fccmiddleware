@@ -10,13 +10,16 @@ namespace FccMiddleware.Domain.Entities;
 public class LegalEntity
 {
     public Guid Id { get; set; }
+    public string BusinessCode { get; set; } = string.Empty;
     public string CountryCode { get; set; } = null!;
+    public string CountryName { get; set; } = string.Empty;
     public string Name { get; set; } = null!;
     public string CurrencyCode { get; set; } = null!;
     public string TaxAuthorityCode { get; set; } = null!;
     public FiscalizationMode DefaultFiscalizationMode { get; set; } = FiscalizationMode.NONE;
     public string? FiscalizationProvider { get; set; }
     public string DefaultTimezone { get; set; } = null!;
+    public string OdooCompanyId { get; set; } = string.Empty;
     public decimal? AmountTolerancePercent { get; set; }
     public long? AmountToleranceAbsolute { get; set; }
     public int? TimeWindowMinutes { get; set; }

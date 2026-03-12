@@ -39,6 +39,9 @@ public sealed class SiteRecord
     /// <summary>Dealer/operator taxpayer ID for dealer-operated sites.</summary>
     public string? OperatorTaxPayerId { get; init; }
 
+    /// <summary>Whether the site participates in pre-auth workflows and reconciliation.</summary>
+    public bool? SiteUsesPreAuth { get; init; }
+
     /// <summary>Effective fiscalization mode for this site.</summary>
     public string FiscalizationMode { get; init; } = null!;
 

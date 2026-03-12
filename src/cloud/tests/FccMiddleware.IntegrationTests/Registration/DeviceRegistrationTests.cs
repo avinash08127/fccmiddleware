@@ -615,12 +615,15 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id                    = TestLegalEntityId,
+            BusinessCode          = "KE-001",
             CountryCode           = "KE",
+            CountryName           = "Kenya",
             Name                  = "Registration Test Kenya Ltd",
             CurrencyCode          = "KES",
             TaxAuthorityCode      = "KRA",
             FiscalizationRequired = false,
             DefaultTimezone       = "Africa/Nairobi",
+            OdooCompanyId         = "ODOO-KE-001",
             IsActive              = true,
             SyncedAt              = DateTimeOffset.UtcNow,
             CreatedAt             = DateTimeOffset.UtcNow,

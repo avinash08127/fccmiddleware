@@ -92,6 +92,9 @@ data class PreAuthCommand(
     /** Authorized amount in minor currency units. */
     val amountMinorUnits: Long,
 
+    /** Price per litre in minor currency units at pre-auth creation time. */
+    val unitPrice: Long,
+
     /** Must match site config. */
     val currencyCode: String,
 

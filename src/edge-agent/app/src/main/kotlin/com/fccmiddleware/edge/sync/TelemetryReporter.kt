@@ -103,9 +103,9 @@ class TelemetryReporter(
             return null
         }
 
-        val deviceId = cfg.agent.deviceId
-        val siteCode = cfg.site.siteCode
-        val legalEntityId = cfg.site.legalEntityId
+        val deviceId = cfg.identity.deviceId
+        val siteCode = cfg.identity.siteCode
+        val legalEntityId = cfg.identity.legalEntityId
 
         val sequence = nextSequenceNumber()
 
@@ -220,9 +220,9 @@ class TelemetryReporter(
             isReachable = isReachable,
             lastHeartbeatAtUtc = lastHeartbeatAtUtc,
             heartbeatAgeSeconds = heartbeatAgeSeconds,
-            fccVendor = cfg.fccConnection.vendor,
-            fccHost = cfg.fccConnection.host,
-            fccPort = cfg.fccConnection.port,
+            fccVendor = cfg.fcc.vendor ?: "UNCONFIGURED",
+            fccHost = cfg.fcc.hostAddress ?: "UNCONFIGURED",
+            fccPort = cfg.fcc.port ?: 0,
             consecutiveHeartbeatFailures = fccConnectionErrors.get(),
         )
     }

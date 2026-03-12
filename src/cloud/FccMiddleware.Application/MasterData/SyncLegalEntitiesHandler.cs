@@ -39,7 +39,7 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
 
         foreach (var item in command.Items)
         {
-            if (!TryParseFiscalizationMode(item, errors, out var defaultMode))
+            if (!TryValidateItem(item, errors, out var defaultMode))
                 continue;
 
             if (byId.TryGetValue(item.Id, out var entity))
@@ -104,24 +104,30 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
     }
 
     private static bool HasChanges(LegalEntity e, LegalEntitySyncItem i, FiscalizationMode defaultMode) =>
-        e.CountryCode               != i.Code ||
+        e.BusinessCode              != i.Code ||
+        e.CountryCode               != i.CountryCode ||
+        e.CountryName               != i.CountryName ||
         e.Name                      != i.Name ||
         e.CurrencyCode              != i.CurrencyCode ||
         e.TaxAuthorityCode          != i.TaxAuthorityCode ||
         e.DefaultFiscalizationMode  != defaultMode ||
         e.FiscalizationProvider     != i.FiscalizationProvider ||
         e.DefaultTimezone           != i.DefaultTimezone ||
+        e.OdooCompanyId             != i.OdooCompanyId ||
         e.IsActive                  != i.IsActive;
 
     private static void ApplyChanges(LegalEntity e, LegalEntitySyncItem i, FiscalizationMode defaultMode, DateTimeOffset now)
     {
-        e.CountryCode              = i.Code;
+        e.BusinessCode             = i.Code;
+        e.CountryCode              = i.CountryCode;
+        e.CountryName              = i.CountryName;
         e.Name                     = i.Name;
         e.CurrencyCode             = i.CurrencyCode;
         e.TaxAuthorityCode         = i.TaxAuthorityCode;
         e.DefaultFiscalizationMode = defaultMode;
         e.FiscalizationProvider    = NormalizeOptional(i.FiscalizationProvider);
         e.DefaultTimezone          = i.DefaultTimezone;
+        e.OdooCompanyId            = i.OdooCompanyId;
         e.IsActive                 = i.IsActive;
         e.DeactivatedAt            = i.IsActive ? null : now;
         e.SyncedAt  = now;
@@ -131,13 +137,16 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
     private static LegalEntity CreateNew(LegalEntitySyncItem i, FiscalizationMode defaultMode, DateTimeOffset now) => new()
     {
         Id                       = i.Id,
-        CountryCode              = i.Code,
+        BusinessCode             = i.Code,
+        CountryCode              = i.CountryCode,
+        CountryName              = i.CountryName,
         Name                     = i.Name,
         CurrencyCode             = i.CurrencyCode,
         TaxAuthorityCode         = i.TaxAuthorityCode,
         DefaultFiscalizationMode = defaultMode,
         FiscalizationProvider    = NormalizeOptional(i.FiscalizationProvider),
         DefaultTimezone          = i.DefaultTimezone,
+        OdooCompanyId            = i.OdooCompanyId,
         IsActive                 = i.IsActive,
         DeactivatedAt            = i.IsActive ? null : now,
         SyncedAt                 = now,
@@ -145,11 +154,32 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
         UpdatedAt                = now
     };
 
-    private static bool TryParseFiscalizationMode(
+    private static bool TryValidateItem(
         LegalEntitySyncItem item,
         List<string> errors,
         out FiscalizationMode mode)
     {
+        if (string.IsNullOrWhiteSpace(item.Code))
+        {
+            errors.Add($"Legal entity {item.Id}: code is required.");
+            mode = default;
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(item.CountryCode))
+        {
+            errors.Add($"Legal entity {item.Id}: countryCode is required.");
+            mode = default;
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(item.CountryName))
+        {
+            errors.Add($"Legal entity {item.Id}: countryName is required.");
+            mode = default;
+            return false;
+        }
+
         if (string.IsNullOrWhiteSpace(item.TaxAuthorityCode))
         {
             errors.Add($"Legal entity {item.Id}: taxAuthorityCode is required.");
@@ -160,6 +190,13 @@ public sealed class SyncLegalEntitiesHandler : IRequestHandler<SyncLegalEntities
         if (string.IsNullOrWhiteSpace(item.DefaultTimezone))
         {
             errors.Add($"Legal entity {item.Id}: defaultTimezone is required.");
+            mode = default;
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(item.OdooCompanyId))
+        {
+            errors.Add($"Legal entity {item.Id}: odooCompanyId is required.");
             mode = default;
             return false;
         }

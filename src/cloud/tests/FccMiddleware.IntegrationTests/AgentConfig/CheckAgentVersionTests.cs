@@ -179,12 +179,15 @@ public sealed class CheckAgentVersionTests : IAsyncLifetime
             db.LegalEntities.Add(new Domain.Entities.LegalEntity
             {
                 Id = TestLegalEntityId,
+                BusinessCode = "ZW-001",
                 Name = "Version Check Legal Entity",
                 CountryCode = "ZW",
+                CountryName = "Zimbabwe",
                 CurrencyCode = "ZWL",
                 TaxAuthorityCode = "ZIMRA",
                 FiscalizationRequired = false,
                 DefaultTimezone = "Africa/Harare",
+                OdooCompanyId = "ODOO-ZW-001",
                 SyncedAt = DateTimeOffset.UtcNow,
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow
@@ -200,6 +203,7 @@ public sealed class CheckAgentVersionTests : IAsyncLifetime
                 SiteCode = TestSiteCode,
                 SiteName = "Version Check Site",
                 OperatingModel = Domain.Enums.SiteOperatingModel.COCO,
+                SiteUsesPreAuth = false,
                 CompanyTaxPayerId = "TAX-VER-001",
                 IsActive = true,
                 SyncedAt = DateTimeOffset.UtcNow,

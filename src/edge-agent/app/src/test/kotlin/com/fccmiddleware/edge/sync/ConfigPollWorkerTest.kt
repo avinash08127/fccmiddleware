@@ -5,6 +5,7 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.config.ConfigApplyResult
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
+import com.fccmiddleware.edge.config.canonicalEdgeConfigJson
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -54,47 +55,7 @@ class ConfigPollWorkerTest {
 
     companion object {
         private const val VALID_TOKEN = "valid-jwt-token"
-        private const val VALID_CONFIG_JSON = """
-        {
-            "schemaVersion": "2.0",
-            "configVersion": 5,
-            "configId": "00000000-0000-0000-0000-000000000001",
-            "issuedAtUtc": "2025-01-01T00:00:00Z",
-            "effectiveAtUtc": "2025-01-01T00:00:00Z",
-            "compatibility": { "minAgentVersion": "1.0.0" },
-            "agent": { "deviceId": "11111111-1111-1111-1111-111111111111", "isPrimaryAgent": true },
-            "site": {
-                "siteCode": "SITE-001",
-                "legalEntityId": "22222222-2222-2222-2222-222222222222",
-                "timezone": "Africa/Johannesburg",
-                "currency": "ZAR",
-                "operatingModel": "COCO",
-                "connectivityMode": "CONNECTED"
-            },
-            "fccConnection": {
-                "vendor": "DOMS",
-                "host": "192.168.1.100",
-                "port": 8080,
-                "credentialsRef": "fcc/site-001",
-                "protocolType": "REST",
-                "transactionMode": "PULL",
-                "ingestionMode": "RELAY",
-                "heartbeatIntervalSeconds": 15
-            },
-            "polling": { "pullIntervalSeconds": 30, "batchSize": 100, "cursorStrategy": "LAST_SUCCESSFUL_TIMESTAMP" },
-            "sync": {
-                "cloudBaseUrl": "https://api.fccmiddleware.io",
-                "uploadBatchSize": 50,
-                "syncIntervalSeconds": 30,
-                "statusPollIntervalSeconds": 30,
-                "configPollIntervalSeconds": 60
-            },
-            "buffer": { "retentionDays": 30, "maxRecords": 50000, "cleanupIntervalHours": 24 },
-            "api": { "localApiPort": 8585, "enableLanApi": false },
-            "telemetry": { "telemetryIntervalSeconds": 60, "logLevel": "INFO" },
-            "fiscalization": { "mode": "NONE", "requireCustomerTaxId": false, "fiscalReceiptRequired": false }
-        }
-        """
+        private val VALID_CONFIG_JSON = canonicalEdgeConfigJson(configVersion = 5)
     }
 
     @Before

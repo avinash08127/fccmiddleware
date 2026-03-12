@@ -79,4 +79,10 @@ public sealed class AgentConfiguration
 
     /// <summary>Config poll interval in seconds (range 30–3600, default 60).</summary>
     public int ConfigPollIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Petronite webhook listener port (default 8090). The local HTTP server that receives
+    /// transaction callbacks from the Petronite bot. Cloud config takes precedence if set.
+    /// </summary>
+    public int PetroniteWebhookListenerPort { get; set; } = 8090;
 }

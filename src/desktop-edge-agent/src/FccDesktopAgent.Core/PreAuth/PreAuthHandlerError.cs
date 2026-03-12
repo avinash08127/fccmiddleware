@@ -18,6 +18,9 @@ public enum PreAuthHandlerError
     /// <summary>FCC adapter factory has not been configured — agent is not fully provisioned.</summary>
     AdapterNotConfigured,
 
+    /// <summary>The configured FCC vendor is explicitly unsupported on this runtime.</summary>
+    UnsupportedVendor,
+
     /// <summary>FCC explicitly declined the pre-auth request.</summary>
     FccDeclined,
 

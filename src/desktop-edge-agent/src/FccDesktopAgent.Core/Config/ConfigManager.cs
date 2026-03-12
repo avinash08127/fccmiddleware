@@ -91,6 +91,15 @@ public sealed class ConfigManager
             return new ConfigApplyResult(ConfigApplyOutcome.NotYetEffective, newConfig.ConfigVersion);
         }
 
+        if (!DesktopFccRuntimeConfiguration.TryValidateSiteConfig(newConfig, out var validationError))
+        {
+            _logger.LogWarning(
+                "Config version {Version} rejected: {ValidationError}",
+                newConfig.ConfigVersion,
+                validationError);
+            return new ConfigApplyResult(ConfigApplyOutcome.Rejected, newConfig.ConfigVersion);
+        }
+
         // Detect changed sections
         var hotReloaded = new List<string>();
         var restartSections = new List<string>();
@@ -206,6 +215,12 @@ public sealed class ConfigManager
 
     internal static void ApplyHotReloadFields(AgentConfiguration target, SiteConfig source)
     {
+        if (DesktopFccRuntimeConfiguration.TryParseVendor(source.Fcc?.Vendor, out var vendor))
+            target.FccVendor = vendor;
+
+        if (!string.IsNullOrWhiteSpace(source.Fcc?.HostAddress) && source.Fcc.Port is > 0)
+            target.FccBaseUrl = $"http://{source.Fcc.HostAddress}:{source.Fcc.Port.Value}";
+
         // FCC polling
         if (source.Fcc?.PullIntervalSeconds is > 0)
             target.FccPollIntervalSeconds = source.Fcc.PullIntervalSeconds.Value;

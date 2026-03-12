@@ -7,6 +7,7 @@ public record SiteDto
     public required Guid LegalEntityId { get; init; }
     public required string SiteName { get; init; }
     public required string OperatingModel { get; init; }
+    public required bool SiteUsesPreAuth { get; init; }
     public string? ConnectivityMode { get; init; }
     public string? IngestionMode { get; init; }
     public string? FccVendor { get; init; }
@@ -98,6 +99,7 @@ public sealed record UpdateSiteRequestDto
 {
     public string? ConnectivityMode { get; init; }
     public string? OperatingModel { get; init; }
+    public bool? SiteUsesPreAuth { get; init; }
     public SiteTolerancePatchDto? Tolerance { get; init; }
     public SiteFiscalizationPatchDto? Fiscalization { get; init; }
 }

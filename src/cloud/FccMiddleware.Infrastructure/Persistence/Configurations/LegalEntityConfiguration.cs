@@ -25,7 +25,9 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             .HasColumnName("id")
             .HasDefaultValueSql("gen_random_uuid()");
 
+        builder.Property(e => e.BusinessCode).HasColumnName("business_code").HasMaxLength(50).IsRequired();
         builder.Property(e => e.CountryCode).HasColumnName("country_code").HasMaxLength(3).IsRequired();
+        builder.Property(e => e.CountryName).HasColumnName("country_name").HasMaxLength(100).IsRequired();
         builder.Property(e => e.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
         builder.Property(e => e.CurrencyCode).HasColumnName("currency_code").HasMaxLength(3).IsRequired();
         builder.Property(e => e.TaxAuthorityCode).HasColumnName("tax_authority_code").HasMaxLength(50).IsRequired();
@@ -38,6 +40,7 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             .IsRequired();
         builder.Property(e => e.FiscalizationProvider).HasColumnName("fiscalization_provider").HasMaxLength(50);
         builder.Property(e => e.DefaultTimezone).HasColumnName("default_timezone").HasMaxLength(50).IsRequired();
+        builder.Property(e => e.OdooCompanyId).HasColumnName("odoo_company_id").HasMaxLength(100).IsRequired();
         builder.Property(e => e.AmountTolerancePercent).HasColumnName("amount_tolerance_percent").HasPrecision(5, 2);
         builder.Property(e => e.AmountToleranceAbsolute).HasColumnName("amount_tolerance_absolute");
         builder.Property(e => e.TimeWindowMinutes).HasColumnName("time_window_minutes");
@@ -46,6 +49,10 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
         builder.Property(e => e.SyncedAt).HasColumnName("synced_at").IsRequired();
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();
         builder.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("now()").IsRequired();
+
+        builder.HasIndex(e => e.BusinessCode)
+            .IsUnique()
+            .HasDatabaseName("uq_legal_entities_business_code");
 
         builder.HasIndex(e => e.CountryCode)
             .IsUnique()
@@ -62,11 +69,14 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             new LegalEntity
             {
                 Id = MalawiId,
+                BusinessCode = "MW",
                 CountryCode = "MW",
+                CountryName = "Malawi",
                 Name = "Malawi",
                 CurrencyCode = "MWK",
                 TaxAuthorityCode = "MRA",
                 DefaultTimezone = "Africa/Blantyre",
+                OdooCompanyId = "ODOO-COMPANY-MW",
                 DefaultFiscalizationMode = FiscalizationMode.FCC_DIRECT,
                 IsActive = true,
                 SyncedAt = _seedDate,
@@ -76,11 +86,14 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             new LegalEntity
             {
                 Id = TanzaniaId,
+                BusinessCode = "TZ",
                 CountryCode = "TZ",
+                CountryName = "Tanzania",
                 Name = "Tanzania",
                 CurrencyCode = "TZS",
                 TaxAuthorityCode = "TRA",
                 DefaultTimezone = "Africa/Dar_es_Salaam",
+                OdooCompanyId = "ODOO-COMPANY-TZ",
                 DefaultFiscalizationMode = FiscalizationMode.FCC_DIRECT,
                 IsActive = true,
                 SyncedAt = _seedDate,
@@ -90,11 +103,14 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             new LegalEntity
             {
                 Id = BotswanaId,
+                BusinessCode = "BW",
                 CountryCode = "BW",
+                CountryName = "Botswana",
                 Name = "Botswana",
                 CurrencyCode = "BWP",
                 TaxAuthorityCode = "BURS",
                 DefaultTimezone = "Africa/Gaborone",
+                OdooCompanyId = "ODOO-COMPANY-BW",
                 DefaultFiscalizationMode = FiscalizationMode.NONE,
                 IsActive = true,
                 SyncedAt = _seedDate,
@@ -104,11 +120,14 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             new LegalEntity
             {
                 Id = ZambiaId,
+                BusinessCode = "ZM",
                 CountryCode = "ZM",
+                CountryName = "Zambia",
                 Name = "Zambia",
                 CurrencyCode = "ZMW",
                 TaxAuthorityCode = "ZRA",
                 DefaultTimezone = "Africa/Lusaka",
+                OdooCompanyId = "ODOO-COMPANY-ZM",
                 DefaultFiscalizationMode = FiscalizationMode.NONE,
                 IsActive = true,
                 SyncedAt = _seedDate,
@@ -118,11 +137,14 @@ internal sealed class LegalEntityConfiguration : IEntityTypeConfiguration<LegalE
             new LegalEntity
             {
                 Id = NamibiaId,
+                BusinessCode = "NA",
                 CountryCode = "NA",
+                CountryName = "Namibia",
                 Name = "Namibia",
                 CurrencyCode = "NAD",
                 TaxAuthorityCode = "NamRA",
                 DefaultTimezone = "Africa/Windhoek",
+                OdooCompanyId = "ODOO-COMPANY-NA",
                 DefaultFiscalizationMode = FiscalizationMode.NONE,
                 IsActive = true,
                 SyncedAt = _seedDate,

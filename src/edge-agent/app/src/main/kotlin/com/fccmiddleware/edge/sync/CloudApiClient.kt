@@ -25,7 +25,7 @@ import okhttp3.CertificatePinner
 // ---------------------------------------------------------------------------
 
 sealed class CloudStatusPollResult {
-    /** HTTP 200 — statuses returned for the requested IDs. */
+    /** HTTP 200 — FCC transaction IDs returned for the requested since watermark. */
     data class Success(val response: SyncedStatusResponse) : CloudStatusPollResult()
 
     /** HTTP 401 — access token expired or invalid; caller should refresh and retry. */
@@ -102,13 +102,13 @@ interface CloudApiClient {
     /**
      * Poll cloud for synced-to-Odoo status.
      *
-     * Calls `GET /api/v1/transactions/synced-status?ids={comma-separated}`.
+     * Calls `GET /api/v1/transactions/synced-status?since={iso-8601-utc}`.
      *
-     * @param fccTransactionIds FCC transaction IDs to check (max 500).
+     * @param since Inclusive UTC lower bound for SYNCED_TO_ODOO acknowledgements.
      * @param bearerToken Device JWT from [DeviceTokenProvider.getAccessToken].
      */
     suspend fun getSyncedStatus(
-        fccTransactionIds: List<String>,
+        since: String,
         bearerToken: String,
     ): CloudStatusPollResult
 
@@ -252,13 +252,13 @@ class HttpCloudApiClient(
     }
 
     override suspend fun getSyncedStatus(
-        fccTransactionIds: List<String>,
+        since: String,
         bearerToken: String,
     ): CloudStatusPollResult {
         return try {
             val response = httpClient.get("$cloudBaseUrl/api/v1/transactions/synced-status") {
                 bearerAuth(bearerToken)
-                parameter("ids", fccTransactionIds.joinToString(","))
+                parameter("since", since)
             }
             when (response.status) {
                 HttpStatusCode.OK -> CloudStatusPollResult.Success(response.body())

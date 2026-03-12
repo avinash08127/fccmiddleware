@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
@@ -154,6 +155,25 @@ public sealed class ConfigManagerTests : IDisposable
         _manager.CurrentSiteConfig.Should().BeNull("config should not be applied when not yet effective");
     }
 
+    [Fact]
+    public async Task ApplyConfigAsync_UnsupportedVendor_Rejected()
+    {
+        var config = MakeSiteConfig(
+            version: 1,
+            fcc: new SiteConfigFcc
+            {
+                Enabled = true,
+                Vendor = "Advatec",
+                HostAddress = "192.168.1.100",
+                Port = 8080,
+            });
+
+        var result = await _manager.ApplyConfigAsync(config, ToJson(config), "1", CancellationToken.None);
+
+        result.Outcome.Should().Be(ConfigApplyOutcome.Rejected);
+        _manager.CurrentSiteConfig.Should().BeNull();
+    }
+
     // ── Hot-reload fields applied ─────────────────────────────────────────────
 
     [Fact]
@@ -167,7 +187,14 @@ public sealed class ConfigManagerTests : IDisposable
                 ConfigPollIntervalSeconds = 90,
             },
             telemetry: new SiteConfigTelemetry { TelemetryIntervalSeconds = 600 },
-            fcc: new SiteConfigFcc { PullIntervalSeconds = 15 });
+            fcc: new SiteConfigFcc
+            {
+                Enabled = true,
+                Vendor = "Radix",
+                HostAddress = "192.168.1.100",
+                Port = 8080,
+                PullIntervalSeconds = 15,
+            });
 
         // Apply config so PostConfigure has values to overlay
         await _manager.ApplyConfigAsync(siteConfig, ToJson(siteConfig), "1", CancellationToken.None);
@@ -180,6 +207,8 @@ public sealed class ConfigManagerTests : IDisposable
         options.ConfigPollIntervalSeconds.Should().Be(90);
         options.TelemetryIntervalSeconds.Should().Be(600);
         options.FccPollIntervalSeconds.Should().Be(15);
+        options.FccVendor.Should().Be(FccVendor.Radix);
+        options.FccBaseUrl.Should().Be("http://192.168.1.100:8080");
     }
 
     [Fact]

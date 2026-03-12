@@ -18,6 +18,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
 import com.fccmiddleware.edge.buffer.entity.AgentConfig
+import com.fccmiddleware.edge.config.EdgeAgentConfigJson
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.security.KeystoreManager
 import com.fccmiddleware.edge.service.EdgeAgentForegroundService
@@ -34,6 +35,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
@@ -251,10 +253,18 @@ class ProvisioningActivity : AppCompatActivity() {
         showProgress("Storing credentials securely...")
 
         withContext(Dispatchers.IO) {
-            // 0. Update the singleton CloudApiClient base URL so all post-registration
-            //    calls (upload, config poll, telemetry, token refresh) use the real endpoint
-            //    instead of the "https://not-yet-provisioned" stub.
-            cloudApiClient.updateBaseUrl(qrData.cloudBaseUrl)
+            val parsedSiteConfig = response.siteConfig?.let { siteConfig ->
+                runCatching {
+                    EdgeAgentConfigJson.decode(
+                        json.encodeToString(JsonObject.serializer(), siteConfig),
+                    )
+                }.onFailure { e ->
+                    Log.w(TAG, "Failed to parse registration siteConfig against canonical contract", e)
+                }.getOrNull()
+            }
+
+            val effectiveCloudBaseUrl = parsedSiteConfig?.sync?.cloudBaseUrl ?: qrData.cloudBaseUrl
+            cloudApiClient.updateBaseUrl(effectiveCloudBaseUrl)
 
             // 1. Store tokens in Android Keystore
             val tokenProvider = KeystoreDeviceTokenProvider(keystoreManager, encryptedPrefs, cloudApiClient)
@@ -265,28 +275,21 @@ class ProvisioningActivity : AppCompatActivity() {
                 deviceId = response.deviceId,
                 siteCode = response.siteCode,
                 legalEntityId = response.legalEntityId,
-                cloudBaseUrl = qrData.cloudBaseUrl,
+                cloudBaseUrl = effectiveCloudBaseUrl,
             )
 
-            // 3. Store FCC connection info from siteConfig if available
-            response.siteConfig?.let { config ->
-                try {
-                    val fccConn = config["fccConnection"] as? JsonObject
-                    fccConn?.get("host")?.jsonPrimitive?.content?.let { encryptedPrefs.fccHost = it }
-                    fccConn?.get("port")?.jsonPrimitive?.int?.let { encryptedPrefs.fccPort = it }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to extract FCC connection from siteConfig", e)
-                }
-            }
+            // 3. Persist bootstrap FCC host/port for diagnostics before the service starts.
+            parsedSiteConfig?.fcc?.hostAddress?.let { encryptedPrefs.fccHost = it }
+            parsedSiteConfig?.fcc?.port?.let { encryptedPrefs.fccPort = it }
 
             // 4. Store initial config in AgentConfig table if siteConfig provided
-            response.siteConfig?.let { siteConfig ->
+            parsedSiteConfig?.let { siteConfig ->
                 try {
-                    val rawConfigJson = json.encodeToString(JsonObject.serializer(), siteConfig)
+                    val rawConfigJson = EdgeAgentConfigJson.encode(siteConfig)
                     val entity = AgentConfig(
                         configJson = rawConfigJson,
-                        configVersion = 1,
-                        schemaVersion = 2,
+                        configVersion = siteConfig.configVersion,
+                        schemaVersion = siteConfig.schemaVersion.substringBefore(".").toIntOrNull() ?: 1,
                         receivedAt = Instant.now().toString(),
                     )
                     agentConfigDao.upsert(entity)

@@ -11,14 +11,18 @@ namespace FccDesktopAgent.Core.Adapter.Petronite;
 /// Petronite-protocol FCC adapter. Communicates with the Petronite cloud API
 /// via OAuth2-authenticated REST calls.
 /// <para>
-/// Push-only model: transactions arrive via webhooks, so <see cref="FetchTransactionsAsync"/>
-/// always returns an empty batch. <see cref="HeartbeatAsync"/> uses GET /nozzles/assigned
-/// as the liveness probe. Pre-auth is two-step: create order + authorize pump.
+/// Push-only model: transactions arrive via <see cref="PetroniteWebhookListener"/>
+/// and are queued internally. <see cref="FetchTransactionsAsync"/> drains that queue
+/// so the standard ingestion pipeline buffers them. On the first fetch call the adapter
+/// lazily starts the webhook listener and runs <see cref="ReconcileOnStartupAsync"/>.
 /// </para>
 /// </summary>
-public sealed class PetroniteAdapter : IFccAdapter
+public sealed class PetroniteAdapter : IFccAdapter, IAsyncDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    /// <summary>Default port for the local webhook listener when none is configured.</summary>
+    private const int DefaultWebhookListenerPort = 8090;
 
     /// <summary>
     /// Duration after which a pending order found during startup reconciliation is considered
@@ -31,6 +35,7 @@ public sealed class PetroniteAdapter : IFccAdapter
     private readonly PetroniteOAuthClient _oauthClient;
     private readonly PetroniteNozzleResolver _nozzleResolver;
     private readonly ILogger<PetroniteAdapter> _logger;
+    private readonly ILoggerFactory _loggerFactory;
 
     /// <summary>
     /// Active pre-authorizations keyed by Petronite OrderId.
@@ -38,18 +43,34 @@ public sealed class PetroniteAdapter : IFccAdapter
     /// </summary>
     private readonly ConcurrentDictionary<string, ActivePreAuth> _activePreAuths = new();
 
+    // ── Webhook listener (PN-4.1) ───────────────────────────────────────────
+
+    /// <summary>
+    /// Queue of raw webhook payloads received by the listener, drained by
+    /// <see cref="FetchTransactionsAsync"/>. Same pattern as Radix push listener.
+    /// </summary>
+    private readonly ConcurrentQueue<RawPayloadEnvelope> _webhookQueue = new();
+
+    /// <summary>Local HTTP listener for Petronite webhook callbacks.</summary>
+    private PetroniteWebhookListener? _webhookListener;
+
+    /// <summary>Guards one-time initialization (listener start + reconciliation).</summary>
+    private volatile bool _initialized;
+    private readonly SemaphoreSlim _initLock = new(1, 1);
+
     public PetroniteAdapter(
         IHttpClientFactory httpFactory,
         FccConnectionConfig config,
         PetroniteOAuthClient oauthClient,
         PetroniteNozzleResolver nozzleResolver,
-        ILogger<PetroniteAdapter> logger)
+        ILoggerFactory loggerFactory)
     {
         _httpFactory = httpFactory;
         _config = config;
         _oauthClient = oauthClient;
         _nozzleResolver = nozzleResolver;
-        _logger = logger;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory.CreateLogger<PetroniteAdapter>();
     }
 
     // ── PN-2.1: Webhook Normalization ────────────────────────────────────────
@@ -175,15 +196,94 @@ public sealed class PetroniteAdapter : IFccAdapter
         });
     }
 
-    // ── PN-2.2: Fetch Transactions (no-op) ──────────────────────────────────
+    // ── PN-2.2 + PN-4.1: Fetch Transactions (drain webhook queue) ──────────
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Push-only model: Petronite pushes transactions via webhooks.
-    /// FetchTransactionsAsync always returns an empty batch.
+    /// On the first call, lazily starts the <see cref="PetroniteWebhookListener"/>
+    /// and runs <see cref="ReconcileOnStartupAsync"/> (PN-3.4). Subsequent calls
+    /// drain the webhook queue into a <see cref="TransactionBatch"/>.
+    /// Same pattern as the Radix push listener.
     /// </remarks>
-    public Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken ct)
-        => Task.FromResult(new TransactionBatch([], null, false));
+    public async Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken ct)
+    {
+        await EnsureInitializedAsync(ct);
+
+        if (_webhookQueue.IsEmpty)
+            return new TransactionBatch([], null, false);
+
+        var records = new List<RawPayloadEnvelope>(Math.Min(cursor.MaxCount, _webhookQueue.Count));
+        while (records.Count < cursor.MaxCount && _webhookQueue.TryDequeue(out var envelope))
+        {
+            records.Add(envelope);
+        }
+
+        var hasMore = !_webhookQueue.IsEmpty;
+        return new TransactionBatch(records, null, hasMore);
+    }
+
+    // ── Lazy initialization (webhook listener + reconciliation) ──────────────
+
+    /// <summary>
+    /// One-time startup: creates and starts the <see cref="PetroniteWebhookListener"/>
+    /// then runs <see cref="ReconcileOnStartupAsync"/> to recover pending pre-auths.
+    /// Thread-safe via <see cref="_initLock"/>; no-op on subsequent calls.
+    /// </summary>
+    private async Task EnsureInitializedAsync(CancellationToken ct)
+    {
+        if (_initialized) return;
+
+        await _initLock.WaitAsync(ct);
+        try
+        {
+            if (_initialized) return;
+
+            // Start the webhook listener (PN-4.1).
+            var port = _config.WebhookListenerPort ?? DefaultWebhookListenerPort;
+            try
+            {
+                _webhookListener = new PetroniteWebhookListener(
+                    port, _config, _loggerFactory.CreateLogger<PetroniteWebhookListener>());
+
+                _webhookListener.Start(OnWebhookReceivedAsync, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Petronite webhook listener failed to start on port {Port}; "
+                    + "push transactions will not be received until the port is available", port);
+                // Non-fatal: adapter continues but push won't work.
+            }
+
+            // Run startup reconciliation (PN-3.4).
+            try
+            {
+                await ReconcileOnStartupAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Petronite startup reconciliation failed (non-fatal)");
+            }
+
+            _initialized = true;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Webhook callback: enqueues received payloads for the next
+    /// <see cref="FetchTransactionsAsync"/> drain cycle.
+    /// </summary>
+    private Task OnWebhookReceivedAsync(RawPayloadEnvelope payload, CancellationToken ct)
+    {
+        _webhookQueue.Enqueue(payload);
+        _logger.LogDebug(
+            "Petronite webhook payload enqueued (queue size: {Size})", _webhookQueue.Count);
+        return Task.CompletedTask;
+    }
 
     // ── PN-2.2: Pump Status (synthesized from nozzle assignments) ────────────
 
@@ -630,7 +730,8 @@ public sealed class PetroniteAdapter : IFccAdapter
         ["vendor"] = "Petronite",
         ["protocol"] = "REST+OAuth2",
         ["ingestionModel"] = "PUSH-only",
-        ["webhookRequired"] = "true",
+        ["webhookListening"] = (_webhookListener?.IsListening ?? false).ToString(),
+        ["webhookQueueSize"] = _webhookQueue.Count.ToString(),
         ["preAuthModel"] = "two-step (create+authorize)",
         ["activePreAuths"] = _activePreAuths.Count.ToString(),
     };
@@ -639,6 +740,29 @@ public sealed class PetroniteAdapter : IFccAdapter
     /// Returns the number of active pre-authorizations currently tracked.
     /// </summary>
     public int ActivePreAuthCount => _activePreAuths.Count;
+
+    /// <summary>Current webhook queue depth (for diagnostics).</summary>
+    public int WebhookQueueSize => _webhookQueue.Count;
+
+    /// <summary>Whether the webhook listener is currently accepting connections.</summary>
+    public bool IsWebhookListening => _webhookListener?.IsListening ?? false;
+
+    // ── IAsyncDisposable ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Stops the webhook listener gracefully on adapter shutdown.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (_webhookListener is not null)
+        {
+            await _webhookListener.StopAsync();
+            _webhookListener.Dispose();
+            _webhookListener = null;
+        }
+
+        _initLock.Dispose();
+    }
 
     // ── Private helpers ──────────────────────────────────────────────────────
 

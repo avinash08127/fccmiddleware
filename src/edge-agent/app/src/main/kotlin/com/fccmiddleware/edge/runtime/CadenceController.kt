@@ -58,8 +58,7 @@ class CadenceController(
     private val preAuthCloudForwardWorker: PreAuthCloudForwardWorker? = null,
     /** Token provider — checked between worker calls to short-circuit on decommission. */
     private val tokenProvider: com.fccmiddleware.edge.sync.DeviceTokenProvider? = null,
-    /** FCC adapter — used for lifecycle management if it implements IFccConnectionLifecycle. */
-    private val fccAdapter: IFccAdapter? = null,
+    fccAdapter: IFccAdapter? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) {
 
@@ -81,15 +80,52 @@ class CadenceController(
         val telemetryTickFrequency: Int = 4,
     )
 
+    /** Late-bound: wired when FCC config becomes available after startup. */
+    @Volatile
+    internal var fccAdapter: IFccAdapter? = fccAdapter
+
+    internal fun updateFccAdapter(adapter: IFccAdapter?) {
+        val previousLifecycle = connectionLifecycle
+        fccAdapter = adapter
+        val nextLifecycle = connectionLifecycle
+
+        if (cadenceJob == null) {
+            return
+        }
+
+        scope.launch {
+            if (previousLifecycle != null && previousLifecycle !== nextLifecycle) {
+                try {
+                    previousLifecycle.setEventListener(null)
+                    previousLifecycle.disconnect()
+                    Log.i(TAG, "Disconnected previous FCC runtime")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to disconnect previous FCC runtime: ${e.message}")
+                }
+            }
+
+            if (nextLifecycle != null && previousLifecycle !== nextLifecycle) {
+                try {
+                    nextLifecycle.setEventListener(fccEventListener)
+                    nextLifecycle.connect()
+                    Log.i(TAG, "Connected updated FCC runtime")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to connect updated FCC runtime: ${e.message}")
+                    launch { attemptReconnect() }
+                }
+            }
+        }
+    }
+
     private var cadenceJob: Job? = null
     private var tickCount = 0L
 
     /**
-     * Resolved at construction: non-null only when the adapter supports persistent connections.
+     * Computed from current [fccAdapter]: non-null only when the adapter supports persistent connections.
      * Used to call connect/disconnect and wire event listener callbacks.
      */
-    private val connectionLifecycle: IFccConnectionLifecycle? =
-        fccAdapter as? IFccConnectionLifecycle
+    private val connectionLifecycle: IFccConnectionLifecycle?
+        get() = fccAdapter as? IFccConnectionLifecycle
 
     /** Event listener that bridges unsolicited FCC events into the cadence controller. */
     private val fccEventListener = object : IFccEventListener {
@@ -143,10 +179,11 @@ class CadenceController(
         cadenceJob?.cancel()
         cadenceJob = scope.launch {
             // If adapter has persistent connection, establish it before starting cadence
-            if (connectionLifecycle != null) {
+            val lifecycle = connectionLifecycle
+            if (lifecycle != null) {
                 try {
-                    connectionLifecycle.setEventListener(fccEventListener)
-                    connectionLifecycle.connect()
+                    lifecycle.setEventListener(fccEventListener)
+                    lifecycle.connect()
                     Log.i(TAG, "FCC persistent connection established")
                 } catch (e: Exception) {
                     Log.e(TAG, "FCC persistent connection failed on startup — will retry: ${e.message}")
@@ -165,11 +202,12 @@ class CadenceController(
     fun stop() {
         cadenceJob?.cancel()
         // Gracefully disconnect persistent connection if active
-        if (connectionLifecycle != null) {
+        val lifecycle = connectionLifecycle
+        if (lifecycle != null) {
             scope.launch {
                 try {
-                    connectionLifecycle.setEventListener(null)
-                    connectionLifecycle.disconnect()
+                    lifecycle.setEventListener(null)
+                    lifecycle.disconnect()
                     Log.i(TAG, "FCC persistent connection closed")
                 } catch (e: Exception) {
                     Log.w(TAG, "Error during FCC disconnect: ${e.message}")

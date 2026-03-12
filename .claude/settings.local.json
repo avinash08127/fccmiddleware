@@ -163,7 +163,27 @@
       "Bash(grep -l \"class.*Adapter.*IFccAdapter\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/adapter/*/*.kt)",
       "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew testDebugUnitTest 2>&1 | tail -30)",
       "Bash(grep -l \"IFccAdapter\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/adapter/radix/*.kt /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/adapter/petronite/*.kt)",
-      "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew testDebugUnitTest 2>&1 | tail -40)"
+      "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew testDebugUnitTest 2>&1 | tail -40)",
+      "Bash(cd /c/Users/a0812/fccmiddleware/src/edge-agent && ./gradlew testDebugUnitTest 2>&1)",
+      "Bash(find /c/Users/a0812/fccmiddleware -type f -name \"*Radix*\" 2>/dev/null | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -type f -name \"*adix*\" -o -name \"*Radix*\" 2>/dev/null | head -30)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -name \"*.cs\" | xargs grep -l \"PetroniteAdapter\\\\|PetroniteWebhook\" | head -10)",
+      "Bash(grep -l \"doms\\\\|radix\\\\|petronite\\\\|jpl_port\\\\|dpp_ports\\\\|fc_access_code\\\\|client_id\\\\|client_secret\" /c/Users/a0812/fccmiddleware/db/ddl/*.sql 2>/dev/null | head -5)",
+      "Bash(find /c/Users/a0812/fccmiddleware -type d -path \"*/portal/*\" -o -path \"*/Portal/*\" 2>/dev/null | grep -i portal | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -name \"*.cs\" | xargs grep -l \"webhook\\\\|Webhook\" | grep -E \"\\(Controller|Service|Startup|Program\\)\" | head -10)",
+      "Bash(./gradlew testDebugUnitTest 2>&1 | tail -30)",
+      "Bash(grep -A1 \"FAILED\" app/build/reports/tests/testDebugUnitTest/index.html 2>/dev/null | head -60 || cat app/build/test-results/testDebugUnitTest/*.xml 2>/dev/null | grep 'failure\\\\|FAILED\\\\|testcase.*name' | head -60)",
+      "Bash(tree -L 2 -I 'obj|bin' /c/Users/a0812/fccmiddleware/VirtualLab/src/VirtualLab.Infrastructure/DomsJpl 2>/dev/null || find /c/Users/a0812/fccmiddleware/VirtualLab/src/VirtualLab.Infrastructure/DomsJpl -type f -name \"*.cs\" | grep -v obj)",
+      "Bash(./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.runtime.CadenceControllerTest\" --tests \"com.fccmiddleware.edge.ingestion.IngestionOrchestratorTest\" --tests \"com.fccmiddleware.edge.preauth.PreAuthHandlerTest\" --tests \"com.fccmiddleware.edge.config.ConfigManagerTest\" 2>&1 | tail -25)",
+      "Bash(./gradlew compileDebugUnitTestKotlin 2>&1 | grep \"^e:\" | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware/VirtualLab -name \"*.cs\" -type f | xargs grep -l \"AddVirtualLabInfrastructure\\\\|DomsJplSimulator\\\\|RadixSimulator\\\\|PetroniteSimulator\" | grep -i \"extension\\\\|setup\\\\|di\" | head -10)",
+      "Bash(cd \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\" && ./gradlew compileDebugUnitTestKotlin 2>&1 | grep \"^e:\" | head -60)",
+      "Bash(cd \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\" && ./gradlew compileDebugUnitTestKotlin 2>&1 | tail -30)",
+      "Bash(./gradlew compileDebugUnitTestKotlin 2>&1 | grep \"^e:\" | head -10)",
+      "Bash(find /c/Users/a0812/fccmiddleware/VirtualLab/src/VirtualLab.Infrastructure -name \"*.cs\" -type f | xargs grep -l \"AddVirtualLabInfrastructure\" 2>/dev/null)",
+      "Bash(find /c/Users/a0812/fccmiddleware/VirtualLab -name \"*.cs\" | xargs grep -l \"VirtualLabApiFactory\" | head -1)",
+      "Bash(./gradlew testDebugUnitTest --tests \"com.fccmiddleware.edge.runtime.CadenceControllerTest\" --tests \"com.fccmiddleware.edge.ingestion.IngestionOrchestratorTest\" --tests \"com.fccmiddleware.edge.preauth.PreAuthHandlerTest\" --tests \"com.fccmiddleware.edge.config.ConfigManagerTest\" 2>&1 | tail -20)",
+      "Bash(./gradlew testDebugUnitTest 2>&1 | grep -E \"FAILED|tests completed\")"
     ]
   }
 }

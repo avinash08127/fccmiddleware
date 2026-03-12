@@ -15,19 +15,21 @@ import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.Nozzle
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import com.fccmiddleware.edge.buffer.entity.SyncState
-import com.fccmiddleware.edge.config.ApiDto
-import com.fccmiddleware.edge.config.AgentDto
 import com.fccmiddleware.edge.config.BufferDto
-import com.fccmiddleware.edge.config.CompatibilityDto
 import com.fccmiddleware.edge.config.ConfigApplyResult
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.EdgeAgentConfigDto
-import com.fccmiddleware.edge.config.FccConnectionDto
 import com.fccmiddleware.edge.config.FiscalizationDto
-import com.fccmiddleware.edge.config.PollingDto
+import com.fccmiddleware.edge.config.FccDto
+import com.fccmiddleware.edge.config.IdentityDto
+import com.fccmiddleware.edge.config.LocalApiDto
+import com.fccmiddleware.edge.config.MappingsDto
+import com.fccmiddleware.edge.config.RolloutDto
 import com.fccmiddleware.edge.config.SiteDto
+import com.fccmiddleware.edge.config.SourceRevisionDto
 import com.fccmiddleware.edge.config.SyncDto
 import com.fccmiddleware.edge.config.TelemetryDto
+import com.fccmiddleware.edge.config.canonicalEdgeConfig
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
@@ -923,7 +925,7 @@ class CloudBackendAlignmentTest {
 
         val badConfig = validConfig().copy(
             configVersion = 10,
-            polling = PollingDto(pullIntervalSeconds = 0, batchSize = 100),
+            fcc = validConfig().fcc.copy(pullIntervalSeconds = 0),
         )
         val result = configManager.applyConfig(badConfig, "{}")
         assertTrue(result is ConfigApplyResult.Rejected)
@@ -952,12 +954,7 @@ class CloudBackendAlignmentTest {
 
         val badConfig = validConfig().copy(
             configVersion = 10,
-            fccConnection = FccConnectionDto(
-                vendor = "DOMS",
-                host = "192.168.1.100",
-                port = 70000,
-                credentialsRef = "cred",
-            ),
+            fcc = validConfig().fcc.copy(port = 70000),
         )
         val result = configManager.applyConfig(badConfig, "{}")
         assertTrue(result is ConfigApplyResult.Rejected)
@@ -987,33 +984,47 @@ class CloudBackendAlignmentTest {
     }
 
     private fun validConfig() = EdgeAgentConfigDto(
-        schemaVersion = "2.0",
+        schemaVersion = "1.0",
         configVersion = 5,
         configId = "cfg-001",
         issuedAtUtc = "2025-01-01T00:00:00Z",
         effectiveAtUtc = "2025-01-01T00:00:00Z",
-        compatibility = CompatibilityDto(minAgentVersion = "1.0.0"),
-        agent = AgentDto(deviceId = "dev-001"),
-        site = SiteDto(
+        sourceRevision = SourceRevisionDto(),
+        identity = IdentityDto(
+            deviceId = "dev-001",
             siteCode = "SITE-001",
             legalEntityId = "lei-001",
+            legalEntityCode = "LE-001",
+            siteId = "site-id-001",
+            siteName = "Site 001",
             timezone = "Africa/Johannesburg",
-            currency = "ZAR",
+            currencyCode = "ZAR",
+        ),
+        site = SiteDto(
+            isActive = true,
             operatingModel = "COCO",
             connectivityMode = "CONNECTED",
+            siteUsesPreAuth = true,
+            odooSiteId = "ODOO-001",
+            companyTaxPayerId = "TAX-001",
         ),
-        fccConnection = FccConnectionDto(
+        fcc = FccDto(
+            enabled = true,
             vendor = "DOMS",
-            host = "192.168.1.100",
+            hostAddress = "192.168.1.100",
             port = 8080,
-            credentialsRef = "cred-ref",
+            credentialRef = "cred-ref",
+            connectionProtocol = "TCP",
+            ingestionMode = "RELAY",
+            pullIntervalSeconds = 30,
         ),
-        polling = PollingDto(),
         sync = SyncDto(cloudBaseUrl = "https://api.fccmiddleware.io"),
         buffer = BufferDto(),
-        api = ApiDto(),
+        localApi = LocalApiDto(),
         telemetry = TelemetryDto(),
         fiscalization = FiscalizationDto(mode = "NONE"),
+        mappings = MappingsDto(),
+        rollout = RolloutDto(minAgentVersion = "1.0.0"),
     )
 
     // =========================================================================
@@ -1038,6 +1049,7 @@ class CloudBackendAlignmentTest {
         every { tokenProvider.isDecommissioned() } returns false
         every { tokenProvider.getAccessToken() } returns "token"
         every { tokenProvider.getLegalEntityId() } returns "lei-test-123"
+        every { tokenProvider.markDecommissioned() } just Runs
         coEvery { syncStateDao.get() } returns null
         coEvery { syncStateDao.upsert(any()) } returns Unit
 

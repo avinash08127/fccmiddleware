@@ -46,10 +46,13 @@ public sealed class MasterDataBrowserController : PortalControllerBase
             .Select(item => new PortalLegalEntityDto
             {
                 Id = item.Id,
-                Code = item.CountryCode,
+                Code = item.BusinessCode,
                 Name = item.Name,
+                CountryCode = item.CountryCode,
+                CountryName = item.CountryName,
                 CurrencyCode = item.CurrencyCode,
-                Country = item.CountryCode,
+                Country = item.CountryName,
+                OdooCompanyId = item.OdooCompanyId,
                 IsActive = item.IsActive,
                 UpdatedAt = item.UpdatedAt
             })

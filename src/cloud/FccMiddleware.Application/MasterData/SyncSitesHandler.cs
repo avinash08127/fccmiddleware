@@ -57,6 +57,12 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
                 continue;
             }
 
+            if (!item.SiteUsesPreAuth.HasValue)
+            {
+                errors.Add($"Site {item.Id}: siteUsesPreAuth is required.");
+                continue;
+            }
+
             if (IsDealerOperated(model)
                 && (string.IsNullOrWhiteSpace(item.OperatorName) || string.IsNullOrWhiteSpace(item.OperatorTaxPayerId)))
             {
@@ -140,6 +146,7 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
         e.CompanyTaxPayerId     != i.CompanyTaxPayerId ||
         e.OperatorName          != NormalizeOptional(i.OperatorName) ||
         e.OperatorTaxPayerId    != NormalizeOptional(i.OperatorTaxPayerId) ||
+        e.SiteUsesPreAuth       != i.SiteUsesPreAuth.GetValueOrDefault() ||
         e.FiscalizationMode     != fiscalizationMode ||
         e.TaxAuthorityEndpoint  != NormalizeOptional(i.TaxAuthorityEndpoint) ||
         e.RequireCustomerTaxId  != i.RequireCustomerTaxId ||
@@ -162,6 +169,7 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
         e.CompanyTaxPayerId     = i.CompanyTaxPayerId;
         e.OperatorName          = NormalizeOptional(i.OperatorName);
         e.OperatorTaxPayerId    = NormalizeOptional(i.OperatorTaxPayerId);
+        e.SiteUsesPreAuth       = i.SiteUsesPreAuth.GetValueOrDefault();
         e.FiscalizationMode     = fiscalizationMode;
         e.TaxAuthorityEndpoint  = NormalizeOptional(i.TaxAuthorityEndpoint);
         e.RequireCustomerTaxId  = i.RequireCustomerTaxId;
@@ -188,6 +196,7 @@ public sealed class SyncSitesHandler : IRequestHandler<SyncSitesCommand, MasterD
         CompanyTaxPayerId      = i.CompanyTaxPayerId,
         OperatorName           = NormalizeOptional(i.OperatorName),
         OperatorTaxPayerId     = NormalizeOptional(i.OperatorTaxPayerId),
+        SiteUsesPreAuth        = i.SiteUsesPreAuth.GetValueOrDefault(),
         FiscalizationMode      = fiscalizationMode,
         TaxAuthorityEndpoint   = NormalizeOptional(i.TaxAuthorityEndpoint),
         RequireCustomerTaxId   = i.RequireCustomerTaxId,

@@ -7,7 +7,6 @@ import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -39,53 +38,8 @@ class ConfigManagerTest {
     private val agentConfigDao: AgentConfigDao = mockk(relaxed = true)
     private lateinit var configManager: ConfigManager
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-    }
-
     companion object {
-        private val BASE_CONFIG_JSON = """
-        {
-            "schemaVersion": "2.0",
-            "configVersion": 5,
-            "configId": "00000000-0000-0000-0000-000000000001",
-            "issuedAtUtc": "2025-01-01T00:00:00Z",
-            "effectiveAtUtc": "2025-01-01T00:00:00Z",
-            "compatibility": { "minAgentVersion": "1.0.0" },
-            "agent": { "deviceId": "11111111-1111-1111-1111-111111111111", "isPrimaryAgent": true },
-            "site": {
-                "siteCode": "SITE-001",
-                "legalEntityId": "22222222-2222-2222-2222-222222222222",
-                "timezone": "Africa/Johannesburg",
-                "currency": "ZAR",
-                "operatingModel": "COCO",
-                "connectivityMode": "CONNECTED"
-            },
-            "fccConnection": {
-                "vendor": "DOMS",
-                "host": "192.168.1.100",
-                "port": 8080,
-                "credentialsRef": "fcc/site-001",
-                "protocolType": "REST",
-                "transactionMode": "PULL",
-                "ingestionMode": "RELAY",
-                "heartbeatIntervalSeconds": 15
-            },
-            "polling": { "pullIntervalSeconds": 30, "batchSize": 100, "cursorStrategy": "LAST_SUCCESSFUL_TIMESTAMP" },
-            "sync": {
-                "cloudBaseUrl": "https://api.fccmiddleware.io",
-                "uploadBatchSize": 50,
-                "syncIntervalSeconds": 30,
-                "statusPollIntervalSeconds": 30,
-                "configPollIntervalSeconds": 60
-            },
-            "buffer": { "retentionDays": 30, "maxRecords": 50000, "cleanupIntervalHours": 24 },
-            "api": { "localApiPort": 8585, "enableLanApi": false },
-            "telemetry": { "telemetryIntervalSeconds": 60, "logLevel": "INFO" },
-            "fiscalization": { "mode": "NONE", "requireCustomerTaxId": false, "fiscalReceiptRequired": false }
-        }
-        """.trimIndent()
+        private val BASE_CONFIG_JSON = canonicalEdgeConfigJson()
     }
 
     @Before
@@ -94,10 +48,10 @@ class ConfigManagerTest {
     }
 
     private fun parseConfig(jsonStr: String): EdgeAgentConfigDto =
-        json.decodeFromString<EdgeAgentConfigDto>(jsonStr)
+        EdgeAgentConfigJson.decode(jsonStr)
 
     private fun configJsonWithVersion(version: Int): String =
-        BASE_CONFIG_JSON.replace("\"configVersion\": 5", "\"configVersion\": $version")
+        canonicalEdgeConfigJson(configVersion = version)
 
     // -------------------------------------------------------------------------
     // loadFromLocal
@@ -117,7 +71,7 @@ class ConfigManagerTest {
         val cfg = configManager.config.value
         assertNotNull(cfg)
         assertEquals(5, cfg!!.configVersion)
-        assertEquals("SITE-001", cfg.site.siteCode)
+        assertEquals("SITE-001", cfg.identity.siteCode)
     }
 
     @Test
@@ -160,11 +114,22 @@ class ConfigManagerTest {
 
     @Test
     fun `accepts same major version with different minor`() = runTest {
-        val config = parseConfig(BASE_CONFIG_JSON).copy(schemaVersion = "2.1")
+        val config = parseConfig(BASE_CONFIG_JSON).copy(schemaVersion = "1.1")
 
         val result = configManager.applyConfig(config, BASE_CONFIG_JSON)
 
         assertTrue(result is ConfigApplyResult.Applied)
+    }
+
+    @Test
+    fun `rejects unsupported FCC protocol combination`() = runTest {
+        val config = canonicalEdgeConfig(connectionProtocol = "REST")
+        val invalidJson = EdgeAgentConfigJson.encode(config)
+
+        val result = configManager.applyConfig(config, invalidJson)
+
+        assertTrue(result is ConfigApplyResult.Rejected)
+        assertEquals("UNSUPPORTED_FCC_CONFIGURATION", (result as ConfigApplyResult.Rejected).reason)
     }
 
     // -------------------------------------------------------------------------
@@ -218,9 +183,9 @@ class ConfigManagerTest {
         configManager.applyConfig(config5, BASE_CONFIG_JSON)
 
         val config6 = parseConfig(configJsonWithVersion(6)).copy(
-            agent = config5.agent.copy(deviceId = "99999999-9999-9999-9999-999999999999"),
+            identity = config5.identity.copy(deviceId = "99999999-9999-9999-9999-999999999999"),
         )
-        val result = configManager.applyConfig(config6, configJsonWithVersion(6))
+        val result = configManager.applyConfig(config6, EdgeAgentConfigJson.encode(config6))
 
         assertTrue(result is ConfigApplyResult.Rejected)
         assertEquals("REPROVISION_REQUIRED", (result as ConfigApplyResult.Rejected).reason)
@@ -232,9 +197,9 @@ class ConfigManagerTest {
         configManager.applyConfig(config5, BASE_CONFIG_JSON)
 
         val config6 = parseConfig(configJsonWithVersion(6)).copy(
-            site = config5.site.copy(siteCode = "SITE-999"),
+            identity = config5.identity.copy(siteCode = "SITE-999"),
         )
-        val result = configManager.applyConfig(config6, configJsonWithVersion(6))
+        val result = configManager.applyConfig(config6, EdgeAgentConfigJson.encode(config6))
 
         assertTrue(result is ConfigApplyResult.Rejected)
         assertEquals("REPROVISION_REQUIRED", (result as ConfigApplyResult.Rejected).reason)
@@ -246,9 +211,9 @@ class ConfigManagerTest {
         configManager.applyConfig(config5, BASE_CONFIG_JSON)
 
         val config6 = parseConfig(configJsonWithVersion(6)).copy(
-            site = config5.site.copy(legalEntityId = "99999999-9999-9999-9999-999999999999"),
+            identity = config5.identity.copy(legalEntityId = "99999999-9999-9999-9999-999999999999"),
         )
-        val result = configManager.applyConfig(config6, configJsonWithVersion(6))
+        val result = configManager.applyConfig(config6, EdgeAgentConfigJson.encode(config6))
 
         assertTrue(result is ConfigApplyResult.Rejected)
         assertEquals("REPROVISION_REQUIRED", (result as ConfigApplyResult.Rejected).reason)
@@ -260,9 +225,9 @@ class ConfigManagerTest {
         configManager.applyConfig(config5, BASE_CONFIG_JSON)
 
         val config6 = parseConfig(configJsonWithVersion(6)).copy(
-            api = config5.api.copy(localApiPort = 9090),
+            localApi = config5.localApi.copy(localhostPort = 9090),
         )
-        val result = configManager.applyConfig(config6, configJsonWithVersion(6))
+        val result = configManager.applyConfig(config6, EdgeAgentConfigJson.encode(config6))
 
         assertTrue(result is ConfigApplyResult.Rejected)
         assertEquals("REPROVISION_REQUIRED", (result as ConfigApplyResult.Rejected).reason)
@@ -304,15 +269,14 @@ class ConfigManagerTest {
     fun `hot-reload fields update in-memory config immediately`() = runTest {
         val config5 = parseConfig(BASE_CONFIG_JSON)
         configManager.applyConfig(config5, BASE_CONFIG_JSON)
-        assertEquals(30, configManager.config.value!!.polling.pullIntervalSeconds)
+        assertEquals(30, configManager.config.value!!.fcc.pullIntervalSeconds)
 
         // Apply version 6 with changed hot-reload field
-        val newerJson = configJsonWithVersion(6)
-            .replace("\"pullIntervalSeconds\": 30", "\"pullIntervalSeconds\": 60")
-        val config6 = parseConfig(newerJson)
+        val config6 = canonicalEdgeConfig(configVersion = 6, pullIntervalSeconds = 60)
+        val newerJson = EdgeAgentConfigJson.encode(config6)
         configManager.applyConfig(config6, newerJson)
 
-        assertEquals(60, configManager.config.value!!.polling.pullIntervalSeconds)
+        assertEquals(60, configManager.config.value!!.fcc.pullIntervalSeconds)
     }
 
     // -------------------------------------------------------------------------

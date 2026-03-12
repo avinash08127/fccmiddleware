@@ -358,12 +358,15 @@ public sealed class AcknowledgeTransactionsTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id                    = TestLegalEntityId,
+            BusinessCode          = "ET-001",
             CountryCode           = "ET",  // Ethiopia — not in EnsureCreated seed
+            CountryName           = "Ethiopia",
             Name                  = "Ack Test Ethiopia Ltd",
             CurrencyCode          = "ETB",
             TaxAuthorityCode      = "ERCA",
             FiscalizationRequired = false,
             DefaultTimezone       = "Africa/Addis_Ababa",
+            OdooCompanyId         = "ODOO-ET-001",
             IsActive              = true,
             SyncedAt              = DateTimeOffset.UtcNow,
             CreatedAt             = DateTimeOffset.UtcNow,
@@ -373,12 +376,15 @@ public sealed class AcknowledgeTransactionsTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id                    = OtherLegalEntityId,
+            BusinessCode          = "GH-001",
             CountryCode           = "GH",  // Ghana — not in EnsureCreated seed
+            CountryName           = "Ghana",
             Name                  = "Ack Test Ghana Ltd",
             CurrencyCode          = "GHS",
             TaxAuthorityCode      = "GRA",
             FiscalizationRequired = false,
             DefaultTimezone       = "Africa/Accra",
+            OdooCompanyId         = "ODOO-GH-001",
             IsActive              = true,
             SyncedAt              = DateTimeOffset.UtcNow,
             CreatedAt             = DateTimeOffset.UtcNow,

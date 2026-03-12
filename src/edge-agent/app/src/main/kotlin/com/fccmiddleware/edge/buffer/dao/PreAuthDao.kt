@@ -27,10 +27,13 @@ interface PreAuthDao {
 
     /**
      * Cloud forward worker: unsynced records ordered oldest-first for chronological forwarding.
+     * Legacy rows missing unit price are returned once (while cloudSyncAttempts = 0) so the
+     * worker can mark them as incomplete instead of retrying forever with fabricated data.
      */
     @Query(
         "SELECT * FROM pre_auth_records " +
         "WHERE is_cloud_synced = 0 " +
+        "AND (unit_price_minor_per_litre IS NOT NULL OR cloud_sync_attempts = 0) " +
         "ORDER BY created_at ASC " +
         "LIMIT :limit"
     )

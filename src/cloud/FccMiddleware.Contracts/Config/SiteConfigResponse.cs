@@ -49,6 +49,7 @@ public sealed record SiteDto
 {
     public required bool IsActive { get; init; }
     public required string OperatingModel { get; init; }
+    public required bool SiteUsesPreAuth { get; init; }
     public required string ConnectivityMode { get; init; }
     public required string OdooSiteId { get; init; }
     public required string CompanyTaxPayerId { get; init; }

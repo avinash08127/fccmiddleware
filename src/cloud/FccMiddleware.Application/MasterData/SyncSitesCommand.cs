@@ -19,6 +19,7 @@ public sealed class SiteSyncItem
     public string CompanyTaxPayerId { get; init; } = null!;
     public string? OperatorName { get; init; }
     public string? OperatorTaxPayerId { get; init; }
+    public bool? SiteUsesPreAuth { get; init; }
     public string FiscalizationMode { get; init; } = null!;
     public string? TaxAuthorityEndpoint { get; init; }
     public bool RequireCustomerTaxId { get; init; }

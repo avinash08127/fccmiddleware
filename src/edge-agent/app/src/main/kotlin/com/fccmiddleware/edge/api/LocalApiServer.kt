@@ -46,19 +46,31 @@ import java.util.concurrent.atomic.AtomicLong
  * Architecture rule: localhost mode must never regress when LAN mode is enabled.
  */
 class LocalApiServer(
-    val config: LocalApiServerConfig,
+    config: LocalApiServerConfig,
     private val transactionDao: TransactionBufferDao,
     private val syncStateDao: SyncStateDao,
     private val connectivityManager: ConnectivityManager,
     private val preAuthHandler: PreAuthHandler,
-    private val fccAdapter: IFccAdapter?,
+    fccAdapter: IFccAdapter? = null,
     private val serviceScope: CoroutineScope,
     private val ingestionOrchestrator: IngestionOrchestrator? = null,
     private val serviceStartMs: Long = System.currentTimeMillis(),
-    private val deviceId: String = "00000000-0000-0000-0000-000000000000",
-    private val siteCode: String = "UNPROVISIONED",
-    private val agentVersion: String = "1.0.0",
+    deviceId: String = "00000000-0000-0000-0000-000000000000",
+    siteCode: String = "UNPROVISIONED",
+    agentVersion: String = "1.0.0",
 ) {
+    /** Late-bound: wired via [wireFccAdapter] when FCC config becomes available after startup. */
+    private var fccAdapter: IFccAdapter? = fccAdapter
+    @Volatile
+    var config: LocalApiServerConfig = config
+        private set
+    @Volatile
+    private var deviceId: String = deviceId
+    @Volatile
+    private var siteCode: String = siteCode
+    @Volatile
+    private var agentVersion: String = agentVersion
+
     data class LocalApiServerConfig(
         val port: Int = 8585,
         /** true: bind to 0.0.0.0 for primary-HHT LAN multi-device mode. */
@@ -80,6 +92,28 @@ class LocalApiServer(
         scope = serviceScope,
     )
     private val tag = "LocalApiServer"
+
+    /** Wire the FCC adapter into this server and its pump status cache. */
+    internal fun wireFccAdapter(adapter: IFccAdapter?) {
+        fccAdapter = adapter
+        pumpStatusCache.fccAdapter = adapter
+    }
+
+    internal fun reconfigure(
+        config: LocalApiServerConfig,
+        deviceId: String = this.deviceId,
+        siteCode: String = this.siteCode,
+        agentVersion: String = this.agentVersion,
+    ) {
+        val shouldRestart = server != null
+        this.config = config
+        this.deviceId = deviceId
+        this.siteCode = siteCode
+        this.agentVersion = agentVersion
+        if (shouldRestart) {
+            start()
+        }
+    }
 
     fun start() {
         server?.stop(1_000, 2_000)

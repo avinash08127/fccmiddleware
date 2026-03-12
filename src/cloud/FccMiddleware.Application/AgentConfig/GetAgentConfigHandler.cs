@@ -105,6 +105,7 @@ public sealed class GetAgentConfigHandler
             {
                 IsActive = site.IsActive,
                 OperatingModel = site.OperatingModel.ToString(),
+                SiteUsesPreAuth = site.SiteUsesPreAuth,
                 ConnectivityMode = site.ConnectivityMode,
                 OdooSiteId = site.OdooSiteId ?? string.Empty,
                 CompanyTaxPayerId = site.CompanyTaxPayerId,

@@ -27,6 +27,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
     private readonly IFccAdapterFactory _adapterFactory;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IOptions<AgentConfiguration> _config;
+    private readonly IConfigManager? _configManager;
     private readonly ILogger<IngestionOrchestrator> _logger;
 
     // Serializes scheduled (CadenceController) and manual (API) poll cycles.
@@ -37,12 +38,14 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
         IFccAdapterFactory adapterFactory,
         IServiceScopeFactory scopeFactory,
         IOptions<AgentConfiguration> config,
-        ILogger<IngestionOrchestrator> logger)
+        ILogger<IngestionOrchestrator> logger,
+        IConfigManager? configManager = null)
     {
         _adapterFactory = adapterFactory;
         _scopeFactory = scopeFactory;
         _config = config;
         _logger = logger;
+        _configManager = configManager;
     }
 
     /// <inheritdoc />
@@ -76,6 +79,52 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
         }
     }
 
+    /// <inheritdoc />
+    public async Task EnsurePushListenersInitializedAsync(CancellationToken ct)
+    {
+        var config = _config.Value;
+
+        ResolvedFccRuntimeConfiguration resolvedConfig;
+        try
+        {
+            resolvedConfig = DesktopFccRuntimeConfiguration.Resolve(
+                config,
+                _configManager?.CurrentSiteConfig,
+                TimeSpan.FromSeconds(10));
+        }
+        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException)
+        {
+            _logger.LogDebug(ex, "Push listener init skipped: runtime configuration not ready");
+            return;
+        }
+
+        // Only Petronite is push-mode — other vendors use polling and don't need early init.
+        if (resolvedConfig.Vendor != FccVendor.Petronite)
+            return;
+
+        _logger.LogInformation("Initializing push-mode listener for {Vendor}", resolvedConfig.Vendor);
+
+        await _pollLock.WaitAsync(ct);
+        try
+        {
+            var adapter = _adapterFactory.Create(resolvedConfig.Vendor, resolvedConfig.ConnectionConfig);
+
+            // Trigger the lazy init (webhook listener start + startup reconciliation)
+            // by calling FetchTransactionsAsync with a minimal cursor. This is idempotent.
+            await adapter.FetchTransactionsAsync(new FetchCursor(null, null, 0), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Push listener initialization failed for {Vendor} (non-fatal — will retry on next poll)",
+                resolvedConfig.Vendor);
+        }
+        finally
+        {
+            _pollLock.Release();
+        }
+    }
+
     // ── Core fetch-and-buffer loop ────────────────────────────────────────────
 
     private async Task<IngestionResult> DoPollAndBufferAsync(CancellationToken ct)
@@ -87,13 +136,20 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
         var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
         var bufferManager = scope.ServiceProvider.GetRequiredService<TransactionBufferManager>();
 
-        var connectionConfig = new FccConnectionConfig(
-            BaseUrl: config.FccBaseUrl,
-            ApiKey: config.FccApiKey,
-            RequestTimeout: TimeSpan.FromSeconds(10),
-            SiteCode: config.SiteId);
-
-        var adapter = _adapterFactory.Create(config.FccVendor, connectionConfig);
+        IFccAdapter adapter;
+        try
+        {
+            var resolvedConfig = DesktopFccRuntimeConfiguration.Resolve(
+                config,
+                _configManager?.CurrentSiteConfig,
+                TimeSpan.FromSeconds(10));
+            adapter = _adapterFactory.Create(resolvedConfig.Vendor, resolvedConfig.ConnectionConfig);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException)
+        {
+            _logger.LogError(ex, "FCC polling skipped: runtime configuration is invalid");
+            return new IngestionResult(0, 0, null);
+        }
 
         // Load cursor from single-row sync_state sentinel (Id = 1).
         var syncState = await db.SyncStates

@@ -264,12 +264,15 @@ public sealed class PollTransactionsTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id                    = TestLegalEntityId,
+            BusinessCode          = "UG-001",
             CountryCode           = "UG",  // Uganda — not in EnsureCreated seed data
+            CountryName           = "Uganda",
             Name                  = "Poll Test Uganda Ltd",
             CurrencyCode          = "UGX",
             TaxAuthorityCode      = "URA",
             FiscalizationRequired = false,
             DefaultTimezone       = "Africa/Kampala",
+            OdooCompanyId         = "ODOO-UG-001",
             IsActive              = true,
             SyncedAt              = DateTimeOffset.UtcNow,
             CreatedAt             = DateTimeOffset.UtcNow,
@@ -279,12 +282,15 @@ public sealed class PollTransactionsTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id                    = OtherLegalEntityId,
+            BusinessCode          = "KE-001",
             CountryCode           = "KE",  // Kenya — not in EnsureCreated seed data
+            CountryName           = "Kenya",
             Name                  = "Poll Test Kenya Ltd",
             CurrencyCode          = "KES",
             TaxAuthorityCode      = "KRA",
             FiscalizationRequired = false,
             DefaultTimezone       = "Africa/Nairobi",
+            OdooCompanyId         = "ODOO-KE-001",
             IsActive              = true,
             SyncedAt              = DateTimeOffset.UtcNow,
             CreatedAt             = DateTimeOffset.UtcNow,

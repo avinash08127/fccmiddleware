@@ -10,7 +10,6 @@ using FccMiddleware.Infrastructure.Storage;
 using FccMiddleware.Infrastructure.Workers;
 using FccMiddleware.Application.Reconciliation;
 using FccMiddleware.Application.Observability;
-using FccMiddleware.Adapter.Doms;
 using FccMiddleware.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -55,26 +54,7 @@ try
     builder.Services.AddScoped<IEventPublisher, OutboxEventPublisher>();
 
     builder.Services.AddScoped<ISiteFccConfigProvider, SiteFccConfigProvider>();
-    builder.Services.AddHttpClient();
-    builder.Services.AddSingleton<IFccAdapterFactory>(sp =>
-        FccAdapterFactory.Create(registry =>
-        {
-            var hcf = sp.GetRequiredService<IHttpClientFactory>();
-            registry[FccVendor.DOMS] = cfg =>
-            {
-                var client = hcf.CreateClient();
-                if (!string.IsNullOrEmpty(cfg.HostAddress))
-                {
-                    client.BaseAddress = new Uri($"http://{cfg.HostAddress}:{cfg.Port}/api/v1/");
-                    if (!string.IsNullOrEmpty(cfg.ApiKey))
-                        client.DefaultRequestHeaders.Add("X-API-Key", cfg.ApiKey);
-                }
-
-                return new DomsCloudAdapter(client, cfg);
-            };
-            registry[FccVendor.RADIX] = _ => throw new NotImplementedException(
-                "Radix cloud adapter is not yet implemented");
-        }));
+    builder.Services.AddCloudFccAdapterFactory();
 
     // ── Outbox Publisher Worker ───────────────────────────────────────────────
     builder.Services.Configure<OutboxWorkerOptions>(

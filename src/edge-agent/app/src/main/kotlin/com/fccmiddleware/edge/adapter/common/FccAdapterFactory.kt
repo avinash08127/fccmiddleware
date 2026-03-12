@@ -19,31 +19,19 @@ class FccAdapterFactory : IFccAdapterFactory {
 
     companion object {
         private const val TAG = "FccAdapterFactory"
-
-        /** Vendors whose adapters are fully implemented and safe to use. */
-        private val IMPLEMENTED_VENDORS: Set<FccVendor> = setOf(
-            FccVendor.DOMS, // TCP/JPL + REST adapters
-        )
     }
 
     override fun resolve(vendor: FccVendor, config: AgentFccConfig): IFccAdapter {
-        if (vendor !in IMPLEMENTED_VENDORS) {
+        if (!FccVendorSupportMatrix.isSupported(vendor, config.connectionProtocol)) {
             Log.e(
                 TAG,
-                "Adapter for vendor $vendor is not implemented. " +
-                    "Implemented vendors: $IMPLEMENTED_VENDORS",
+                FccVendorSupportMatrix.unsupportedMessage(vendor, config.connectionProtocol),
             )
-            throw AdapterNotImplementedException(vendor)
+            throw AdapterNotImplementedException(vendor, config.connectionProtocol)
         }
 
         return when (vendor) {
-            FccVendor.DOMS -> {
-                if (config.connectionProtocol.equals("TCP", ignoreCase = true)) {
-                    com.fccmiddleware.edge.adapter.doms.DomsJplAdapter(config)
-                } else {
-                    DomsAdapter(config)
-                }
-            }
+            FccVendor.DOMS -> com.fccmiddleware.edge.adapter.doms.DomsJplAdapter(config)
             FccVendor.RADIX -> RadixAdapter(config)
             FccVendor.PETRONITE -> PetroniteAdapter(config)
             else -> throw AdapterNotRegisteredException(vendor)
@@ -55,7 +43,7 @@ class FccAdapterFactory : IFccAdapterFactory {
  * Thrown when an adapter binding exists for the vendor but the implementation
  * is not yet complete (all methods are stubs).
  */
-class AdapterNotImplementedException(vendor: FccVendor) : Exception(
-    "Adapter for vendor $vendor exists but is not yet implemented. " +
-        "Error code: ADAPTER_NOT_IMPLEMENTED",
+class AdapterNotImplementedException(vendor: FccVendor, connectionProtocol: String) : Exception(
+    FccVendorSupportMatrix.unsupportedMessage(vendor, connectionProtocol) +
+        " Error code: ADAPTER_NOT_IMPLEMENTED",
 )

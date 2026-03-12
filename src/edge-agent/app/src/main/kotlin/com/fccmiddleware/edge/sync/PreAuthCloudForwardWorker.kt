@@ -123,6 +123,17 @@ class PreAuthCloudForwardWorker(
         }
 
         for (record in unsynced) {
+            if (record.unitPrice == null) {
+                val attemptNow = Instant.now().toString()
+                dao.recordCloudSyncFailure(record.id, attemptNow)
+                Log.w(
+                    TAG,
+                    "Skipping pre-auth ${record.odooOrderId} cloud forward: unitPrice is missing " +
+                        "for a legacy local record.",
+                )
+                continue
+            }
+
             val result = doForward(client, provider, record, token)
             when (result) {
                 is ForwardAttemptResult.Success -> {
@@ -252,10 +263,7 @@ class PreAuthCloudForwardWorker(
             nozzleNumber = nozzleNumber,
             productCode = productCode,
             requestedAmount = requestedAmountMinorUnits,
-            // TODO (EA-4.x): Edge PreAuthRecord does not yet store unitPrice; cloud should
-            // derive the actual unit price from its product/pricing data. Minimum valid value
-            // sent to satisfy the API contract (minimum: 1).
-            unitPrice = 1,
+            unitPrice = requireNotNull(unitPrice),
             currency = currencyCode,
             status = status,
             requestedAt = requestedAt,

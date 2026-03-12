@@ -58,16 +58,18 @@ public sealed class MasterDataController : ControllerBase
             IsFullSnapshot = request.IsFullSnapshot,
             Items = request.LegalEntities.Select(r => new LegalEntitySyncItem
             {
-                Id           = r.Id,
-                Code         = r.Code,
-                Name         = r.Name,
-                CurrencyCode = r.CurrencyCode,
-                Country      = r.Country,
-                TaxAuthorityCode = r.TaxAuthorityCode,
+                Id                      = r.Id,
+                Code                    = r.Code,
+                Name                    = r.Name,
+                CountryCode             = r.CountryCode,
+                CountryName             = r.CountryName,
+                CurrencyCode            = r.CurrencyCode,
+                TaxAuthorityCode        = r.TaxAuthorityCode,
                 DefaultFiscalizationMode = r.DefaultFiscalizationMode,
-                FiscalizationProvider = r.FiscalizationProvider,
-                DefaultTimezone = r.DefaultTimezone,
-                IsActive     = r.IsActive
+                FiscalizationProvider   = r.FiscalizationProvider,
+                DefaultTimezone         = r.DefaultTimezone,
+                OdooCompanyId           = r.OdooCompanyId,
+                IsActive                = r.IsActive
             }).ToList()
         };
 
@@ -108,6 +110,7 @@ public sealed class MasterDataController : ControllerBase
                 CompanyTaxPayerId = r.CompanyTaxPayerId,
                 OperatorName = r.OperatorName,
                 OperatorTaxPayerId = r.OperatorTaxPayerId,
+                SiteUsesPreAuth = r.SiteUsesPreAuth,
                 FiscalizationMode = r.FiscalizationMode,
                 TaxAuthorityEndpoint = r.TaxAuthorityEndpoint,
                 RequireCustomerTaxId = r.RequireCustomerTaxId,

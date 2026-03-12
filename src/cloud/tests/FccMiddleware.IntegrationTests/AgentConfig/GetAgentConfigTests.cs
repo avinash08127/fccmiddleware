@@ -113,6 +113,7 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
         identity.GetProperty("currencyCode").GetString().Should().Be("ZWL");
 
         var site = body.GetProperty("site");
+        site.GetProperty("siteUsesPreAuth").GetBoolean().Should().BeTrue();
         site.GetProperty("connectivityMode").GetString().Should().Be("CONNECTED");
         site.GetProperty("companyTaxPayerId").GetString().Should().Be("TAX-CFG-001");
         site.GetProperty("operatorName").GetString().Should().Be("Dealer Config Operator");
@@ -342,12 +343,15 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id                    = TestLegalEntityId,
+            BusinessCode          = "ZW-001",
             CountryCode           = "ZW",
+            CountryName           = "Zimbabwe",
             Name                  = "Config Test Zimbabwe Ltd",
             CurrencyCode          = "ZWL",
             TaxAuthorityCode      = "ZIMRA",
             FiscalizationRequired = true,
             DefaultTimezone       = "Africa/Harare",
+            OdooCompanyId         = "ODOO-ZW-001",
             IsActive              = true,
             SyncedAt              = DateTimeOffset.UtcNow,
             CreatedAt             = DateTimeOffset.UtcNow,
@@ -361,6 +365,7 @@ public sealed class GetAgentConfigTests : IAsyncLifetime
             SiteCode          = TestSiteCode,
             SiteName          = "Config Test Station",
             OperatingModel    = SiteOperatingModel.COCO,
+            SiteUsesPreAuth   = true,
             ConnectivityMode  = "CONNECTED",
             CompanyTaxPayerId = "TAX-CFG-001",
             OperatorName      = "Dealer Config Operator",

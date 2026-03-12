@@ -27,12 +27,15 @@ public sealed class PreAuthHandlerTests : IDisposable
     private readonly IFccAdapter _adapter;
     private readonly IConnectivityMonitor _connectivity;
     private readonly IOptions<AgentConfiguration> _config;
+    private readonly IConfigManager _configManager;
+    private SiteConfig? _currentSiteConfig;
     private readonly PreAuthHandler _handler;
 
     private static readonly AgentConfiguration DefaultConfig = new()
     {
         FccBaseUrl = "http://fcc-lan:8080",
         FccApiKey = "test-key",
+        FccVendor = FccVendor.Doms,
         PreAuthTimeoutSeconds = 5,
         PreAuthExpiryMinutes = 5,
         SiteId = "SITE-A",
@@ -60,11 +63,15 @@ public sealed class PreAuthHandlerTests : IDisposable
             MeasuredAt: DateTimeOffset.UtcNow));
 
         _config = Options.Create(DefaultConfig);
+        _configManager = Substitute.For<IConfigManager>();
+        _configManager.CurrentSiteConfig.Returns(_ => _currentSiteConfig);
+        _currentSiteConfig = MakeSiteConfig();
 
         _handler = new PreAuthHandler(
             _db, _connectivity, _config,
             NullLogger<PreAuthHandler>.Instance,
-            _adapterFactory);
+            _adapterFactory,
+            _configManager);
     }
 
     public void Dispose()
@@ -88,6 +95,37 @@ public sealed class PreAuthHandlerTests : IDisposable
             RequestedAmountMinorUnits: 50_000,
             UnitPriceMinorPerLitre: 1_500,
             Currency: "ETB");
+
+    private static SiteConfig MakeSiteConfig(
+        string vendor = "DOMS",
+        string connectionProtocol = "REST",
+        string hostAddress = "fcc-lan",
+        int port = 8080) =>
+        new()
+        {
+            Identity = new SiteConfigIdentity
+            {
+                SiteCode = "SITE-A",
+                LegalEntityId = "LE-001",
+            },
+            Site = new SiteConfigSite
+            {
+                Currency = "ETB",
+                Timezone = "Africa/Addis_Ababa",
+            },
+            Fcc = new SiteConfigFcc
+            {
+                Enabled = true,
+                Vendor = vendor,
+                ConnectionProtocol = connectionProtocol,
+                HostAddress = hostAddress,
+                Port = port,
+            },
+            Mappings = new SiteConfigMappings
+            {
+                PumpNumberOffset = 0,
+            },
+        };
 
     private async Task SeedNozzleMappingAsync(
         string siteCode = "SITE-A",
@@ -292,12 +330,46 @@ public sealed class PreAuthHandlerTests : IDisposable
         var handlerNoAdapter = new PreAuthHandler(
             _db, _connectivity, _config,
             NullLogger<PreAuthHandler>.Instance,
-            adapterFactory: null);
+            adapterFactory: null,
+            configManager: _configManager);
 
         var result = await handlerNoAdapter.HandleAsync(MakeRequest(), CancellationToken.None);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Be(PreAuthHandlerError.AdapterNotConfigured);
+    }
+
+    [Fact]
+    public async Task HandleAsync_UsesConfiguredVendorFromSiteConfig()
+    {
+        _currentSiteConfig = MakeSiteConfig(vendor: "RADIX");
+        await SeedNozzleMappingAsync();
+        _adapter.SendPreAuthAsync(Arg.Any<PreAuthCommand>(), Arg.Any<CancellationToken>())
+            .Returns(AcceptedResult());
+
+        var result = await _handler.HandleAsync(MakeRequest(), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        _adapterFactory.Received(1).Create(
+            FccVendor.Radix,
+            Arg.Is<FccConnectionConfig>(cfg =>
+                cfg.SiteCode == "SITE-A"
+                && cfg.BaseUrl == "http://fcc-lan:8080"
+                && cfg.CurrencyCode == "ETB"
+                && cfg.Timezone == "Africa/Addis_Ababa"));
+    }
+
+    [Fact]
+    public async Task HandleAsync_UnsupportedVendor_FailsExplicitly()
+    {
+        _currentSiteConfig = MakeSiteConfig(vendor: "ADVATEC");
+        await SeedNozzleMappingAsync();
+
+        var result = await _handler.HandleAsync(MakeRequest(), CancellationToken.None);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Be(PreAuthHandlerError.UnsupportedVendor);
+        await _adapter.DidNotReceive().SendPreAuthAsync(Arg.Any<PreAuthCommand>(), Arg.Any<CancellationToken>());
     }
 
     // ── HandleAsync: FCC responses ────────────────────────────────────────────
@@ -494,6 +566,39 @@ public sealed class PreAuthHandlerTests : IDisposable
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Be(PreAuthHandlerError.RecordNotFound);
+    }
+
+    [Fact]
+    public async Task CancelAsync_UsesConfiguredVendorFromSiteConfig()
+    {
+        _currentSiteConfig = MakeSiteConfig(vendor: "PETRONITE", hostAddress: "petronite-edge", port: 9443);
+        _db.PreAuths.Add(new PreAuthEntity
+        {
+            Id = "PA-005",
+            OdooOrderId = "ORDER-005",
+            SiteCode = "SITE-A",
+            PumpNumber = 1,
+            NozzleNumber = 1,
+            ProductCode = "DIESEL",
+            RequestedAmount = 50_000,
+            UnitPrice = 1_500,
+            Currency = "ETB",
+            Status = PreAuthStatus.Authorized,
+            FccCorrelationId = "FCC-CORR-005",
+            RequestedAt = DateTimeOffset.UtcNow,
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
+        });
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.CancelAsync("ORDER-005", "SITE-A", CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        _adapterFactory.Received(1).Create(
+            FccVendor.Petronite,
+            Arg.Is<FccConnectionConfig>(cfg =>
+                cfg.SiteCode == "SITE-A"
+                && cfg.BaseUrl == "http://petronite-edge:9443"));
+        await _adapter.Received(1).CancelPreAuthAsync("FCC-CORR-005", Arg.Any<CancellationToken>());
     }
 
     [Fact]

@@ -10,6 +10,7 @@ import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.runtime.CadenceController
+import com.fccmiddleware.edge.runtime.FccRuntimeState
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.security.KeystoreManager
 import com.fccmiddleware.edge.sync.CloudApiClient
@@ -19,6 +20,8 @@ import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.fccmiddleware.edge.sync.HttpCloudApiClient
 import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
 import com.fccmiddleware.edge.sync.KeystoreDeviceTokenProvider
+import com.fccmiddleware.edge.adapter.common.FccAdapterFactory
+import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.sync.TelemetryReporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +57,8 @@ val appModule = module {
     // -------------------------------------------------------------------------
     single { KeystoreManager() }
     single { EncryptedPrefsManager(androidContext()) }
+    single { ConfigManager(agentConfigDao = get()) }
+    single { FccRuntimeState() }
 
     // -------------------------------------------------------------------------
     // Cloud API Client
@@ -107,6 +112,8 @@ val appModule = module {
     // -------------------------------------------------------------------------
     single {
         val encryptedPrefs = get<EncryptedPrefsManager>()
+        val configManager = get<ConfigManager>()
+        val runtimeState = get<FccRuntimeState>()
         val probeHttpClient = OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(4, TimeUnit.SECONDS)
@@ -114,7 +121,7 @@ val appModule = module {
 
         ConnectivityManager(
             internetProbe = {
-                val baseUrl = encryptedPrefs.cloudBaseUrl
+                val baseUrl = configManager.config.value?.sync?.cloudBaseUrl ?: encryptedPrefs.cloudBaseUrl
                 if (baseUrl.isNullOrBlank()) {
                     false
                 } else {
@@ -130,19 +137,11 @@ val appModule = module {
                 }
             },
             fccProbe = {
-                val host = encryptedPrefs.fccHost
-                val port = encryptedPrefs.fccPort
-                if (host.isNullOrBlank() || port <= 0) {
+                val adapter = runtimeState.adapter ?: return@ConnectivityManager false
+                try {
+                    adapter.heartbeat()
+                } catch (_: Exception) {
                     false
-                } else {
-                    try {
-                        Socket().use { socket ->
-                            socket.connect(InetSocketAddress(host, port), 4_000)
-                            true
-                        }
-                    } catch (_: Exception) {
-                        false
-                    }
                 }
             },
             auditLogDao = get(),
@@ -178,10 +177,8 @@ val appModule = module {
     }
     single {
         IngestionOrchestrator(
-            adapter = null,          // TODO (EA-2.x): inject from adapter factory once wired
             bufferManager = get(),
             syncStateDao = get(),
-            config = null,           // TODO (EA-2.x): inject from ConfigManager once wired
         )
     }
     single {
@@ -191,7 +188,6 @@ val appModule = module {
             connectivityManager = get(),
             auditLogDao = get(),
             scope = get<CoroutineScope>(),
-            fccAdapter = null, // TODO (EA-2.x): inject from adapter factory once wired
         )
     }
 
@@ -207,9 +203,13 @@ val appModule = module {
     }
 
     // -------------------------------------------------------------------------
+    // FCC Adapter Factory — resolves vendor adapters at runtime from config
+    // -------------------------------------------------------------------------
+    single<IFccAdapterFactory> { FccAdapterFactory() }
+
+    // -------------------------------------------------------------------------
     // Configuration
     // -------------------------------------------------------------------------
-    single { ConfigManager(agentConfigDao = get()) }
     single {
         ConfigPollWorker(
             configManager = get(),
@@ -240,21 +240,21 @@ val appModule = module {
     // Local REST API Server
     // -------------------------------------------------------------------------
     single {
+        val encryptedPrefs = get<EncryptedPrefsManager>()
         LocalApiServer(
             config = LocalApiServer.LocalApiServerConfig(
                 port = 8585,
-                enableLanApi = false,     // TODO (EA-2.x): load from site config
+                enableLanApi = false,
                 lanApiKey = null,
             ),
             transactionDao = get(),
             syncStateDao = get(),
             connectivityManager = get(),
             preAuthHandler = get(),
-            fccAdapter = null,            // TODO (EA-2.x): resolve from adapter factory
             serviceScope = get<CoroutineScope>(),
             ingestionOrchestrator = get(),
+            deviceId = encryptedPrefs.deviceId ?: "00000000-0000-0000-0000-000000000000",
+            siteCode = encryptedPrefs.siteCode ?: "UNPROVISIONED",
         )
     }
-
-    // TODO (EA-2.x): adapter factory
 }

@@ -295,12 +295,15 @@ public sealed class OutboxPublisherWorkerTests : IAsyncLifetime
         db.LegalEntities.Add(new LegalEntity
         {
             Id = legalEntityId,
+            BusinessCode = "GH-001",
             CountryCode = "GH",
+            CountryName = "Ghana",
             Name = "Test Ghana Ltd",
             CurrencyCode = "GHS",
             TaxAuthorityCode = "GRA",
             FiscalizationRequired = false,
             DefaultTimezone = "Africa/Accra",
+            OdooCompanyId = "ODOO-GH-001",
             IsActive = true,
             SyncedAt = DateTimeOffset.UtcNow,
             CreatedAt = DateTimeOffset.UtcNow,

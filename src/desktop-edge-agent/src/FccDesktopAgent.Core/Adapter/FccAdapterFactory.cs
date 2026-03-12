@@ -16,6 +16,12 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILoggerFactory _loggerFactory;
 
+    // Petronite adapter is stateful (webhook listener + pre-auth map + queue).
+    // Cache a single instance per config fingerprint so state survives across poll cycles.
+    private PetroniteAdapter? _cachedPetroniteAdapter;
+    private string? _cachedPetroniteFingerprint;
+    private readonly object _petroniteLock = new();
+
     public FccAdapterFactory(IHttpClientFactory httpFactory, ILoggerFactory loggerFactory)
     {
         _httpFactory = httpFactory;
@@ -34,12 +40,42 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
         FccVendor.Radix => new RadixAdapter(
             _httpFactory,
             config,
-            _loggerFactory.CreateLogger<RadixAdapter>()),
-        FccVendor.Petronite => CreatePetroniteAdapter(config),
-        FccVendor.Advatec => throw new NotImplementedException(
-            "Advatec adapter is not yet implemented"),
+            _loggerFactory.CreateLogger<RadixAdapter>(),
+            siteCode: config.SiteCode,
+            legalEntityId: config.LegalEntityId ?? config.SiteCode,
+            currencyCode: config.CurrencyCode ?? "TZS",
+            timezone: config.Timezone ?? "Africa/Dar_es_Salaam",
+            pumpNumberOffset: config.PumpNumberOffset,
+            productCodeMapping: config.ProductCodeMapping),
+        FccVendor.Petronite => GetOrCreatePetroniteAdapter(config),
+        FccVendor.Advatec => throw new NotSupportedException(
+            "Advatec adapter is not supported on desktop"),
         _ => throw new ArgumentException($"Unknown FCC vendor: {vendor}", nameof(vendor))
     };
+
+    /// <summary>
+    /// Returns a cached Petronite adapter if the config hasn't changed, or creates
+    /// a new one (disposing the old). Petronite adapters are stateful — they own the
+    /// webhook listener, pre-auth map, and webhook queue — so they must survive across
+    /// poll cycles.
+    /// </summary>
+    private PetroniteAdapter GetOrCreatePetroniteAdapter(FccConnectionConfig config)
+    {
+        var fingerprint = $"{config.BaseUrl}|{config.ClientId}|{config.WebhookSecret}|{config.WebhookListenerPort}";
+
+        lock (_petroniteLock)
+        {
+            if (_cachedPetroniteAdapter is not null && _cachedPetroniteFingerprint == fingerprint)
+                return _cachedPetroniteAdapter;
+
+            // Config changed or first creation — dispose old and create new.
+            _cachedPetroniteAdapter?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+            _cachedPetroniteAdapter = CreatePetroniteAdapter(config);
+            _cachedPetroniteFingerprint = fingerprint;
+            return _cachedPetroniteAdapter;
+        }
+    }
 
     private PetroniteAdapter CreatePetroniteAdapter(FccConnectionConfig config)
     {
@@ -59,19 +95,28 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
             config,
             oauthClient,
             nozzleResolver,
-            _loggerFactory.CreateLogger<PetroniteAdapter>());
+            _loggerFactory);
     }
 
     private DomsJplAdapter CreateDomsJplAdapter(FccConnectionConfig config)
     {
+        if (string.IsNullOrWhiteSpace(config.SiteCode)
+            || string.IsNullOrWhiteSpace(config.LegalEntityId)
+            || string.IsNullOrWhiteSpace(config.CurrencyCode)
+            || string.IsNullOrWhiteSpace(config.Timezone))
+        {
+            throw new InvalidOperationException(
+                "DOMS TCP adapter requires siteCode, legalEntityId, currencyCode, and timezone from site config.");
+        }
+
         return new DomsJplAdapter(
             config: config,
             siteCode: config.SiteCode,
-            legalEntityId: config.SiteCode, // Resolved from site config at runtime
-            currencyCode: "ZAR", // Default; overridden by site config at runtime
-            timezone: "Africa/Johannesburg", // Default; overridden by site config at runtime
-            pumpNumberOffset: 0, // Default; overridden by site config at runtime
-            productCodeMapping: null,
+            legalEntityId: config.LegalEntityId,
+            currencyCode: config.CurrencyCode,
+            timezone: config.Timezone,
+            pumpNumberOffset: config.PumpNumberOffset,
+            productCodeMapping: config.ProductCodeMapping,
             logger: _loggerFactory.CreateLogger<DomsJplAdapter>());
     }
 }

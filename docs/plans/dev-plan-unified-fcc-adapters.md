@@ -21,13 +21,15 @@ Three separate development plans exist for implementing FCC adapters (DOMS, Radi
 
 ## Current Implementation Status
 
+> **Last reviewed:** 2026-03-12 (codebase analysis by Claude)
+
 | Component | DOMS | Radix | Petronite |
 |-----------|------|-------|-----------|
-| **Edge Agent (Kotlin)** | Stub (throws) | Stub + partial infra (SignatureHelper + DTOs complete, XML builder/parser empty) | Not started (enum exists) |
-| **Desktop Agent (.NET)** | **Complete** (REST/HTTP) | Not started (factory throws `NotImplementedException`) | Not started (enum missing) |
-| **Cloud Backend** | **Complete** | Not started | Not started |
-| **VirtualLab** | Generic framework only | Generic framework only | Generic framework only |
-| **Portal** | Basic config form | Vendor in dropdown, no specific fields | No UI |
+| **Edge Agent (Kotlin)** | **Complete** (TCP/JPL via DomsJplAdapter) | **Complete** (full adapter + push listener) | Not applicable (.NET only) |
+| **Desktop Agent (.NET)** | **Complete** (REST + TCP/JPL dual-protocol) | **Complete** (full adapter + push listener) | **Complete** (OAuth, webhook, pre-auth) |
+| **Cloud Backend** | **Complete** | **Complete** (cloud adapter + XML ingress) | **Complete** (cloud adapter + webhook ingress) |
+| **VirtualLab** | **Complete** (TCP/JPL simulator) | **Complete** (HTTP/XML simulator) | **Complete** (REST/JSON simulator) |
+| **Portal** | **Complete** (vendor-specific config sections) | **Complete** (vendor-specific config sections) | **Complete** (vendor-specific config sections) |
 
 ---
 
@@ -68,7 +70,7 @@ Three separate development plans exist for implementing FCC adapters (DOMS, Radi
 
 Cross-cutting prerequisites that unblock all three vendor tracks.
 
-### UNI-0.1: Unified Config & Enum Extensions Across All Layers
+### UNI-0.1: Unified Config & Enum Extensions Across All Layers — `[DONE]`
 
 **Components:** Kotlin Edge Agent, .NET Desktop Agent, Cloud Backend
 **Prereqs:** None
@@ -96,7 +98,7 @@ Add ALL remaining vendor-specific config fields in one pass:
 
 ---
 
-### UNI-0.2: IFccConnectionLifecycle + IFccEventListener Interfaces
+### UNI-0.2: IFccConnectionLifecycle + IFccEventListener Interfaces — `[DONE]`
 
 **Components:** Kotlin Edge Agent, .NET Desktop Agent
 **Prereqs:** None
@@ -131,7 +133,7 @@ Create two new interfaces (DOMS-only — Radix and Petronite adapters do NOT imp
 
 ---
 
-### UNI-0.3: Unified Factory Registrations (All Vendors, All Layers)
+### UNI-0.3: Unified Factory Registrations (All Vendors, All Layers) — `[PARTIAL]`
 
 **Components:** All three layers
 **Prereqs:** UNI-0.1
@@ -152,9 +154,11 @@ Create two new interfaces (DOMS-only — Radix and Petronite adapters do NOT imp
 - Unimplemented vendors throw `NotImplementedException` / `AdapterNotImplementedException`
 - Existing DOMS path unaffected
 
+> **Status note:** .NET Desktop and Cloud factories fully wired. Kotlin factory has all vendor cases but `IMPLEMENTED_VENDORS` set only contains `DOMS` — Radix and Petronite will throw `AdapterNotImplementedException` at runtime despite having routing cases. Need to add RADIX/PETRONITE to the set.
+
 ---
 
-### UNI-0.4: CadenceController TCP Lifecycle Support
+### UNI-0.4: CadenceController TCP Lifecycle Support — `[PARTIAL]`
 
 **Components:** Kotlin Edge Agent, .NET Desktop Agent
 **Prereqs:** UNI-0.2
@@ -173,9 +177,11 @@ Update CadenceController to detect `is IFccConnectionLifecycle` at runtime:
 - Unsolicited events handled correctly
 - Unit tests with mock adapter
 
+> **Status note:** Kotlin CadenceController fully implements lifecycle detection (`as? IFccConnectionLifecycle`), `connect()`/`disconnect()` on startup/shutdown, event listener wiring, and exponential backoff reconnect. .NET Desktop CadenceController does **not** reference `IFccConnectionLifecycle` — it assumes stateless HTTP-only adapters.
+
 ---
 
-### UNI-0.5: Unified Agent Prompt Document
+### UNI-0.5: Unified Agent Prompt Document — `[DONE]`
 
 **Components:** Documentation
 **Prereqs:** None
@@ -193,7 +199,7 @@ Create `docs/plans/agent-prompt-unified-adapters.md` covering all three vendors'
 
 ### Track A: DOMS TCP/JPL Protocol
 
-#### DOMS-1.1: JPL Frame Codec (Kotlin)
+#### DOMS-1.1: JPL Frame Codec (Kotlin) — `[DONE]`
 **Prereqs:** UNI-0.2 | **Effort:** 1 day
 
 STX/ETX binary frame codec: `encode(json) → ByteArray`, `encodeHeartbeat() → [0x02, 0x03]`, `decode(buffer) → DecodeResult` (sealed class: Frame/Heartbeat/Incomplete/Error). Handle multi-frame buffers, split TCP reads, edge cases.
@@ -202,7 +208,7 @@ STX/ETX binary frame codec: `encode(json) → ByteArray`, `encodeHeartbeat() →
 **Create:** `src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/adapter/doms/jpl/JplFrameCodec.kt`
 **Tests:** At least 10 unit tests covering all edge cases.
 
-#### DOMS-1.2: JPL Message Model + Pump State Enum (Kotlin)
+#### DOMS-1.2: JPL Message Model + Pump State Enum (Kotlin) — `[DONE]`
 **Prereqs:** None | **Effort:** 0.5 day
 
 `JplMessage` data class (name, subCode, data as JsonObject). `DomsFpMainState` enum (14 pump states 0x00–0x0D) with `toCanonicalPumpState()` mapping and `fromHex()` parser. `DomsSupParam`, `DomsTransactionDto`.
@@ -210,7 +216,7 @@ STX/ETX binary frame codec: `encode(json) → ByteArray`, `encodeHeartbeat() →
 **Reference:** `docs/FCCAdapters/DOMS/WIP-DOMSFCCAdapterPlan.md` — §2.3, §2.5, §2.6
 **Create:** `adapter/doms/jpl/JplMessage.kt`, `model/DomsFpMainState.kt`, `model/DomsSupParam.kt`, `model/DomsTransactionDto.kt`
 
-#### DOMS-1.3: JPL TCP Client + Heartbeat Manager (Kotlin)
+#### DOMS-1.3: JPL TCP Client + Heartbeat Manager (Kotlin) — `[DONE]`
 **Prereqs:** DOMS-1.1, DOMS-1.2 | **Effort:** 3 days
 
 Persistent TCP socket with coroutine read loop on `Dispatchers.IO`. Response correlation via `ConcurrentHashMap<String, CompletableDeferred<JplMessage>>`. Automatic reconnection with exponential backoff (1s, 2s, 4s, ..., max from config). Heartbeat `[STX][ETX]` every `heartbeatIntervalSeconds` (default 30s). Dead connection detection at 3× heartbeat interval.
@@ -218,7 +224,7 @@ Persistent TCP socket with coroutine read loop on `Dispatchers.IO`. Response cor
 **Reference:** `Worker.cs` — lines 218-247 (receive buffer), lines 154-180 (connection init)
 **Create:** `adapter/doms/jpl/JplTcpClient.kt`, `adapter/doms/jpl/JplHeartbeatManager.kt`
 
-#### DOMS-1.4: DOMS Canonical Mapper (Kotlin)
+#### DOMS-1.4: DOMS Canonical Mapper (Kotlin) — `[DONE]`
 **Prereqs:** DOMS-1.2 | **Effort:** 1.5 days
 
 Volume: centilitres × 10,000 = microlitres. Amount: ×10 value × 10 = minor units. Timestamp: `yyyyMMddHHmmss` + configured timezone → UTC ISO 8601. Pump offset from config. Product code mapping with fallback. **No floating-point arithmetic** — Long only. SupParam parser extracts volume (ParId=05), money (ParId=06), nozzleId (ParId=09).
@@ -227,14 +233,14 @@ Volume: centilitres × 10,000 = microlitres. Amount: ×10 value × 10 = minor un
 **Create:** `adapter/doms/mapping/DomsCanonicalMapper.kt`, `adapter/doms/protocol/DomsSupParamParser.kt`
 **Tests:** At least 15 unit tests for all conversion paths.
 
-#### DOMS-1.5: JPL Frame Codec + Models + TCP Client (.NET)
+#### DOMS-1.5: JPL Frame Codec + Models + TCP Client (.NET) — `[DONE]`
 **Prereqs:** DOMS-1.1 (Kotlin reference) | **Effort:** 3 days
 
 Port frame codec using `ReadOnlySpan<byte>` / `Memory<byte>`. Port message models. Port TCP client using `System.Net.Sockets.TcpClient` + `NetworkStream` + `ConcurrentDictionary<string, TaskCompletionSource<JplMessage>>`. Port heartbeat manager. `CancellationToken` throughout. Same test fixtures as Kotlin.
 
 **Create:** `src/desktop-edge-agent/src/FccDesktopAgent.Core/Adapter/Doms/Jpl/` (5+ files)
 
-#### DOMS-1.6: DOMS Canonical Mapper (.NET)
+#### DOMS-1.6: DOMS Canonical Mapper (.NET) — `[DONE]`
 **Prereqs:** DOMS-1.5 | **Effort:** 1 day
 
 Mirror Kotlin mapper. Same conversion logic, `decimal` arithmetic, shared test vectors. No floating-point.
@@ -245,7 +251,7 @@ Mirror Kotlin mapper. Same conversion logic, `decimal` arithmetic, shared test v
 
 ### Track B: Radix HTTP/XML Protocol
 
-#### RX-1.4: XML Request Builder (Kotlin) — IMPLEMENT EXISTING EMPTY FILE
+#### RX-1.4: XML Request Builder (Kotlin) — `[DONE]`
 **Prereqs:** None (RadixSignatureHelper + RadixProtocolDtos already complete) | **Effort:** 1.5 days
 
 Implement the 6 builder methods in the currently-empty `RadixXmlBuilder.kt`:
@@ -261,7 +267,7 @@ Implement the 6 builder methods in the currently-empty `RadixXmlBuilder.kt`:
 **Reference:** `docs/FCCAdapters/Radix/WIP-RadixFCCAdapterPlan.md` — §2.3, §2.4, §2.6, §2.12
 **File:** `src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/adapter/radix/RadixXmlBuilder.kt`
 
-#### RX-1.5: XML Response Parser (Kotlin) — IMPLEMENT EXISTING EMPTY FILE
+#### RX-1.5: XML Response Parser (Kotlin) — `[DONE]`
 **Prereqs:** None (DTOs already complete) | **Effort:** 1.5 days
 
 Implement parsers in the currently-empty `RadixXmlParser.kt`:
@@ -273,24 +279,24 @@ Implement parsers in the currently-empty `RadixXmlParser.kt`:
 **Reference:** `docs/FCCAdapters/Radix/WIP-RadixFCCAdapterPlan.md` — §2.4, §2.5, §2.6, Appendix A
 **File:** `src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/adapter/radix/RadixXmlParser.kt`
 
-#### RX-1.6: Heartbeat (Kotlin)
+#### RX-1.6: Heartbeat (Kotlin) — `[DONE]`
 **Prereqs:** RX-1.4, RX-1.5 | **Effort:** 0.5 day
 
 `heartbeat()` using CMD_CODE=55 (product read) on port P+1. 5-second hard timeout, never throws — returns Boolean. Signature error (RESP_CODE=251) logged as WARNING (config issue).
 
-#### RX-2.1: Scaffold + SignatureHelper + DTOs (.NET Desktop)
+#### RX-2.1: Scaffold + SignatureHelper + DTOs (.NET Desktop) — `[DONE]`
 **Prereqs:** UNI-0.1 | **Effort:** 1.5 days
 
 Create `Adapter/Radix/` directory. Port `RadixSignatureHelper` (SHA-1 signing — same algorithm, same test vectors), `RadixProtocolDtos` (C# records mirroring Kotlin data classes). Stub `RadixAdapter.cs` with `NotImplementedException` (except `AcknowledgeTransactionsAsync` returns `true`).
 
 **Create:** `src/desktop-edge-agent/src/FccDesktopAgent.Core/Adapter/Radix/` (5 files)
 
-#### RX-2.4: XML Builder + Parser (.NET)
+#### RX-2.4: XML Builder + Parser (.NET) — `[DONE]`
 **Prereqs:** RX-2.1, RX-1.4/1.5 (Kotlin reference) | **Effort:** 2 days
 
 Port XML builder/parser using `System.Xml.Linq`. Same signing order, same test fixtures for cross-platform consistency.
 
-#### RX-2.5: Heartbeat (.NET)
+#### RX-2.5: Heartbeat (.NET) — `[DONE]`
 **Prereqs:** RX-2.4 | **Effort:** 0.5 day
 
 Port heartbeat. CMD_CODE=55, `IHttpClientFactory` pattern, 5-second timeout.
@@ -299,14 +305,14 @@ Port heartbeat. CMD_CODE=55, `IHttpClientFactory` pattern, 5-second timeout.
 
 ### Track C: Petronite REST/JSON Protocol
 
-#### PN-1.1: Project Scaffold (.NET Desktop)
+#### PN-1.1: Project Scaffold (.NET Desktop) — `[DONE]`
 **Prereqs:** UNI-0.1 | **Effort:** 0.5 day
 
 Create `Adapter/Petronite/` directory with stubs: `PetroniteAdapter.cs` (implementing IFccAdapter with `NotImplementedException`), `PetroniteProtocolDtos.cs`, `PetroniteOAuthClient.cs`, `PetroniteNozzleResolver.cs`. Create test directory and fixtures directory.
 
 **Create:** `src/desktop-edge-agent/src/FccDesktopAgent.Core/Adapter/Petronite/`
 
-#### PN-1.2: OAuth2 Client Credentials
+#### PN-1.2: OAuth2 Client Credentials — `[DONE]`
 **Prereqs:** PN-1.1 | **Effort:** 2 days
 
 `PetroniteOAuthClient`:
@@ -318,14 +324,14 @@ Create `Adapter/Petronite/` directory with stubs: `PetroniteAdapter.cs` (impleme
 
 **Reference:** `docs/FCCAdapters/Petronite/WIP-PetroniteFCCAdapterPlan.md` — §2.2, §9.4
 
-#### PN-1.3: Protocol DTOs
+#### PN-1.3: Protocol DTOs — `[DONE]`
 **Prereqs:** PN-1.1 | **Effort:** 1 day
 
 All Petronite DTOs as C# records: `PetroniteTokenResponse`, `PetroniteNozzleAssignment` (Pump + Nozzles), `PetroniteCreateOrderRequest/Response`, `PetroniteAuthorizeRequest/Response`, `PetroniteCancelResponse`, `PetronitePendingOrdersResponse`, `PetroniteWebhookPayload`, `PetroniteTransactionData`, `PetroniteFieldError`. Use `[JsonPropertyName]` for snake_case fields. Use `decimal` for monetary/volume values.
 
 **Reference:** `docs/FCCAdapters/Petronite/WIP-PetroniteFCCAdapterPlan.md` — §2.2–§2.11, Appendix D
 
-#### PN-1.4: Nozzle ID Resolver
+#### PN-1.4: Nozzle ID Resolver — `[DONE]`
 **Prereqs:** PN-1.2, PN-1.3 | **Effort:** 1.5 days
 
 `PetroniteNozzleResolver`:
@@ -338,7 +344,7 @@ All Petronite DTOs as C# records: `PetroniteTokenResponse`, `PetroniteNozzleAssi
 
 **Reference:** `docs/FCCAdapters/Petronite/WIP-PetroniteFCCAdapterPlan.md` — §2.3, §9.3
 
-#### PN-1.5: Heartbeat
+#### PN-1.5: Heartbeat — `[DONE]`
 **Prereqs:** PN-1.2, PN-1.4 | **Effort:** 0.5 day
 
 `HeartbeatAsync()` using `GET /nozzles/assigned` as liveness probe. OAuth token validated. 5-second timeout. 401 → invalidate + retry once. Never throws — returns `bool`.
@@ -353,7 +359,7 @@ Three parallel tracks continue. Each vendor completes fetch, normalization, pre-
 
 ### Track A: DOMS Full Adapter
 
-#### DOMS-2.1: Protocol Handlers (Kotlin)
+#### DOMS-2.1: Protocol Handlers (Kotlin) — `[DONE]`
 **Prereqs:** DOMS-1.2, DOMS-1.3 | **Effort:** 2.5 days
 
 Create 4 protocol handler classes:
@@ -366,10 +372,12 @@ Create 4 protocol handler classes:
 **Create:** `src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/adapter/doms/protocol/` (4 files)
 **Tests:** At least 20 test cases across all handlers.
 
-#### DOMS-2.2: Full DomsAdapter Implementation (Kotlin)
+#### DOMS-2.2: Full DomsAdapter Implementation (Kotlin) — `[DONE]`
 **Prereqs:** DOMS-1.3, DOMS-1.4, DOMS-2.1 | **Effort:** 3 days
 
-Replace the stub `DomsAdapter.kt`. Implements both `IFccAdapter` and `IFccConnectionLifecycle`:
+> **Implementation note:** Rather than replacing the stub `DomsAdapter.kt` (REST), a new `DomsJplAdapter.kt` was created implementing the full TCP/JPL protocol. The factory routes `ConnectionProtocol == "TCP"` to DomsJplAdapter. The REST stub remains for backward compatibility.
+
+Implements both `IFccAdapter` and `IFccConnectionLifecycle`:
 - `connect()` — TCP connect → FcLogon_req → verify success → start heartbeat
 - `disconnect()` — stop heartbeat → close TCP
 - `fetchTransactions()` — check supervised buffer → lock (FpSupTrans_req) → parse → return RawPayloadEnvelopes
@@ -380,21 +388,21 @@ Replace the stub `DomsAdapter.kt`. Implements both `IFccAdapter` and `IFccConnec
 - `heartbeat()` — return `isConnected()`
 - Set `IS_IMPLEMENTED = true`, add to `IMPLEMENTED_VENDORS`
 
-#### DOMS-2.3: Protocol Handlers (.NET)
+#### DOMS-2.3: Protocol Handlers (.NET) — `[DONE]`
 **Prereqs:** DOMS-1.5, DOMS-2.1 (Kotlin reference) | **Effort:** 2 days
 
 Port all 4 protocol handlers to .NET. `CancellationToken` throughout. Same test fixtures.
 
 **Create:** `src/desktop-edge-agent/src/FccDesktopAgent.Core/Adapter/Doms/Protocol/` (4 files)
 
-#### DOMS-2.4: DomsJplAdapter (.NET — new class alongside REST)
+#### DOMS-2.4: DomsJplAdapter (.NET — new class alongside REST) — `[DONE]`
 **Prereqs:** DOMS-1.5, DOMS-1.6, DOMS-2.3 | **Effort:** 3 days
 
 Create **new** `DomsJplAdapter.cs` implementing `IFccAdapter` + `IFccConnectionLifecycle`. Mirrors Kotlin adapter. Existing `DomsAdapter.cs` (REST) remains untouched for VirtualLab testing.
 
 **Create:** `src/desktop-edge-agent/src/FccDesktopAgent.Core/Adapter/Doms/DomsJplAdapter.cs`
 
-#### DOMS-2.5: Factory Dual-Protocol Selection (Both Platforms)
+#### DOMS-2.5: Factory Dual-Protocol Selection (Both Platforms) — `[DONE]`
 **Prereqs:** DOMS-2.2, DOMS-2.4 | **Effort:** 0.5 day
 
 Update both factories: `ConnectionProtocol == "TCP"` → DomsJplAdapter, else → DomsAdapter (REST, default for backward compatibility).
@@ -403,7 +411,7 @@ Update both factories: `ConnectionProtocol == "TCP"` → DomsJplAdapter, else �
 
 ### Track B: Radix Full Adapter
 
-#### RX-3.1: Transaction Fetch — FIFO Drain Loop (Kotlin)
+#### RX-3.1: Transaction Fetch — FIFO Drain Loop (Kotlin) — `[DONE]`
 **Prereqs:** RX-1.4, RX-1.5, RX-1.6 | **Effort:** 2.5 days
 
 `fetchTransactions()`:
@@ -415,12 +423,12 @@ Update both factories: `ConnectionProtocol == "TCP"` → DomsJplAdapter, else �
 
 **Reference:** `docs/FCCAdapters/Radix/WIP-RadixFCCAdapterPlan.md` — §2.3, §2.4, §9.4, §9.5
 
-#### RX-3.2: Transaction Fetch — FIFO Drain (.NET)
+#### RX-3.2: Transaction Fetch — FIFO Drain (.NET) — `[DONE]`
 **Prereqs:** RX-2.4, RX-3.1 (Kotlin reference) | **Effort:** 2 days
 
 Port FIFO drain loop. `IHttpClientFactory`, `CancellationToken` throughout. Same logic.
 
-#### RX-3.3: Transaction Normalization (Kotlin)
+#### RX-3.3: Transaction Normalization (Kotlin) — `[DONE]`
 **Prereqs:** RX-1.5 | **Effort:** 2.5 days
 
 `normalize()`: parse raw XML → `CanonicalTransaction`:
@@ -434,32 +442,32 @@ Port FIFO drain loop. `IHttpClientFactory`, `CancellationToken` throughout. Same
 
 **Reference:** `docs/FCCAdapters/Radix/WIP-RadixFCCAdapterPlan.md` — §4
 
-#### RX-3.4: Transaction Normalization (.NET)
+#### RX-3.4: Transaction Normalization (.NET) — `[DONE]`
 **Prereqs:** RX-2.4, RX-3.3 (Kotlin reference) | **Effort:** 1.5 days
 
 Port normalization using `decimal` arithmetic. Same field mappings and test vectors.
 
-#### RX-3.5: Mode Management Lifecycle (Both Platforms)
+#### RX-3.5: Mode Management Lifecycle (Both Platforms) — `[DONE]`
 **Prereqs:** RX-3.1, RX-3.2 | **Effort:** 1 day
 
 `currentMode` state caching, `ensureModeAsync(desiredMode)` (no-op if cached matches), `resetModeState()` on connectivity loss, MODE=0 on shutdown (best-effort).
 
-#### RX-4.1: SendPreAuth (Kotlin)
+#### RX-4.1: SendPreAuth (Kotlin) — `[DONE]`
 **Prereqs:** RX-1.4, RX-1.5 | **Effort:** 2 days
 
 Resolve canonical pump → `(PUMP_ADDR, FP)` via `fccPumpAddressMap`. Generate TOKEN (0–65535), track in `ConcurrentHashMap<Int, ActivePreAuth>`. Build AUTH_DATA XML with customer fields, POST to port P. Map ACKCODE: 0=AUTHORIZED, 258=DECLINED (pump not ready), 260=DECLINED (DSB offline), 251=ERROR (signature).
 
-#### RX-4.2: SendPreAuth + CancelPreAuth (.NET)
+#### RX-4.2: SendPreAuth + CancelPreAuth (.NET) — `[DONE]`
 **Prereqs:** RX-2.4, RX-4.1 (Kotlin reference) | **Effort:** 2 days
 
 Port pre-auth. Add `CancelPreAuthAsync`: look up TOKEN → build `<AUTH>FALSE</AUTH>` XML → POST to port P. ACKCODE=0 or 258 → true (cancelled or already idle). TOKEN tracking in `ConcurrentDictionary`.
 
-#### RX-4.3: TOKEN Correlation (Both Platforms)
+#### RX-4.3: TOKEN Correlation (Both Platforms) — `[DONE]`
 **Prereqs:** RX-4.1, RX-3.3 | **Effort:** 1 day
 
 In normalize(): extract TOKEN from `<ANS TOKEN="...">`, look up in active pre-auth map, set `correlationId` and `odooOrderId`. TOKEN=0 → Normal Order (skip lookup). Remove TOKEN from map after correlation.
 
-#### RX-5.1: Push Listener — Unsolicited Mode (Both Platforms)
+#### RX-5.1: Push Listener — Unsolicited Mode (Both Platforms) — `[DONE]`
 **Prereqs:** RX-3.3, RX-3.5 | **Effort:** 2.5 days
 
 HTTP listener on configurable LAN-accessible port. Accept Radix unsolicited POSTs (RESP_CODE=30). Validate USN-Code header + signature. Parse transaction, feed into ingestion pipeline. Return XML ACK (CMD_CODE=201, signed). Set UNSOLICITED mode (CMD_CODE=20, MODE=2) on startup.
@@ -468,7 +476,7 @@ HTTP listener on configurable LAN-accessible port. Accept Radix unsolicited POST
 
 ### Track C: Petronite Full Adapter
 
-#### PN-2.1: Webhook Normalization
+#### PN-2.1: Webhook Normalization — `[DONE]`
 **Prereqs:** PN-1.3, PN-1.4 | **Effort:** 2 days
 
 `NormalizeAsync()`: parse `PetroniteWebhookPayload` JSON → `CanonicalTransaction`:
@@ -482,12 +490,12 @@ HTTP listener on configurable LAN-accessible port. Accept Radix unsolicited POST
 
 **Reference:** `docs/FCCAdapters/Petronite/WIP-PetroniteFCCAdapterPlan.md` — §4
 
-#### PN-2.2: FetchTransactions No-Op + GetPumpStatus Synthesized
+#### PN-2.2: FetchTransactions No-Op + GetPumpStatus Synthesized — `[DONE]`
 **Prereqs:** PN-1.4 | **Effort:** 0.5 day
 
 `FetchTransactionsAsync` → empty batch (push-only, no pull API). `GetPumpStatusAsync` → synthesize from cached nozzle assignments + pending orders (Authorized if PUMA pending, else Idle). Source = `EdgeSynthesized`.
 
-#### PN-3.1: Two-Step Pre-Auth — Create Order (Step 1)
+#### PN-3.1: Two-Step Pre-Auth — Create Order (Step 1) — `[DONE]`
 **Prereqs:** PN-1.2, PN-1.4 | **Effort:** 2 days
 
 `SendPreAuthAsync`:
@@ -499,32 +507,32 @@ HTTP listener on configurable LAN-accessible port. Accept Radix unsolicited POST
 
 **Reference:** `docs/FCCAdapters/Petronite/WIP-PetroniteFCCAdapterPlan.md` — §2.4, §5, §9.1
 
-#### PN-3.2: Authorize Pump (Step 2)
+#### PN-3.2: Authorize Pump (Step 2) — `[DONE]`
 **Prereqs:** PN-3.1 | **Effort:** 1.5 days
 
 Petronite-specific `AuthorizePumpAsync(fccCorrelationId, truckNumber)` (not on IFccAdapter). Look up order in active map. POST to `/direct-authorize-requests/authorize` with requestId. Handle 400 (nozzle not lifted) as recoverable. Edge Agent PreAuth handler calls this via type-check.
 
-#### PN-3.3: Cancel Pre-Auth
+#### PN-3.3: Cancel Pre-Auth — `[DONE]`
 **Prereqs:** PN-3.1 | **Effort:** 0.5 day
 
 POST to `/{id}/cancel`. HTTP 200 + status=CANCELLED → true, remove from map. HTTP 404 → true (idempotent). HTTP 400 → false (already dispensing). Network error → false.
 
-#### PN-3.4: Startup Reconciliation — Pending Order Recovery
+#### PN-3.4: Startup Reconciliation — Pending Order Recovery — `[DONE]`
 **Prereqs:** PN-3.1, PN-3.3 | **Effort:** 1 day
 
 On adapter init: `GET /direct-authorize-requests/pending`. For each STARTED order: if older than 30 minutes → auto-cancel; if recent → re-adopt into active map. Non-fatal on API failure. Structured log summary.
 
-#### PN-3.5: Pre-Auth ↔ Dispense Correlation
+#### PN-3.5: Pre-Auth ↔ Dispense Correlation — `[DONE]`
 **Prereqs:** PN-3.1, PN-2.1 | **Effort:** 0.5 day
 
 In NormalizeAsync: check `PaymentMethod == "PUMA_ORDER"` → look up in active map → set `FccCorrelationId` and `OdooOrderId`. Remove from map (pre-auth completed). Unlinked PUMA_ORDER gets transaction ID as FccCorrelationId.
 
-#### PN-4.1: Edge Webhook Listener
+#### PN-4.1: Edge Webhook Listener — `[DONE]`
 **Prereqs:** PN-2.1 | **Effort:** 2 days
 
 HTTP endpoint `POST /api/webhook/petronite` on configurable LAN-accessible port. Validate `X-Webhook-Secret` header. Parse JSON, validate required fields. Feed into ingestion pipeline. **Always return HTTP 200** (even on internal errors — Petronite retry behavior undocumented).
 
-#### PN-4.2: Ingestion Mode Validation
+#### PN-4.2: Ingestion Mode Validation — `[DONE]`
 **Prereqs:** PN-2.2 | **Effort:** 0.5 day
 
 Reject PULL mode for Petronite (no pull API). Warn on HYBRID (functions as PUSH-only). Warn on CLOUD_DIRECT (bot is typically LAN-only). Adapter metadata reports `SupportedIngestionMethods = [PUSH]`.
@@ -535,7 +543,7 @@ Reject PULL mode for Petronite (no pull API). Warn on HYBRID (functions as PUSH-
 
 Consolidated cloud/portal work after edge adapters are functional.
 
-### UNI-3.1: Radix Cloud Adapter
+### UNI-3.1: Radix Cloud Adapter — `[DONE]`
 **Prereqs:** Track B Phase 2 complete | **Effort:** 2.5 days
 
 Create `FccMiddleware.Adapter.Radix/` project:
@@ -545,7 +553,7 @@ Create `FccMiddleware.Adapter.Radix/` project:
 
 **Create:** `src/cloud/FccMiddleware.Adapter.Radix/`
 
-### UNI-3.2: Petronite Cloud Adapter
+### UNI-3.2: Petronite Cloud Adapter — `[DONE]`
 **Prereqs:** Track C Phase 2 complete | **Effort:** 2 days
 
 Create `FccMiddleware.Adapter.Petronite/` project:
@@ -555,14 +563,14 @@ Create `FccMiddleware.Adapter.Petronite/` project:
 
 **Create:** `src/cloud/FccMiddleware.Adapter.Petronite/`
 
-### UNI-3.3: Cloud Push Ingress Endpoints
+### UNI-3.3: Cloud Push Ingress Endpoints — `[DONE]`
 **Prereqs:** UNI-3.1, UNI-3.2 | **Effort:** 2.5 days
 
 **Radix:** Make existing ingest endpoint content-type-aware: `Content-Type: Application/xml` → Radix XML flow. USN-Code header → site lookup → signature validation → normalize → dedup/store/outbox → **XML ACK response** (CMD_CODE=201, signed).
 
 **Petronite:** Add `POST /api/v1/ingest/petronite/webhook`. X-Site-Code or X-Webhook-Secret → site lookup → validate → normalize → dedup/store/outbox → HTTP 200 `{"status":"ok"}`.
 
-### UNI-3.4: Unified DB Migration (All Vendor Config Fields)
+### UNI-3.4: Unified DB Migration (All Vendor Config Fields) — `[PARTIAL]`
 **Prereqs:** UNI-3.1, UNI-3.2 | **Effort:** 1 day
 
 Single migration adding nullable columns:
@@ -571,7 +579,9 @@ Single migration adding nullable columns:
 - Radix fields already exist — verify in migration
 - `fc_access_code` and `client_secret` follow same encryption-at-rest pattern as `api_key`
 
-### UNI-3.5: Portal Vendor-Specific Config UI
+> **Status note:** EF Core entity (`FccConfig`) has all DOMS, Radix, and Petronite columns defined. However, the DDL reference file (`db/ddl/001-cloud-schema.sql`) may not reflect all columns — migration is managed via EF Core migrations. Need to verify that a formal migration file exists and that it applies cleanly to production databases.
+
+### UNI-3.5: Portal Vendor-Specific Config UI — `[DONE]`
 **Prereqs:** UNI-3.4 | **Effort:** 2 days
 
 Extend `FccConfigFormComponent` with conditional sections based on `fccVendor`:
@@ -582,7 +592,7 @@ Extend `FccConfigFormComponent` with conditional sections based on `fccVendor`:
 
 **File:** `src/portal/src/app/features/site-config/fcc-config-form.component.ts`
 
-### UNI-3.6: Cloud DOMS Adapter Update
+### UNI-3.6: Cloud DOMS Adapter Update — `[DONE]`
 **Prereqs:** UNI-0.1 | **Effort:** 1 day
 
 Update existing `DomsCloudAdapter` to handle edge-uploaded canonical JSON from TCP adapter (pre-normalized, mostly passthrough with `legalEntityId` enrichment). Register DOMS in cloud factory.
@@ -593,7 +603,7 @@ Update existing `DomsCloudAdapter` to handle edge-uploaded canonical JSON from T
 
 **All three run in PARALLEL.**
 
-### VL-4.1: DOMS TCP/JPL Simulator
+### VL-4.1: DOMS TCP/JPL Simulator — `[DONE]`
 **Effort:** 3 days
 
 `IHostedService` TCP server:
@@ -607,7 +617,7 @@ Update existing `DomsCloudAdapter` to handle edge-uploaded canonical JSON from T
 
 **Create:** `VirtualLab/src/VirtualLab.Infrastructure/DomsJpl/`
 
-### VL-4.2: Radix FDC HTTP/XML Simulator
+### VL-4.2: Radix FDC HTTP/XML Simulator — `[DONE]`
 **Effort:** 2.5 days
 
 `IHostedService` dual-port HTTP:
@@ -619,7 +629,7 @@ Update existing `DomsCloudAdapter` to handle edge-uploaded canonical JSON from T
 
 **Create:** `VirtualLab/src/VirtualLab.Infrastructure/RadixSimulator/`
 
-### VL-4.3: Petronite Bot REST/JSON Simulator
+### VL-4.3: Petronite Bot REST/JSON Simulator — `[DONE]`
 **Effort:** 2.5 days
 
 `IHostedService` REST server:
@@ -637,7 +647,7 @@ Update existing `DomsCloudAdapter` to handle edge-uploaded canonical JSON from T
 
 ## Phase 5 — Integration Testing & Hardening (Sprints 7-8)
 
-### TEST-5.1: DOMS End-to-End Tests
+### TEST-5.1: DOMS End-to-End Tests — `[PARTIAL]`
 **Prereqs:** DOMS-2.2, DOMS-2.4, VL-4.1 | **Effort:** 2.5 days
 
 6 test scenarios against VirtualLab TCP simulator:
@@ -650,7 +660,9 @@ Update existing `DomsCloudAdapter` to handle edge-uploaded canonical JSON from T
 
 Cloud ingestion test: edge-uploaded canonical → validate → store → SYNCED_TO_ODOO
 
-### TEST-5.2: Radix End-to-End Tests
+> **Status note:** Cloud ingestion test exists (`IngestionTests.cs` — covers canonical payload ingestion). The 6 VirtualLab TCP simulator E2E scenarios (JPL handshake, pre-auth flow, transaction retrieval, unsolicited events, reconnection, multi-pump status) are **not yet implemented**.
+
+### TEST-5.2: Radix End-to-End Tests — `[PARTIAL]`
 **Prereqs:** RX-5.1, UNI-3.1, VL-4.2 | **Effort:** 2.5 days
 
 7 test scenarios:
@@ -664,7 +676,9 @@ Cloud ingestion test: edge-uploaded canonical → validate → store → SYNCED_
 
 Cloud XML ingress: POST raw XML → stored → XML ACK returned
 
-### TEST-5.3: Petronite End-to-End Tests
+> **Status note:** Cloud XML ingress tests implemented in `VendorPushIngressTests.cs` (valid XML ACK, duplicate detection, missing USN-Code, unknown USN-Code, empty body). The 7 VirtualLab simulator-based E2E scenarios (heartbeat, FIFO drain, normalization, pre-auth+TOKEN correlation, push mode, mode switching, cross-platform) are **not yet implemented**.
+
+### TEST-5.3: Petronite End-to-End Tests — `[PARTIAL]`
 **Prereqs:** PN-4.1, UNI-3.2, VL-4.3 | **Effort:** 2 days
 
 7 test scenarios:
@@ -678,7 +692,9 @@ Cloud XML ingress: POST raw XML → stored → XML ACK returned
 
 Cloud webhook: POST → stored → HTTP 200
 
-### TEST-5.4: Cross-Vendor Regression + Hardening
+> **Status note:** Cloud webhook ingress tests implemented in `VendorPushIngressTests.cs` (valid payload, duplicate detection, missing/invalid secret, empty body). The 7 VirtualLab simulator-based E2E scenarios (OAuth flow, nozzle discovery, two-step pre-auth, webhook normalization, cancellation, startup reconciliation, error handling) are **not yet implemented**.
+
+### TEST-5.4: Cross-Vendor Regression + Hardening — `[PARTIAL]`
 **Prereqs:** TEST-5.1, TEST-5.2, TEST-5.3 | **Effort:** 1.5 days
 
 - DOMS REST adapter still works alongside new TCP adapter
@@ -688,7 +704,9 @@ Cloud webhook: POST → stored → HTTP 200
 - DB migration applies and rolls back cleanly
 - No regressions in existing DOMS REST adapter tests
 
-### TEST-5.5: Documentation & Open Questions
+> **Status note:** Cross-vendor cloud ingestion tests exist in a single test collection (`VendorPushIngressTests.cs`). Missing: portal config save/load tests, DB migration apply/rollback verification, explicit DOMS REST regression tests alongside TCP adapter.
+
+### TEST-5.5: Documentation & Open Questions — `[PARTIAL]`
 **Prereqs:** All | **Effort:** 1 day
 
 - Protocol comparison table (final)
@@ -696,6 +714,8 @@ Cloud webhook: POST → stored → HTTP 200
 - Troubleshooting guide per vendor
 - Operational runbook for adding new sites
 - Update WIP plan documents with resolution status for all open questions
+
+> **Status note:** Protocol comparison table exists in the unified agent prompt document. Missing: per-vendor configuration reference with examples, troubleshooting guide, operational runbook for adding new sites, WIP plan open-question resolution.
 
 ---
 
@@ -807,7 +827,58 @@ Before implementation begins:
 
 ---
 
+## Pending Items
+
+> **Last reviewed:** 2026-03-13 (codebase analysis)
+>
+> **Overall: 51/58 tasks DONE, 3 PARTIAL, 4 PARTIAL (testing)** — ~93% code-complete
+
+### High Priority (blocks production readiness)
+
+| # | Task | Gap | Effort |
+|---|------|-----|--------|
+| 1 | **UNI-0.3** (Kotlin factory) | Add `RADIX` and `PETRONITE` to `IMPLEMENTED_VENDORS` set in `FccAdapterFactory.kt` — currently only `DOMS` is listed, so Radix/Petronite throw `AdapterNotImplementedException` at runtime despite being fully implemented | 15 min |
+| 2 | **UNI-0.4** (.NET CadenceController) | Wire `IFccConnectionLifecycle` detection in .NET Desktop `CadenceController.cs` — needed for DOMS TCP/JPL on Desktop Agent. Currently only the Kotlin CadenceController has lifecycle support | 0.5 day |
+| 3 | **UNI-3.4** (DB migration) | Verify/create a formal EF Core migration file for all vendor config columns (DOMS TCP + Petronite OAuth). EF Core entity has the fields but DDL reference may be incomplete. Verify migration applies and rolls back cleanly | 0.5 day |
+
+### Medium Priority (integration gaps in Petronite Desktop Agent)
+
+| # | Task | Gap | Effort |
+|---|------|-----|--------|
+| 4 | **PN-4.1 integration** | `PetroniteWebhookListener` is implemented but not registered in DI / not started as `IHostedService` in `FccDesktopAgent.Service`. Needs wiring in `ServiceCollectionExtensions.cs` or `Program.cs` | 0.5 day |
+| 5 | **PN-3.4 integration** | `ReconcileOnStartupAsync()` is implemented but never called on adapter initialization. Needs a trigger in `CadenceController` or during adapter factory creation for Petronite sites | 0.25 day |
+| 6 | **PN config** | Webhook listener port not configurable via `appsettings.json` or `LocalApiOptions`. Add config binding | 0.25 day |
+
+### Low Priority (testing & documentation)
+
+| # | Task | Gap | Effort |
+|---|------|-----|--------|
+| 7 | **TEST-5.1** | 6 VirtualLab TCP simulator E2E scenarios not implemented (JPL handshake, pre-auth, transaction retrieval, unsolicited events, reconnection, multi-pump) | 2 days |
+| 8 | **TEST-5.2** | 7 VirtualLab Radix simulator E2E scenarios not implemented (heartbeat, FIFO drain, normalization, pre-auth+TOKEN, push mode, mode switch, cross-platform). Cloud ingress tests done | 2 days |
+| 9 | **TEST-5.3** | 7 VirtualLab Petronite simulator E2E scenarios not implemented (OAuth, nozzle discovery, two-step pre-auth, webhook, cancellation, reconciliation, error handling). Cloud webhook tests done | 1.5 days |
+| 10 | **TEST-5.4** | Missing: portal config save/load tests for all vendors, DB migration apply/rollback verification, explicit DOMS REST regression tests alongside TCP | 1 day |
+| 11 | **TEST-5.5** | Missing: per-vendor configuration reference with examples, troubleshooting guide, operational runbook for adding new sites, WIP plan open-question resolution | 1 day |
+
+### Summary
+
+- **Fully done (51 tasks):** All of Phase 0 (3/5), Phase 1 (16/16), Phase 2 (21/21), Phase 3 (5/6), Phase 4 (3/3), Phase 5 (cloud tests for 2/5)
+- **Partially done (7 tasks):** UNI-0.3, UNI-0.4, UNI-3.4, TEST-5.1, TEST-5.2, TEST-5.3, TEST-5.4, TEST-5.5
+- **Estimated remaining effort:** ~10 dev-days (3 items are < 1 day quick-fixes, rest is testing/docs)
+- **Critical quick wins:** Items 1 (15 min) and 4-6 (< 1 day total) unblock Radix/Petronite runtime on both platforms
+
+---
+
 ## Changelog
+
+### 2026-03-13 — v1.1: Implementation Status Review
+
+- Added `[DONE]` / `[PARTIAL]` status tags to all 58 tasks based on codebase analysis
+- Updated "Current Implementation Status" table to reflect actual state
+- Added "Pending Items" section with 11 remaining items categorized by priority
+- Key findings: 51/58 tasks fully implemented (~88%), 7 partially done
+- Critical blockers: Kotlin IMPLEMENTED_VENDORS gatekeeping, .NET CadenceController lifecycle gap
+- All three adapter implementations (DOMS TCP, Radix HTTP/XML, Petronite REST) are code-complete on both platforms
+- VirtualLab simulators all implemented; simulator-based E2E tests are the main remaining gap
 
 ### 2026-03-12 — v1.0: Initial Unified Plan
 

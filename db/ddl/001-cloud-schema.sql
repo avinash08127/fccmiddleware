@@ -13,19 +13,23 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";  -- gen_random_uuid()
 
 CREATE TABLE legal_entities (
     id                      uuid            NOT NULL DEFAULT gen_random_uuid(),
+    business_code           varchar(50)     NOT NULL,
     country_code            varchar(3)      NOT NULL,
+    country_name            varchar(100)    NOT NULL,
     name                    varchar(200)    NOT NULL,
     currency_code           varchar(3)      NOT NULL,
     tax_authority_code      varchar(50)     NOT NULL,
     fiscalization_required  boolean         NOT NULL DEFAULT false,
     fiscalization_provider  varchar(50),
     default_timezone        varchar(50)     NOT NULL,
+    odoo_company_id         varchar(100)    NOT NULL,
     is_active               boolean         NOT NULL DEFAULT true,
     deactivated_at          timestamptz,
     synced_at               timestamptz     NOT NULL,
     created_at              timestamptz     NOT NULL DEFAULT now(),
     updated_at              timestamptz     NOT NULL DEFAULT now(),
     CONSTRAINT pk_legal_entities PRIMARY KEY (id),
+    CONSTRAINT uq_legal_entities_business_code UNIQUE (business_code),
     CONSTRAINT uq_legal_entities_country_code UNIQUE (country_code)
 );
 
@@ -35,6 +39,7 @@ CREATE TABLE sites (
     site_code               varchar(50)     NOT NULL,
     site_name               varchar(200)    NOT NULL,
     operating_model         varchar(20)     NOT NULL,
+    site_uses_pre_auth      boolean         NOT NULL DEFAULT false,
     connectivity_mode       varchar(20)     NOT NULL DEFAULT 'CONNECTED',
     operator_name           varchar(200),
     operator_tax_payer_id   varchar(100),
