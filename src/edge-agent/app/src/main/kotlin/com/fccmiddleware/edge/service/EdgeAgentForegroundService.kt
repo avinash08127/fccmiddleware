@@ -28,14 +28,17 @@ import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
+import com.fccmiddleware.edge.R
 import com.fccmiddleware.edge.ui.DecommissionedActivity
 import com.fccmiddleware.edge.ui.ProvisioningActivity
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import org.koin.android.ext.android.inject
 
 /**
@@ -55,7 +58,17 @@ import org.koin.android.ext.android.inject
 class EdgeAgentForegroundService : Service() {
 
     // SupervisorJob ensures one failing child does not cancel siblings.
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // CoroutineExceptionHandler logs uncaught exceptions to prevent silent service crashes (T-008).
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
+            AppLogger.e(TAG, "Uncaught exception in service coroutine: ${throwable.message}", throwable)
+        }
+    )
+
+    // Guard against re-entrant onStartCommand (T-004): START_STICKY may deliver
+    // multiple calls without an intervening onDestroy (e.g., ProvisioningActivity
+    // also calls startForegroundService). Only the first call runs full initialisation.
+    private val serviceStarted = AtomicBoolean(false)
 
     private val localApiServer: LocalApiServer by inject()
     private val connectivityManager: ConnectivityManager by inject()
@@ -92,6 +105,12 @@ class EdgeAgentForegroundService : Service() {
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
         AppLogger.i(TAG, "EdgeAgentForegroundService started in foreground")
+
+        // Skip re-initialisation if already running (T-004).
+        if (!serviceStarted.compareAndSet(false, true)) {
+            AppLogger.i(TAG, "onStartCommand: service already initialised — skipping duplicate setup")
+            return START_STICKY
+        }
 
         // Start network binder first so WiFi/mobile state flows are populated
         // before connectivity probes begin.
@@ -142,6 +161,7 @@ class EdgeAgentForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        serviceStarted.set(false)
         cadenceController.stop()
         connectivityManager.stop()
         networkBinder.stop()
@@ -341,7 +361,7 @@ class EdgeAgentForegroundService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("FCC Edge Agent Running")
             .setContentText("Monitoring forecourt and syncing transactions")
-            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .build()
     }

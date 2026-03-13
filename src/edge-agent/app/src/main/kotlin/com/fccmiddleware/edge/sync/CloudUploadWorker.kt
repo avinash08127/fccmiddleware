@@ -86,7 +86,7 @@ class CloudUploadWorker(
      * reset to config value on successful upload. Floor: 1 record.
      */
     @Volatile
-    internal var effectiveBatchSize: Int = config.uploadBatchSize
+    internal var effectiveBatchSize: Int = config.uploadBatchSize.coerceAtLeast(1)
 
     /**
      * M-08: Circuit breaker for upload operations.
@@ -140,8 +140,9 @@ class CloudUploadWorker(
             return
         }
 
-        val batchSize = effectiveBatchSize.coerceAtMost(CLOUD_MAX_BATCH_SIZE)
+        val batchSize = effectiveBatchSize.coerceIn(1, CLOUD_MAX_BATCH_SIZE)
         val batch = bm.getPendingBatch(batchSize)
+        val batchWasFull = batch.size == batchSize
         if (batch.isEmpty()) {
             // H-02 fix: reset backoff when buffer drains so new records upload immediately
             uploadCircuitBreaker.recordSuccess()
@@ -163,7 +164,7 @@ class CloudUploadWorker(
         }
 
         val result = doUpload(client, provider, batch, token)
-        handleUploadResult(bm, batch, result)
+        handleUploadResult(bm, batch, result, batchWasFull)
     }
 
     /**
@@ -641,6 +642,7 @@ class CloudUploadWorker(
         bm: TransactionBufferManager,
         batch: List<BufferedTransaction>,
         result: UploadAttemptResult,
+        batchWasFull: Boolean = false,
     ) {
         when (result) {
             is UploadAttemptResult.Success -> {
@@ -649,8 +651,17 @@ class CloudUploadWorker(
                 val dbWriteSucceeded = updateLastUploadAt()
                 if (dbWriteSucceeded) {
                     uploadCircuitBreaker.recordSuccess()
-                    // M-15: Reset effective batch size on success
-                    effectiveBatchSize = config.uploadBatchSize
+                    // P-002: Adaptive batch sizing — grow on full batch (backlog present),
+                    // reset to config default on partial batch (backlog cleared).
+                    effectiveBatchSize = if (batchWasFull) {
+                        val boosted = (effectiveBatchSize * 2).coerceAtMost(CLOUD_MAX_BATCH_SIZE)
+                        if (boosted > effectiveBatchSize) {
+                            AppLogger.d(TAG, "Full batch uploaded; boosting effectiveBatchSize $effectiveBatchSize → $boosted")
+                        }
+                        boosted
+                    } else {
+                        config.uploadBatchSize.coerceAtLeast(1)
+                    }
                 } else {
                     // DB write failed — keep backoff active so the next tick retries the write.
                     AppLogger.w(TAG, "SyncState write failed after successful upload; circuit breaker NOT reset")
@@ -711,6 +722,9 @@ class CloudUploadWorker(
                         error = result.message,
                     )
                 }
+                // H-11: Dead-letter records that have exhausted all upload retries after
+                // transport failures too, not just after cloud REJECTED responses.
+                bm.deadLetterExhausted()
             }
         }
     }

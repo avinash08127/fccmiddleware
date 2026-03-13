@@ -11,6 +11,7 @@ export interface ToleranceConfig {
 export interface UpdateSiteRequest {
   connectivityMode?: ConnectivityMode;
   operatingModel?: SiteOperatingModel;
+  siteUsesPreAuth?: boolean;
   tolerance?: ToleranceConfig;
   fiscalization?: {
     mode?: FiscalizationMode;
@@ -111,6 +112,7 @@ export interface Site {
   fccVendor: FccVendor | null;
   timezone: string | null;
   isActive: boolean;
+  siteUsesPreAuth: boolean;
   updatedAt: string | null;
 }
 
@@ -215,6 +217,7 @@ export interface FccConfig {
   advatecWebhookToken: string | null;
   advatecEfdSerialNumber: string | null;
   advatecCustIdType: number | null;
+  advatecPumpMap: string | null;
 }
 
 // ── SiteConfig sub-types ──────────────────────────────────────────────────────

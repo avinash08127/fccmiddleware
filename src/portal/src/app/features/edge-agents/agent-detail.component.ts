@@ -1,9 +1,9 @@
 import { Component, DestroyRef, inject, signal, computed, OnInit } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { CommonModule, DOCUMENT } from '@angular/common';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { forkJoin, interval, EMPTY } from 'rxjs';
-import { catchError, switchMap } from 'rxjs/operators';
+import { forkJoin, interval, EMPTY, of, fromEvent } from 'rxjs';
+import { catchError, filter, switchMap } from 'rxjs/operators';
 import { Subject } from 'rxjs';
 import { CardModule } from 'primeng/card';
 import { ButtonModule } from 'primeng/button';
@@ -23,6 +23,23 @@ import {
 } from '../../core/models/agent.model';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
+import { RoleVisibleDirective } from '../../shared/directives/role-visible.directive';
+
+// ── GUID validation ─────────────────────────────────────────────────────────
+
+const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidGuid(value: string): boolean {
+  return GUID_REGEX.test(value);
+}
+
+// ── Redaction detection (F08-09) ─────────────────────────────────────────────
+
+const REDACTED_HOST = '***';
+
+function isFccHostRedacted(host: string | null | undefined): boolean {
+  return host === REDACTED_HOST;
+}
 
 // ── Connectivity helpers ─────────────────────────────────────────────────────
 
@@ -57,7 +74,7 @@ function connectivityIcon(state: string | null): string {
 }
 
 function formatLag(seconds: number | null): string {
-  if (seconds === null) return '—';
+  if (seconds === null) return '\u2014';
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
@@ -102,6 +119,7 @@ interface TimelineEvent {
     SkeletonModule,
     EmptyStateComponent,
     UtcDatePipe,
+    RoleVisibleDirective,
   ],
   template: `
     <div class="page-container">
@@ -119,7 +137,7 @@ interface TimelineEvent {
           <div>
             <h1 class="page-title">
               <i class="pi pi-server"></i>
-              {{ registration()?.siteCode ?? 'Loading…' }}
+              {{ registration()?.siteCode ?? 'Loading\u2026' }}
             </h1>
             @if (registration()) {
               <p class="page-subtitle">
@@ -134,6 +152,24 @@ interface TimelineEvent {
           </div>
         </div>
         <div class="header-right">
+          <!-- F08-08: Decommission button for admin roles -->
+          <ng-container *appRoleVisible="['SystemAdmin', 'SystemAdministrator', 'OperationsManager']">
+            @if (registration() && registration()!.status !== 'DEACTIVATED') {
+              <p-button
+                label="Decommission"
+                icon="pi pi-power-off"
+                severity="danger"
+                [outlined]="true"
+                [loading]="decommissioning()"
+                (onClick)="confirmDecommission()"
+              />
+            }
+            @if (registration()?.status === 'DEACTIVATED') {
+              <span class="decommissioned-badge">
+                <i class="pi pi-ban"></i> Decommissioned
+              </span>
+            }
+          </ng-container>
           <span class="refresh-note"><i class="pi pi-refresh"></i> Auto-refresh 30s</span>
           <p-button
             icon="pi pi-refresh"
@@ -145,7 +181,7 @@ interface TimelineEvent {
         </div>
       </div>
 
-      @if (loading() && !telemetry()) {
+      @if (loading() && !telemetry() && !registration()) {
         <!-- Loading skeletons -->
         <div class="cards-grid">
           @for (_ of [1,2,3,4]; track $index) {
@@ -160,184 +196,226 @@ interface TimelineEvent {
           title="Failed to load agent data"
           description="Check the device ID and try again."
         />
-      } @else if (telemetry()) {
+      } @else if (registration() || telemetry()) {
 
         <!-- ── Row 1: Status + FCC Connection ─── -->
         <div class="cards-grid">
 
           <!-- Current Status Card -->
-          <p-card header="Current Status" styleClass="detail-card">
-            <div class="stat-row">
-              <span class="stat-label">Connectivity</span>
-              <span class="conn-badge" [class]="connClass(telemetry()!.connectivityState)">
-                <i [class]="connIcon(telemetry()!.connectivityState)"></i>
-                {{ connLabel(telemetry()!.connectivityState) }}
-              </span>
-            </div>
-            <p-divider />
-            <div class="stat-row">
-              <span class="stat-label">Uptime</span>
-              <span>{{ formatUptime(telemetry()!.device.appUptimeSeconds) }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Last Heartbeat</span>
-              <span>{{ telemetry()!.fccHealth.lastHeartbeatAtUtc | utcDate:'short' }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Reported At</span>
-              <span>{{ telemetry()!.reportedAtUtc | utcDate:'short' }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">OS</span>
-              <span>{{ telemetry()!.device.osVersion }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Device Model</span>
-              <span>{{ telemetry()!.device.deviceModel }}</span>
-            </div>
-            @if (registration()?.environment) {
+          @if (telemetry()) {
+            <p-card header="Current Status" styleClass="detail-card">
               <div class="stat-row">
-                <span class="stat-label">Environment</span>
-                <span class="env-badge">{{ registration()!.environment }}</span>
+                <span class="stat-label">Connectivity</span>
+                <span class="conn-badge" [class]="connClass(telemetry()!.connectivityState)">
+                  <i [class]="connIcon(telemetry()!.connectivityState)"></i>
+                  {{ connLabel(telemetry()!.connectivityState) }}
+                </span>
               </div>
-            }
-          </p-card>
-
-          <!-- FCC Connection Card -->
-          <p-card header="FCC Connection" styleClass="detail-card">
-            <div class="stat-row">
-              <span class="stat-label">Vendor</span>
-              <strong>{{ telemetry()!.fccHealth.fccVendor }}</strong>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Host</span>
-              <code>{{ telemetry()!.fccHealth.fccHost }}:{{ telemetry()!.fccHealth.fccPort }}</code>
-            </div>
-            <p-divider />
-            <div class="stat-row">
-              <span class="stat-label">FCC Reachable</span>
-              @if (telemetry()!.fccHealth.isReachable) {
-                <span class="text-success"><i class="pi pi-check-circle"></i> Yes</span>
-              } @else {
-                <span class="text-danger"><i class="pi pi-times-circle"></i> No</span>
+              <p-divider />
+              <div class="stat-row">
+                <span class="stat-label">Uptime</span>
+                <span>{{ formatUptime(telemetry()!.device.appUptimeSeconds) }}</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Last Heartbeat</span>
+                <span>{{ telemetry()!.fccHealth.lastHeartbeatAtUtc | utcDate:'short' }}</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Reported At</span>
+                <span>{{ telemetry()!.reportedAtUtc | utcDate:'short' }}</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">OS</span>
+                <span>{{ telemetry()!.device.osVersion }}</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Device Model</span>
+                <span>{{ telemetry()!.device.deviceModel }}</span>
+              </div>
+              @if (registration()?.environment) {
+                <div class="stat-row">
+                  <span class="stat-label">Environment</span>
+                  <span class="env-badge">{{ registration()!.environment }}</span>
+                </div>
               }
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Last Heartbeat</span>
-              <span>{{ telemetry()!.fccHealth.lastHeartbeatAtUtc | utcDate:'short' }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Heartbeat Age</span>
-              <span [class]="heartbeatAgeClass(telemetry()!.fccHealth.heartbeatAgeSeconds)">
-                {{ formatLag(telemetry()!.fccHealth.heartbeatAgeSeconds) }}
-              </span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Consecutive Failures</span>
-              <span [class]="failureClass(telemetry()!.fccHealth.consecutiveHeartbeatFailures)">
-                {{ telemetry()!.fccHealth.consecutiveHeartbeatFailures }}
-              </span>
-            </div>
-          </p-card>
+            </p-card>
+          }
+
+          <!-- FCC Connection Card (F08-09: detect redacted data) -->
+          @if (telemetry()) {
+            @if (isFccRedacted()) {
+              <p-card header="FCC Connection" styleClass="detail-card">
+                <div class="restricted-notice">
+                  <i class="pi pi-lock"></i>
+                  <span>Restricted</span>
+                  <p>FCC connection details are restricted for your role. Contact an administrator for full access.</p>
+                </div>
+                <p-divider />
+                <div class="stat-row">
+                  <span class="stat-label">Vendor</span>
+                  <strong>{{ telemetry()!.fccHealth.fccVendor }}</strong>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">FCC Reachable</span>
+                  @if (telemetry()!.fccHealth.isReachable) {
+                    <span class="text-success"><i class="pi pi-check-circle"></i> Yes</span>
+                  } @else {
+                    <span class="text-danger"><i class="pi pi-times-circle"></i> No</span>
+                  }
+                </div>
+              </p-card>
+            } @else {
+              <p-card header="FCC Connection" styleClass="detail-card">
+                <div class="stat-row">
+                  <span class="stat-label">Vendor</span>
+                  <strong>{{ telemetry()!.fccHealth.fccVendor }}</strong>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Host</span>
+                  <code>{{ telemetry()!.fccHealth.fccHost }}:{{ telemetry()!.fccHealth.fccPort }}</code>
+                </div>
+                <p-divider />
+                <div class="stat-row">
+                  <span class="stat-label">FCC Reachable</span>
+                  @if (telemetry()!.fccHealth.isReachable) {
+                    <span class="text-success"><i class="pi pi-check-circle"></i> Yes</span>
+                  } @else {
+                    <span class="text-danger"><i class="pi pi-times-circle"></i> No</span>
+                  }
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Last Heartbeat</span>
+                  <span>{{ telemetry()!.fccHealth.lastHeartbeatAtUtc | utcDate:'short' }}</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Heartbeat Age</span>
+                  <span [class]="heartbeatAgeClass(telemetry()!.fccHealth.heartbeatAgeSeconds)">
+                    {{ formatLag(telemetry()!.fccHealth.heartbeatAgeSeconds) }}
+                  </span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Consecutive Failures</span>
+                  <span [class]="failureClass(telemetry()!.fccHealth.consecutiveHeartbeatFailures)">
+                    {{ telemetry()!.fccHealth.consecutiveHeartbeatFailures }}
+                  </span>
+                </div>
+              </p-card>
+            }
+          }
 
           <!-- Telemetry Card -->
-          <p-card header="Device & Buffer" styleClass="detail-card">
-            <div class="stat-label-top">Battery</div>
-            <div class="battery-row">
-              <p-progressBar
-                [value]="telemetry()!.device.batteryPercent"
-                [showValue]="true"
-                styleClass="battery-bar"
-                [class]="batteryBarClass(telemetry()!.device.batteryPercent)"
-              />
-              @if (telemetry()!.device.isCharging) {
-                <i class="pi pi-bolt text-success" pTooltip="Charging"></i>
-              }
-            </div>
-            <p-divider />
-            <div class="stat-row">
-              <span class="stat-label">Storage Free</span>
-              <span>{{ formatStorage(telemetry()!.device.storageFreeMb) }}
-                / {{ formatStorage(telemetry()!.device.storageTotalMb) }}</span>
-            </div>
-            <p-divider />
-            <div class="stat-label-top">Buffer Breakdown</div>
-            <div class="buffer-grid">
-              <div class="buffer-item">
-                <span class="buffer-count">{{ telemetry()!.buffer.pendingUploadCount }}</span>
-                <span class="buffer-label">Pending</span>
+          @if (telemetry()) {
+            <p-card header="Device & Buffer" styleClass="detail-card">
+              <div class="stat-label-top">Battery</div>
+              <div class="battery-row">
+                <p-progressBar
+                  [value]="telemetry()!.device.batteryPercent"
+                  [showValue]="true"
+                  styleClass="battery-bar"
+                  [class]="batteryBarClass(telemetry()!.device.batteryPercent)"
+                />
+                @if (telemetry()!.device.isCharging) {
+                  <i class="pi pi-bolt text-success" pTooltip="Charging"></i>
+                }
               </div>
-              <div class="buffer-item">
-                <span class="buffer-count">{{ telemetry()!.buffer.syncedCount }}</span>
-                <span class="buffer-label">Synced</span>
-              </div>
-              <div class="buffer-item">
-                <span class="buffer-count">{{ telemetry()!.buffer.syncedToOdooCount }}</span>
-                <span class="buffer-label">Odoo</span>
-              </div>
-              <div class="buffer-item buffer-item--danger">
-                <span class="buffer-count">{{ telemetry()!.buffer.failedCount }}</span>
-                <span class="buffer-label">Failed</span>
-              </div>
-            </div>
-            <div class="stat-row" style="margin-top:0.5rem">
-              <span class="stat-label">Total Records</span>
-              <strong>{{ telemetry()!.buffer.totalRecords }}</strong>
-            </div>
-            @if (telemetry()!.buffer.oldestPendingAtUtc) {
+              <p-divider />
               <div class="stat-row">
-                <span class="stat-label">Oldest Pending</span>
-                <span>{{ telemetry()!.buffer.oldestPendingAtUtc | utcDate:'short' }}</span>
+                <span class="stat-label">Storage Free</span>
+                <span>{{ formatStorage(telemetry()!.device.storageFreeMb) }}
+                  / {{ formatStorage(telemetry()!.device.storageTotalMb) }}</span>
               </div>
-            }
-          </p-card>
+              <p-divider />
+              <div class="stat-label-top">Buffer Breakdown</div>
+              <div class="buffer-grid">
+                <div class="buffer-item">
+                  <span class="buffer-count">{{ telemetry()!.buffer.pendingUploadCount }}</span>
+                  <span class="buffer-label">Pending</span>
+                </div>
+                <div class="buffer-item">
+                  <span class="buffer-count">{{ telemetry()!.buffer.syncedCount }}</span>
+                  <span class="buffer-label">Synced</span>
+                </div>
+                <div class="buffer-item">
+                  <span class="buffer-count">{{ telemetry()!.buffer.syncedToOdooCount }}</span>
+                  <span class="buffer-label">Odoo</span>
+                </div>
+                <div class="buffer-item buffer-item--danger">
+                  <span class="buffer-count">{{ telemetry()!.buffer.failedCount }}</span>
+                  <span class="buffer-label">Failed</span>
+                </div>
+              </div>
+              <div class="stat-row" style="margin-top:0.5rem">
+                <span class="stat-label">Total Records</span>
+                <strong>{{ telemetry()!.buffer.totalRecords }}</strong>
+              </div>
+              @if (telemetry()!.buffer.oldestPendingAtUtc) {
+                <div class="stat-row">
+                  <span class="stat-label">Oldest Pending</span>
+                  <span>{{ telemetry()!.buffer.oldestPendingAtUtc | utcDate:'short' }}</span>
+                </div>
+              }
+            </p-card>
+          }
 
           <!-- Sync Status Card -->
-          <p-card header="Sync Status" styleClass="detail-card">
-            <div class="stat-row">
-              <span class="stat-label">Sync Lag</span>
-              <strong [class]="lagClass(telemetry()!.sync.syncLagSeconds)">
-                {{ formatLag(telemetry()!.sync.syncLagSeconds) }}
-              </strong>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Last Upload</span>
-              <span>{{ telemetry()!.sync.lastSuccessfulSyncUtc | utcDate:'short' }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Last Attempt</span>
-              <span>{{ telemetry()!.sync.lastSyncAttemptUtc | utcDate:'short' }}</span>
-            </div>
-            <p-divider />
-            <div class="stat-row">
-              <span class="stat-label">Config Version</span>
-              <code>{{ telemetry()!.sync.configVersion ?? '—' }}</code>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Last Config Pull</span>
-              <span>{{ telemetry()!.sync.lastConfigPullUtc | utcDate:'short' }}</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Batch Size</span>
-              <span>{{ telemetry()!.sync.uploadBatchSize }}</span>
-            </div>
-            <p-divider />
-            <div class="stat-label-top">Error Counts</div>
-            <div class="error-counts-grid">
-              <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.fccConnectionErrors > 0">
-                <span>FCC Conn</span><strong>{{ telemetry()!.errorCounts.fccConnectionErrors }}</strong>
+          @if (telemetry()) {
+            <p-card header="Sync Status" styleClass="detail-card">
+              <div class="stat-row">
+                <span class="stat-label">Sync Lag</span>
+                <strong [class]="lagClass(telemetry()!.sync.syncLagSeconds)">
+                  {{ formatLag(telemetry()!.sync.syncLagSeconds) }}
+                </strong>
               </div>
-              <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.cloudUploadErrors > 0">
-                <span>Upload</span><strong>{{ telemetry()!.errorCounts.cloudUploadErrors }}</strong>
+              <div class="stat-row">
+                <span class="stat-label">Last Upload</span>
+                <span>{{ telemetry()!.sync.lastSuccessfulSyncUtc | utcDate:'short' }}</span>
               </div>
-              <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.cloudAuthErrors > 0">
-                <span>Auth</span><strong>{{ telemetry()!.errorCounts.cloudAuthErrors }}</strong>
+              <div class="stat-row">
+                <span class="stat-label">Last Attempt</span>
+                <span>{{ telemetry()!.sync.lastSyncAttemptUtc | utcDate:'short' }}</span>
               </div>
-              <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.bufferWriteErrors > 0">
-                <span>Buffer</span><strong>{{ telemetry()!.errorCounts.bufferWriteErrors }}</strong>
+              <p-divider />
+              <div class="stat-row">
+                <span class="stat-label">Config Version</span>
+                <code>{{ telemetry()!.sync.configVersion ?? '\u2014' }}</code>
               </div>
-            </div>
-          </p-card>
+              <div class="stat-row">
+                <span class="stat-label">Last Config Pull</span>
+                <span>{{ telemetry()!.sync.lastConfigPullUtc | utcDate:'short' }}</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Batch Size</span>
+                <span>{{ telemetry()!.sync.uploadBatchSize }}</span>
+              </div>
+              <p-divider />
+              <div class="stat-label-top">Error Counts</div>
+              <div class="error-counts-grid">
+                <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.fccConnectionErrors > 0">
+                  <span>FCC Conn</span><strong>{{ telemetry()!.errorCounts.fccConnectionErrors }}</strong>
+                </div>
+                <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.cloudUploadErrors > 0">
+                  <span>Upload</span><strong>{{ telemetry()!.errorCounts.cloudUploadErrors }}</strong>
+                </div>
+                <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.cloudAuthErrors > 0">
+                  <span>Auth</span><strong>{{ telemetry()!.errorCounts.cloudAuthErrors }}</strong>
+                </div>
+                <div class="ec-item" [class.ec-item--warn]="telemetry()!.errorCounts.bufferWriteErrors > 0">
+                  <span>Buffer</span><strong>{{ telemetry()!.errorCounts.bufferWriteErrors }}</strong>
+                </div>
+              </div>
+            </p-card>
+          }
+
+          <!-- No telemetry notice (F08-05: partial data display) -->
+          @if (!telemetry() && registration()) {
+            <p-card header="Telemetry" styleClass="detail-card">
+              <app-empty-state
+                icon="pi-chart-bar"
+                title="No telemetry yet"
+                description="This agent has not reported telemetry data yet. It may have just been registered."
+              />
+            </p-card>
+          }
         </div>
 
         <!-- ── Connectivity Timeline ─── -->
@@ -398,14 +476,14 @@ interface TimelineEvent {
                       <span class="conn-badge" [class]="connClass(event.previousState)">
                         {{ connLabel(event.previousState) }}
                       </span>
-                    } @else { — }
+                    } @else { \u2014 }
                   </td>
                   <td>
                     @if (event.newState) {
                       <span class="conn-badge" [class]="connClass(event.newState)">
                         {{ connLabel(event.newState) }}
                       </span>
-                    } @else { — }
+                    } @else { \u2014 }
                   </td>
                 </tr>
               </ng-template>
@@ -429,7 +507,7 @@ interface TimelineEvent {
                   <span class="text-muted"> uploaded {{ batch.uploadedAtUtc | utcDate:'short' }}</span>
                   <span class="text-muted"> ({{ batch.logEntries.length }} entries)</span>
                 </div>
-                <pre class="diag-log-entries">{{ batch.logEntries.join('\n') }}</pre>
+                <pre class="diag-log-entries">{{ batch.logEntries.join('\\n') }}</pre>
               </div>
             }
           }
@@ -630,6 +708,39 @@ interface TimelineEvent {
       color: var(--p-text-muted-color, #64748b);
     }
 
+    /* ── Decommission badge ──────────────────── */
+    .decommissioned-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.3rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      background: #fee2e2;
+      color: #dc2626;
+    }
+
+    /* ── Restricted notice (F08-09) ──────────── */
+    .restricted-notice {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.375rem;
+      background: #fef9c3;
+      color: #a16207;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .restricted-notice p {
+      width: 100%;
+      margin: 0.2rem 0 0;
+      font-weight: 400;
+      font-size: 0.75rem;
+    }
+
     /* ── Utilities ──────────────────────────── */
     .env-badge {
       display: inline-block;
@@ -656,6 +767,7 @@ export class AgentDetailComponent implements OnInit {
   private readonly router      = inject(Router);
   private readonly agentService = inject(AgentService);
   private readonly destroyRef  = inject(DestroyRef);
+  private readonly document    = inject(DOCUMENT);
 
   readonly registration  = signal<AgentRegistration | null>(null);
   readonly telemetry     = signal<AgentTelemetry | null>(null);
@@ -663,9 +775,16 @@ export class AgentDetailComponent implements OnInit {
   readonly diagnosticLogs = signal<DiagnosticLogBatch[]>([]);
   readonly loading       = signal(true);
   readonly error         = signal(false);
+  readonly decommissioning = signal(false);
 
   private agentId = '';
   private readonly refresh$ = new Subject<void>();
+
+  // ── F08-09: Detect redacted FCC host ───────────────────────────────────────
+  readonly isFccRedacted = computed(() => {
+    const t = this.telemetry();
+    return t ? isFccHostRedacted(t.fccHealth.fccHost) : false;
+  });
 
   // ── Derived: connectivity timeline (events with state transitions) ────────
   readonly connectivityEvents = computed<TimelineEvent[]>(() =>
@@ -687,15 +806,28 @@ export class AgentDetailComponent implements OnInit {
   ngOnInit(): void {
     this.agentId = this.route.snapshot.paramMap.get('id') ?? '';
 
+    // F08-02: Validate GUID before making API calls
+    if (!isValidGuid(this.agentId)) {
+      this.router.navigate(['/agents']);
+      return;
+    }
+
+    // F08-05: Handle each observable's error independently
     this.refresh$
       .pipe(
         switchMap(() => {
           this.loading.set(true);
           this.error.set(false);
           return forkJoin({
-            registration: this.agentService.getAgentById(this.agentId),
-            telemetry:    this.agentService.getAgentTelemetry(this.agentId),
-            events:       this.agentService.getAgentEvents(this.agentId, 20),
+            registration: this.agentService.getAgentById(this.agentId).pipe(
+              catchError(() => of(null)),
+            ),
+            telemetry: this.agentService.getAgentTelemetry(this.agentId).pipe(
+              catchError(() => of(null)),
+            ),
+            events: this.agentService.getAgentEvents(this.agentId, 20).pipe(
+              catchError(() => of([] as AgentAuditEvent[])),
+            ),
           }).pipe(
             catchError(() => {
               this.error.set(true);
@@ -707,17 +839,34 @@ export class AgentDetailComponent implements OnInit {
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe((data) => {
-        this.registration.set(data.registration);
-        this.telemetry.set(data.telemetry);
-        this.events.set(data.events);
+        if (data.registration === null && data.telemetry === null) {
+          this.error.set(true);
+        } else {
+          this.registration.set(data.registration);
+          this.telemetry.set(data.telemetry);
+          this.events.set(data.events);
+          this.loadDiagnosticLogs();
+        }
         this.loading.set(false);
-        this.loadDiagnosticLogs();
       });
 
-    // Initial load + auto-refresh every 30 seconds
+    // Initial load
     this.triggerRefresh();
+
+    // F08-04: Visibility-aware auto-refresh — pause when tab is hidden
     interval(30_000)
-      .pipe(takeUntilDestroyed(this.destroyRef))
+      .pipe(
+        filter(() => this.document.visibilityState === 'visible'),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(() => this.triggerRefresh());
+
+    // F08-04: Resume refresh immediately when tab becomes visible again
+    fromEvent(this.document, 'visibilitychange')
+      .pipe(
+        filter(() => this.document.visibilityState === 'visible'),
+        takeUntilDestroyed(this.destroyRef),
+      )
       .subscribe(() => this.triggerRefresh());
   }
 
@@ -729,11 +878,40 @@ export class AgentDetailComponent implements OnInit {
     this.router.navigate(['/agents']);
   }
 
+  // F08-07: Managed subscription with takeUntilDestroyed
   loadDiagnosticLogs(): void {
     this.agentService.getAgentDiagnosticLogs(this.agentId)
-      .pipe(catchError(() => EMPTY))
+      .pipe(
+        catchError(() => EMPTY),
+        takeUntilDestroyed(this.destroyRef),
+      )
       .subscribe((response) => {
         this.diagnosticLogs.set(response.batches);
+      });
+  }
+
+  // F08-08: Decommission with confirmation
+  confirmDecommission(): void {
+    const reg = this.registration();
+    if (!reg) return;
+
+    const confirmed = window.confirm(
+      `Are you sure you want to decommission device "${reg.deviceId}" (${reg.siteCode})? This action cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    this.decommissioning.set(true);
+    this.agentService.decommissionAgent(reg.deviceId)
+      .pipe(
+        catchError(() => {
+          this.decommissioning.set(false);
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(() => {
+        this.decommissioning.set(false);
+        this.triggerRefresh();
       });
   }
 

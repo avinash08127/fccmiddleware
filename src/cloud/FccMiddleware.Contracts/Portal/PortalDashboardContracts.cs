@@ -34,7 +34,7 @@ public sealed record IngestionHealthDataDto
     public required decimal TransactionsPerMinute { get; init; }
     public required decimal SuccessRate { get; init; }
     public required decimal ErrorRate { get; init; }
-    public required int LatencyP95Ms { get; init; }
+    public int? LatencyP95Ms { get; init; }
     public required int DlqDepth { get; init; }
     public required int PeriodMinutes { get; init; }
 }

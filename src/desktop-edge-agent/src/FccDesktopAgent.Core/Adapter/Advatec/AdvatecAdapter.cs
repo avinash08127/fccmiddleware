@@ -31,9 +31,10 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
         PropertyNameCaseInsensitive = true
     };
 
-    private const int HeartbeatTimeoutMs = 5000;
+    private const int DefaultHeartbeatTimeoutMs = 5000;
     private const int DefaultWebhookListenerPort = 8091;
     private const int DefaultDevicePort = 5560;
+    private const int DefaultApiRequestTimeoutSeconds = 10;
 
     /// <summary>Maximum age for an active pre-auth entry before it's considered stale.</summary>
     private static readonly TimeSpan PreAuthTtl = TimeSpan.FromMinutes(30);
@@ -41,6 +42,7 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
     private readonly FccConnectionConfig _config;
     private readonly ILogger<AdvatecAdapter> _logger;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly IHttpClientFactory? _httpClientFactory;
 
     // ── Webhook listener (ADV-3.1) ───────────────────────────────────────────
 
@@ -58,15 +60,20 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
     /// </summary>
     private readonly ConcurrentDictionary<int, ActivePreAuth> _activePreAuths = new();
 
+    /// <summary>Serializes purge + match operations to prevent TOCTOU races on _activePreAuths.</summary>
+    private readonly object _preAuthCorrelationLock = new();
+
     /// <summary>Lazily created HTTP client for Advatec Customer data submission.</summary>
     private AdvatecApiClient? _apiClient;
     private readonly object _apiClientLock = new();
 
     public AdvatecAdapter(
         FccConnectionConfig config,
+        IHttpClientFactory httpClientFactory,
         ILoggerFactory loggerFactory)
     {
         _config = config;
+        _httpClientFactory = httpClientFactory;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<AdvatecAdapter>();
     }
@@ -79,6 +86,7 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
         _config = config;
         _logger = logger;
         _loggerFactory = null!;
+        _httpClientFactory = null;
     }
 
     // ── NormalizeAsync ────────────────────────────────────────────────────────
@@ -104,10 +112,16 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
         if (envelope.Data is null)
             throw new InvalidOperationException("Advatec webhook payload has no Data.");
 
-        // Purge stale pre-auths on each normalization cycle
-        PurgeStalePreAuths();
+        // M-11: Purge + match under lock to prevent TOCTOU race where purge removes
+        // an entry between match's read and TryRemove.
+        ActivePreAuth? matchedPreAuth;
+        lock (_preAuthCorrelationLock)
+        {
+            PurgeStalePreAuths();
+            matchedPreAuth = TryMatchPreAuth(envelope.Data);
+        }
 
-        var canonical = MapToCanonical(envelope.Data, rawPayload);
+        var canonical = MapToCanonical(envelope.Data, rawPayload, matchedPreAuth);
         return Task.FromResult(canonical);
     }
 
@@ -168,6 +182,8 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
                 _logger.LogError(ex,
                     "Advatec webhook listener failed to start on port {Port}; "
                     + "push transactions will not be received until the port is available", port);
+                // Do NOT set _initialized so the next call retries listener startup.
+                return;
             }
 
             _initialized = true;
@@ -270,6 +286,15 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
     /// </summary>
     public Task<bool> CancelPreAuthAsync(string fccCorrelationId, CancellationToken ct)
     {
+        // Validate correlation ID format: must match "ADV-{pump}-{timestamp}"
+        if (string.IsNullOrWhiteSpace(fccCorrelationId) || !IsValidCorrelationId(fccCorrelationId))
+        {
+            _logger.LogWarning(
+                "Advatec cancel pre-auth: invalid correlation ID format '{CorrelationId}'. " +
+                "Expected 'ADV-{{pump}}-{{timestamp}}'", fccCorrelationId);
+            return Task.FromResult(false);
+        }
+
         // Find and remove by correlationId
         foreach (var kvp in _activePreAuths)
         {
@@ -286,13 +311,38 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
             }
         }
 
-        _logger.LogDebug("Advatec cancel pre-auth: no active pre-auth found for {CorrelationId}",
-            fccCorrelationId);
+        _logger.LogWarning(
+            "Advatec cancel pre-auth: no active pre-auth found for valid CorrelationId={CorrelationId}. " +
+            "It may have already been matched to a receipt or expired (TTL={TtlMinutes}min)",
+            fccCorrelationId, PreAuthTtl.TotalMinutes);
         return Task.FromResult(false);
+    }
+
+    /// <summary>
+    /// Validates that a correlation ID matches the expected format: ADV-{pumpNumber}-{unixMs}.
+    /// </summary>
+    private static bool IsValidCorrelationId(string correlationId)
+    {
+        // Format: "ADV-{int}-{long}"
+        if (!correlationId.StartsWith("ADV-", StringComparison.Ordinal))
+            return false;
+
+        var remainder = correlationId.AsSpan(4); // after "ADV-"
+        var dashIdx = remainder.IndexOf('-');
+        if (dashIdx <= 0 || dashIdx == remainder.Length - 1)
+            return false;
+
+        return int.TryParse(remainder[..dashIdx], out _)
+            && long.TryParse(remainder[(dashIdx + 1)..], out _);
     }
 
     // ── GetPumpStatusAsync ───────────────────────────────────────────────────
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Advatec EFDs are receipt-only fiscal devices — they have no concept of pumps or
+    /// real-time dispenser state. PumpStatusCapability is NotApplicable for this adapter.
+    /// </remarks>
     public Task<IReadOnlyList<PumpStatus>> GetPumpStatusAsync(CancellationToken ct)
     {
         return Task.FromResult<IReadOnlyList<PumpStatus>>(Array.Empty<PumpStatus>());
@@ -308,7 +358,8 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
         {
             using var client = new TcpClient();
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(HeartbeatTimeoutMs);
+            var heartbeatMs = (_config.HeartbeatIntervalSeconds ?? 5) * 1000;
+            timeoutCts.CancelAfter(heartbeatMs > 0 ? heartbeatMs : DefaultHeartbeatTimeoutMs);
             await client.ConnectAsync(host, port, timeoutCts.Token);
             return true;
         }
@@ -358,7 +409,6 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
             _webhookListener = null;
         }
 
-        _apiClient?.Dispose();
         _apiClient = null;
 
         _initLock.Dispose();
@@ -376,7 +426,14 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
 
             var host = _config.AdvatecDeviceAddress ?? "127.0.0.1";
             var port = _config.AdvatecDevicePort ?? DefaultDevicePort;
-            _apiClient = new AdvatecApiClient(host, port, _logger);
+
+            // H-05: Use IHttpClientFactory to avoid socket exhaustion and memory leaks.
+            // The factory manages HttpClient/HttpMessageHandler lifetimes properly.
+            var httpClient = _httpClientFactory?.CreateClient("Advatec") ?? new HttpClient();
+            var apiTimeout = _config.ApiRequestTimeoutSeconds ?? DefaultApiRequestTimeoutSeconds;
+            httpClient.Timeout = TimeSpan.FromSeconds(apiTimeout);
+
+            _apiClient = new AdvatecApiClient(httpClient, host, port, _logger);
             return _apiClient;
         }
     }
@@ -467,7 +524,7 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
     // ── Private: mapping ─────────────────────────────────────────────────────
 
     private CanonicalTransaction MapToCanonical(
-        AdvatecReceiptData receipt, RawPayloadEnvelope rawPayload)
+        AdvatecReceiptData receipt, RawPayloadEnvelope rawPayload, ActivePreAuth? matchedPreAuth = null)
     {
         if (string.IsNullOrWhiteSpace(receipt.TransactionId))
             throw new InvalidOperationException("Advatec Receipt missing TransactionId.");
@@ -481,7 +538,7 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
         var volumeMicrolitres = (long)(item.Quantity * 1_000_000m);
 
         // Amount & price conversion via currency factor
-        var currencyFactor = GetCurrencyFactor(_config.CurrencyCode ?? "TZS");
+        var currencyFactor = CurrencyHelper.GetCurrencyFactor(_config.CurrencyCode ?? "TZS");
         var amountMinorUnits = (long)(receipt.AmountInclusive * currencyFactor);
         var unitPriceMinorPerLitre = (long)(item.Price * currencyFactor);
 
@@ -511,9 +568,6 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
 
         // Dedup key: {siteCode}-{TransactionId}
         var fccTransactionId = $"{_config.SiteCode}-{receipt.TransactionId}";
-
-        // ── Pre-auth correlation (ADV-4.4) ───────────────────────────────────
-        var matchedPreAuth = TryMatchPreAuth(receipt);
 
         // Pump number: from pre-auth if matched, otherwise config default (AQ-3)
         var pumpNumber = matchedPreAuth?.PumpNumber ?? (0 + _config.PumpNumberOffset);
@@ -580,15 +634,6 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
         }
     }
 
-    private static decimal GetCurrencyFactor(string currencyCode)
-    {
-        return currencyCode.ToUpperInvariant() switch
-        {
-            "KWD" or "BHD" or "OMR" => 1000m,
-            "JPY" or "KRW" or "TZS" or "UGX" or "RWF" => 1m,
-            _ => 100m
-        };
-    }
 }
 
 /// <summary>

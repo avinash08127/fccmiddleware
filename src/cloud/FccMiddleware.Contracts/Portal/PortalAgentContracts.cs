@@ -25,6 +25,7 @@ public sealed record AgentHealthSummaryDto
     public required Guid LegalEntityId { get; init; }
     public required string AgentVersion { get; init; }
     public required string Status { get; init; }
+    public required bool HasTelemetry { get; init; }
     public string? ConnectivityState { get; init; }
     public int? BatteryPercent { get; init; }
     public bool? IsCharging { get; init; }

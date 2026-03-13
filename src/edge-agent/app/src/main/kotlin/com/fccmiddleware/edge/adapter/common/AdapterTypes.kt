@@ -389,4 +389,14 @@ interface IPreAuthMatcher {
      * List active (non-terminal) pre-auths for diagnostics and status endpoints.
      */
     fun getActivePreAuths(): List<ActivePreAuthSnapshot>
+
+    /**
+     * Purge pre-auth entries older than the adapter's configured TTL.
+     *
+     * Called periodically (e.g., during fetch cycles or cadence ticks) to prevent
+     * memory leaks from pre-auths that were never matched to a transaction.
+     *
+     * @return Number of stale entries purged.
+     */
+    fun purgeStale(): Int = 0
 }

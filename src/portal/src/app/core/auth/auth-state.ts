@@ -13,6 +13,7 @@ const initializationByInstance = new WeakMap<IPublicClientApplication, Promise<v
 
 const APP_ROLES = [
   'SystemAdmin',
+  /** @deprecated Use 'SystemAdmin'. Kept for backward-compatible JWT recognition. */
   'SystemAdministrator',
   'OperationsManager',
   'SiteSupervisor',

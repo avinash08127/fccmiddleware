@@ -1,4 +1,5 @@
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Interfaces;
 
 namespace FccMiddleware.Domain.Entities;
 
@@ -6,7 +7,7 @@ namespace FccMiddleware.Domain.Entities;
 /// A fuel retail site (station). Site codes are globally unique (BR-2.3).
 /// Tenant-scoped via LegalEntityId.
 /// </summary>
-public class Site
+public class Site : ITenantScoped
 {
     public Guid Id { get; set; }
     public Guid LegalEntityId { get; set; }

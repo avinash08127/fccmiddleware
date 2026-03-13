@@ -9,9 +9,7 @@ export enum FccVendor {
 
 export enum TransactionStatus {
   PENDING = 'PENDING',
-  SYNCED = 'SYNCED',
   SYNCED_TO_ODOO = 'SYNCED_TO_ODOO',
-  STALE_PENDING = 'STALE_PENDING',
   DUPLICATE = 'DUPLICATE',
   ARCHIVED = 'ARCHIVED',
 }
@@ -20,6 +18,8 @@ export enum IngestionSource {
   FCC_PUSH = 'FCC_PUSH',
   EDGE_UPLOAD = 'EDGE_UPLOAD',
   CLOUD_PULL = 'CLOUD_PULL',
+  CLOUD_DIRECT = 'CLOUD_DIRECT',
+  WEBHOOK = 'WEBHOOK',
 }
 
 export enum ReconciliationStatus {
@@ -67,6 +67,7 @@ export interface Transaction {
   duplicateOfId: string | null;
   rawPayloadRef: string | null;
   rawPayloadJson: string | null;
+  isStale: boolean;
 }
 
 /** Extended detail view — same shape as Transaction (all fields are returned). */

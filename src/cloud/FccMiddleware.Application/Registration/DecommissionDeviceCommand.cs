@@ -6,6 +6,7 @@ namespace FccMiddleware.Application.Registration;
 public sealed class DecommissionDeviceCommand : IRequest<Result<DecommissionDeviceResult>>
 {
     public required Guid DeviceId { get; init; }
+    public required string DecommissionedBy { get; init; }
 }
 
 public sealed class DecommissionDeviceResult

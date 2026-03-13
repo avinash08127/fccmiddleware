@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FccMiddleware.Api.Portal;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
@@ -30,7 +31,7 @@ public sealed class SitesController : PortalControllerBase
     public async Task<IActionResult> GetSites(
         [FromQuery] Guid legalEntityId,
         [FromQuery] string? cursor,
-        [FromQuery] int pageSize = 50,
+        [FromQuery] int pageSize = 20,
         [FromQuery] bool? isActive = null,
         [FromQuery] string? operatingModel = null,
         [FromQuery] string? connectivityMode = null,
@@ -41,6 +42,12 @@ public sealed class SitesController : PortalControllerBase
         if (pageSize is < 1 or > 200)
         {
             return BadRequest(BuildError("VALIDATION.INVALID_PAGE_SIZE", "pageSize must be between 1 and 200."));
+        }
+
+        // F09-04: Reject Guid.Empty — avoids a silent empty-result response for an unset parameter.
+        if (legalEntityId == Guid.Empty)
+        {
+            return BadRequest(BuildError("VALIDATION.INVALID_LEGAL_ENTITY", "legalEntityId must not be empty."));
         }
 
         var access = _accessResolver.Resolve(User);
@@ -54,60 +61,89 @@ public sealed class SitesController : PortalControllerBase
             return Forbid();
         }
 
-        var sites = await _db.Sites
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Include(site => site.LegalEntity)
-            .Include(site => site.FccConfigs.Where(config => config.IsActive))
-            .Where(site => site.LegalEntityId == legalEntityId)
-            .ToListAsync(cancellationToken);
+        // Parse enum filters early to surface 400s before hitting the database.
+        SiteOperatingModel? parsedOperatingModel = null;
+        if (!string.IsNullOrWhiteSpace(operatingModel))
+        {
+            if (!Enum.TryParse<SiteOperatingModel>(operatingModel, true, out var om))
+            {
+                return BadRequest(BuildError("VALIDATION.INVALID_OPERATING_MODEL", $"Unknown operatingModel '{operatingModel}'."));
+            }
+            parsedOperatingModel = om;
+        }
 
-        IEnumerable<Site> filtered = sites;
+        IngestionMode? parsedIngestionMode = null;
+        if (!string.IsNullOrWhiteSpace(ingestionMode))
+        {
+            if (!Enum.TryParse<IngestionMode>(ingestionMode, true, out var im))
+            {
+                return BadRequest(BuildError("VALIDATION.INVALID_INGESTION_MODE", $"Unknown ingestionMode '{ingestionMode}'."));
+            }
+            parsedIngestionMode = im;
+        }
+
+        FccVendor? parsedFccVendor = null;
+        if (!string.IsNullOrWhiteSpace(fccVendor))
+        {
+            if (!Enum.TryParse<FccVendor>(fccVendor, true, out var fv))
+            {
+                return BadRequest(BuildError("VALIDATION.INVALID_FCC_VENDOR", $"Unknown fccVendor '{fccVendor}'."));
+            }
+            parsedFccVendor = fv;
+        }
+
+        // F09-01 + F09-09: Push all filtering to the database via IQueryable.
+        // ForPortal replaces raw IgnoreQueryFilters and enforces explicit tenant scoping,
+        // reducing the risk of data leakage if a future endpoint omits the manual check.
+        IQueryable<Site> query = _db.Sites
+            .ForPortal(access, legalEntityId)
+            .Include(site => site.LegalEntity)
+            .Include(site => site.FccConfigs.Where(config => config.IsActive));
 
         if (isActive.HasValue)
         {
-            filtered = filtered.Where(site => site.IsActive == isActive.Value);
+            query = query.Where(s => s.IsActive == isActive.Value);
         }
 
-        if (!string.IsNullOrWhiteSpace(operatingModel))
+        if (parsedOperatingModel.HasValue)
         {
-            filtered = filtered.Where(site => string.Equals(site.OperatingModel.ToString(), operatingModel, StringComparison.OrdinalIgnoreCase));
+            query = query.Where(s => s.OperatingModel == parsedOperatingModel.Value);
         }
 
         if (!string.IsNullOrWhiteSpace(connectivityMode))
         {
-            filtered = filtered.Where(site => string.Equals(site.ConnectivityMode, connectivityMode, StringComparison.OrdinalIgnoreCase));
+            var normalizedMode = connectivityMode.ToUpperInvariant();
+            query = query.Where(s => s.ConnectivityMode == normalizedMode);
         }
 
-        if (!string.IsNullOrWhiteSpace(ingestionMode))
+        if (parsedIngestionMode.HasValue)
         {
-            filtered = filtered.Where(site =>
-                string.Equals(site.FccConfigs.OrderByDescending(config => config.UpdatedAt).FirstOrDefault()?.IngestionMode.ToString(),
-                    ingestionMode,
-                    StringComparison.OrdinalIgnoreCase));
+            query = query.Where(s => s.FccConfigs.Any(c => c.IsActive && c.IngestionMode == parsedIngestionMode.Value));
         }
 
-        if (!string.IsNullOrWhiteSpace(fccVendor))
+        if (parsedFccVendor.HasValue)
         {
-            filtered = filtered.Where(site =>
-                string.Equals(site.FccConfigs.OrderByDescending(config => config.UpdatedAt).FirstOrDefault()?.FccVendor.ToString(),
-                    fccVendor,
-                    StringComparison.OrdinalIgnoreCase));
+            query = query.Where(s => s.FccConfigs.Any(c => c.IsActive && c.FccVendor == parsedFccVendor.Value));
         }
 
-        var ordered = filtered
-            .OrderBy(site => site.UpdatedAt)
-            .ThenBy(site => site.Id)
-            .ToList();
+        // F09-02: Count before cursor pagination to avoid double-enumeration of a lazy LINQ chain.
+        var totalCount = await query.CountAsync(cancellationToken);
 
+        // F09-03: Cursor applied at DB level. UpdatedAt is non-nullable on Site, so no null-skip risk.
         if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
         {
-            ordered = ordered
-                .Where(site => site.UpdatedAt > cursorTimestamp || (site.UpdatedAt == cursorTimestamp && site.Id.CompareTo(cursorId) > 0))
-                .ToList();
+            query = query.Where(s =>
+                s.UpdatedAt > cursorTimestamp ||
+                (s.UpdatedAt == cursorTimestamp && s.Id > cursorId));
         }
 
-        var page = ordered.Take(pageSize + 1).ToList();
+        // F09-01: Only fetch pageSize+1 rows from the database — no full table scan.
+        var page = await query
+            .OrderBy(s => s.UpdatedAt)
+            .ThenBy(s => s.Id)
+            .Take(pageSize + 1)
+            .ToListAsync(cancellationToken);
+
         var hasMore = page.Count > pageSize;
         if (hasMore)
         {
@@ -129,7 +165,7 @@ public sealed class SitesController : PortalControllerBase
                 PageSize = page.Count,
                 HasMore = hasMore,
                 NextCursor = nextCursor,
-                TotalCount = filtered.Count()
+                TotalCount = totalCount
             }
         });
     }
@@ -205,7 +241,12 @@ public sealed class SitesController : PortalControllerBase
 
         if (!string.IsNullOrWhiteSpace(request.ConnectivityMode))
         {
-            site.ConnectivityMode = request.ConnectivityMode;
+            var normalizedMode = request.ConnectivityMode.ToUpperInvariant();
+            if (normalizedMode is not ("CONNECTED" or "DISCONNECTED"))
+            {
+                return BadRequest(BuildError("VALIDATION.INVALID_CONNECTIVITY_MODE", $"Unknown connectivityMode '{request.ConnectivityMode}'. Must be CONNECTED or DISCONNECTED."));
+            }
+            site.ConnectivityMode = normalizedMode;
         }
 
         if (request.SiteUsesPreAuth.HasValue)
@@ -266,6 +307,35 @@ public sealed class SitesController : PortalControllerBase
         }
 
         site.UpdatedAt = DateTimeOffset.UtcNow;
+
+        // F10-11: Audit event for site config change
+        var siteUserId = User.FindFirst("sub")?.Value ?? "unknown";
+        _db.AuditEvents.Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = DateTimeOffset.UtcNow,
+            LegalEntityId = site.LegalEntityId,
+            EventType = "SITE_CONFIG_UPDATED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = site.SiteCode,
+            Source = "SitesController",
+            Payload = JsonSerializer.Serialize(new
+            {
+                SiteId = id,
+                site.SiteCode,
+                UpdatedBy = siteUserId,
+                Fields = new
+                {
+                    request.OperatingModel,
+                    request.ConnectivityMode,
+                    request.SiteUsesPreAuth,
+                    HasTolerance = request.Tolerance is not null,
+                    HasFiscalization = request.Fiscalization is not null,
+                }
+            }),
+            EntityId = id
+        });
+
         await _db.SaveChangesAsync(cancellationToken);
 
         var detail = await LoadSiteDetailAsync(id, cancellationToken);
@@ -347,6 +417,8 @@ public sealed class SitesController : PortalControllerBase
                 IngestionMethod = transactionMode ?? IngestionMethod.PUSH,
                 IngestionMode = parsedIngestionMode ?? IngestionMode.CLOUD_DIRECT,
                 PullIntervalSeconds = request.PullIntervalSeconds,
+                CatchUpPullIntervalSeconds = request.CatchUpPullIntervalSeconds,
+                HybridCatchUpIntervalSeconds = request.HybridCatchUpIntervalSeconds,
                 HeartbeatIntervalSeconds = request.HeartbeatIntervalSeconds ?? 60,
                 HeartbeatTimeoutSeconds = request.HeartbeatTimeoutSeconds ?? 180,
                 IsActive = request.Enabled ?? true,
@@ -393,6 +465,16 @@ public sealed class SitesController : PortalControllerBase
                 config.PullIntervalSeconds = request.PullIntervalSeconds.Value;
             }
 
+            if (request.CatchUpPullIntervalSeconds.HasValue)
+            {
+                config.CatchUpPullIntervalSeconds = request.CatchUpPullIntervalSeconds.Value;
+            }
+
+            if (request.HybridCatchUpIntervalSeconds.HasValue)
+            {
+                config.HybridCatchUpIntervalSeconds = request.HybridCatchUpIntervalSeconds.Value;
+            }
+
             if (request.HeartbeatIntervalSeconds.HasValue)
             {
                 config.HeartbeatIntervalSeconds = request.HeartbeatIntervalSeconds.Value;
@@ -411,6 +493,30 @@ public sealed class SitesController : PortalControllerBase
             config.ConfigVersion += 1;
             config.UpdatedAt = DateTimeOffset.UtcNow;
         }
+
+        // F10-01: Apply vendor-specific fields
+        ApplyVendorSpecificFields(config, request);
+
+        // F10-11: Audit event for FCC config change
+        var userId = User.FindFirst("sub")?.Value ?? "unknown";
+        _db.AuditEvents.Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = DateTimeOffset.UtcNow,
+            LegalEntityId = site.LegalEntityId,
+            EventType = "FCC_CONFIG_UPDATED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = site.SiteCode,
+            Source = "SitesController",
+            Payload = JsonSerializer.Serialize(new
+            {
+                SiteId = siteId,
+                site.SiteCode,
+                Vendor = request.Vendor,
+                UpdatedBy = userId,
+            }),
+            EntityId = config.Id
+        });
 
         await _db.SaveChangesAsync(cancellationToken);
 
@@ -522,6 +628,29 @@ public sealed class SitesController : PortalControllerBase
         }
 
         _db.Pumps.Add(pump);
+
+        // F10-11: Audit event for pump added
+        var addPumpUserId = User.FindFirst("sub")?.Value ?? "unknown";
+        _db.AuditEvents.Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = site.LegalEntityId,
+            EventType = "PUMP_ADDED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = site.SiteCode,
+            Source = "SitesController",
+            Payload = JsonSerializer.Serialize(new
+            {
+                SiteId = siteId,
+                site.SiteCode,
+                pump.PumpNumber,
+                NozzleCount = pump.Nozzles.Count,
+                AddedBy = addPumpUserId,
+            }),
+            EntityId = pump.Id
+        });
+
         await _db.SaveChangesAsync(cancellationToken);
 
         pump = await _db.Pumps
@@ -569,6 +698,27 @@ public sealed class SitesController : PortalControllerBase
             nozzle.IsActive = false;
             nozzle.UpdatedAt = now;
         }
+
+        // F10-11: Audit event for pump removed
+        var removePumpUserId = User.FindFirst("sub")?.Value ?? "unknown";
+        _db.AuditEvents.Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = pump.LegalEntityId,
+            EventType = "PUMP_REMOVED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = null,
+            Source = "SitesController",
+            Payload = JsonSerializer.Serialize(new
+            {
+                SiteId = siteId,
+                PumpId = pumpId,
+                pump.PumpNumber,
+                RemovedBy = removePumpUserId,
+            }),
+            EntityId = pumpId
+        });
 
         await _db.SaveChangesAsync(cancellationToken);
         return NoContent();
@@ -621,6 +771,29 @@ public sealed class SitesController : PortalControllerBase
         nozzle.ProductId = product.Id;
         nozzle.Product = product;
         nozzle.UpdatedAt = DateTimeOffset.UtcNow;
+
+        // F10-11: Audit event for nozzle updated
+        var nozzleUserId = User.FindFirst("sub")?.Value ?? "unknown";
+        _db.AuditEvents.Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = DateTimeOffset.UtcNow,
+            LegalEntityId = nozzle.LegalEntityId,
+            EventType = "NOZZLE_UPDATED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = null,
+            Source = "SitesController",
+            Payload = JsonSerializer.Serialize(new
+            {
+                SiteId = siteId,
+                PumpId = pumpId,
+                NozzleNumber = nozzleNumber,
+                NewProductCode = request.CanonicalProductCode,
+                UpdatedBy = nozzleUserId,
+            }),
+            EntityId = nozzle.Id
+        });
+
         await _db.SaveChangesAsync(cancellationToken);
 
         return Ok(MapNozzle(nozzle));
@@ -679,8 +852,7 @@ public sealed class SitesController : PortalControllerBase
                 Mode = site.FiscalizationMode.ToString(),
                 TaxAuthorityEndpoint = site.TaxAuthorityEndpoint,
                 RequireCustomerTaxId = site.RequireCustomerTaxId,
-                FiscalReceiptRequired = site.FiscalReceiptRequired
-                    || site.FiscalizationMode == FiscalizationMode.FCC_DIRECT
+                FiscalReceiptRequired = site.FiscalReceiptRequired,
             },
             Tolerance = new SiteToleranceDto
             {
@@ -735,11 +907,37 @@ public sealed class SitesController : PortalControllerBase
             TransactionMode = config.IngestionMethod.ToString(),
             IngestionMode = config.IngestionMode.ToString(),
             PullIntervalSeconds = config.PullIntervalSeconds,
-            CatchUpPullIntervalSeconds = null,
-            HybridCatchUpIntervalSeconds = null,
+            CatchUpPullIntervalSeconds = config.CatchUpPullIntervalSeconds,
+            HybridCatchUpIntervalSeconds = config.HybridCatchUpIntervalSeconds,
             HeartbeatIntervalSeconds = config.HeartbeatIntervalSeconds,
             HeartbeatTimeoutSeconds = config.HeartbeatTimeoutSeconds,
-            PushSourceIpAllowList = Array.Empty<string>()
+            PushSourceIpAllowList = Array.Empty<string>(),
+
+            // F10-01: DOMS TCP/JPL vendor-specific fields
+            JplPort = config.JplPort,
+            FcAccessCode = config.FcAccessCode,
+            DomsCountryCode = config.DomsCountryCode,
+            PosVersionId = config.PosVersionId,
+            ConfiguredPumps = config.ConfiguredPumps,
+
+            // F10-01: Radix vendor-specific fields
+            SharedSecret = config.SharedSecret,
+            UsnCode = config.UsnCode,
+            AuthPort = config.AuthPort,
+            FccPumpAddressMap = config.FccPumpAddressMap,
+
+            // F10-01: Petronite OAuth2 vendor-specific fields
+            ClientId = config.ClientId,
+            ClientSecret = config.ClientSecret,
+            WebhookSecret = config.WebhookSecret,
+            OAuthTokenEndpoint = config.OAuthTokenEndpoint,
+
+            // F10-01: Advatec EFD vendor-specific fields
+            AdvatecDevicePort = config.AdvatecDevicePort,
+            AdvatecWebhookToken = config.AdvatecWebhookToken,
+            AdvatecEfdSerialNumber = config.AdvatecEfdSerialNumber,
+            AdvatecCustIdType = config.AdvatecCustIdType,
+            AdvatecPumpMap = config.AdvatecPumpMap,
         };
 
     private static bool TryParseFccVendor(string? value, out FccVendor? vendor)
@@ -808,5 +1006,37 @@ public sealed class SitesController : PortalControllerBase
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// F10-01: Applies vendor-specific fields from the request to the FCC config entity.
+    /// </summary>
+    private static void ApplyVendorSpecificFields(FccConfig config, UpdateFccConfigRequestDto request)
+    {
+        // DOMS TCP/JPL fields
+        if (request.JplPort.HasValue) config.JplPort = request.JplPort.Value;
+        if (request.FcAccessCode is not null) config.FcAccessCode = request.FcAccessCode;
+        if (request.DomsCountryCode is not null) config.DomsCountryCode = request.DomsCountryCode;
+        if (request.PosVersionId is not null) config.PosVersionId = request.PosVersionId;
+        if (request.ConfiguredPumps is not null) config.ConfiguredPumps = request.ConfiguredPumps;
+
+        // Radix fields
+        if (request.SharedSecret is not null) config.SharedSecret = request.SharedSecret;
+        if (request.UsnCode.HasValue) config.UsnCode = request.UsnCode.Value;
+        if (request.AuthPort.HasValue) config.AuthPort = request.AuthPort.Value;
+        if (request.FccPumpAddressMap is not null) config.FccPumpAddressMap = request.FccPumpAddressMap;
+
+        // Petronite OAuth2 fields
+        if (request.ClientId is not null) config.ClientId = request.ClientId;
+        if (request.ClientSecret is not null) config.ClientSecret = request.ClientSecret;
+        if (request.WebhookSecret is not null) config.WebhookSecret = request.WebhookSecret;
+        if (request.OAuthTokenEndpoint is not null) config.OAuthTokenEndpoint = request.OAuthTokenEndpoint;
+
+        // Advatec EFD fields
+        if (request.AdvatecDevicePort.HasValue) config.AdvatecDevicePort = request.AdvatecDevicePort.Value;
+        if (request.AdvatecWebhookToken is not null) config.AdvatecWebhookToken = request.AdvatecWebhookToken;
+        if (request.AdvatecEfdSerialNumber is not null) config.AdvatecEfdSerialNumber = request.AdvatecEfdSerialNumber;
+        if (request.AdvatecCustIdType.HasValue) config.AdvatecCustIdType = request.AdvatecCustIdType.Value;
+        if (request.AdvatecPumpMap is not null) config.AdvatecPumpMap = request.AdvatecPumpMap;
     }
 }

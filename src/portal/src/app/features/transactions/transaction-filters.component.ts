@@ -1,4 +1,7 @@
-import { Component, Input, Output, EventEmitter } from '@angular/core';
+import { Component, DestroyRef, inject, Input, Output, EventEmitter } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Subject } from 'rxjs';
+import { debounceTime } from 'rxjs/operators';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PanelModule } from 'primeng/panel';
@@ -62,7 +65,7 @@ export const EMPTY_FILTERS: TransactionFilters = {
             id="filter-transaction-id"
             [(ngModel)]="filters.fccTransactionId"
             placeholder="FCC Transaction ID"
-            (ngModelChange)="emit()"
+            (ngModelChange)="emitDebounced()"
           />
         </div>
 
@@ -73,7 +76,7 @@ export const EMPTY_FILTERS: TransactionFilters = {
             id="filter-odoo-order-id"
             [(ngModel)]="filters.odooOrderId"
             placeholder="Odoo Order ID"
-            (ngModelChange)="emit()"
+            (ngModelChange)="emitDebounced()"
           />
         </div>
 
@@ -206,16 +209,23 @@ export const EMPTY_FILTERS: TransactionFilters = {
   ],
 })
 export class TransactionFiltersComponent {
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly debouncedEmit$ = new Subject<void>();
+
   @Input() siteOptions: { label: string; value: string }[] = [];
   @Output() filtersChange = new EventEmitter<TransactionFilters>();
 
   filters: TransactionFilters = { ...EMPTY_FILTERS, dateRange: { from: null, to: null } };
 
+  constructor() {
+    this.debouncedEmit$
+      .pipe(debounceTime(300), takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => this.filtersChange.emit({ ...this.filters }));
+  }
+
   readonly statusOptions = [
     { label: 'Pending', value: TransactionStatus.PENDING },
-    { label: 'Synced', value: TransactionStatus.SYNCED },
     { label: 'Synced to Odoo', value: TransactionStatus.SYNCED_TO_ODOO },
-    { label: 'Stale Pending', value: TransactionStatus.STALE_PENDING },
     { label: 'Duplicate', value: TransactionStatus.DUPLICATE },
     { label: 'Archived', value: TransactionStatus.ARCHIVED },
   ];
@@ -230,11 +240,16 @@ export class TransactionFiltersComponent {
   readonly ingestionSourceOptions = [
     { label: 'FCC Push', value: IngestionSource.FCC_PUSH },
     { label: 'Edge Upload', value: IngestionSource.EDGE_UPLOAD },
-    { label: 'Cloud Pull', value: IngestionSource.CLOUD_PULL },
+    { label: 'Cloud Direct', value: IngestionSource.CLOUD_DIRECT },
+    { label: 'Webhook', value: IngestionSource.WEBHOOK },
   ];
 
   emit(): void {
     this.filtersChange.emit({ ...this.filters });
+  }
+
+  emitDebounced(): void {
+    this.debouncedEmit$.next();
   }
 
   onDateRangeSelected(range: DateRange): void {

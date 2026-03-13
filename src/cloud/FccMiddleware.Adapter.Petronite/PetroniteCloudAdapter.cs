@@ -1,8 +1,10 @@
 using System.Text.Json;
 using FccMiddleware.Adapter.Petronite.Internal;
+using FccMiddleware.Domain.Common;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Domain.Models.Adapter;
+using Microsoft.Extensions.Logging;
 
 namespace FccMiddleware.Adapter.Petronite;
 
@@ -26,10 +28,12 @@ public sealed class PetroniteCloudAdapter : IFccAdapter
     };
 
     private readonly SiteFccConfig _config;
+    private readonly ILogger<PetroniteCloudAdapter> _logger;
 
-    public PetroniteCloudAdapter(SiteFccConfig config)
+    public PetroniteCloudAdapter(SiteFccConfig config, ILogger<PetroniteCloudAdapter> logger)
     {
         _config = config;
+        _logger = logger;
     }
 
     // ── NormalizeTransaction ─────────────────────────────────────────────────
@@ -86,11 +90,35 @@ public sealed class PetroniteCloudAdapter : IFccAdapter
         if (string.IsNullOrWhiteSpace(payload.Transaction.OrderId))
             return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Petronite transaction missing orderId.");
 
+        // FccTransactionId = "{siteCode}-{orderId}" — DB max is 200 chars
+        if (payload.Transaction.OrderId.Length > 200)
+            return ValidationResult.Fail(
+                "FIELD_TOO_LONG",
+                $"Petronite orderId exceeds max length of 200 (got {payload.Transaction.OrderId.Length}).");
+
+        if (string.IsNullOrWhiteSpace(payload.Transaction.ProductCode))
+            return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Petronite transaction missing productCode.");
+
+        if (payload.Transaction.ProductCode.Length > 50)
+            return ValidationResult.Fail(
+                "FIELD_TOO_LONG",
+                $"Petronite productCode exceeds max length of 50 (got {payload.Transaction.ProductCode.Length}).");
+
         if (payload.Transaction.VolumeLitres <= 0)
             return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Petronite volumeLitres must be > 0.");
 
         if (payload.Transaction.AmountMajor <= 0)
             return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Petronite amountMajor must be > 0.");
+
+        if (!DateTimeOffset.TryParse(payload.Transaction.StartTime, out _))
+            return ValidationResult.Fail(
+                "INVALID_TIMESTAMP",
+                $"Petronite StartTime '{payload.Transaction.StartTime}' is not a valid timestamp.");
+
+        if (!DateTimeOffset.TryParse(payload.Transaction.EndTime, out _))
+            return ValidationResult.Fail(
+                "INVALID_TIMESTAMP",
+                $"Petronite EndTime '{payload.Transaction.EndTime}' is not a valid timestamp.");
 
         return ValidationResult.Ok();
     }
@@ -134,24 +162,39 @@ public sealed class PetroniteCloudAdapter : IFccAdapter
         var volumeMicrolitres = (long)(dto.VolumeLitres * 1_000_000m);
 
         // Amount: major units × currency factor = minor units
-        var currencyFactor = GetCurrencyFactor(_config.CurrencyCode);
+        var currencyFactor = CurrencyHelper.GetCurrencyFactor(_config.CurrencyCode);
         var amountMinorUnits = (long)(dto.AmountMajor * currencyFactor);
 
         // Unit price: major units × currency factor = minor per litre
         var unitPriceMinor = (long)(dto.UnitPrice * currencyFactor);
+
+        // L-01: Guard against null ProductCode — Petronite may omit it for non-fuel items.
+        if (string.IsNullOrWhiteSpace(dto.ProductCode))
+        {
+            throw new InvalidOperationException(
+                $"Petronite ProductCode is null/empty for order {dto.OrderId}. " +
+                "Cannot normalize transaction without a product code.");
+        }
 
         // Product code mapping
         var productCode = _config.ProductCodeMapping.TryGetValue(dto.ProductCode, out var mapped)
             ? mapped
             : dto.ProductCode;
 
-        // Timestamps
-        var startedAt = DateTimeOffset.TryParse(dto.StartTime, out var start)
-            ? start
-            : DateTimeOffset.UtcNow;
-        var completedAt = DateTimeOffset.TryParse(dto.EndTime, out var end)
-            ? end
-            : DateTimeOffset.UtcNow;
+        // Timestamps — reject transactions with unparseable times to avoid placing them in wrong time windows
+        if (!DateTimeOffset.TryParse(dto.StartTime, out var startedAt))
+        {
+            throw new InvalidOperationException(
+                $"Petronite StartTime failed to parse for order {dto.OrderId} (raw: '{dto.StartTime}'). " +
+                "Cannot normalize transaction without a valid start timestamp.");
+        }
+
+        if (!DateTimeOffset.TryParse(dto.EndTime, out var completedAt))
+        {
+            throw new InvalidOperationException(
+                $"Petronite EndTime failed to parse for order {dto.OrderId} (raw: '{dto.EndTime}'). " +
+                "Cannot normalize transaction without a valid end timestamp.");
+        }
 
         return new CanonicalTransaction
         {
@@ -172,13 +215,4 @@ public sealed class PetroniteCloudAdapter : IFccAdapter
         };
     }
 
-    private static decimal GetCurrencyFactor(string currencyCode)
-    {
-        return currencyCode.ToUpperInvariant() switch
-        {
-            "KWD" or "BHD" or "OMR" => 1000m,
-            "JPY" or "KRW" => 1m,
-            _ => 100m
-        };
-    }
 }

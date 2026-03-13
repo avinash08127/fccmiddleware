@@ -87,6 +87,8 @@ internal sealed class PreAuthRecordConfiguration : IEntityTypeConfiguration<PreA
         builder.ToTable(t =>
         {
             t.HasCheckConstraint("chk_preauth_amount", "requested_amount_minor_units > 0");
+            t.HasCheckConstraint("chk_preauth_pump", "pump_number > 0");
+            t.HasCheckConstraint("chk_preauth_nozzle", "nozzle_number > 0");
             t.HasCheckConstraint("chk_preauth_status",
                 "status IN ('PENDING','AUTHORIZED','DISPENSING','COMPLETED','CANCELLED','EXPIRED','FAILED')");
         });

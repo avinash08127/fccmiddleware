@@ -1,4 +1,5 @@
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Interfaces;
 
 namespace FccMiddleware.Domain.Entities;
 
@@ -6,7 +7,7 @@ namespace FccMiddleware.Domain.Entities;
 /// Durable record of a dispense-to-pre-auth reconciliation attempt.
 /// One reconciliation record exists per transaction at a pre-auth-enabled site.
 /// </summary>
-public class ReconciliationRecord
+public class ReconciliationRecord : ITenantScoped
 {
     public Guid Id { get; set; }
     public Guid LegalEntityId { get; set; }

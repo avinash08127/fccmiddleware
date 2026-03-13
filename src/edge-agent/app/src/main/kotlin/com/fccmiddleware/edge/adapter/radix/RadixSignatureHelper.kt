@@ -22,6 +22,25 @@ import java.security.MessageDigest
  * the hash must match character-for-character. Do NOT trim, normalize, or reformat
  * the XML before signing. The FDC validates signatures and returns RESP_CODE=251
  * (SIGNATURE_ERR) on mismatch.
+ *
+ * ---
+ * **S-008 — Security Risk: SHA-1 is cryptographically broken for collision resistance**
+ *
+ * SHA-1 is used here solely because the Radix FDC protocol specification mandates it.
+ * This is a **protocol-level constraint** — changing the algorithm would break
+ * interoperability with the FCC hardware.
+ *
+ * Risk: On a compromised LAN an attacker who can intercept traffic could theoretically
+ * forge FCC commands (pump authorisation, transaction acknowledgement) using a chosen-
+ * prefix collision. The SHAttered attack (2017) demonstrated practical SHA-1 collisions.
+ *
+ * Mitigations in place:
+ * 1. **Network isolation** — the FCC LAN must be physically segmented from guest/public
+ *    networks. Verify this in the site deployment checklist.
+ * 2. **Shared secret** — the shared secret adds a keyed MAC-like property; an attacker
+ *    also needs to know (or brute-force) the secret to produce a valid signature.
+ * 3. **Upgrade path** — if a future Radix firmware release supports SHA-256, migrate by
+ *    updating [sha1Hex] and verifying against the new protocol spec.
  */
 object RadixSignatureHelper {
 
@@ -83,7 +102,10 @@ object RadixSignatureHelper {
      *
      * The input is encoded as UTF-8 bytes before hashing. No trimming or normalization
      * is performed — the caller is responsible for providing the exact content.
+     *
+     * SHA-1 is intentional here — mandated by the Radix FDC protocol spec (S-008).
      */
+    @Suppress("WeakHashAlgorithm") // S-008: SHA-1 is Radix protocol-mandated, not a design choice.
     private fun sha1Hex(input: String): String {
         val digest = MessageDigest.getInstance("SHA-1")
         val hashBytes = digest.digest(input.toByteArray(Charsets.UTF_8))

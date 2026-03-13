@@ -1,0 +1,935 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 5,
+    "identityHash": "0aa68d14aa0e1d6bef2798afecca616c",
+    "entities": [
+      {
+        "tableName": "buffered_transactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `fcc_transaction_id` TEXT NOT NULL, `site_code` TEXT NOT NULL, `pump_number` INTEGER NOT NULL, `nozzle_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, `volume_microlitres` INTEGER NOT NULL, `amount_minor_units` INTEGER NOT NULL, `unit_price_minor_per_litre` INTEGER NOT NULL, `currency_code` TEXT NOT NULL, `started_at` TEXT NOT NULL, `completed_at` TEXT NOT NULL, `fiscal_receipt_number` TEXT, `fcc_vendor` TEXT NOT NULL, `attendant_id` TEXT, `status` TEXT NOT NULL, `sync_status` TEXT NOT NULL, `ingestion_source` TEXT NOT NULL, `raw_payload_json` TEXT, `correlation_id` TEXT NOT NULL, `upload_attempts` INTEGER NOT NULL, `last_upload_attempt_at` TEXT, `last_upload_error` TEXT, `order_uuid` TEXT, `odoo_order_id` TEXT, `add_to_cart` INTEGER NOT NULL DEFAULT 0, `payment_id` TEXT, `is_discard` INTEGER NOT NULL DEFAULT 0, `fiscal_attempts` INTEGER NOT NULL DEFAULT 0, `last_fiscal_attempt_at` TEXT, `fiscal_status` TEXT NOT NULL DEFAULT 'NONE', `schema_version` INTEGER NOT NULL, `created_at` TEXT NOT NULL, `updated_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccTransactionId",
+            "columnName": "fcc_transaction_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "siteCode",
+            "columnName": "site_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pumpNumber",
+            "columnName": "pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nozzleNumber",
+            "columnName": "nozzle_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "productCode",
+            "columnName": "product_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "volumeMicrolitres",
+            "columnName": "volume_microlitres",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amountMinorUnits",
+            "columnName": "amount_minor_units",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "unitPriceMinorPerLitre",
+            "columnName": "unit_price_minor_per_litre",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currencyCode",
+            "columnName": "currency_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "started_at",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completed_at",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fiscalReceiptNumber",
+            "columnName": "fiscal_receipt_number",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fccVendor",
+            "columnName": "fcc_vendor",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attendantId",
+            "columnName": "attendant_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncStatus",
+            "columnName": "sync_status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ingestionSource",
+            "columnName": "ingestion_source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawPayloadJson",
+            "columnName": "raw_payload_json",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "correlationId",
+            "columnName": "correlation_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "uploadAttempts",
+            "columnName": "upload_attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastUploadAttemptAt",
+            "columnName": "last_upload_attempt_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastUploadError",
+            "columnName": "last_upload_error",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "orderUuid",
+            "columnName": "order_uuid",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "odooOrderId",
+            "columnName": "odoo_order_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "addToCart",
+            "columnName": "add_to_cart",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "paymentId",
+            "columnName": "payment_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "isDiscard",
+            "columnName": "is_discard",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "fiscalAttempts",
+            "columnName": "fiscal_attempts",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "lastFiscalAttemptAt",
+            "columnName": "last_fiscal_attempt_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fiscalStatus",
+            "columnName": "fiscal_status",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'NONE'"
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schema_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "ix_bt_dedup",
+            "unique": true,
+            "columnNames": [
+              "fcc_transaction_id",
+              "site_code"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `ix_bt_dedup` ON `${TABLE_NAME}` (`fcc_transaction_id`, `site_code`)"
+          },
+          {
+            "name": "ix_bt_sync_status",
+            "unique": false,
+            "columnNames": [
+              "sync_status",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `ix_bt_sync_status` ON `${TABLE_NAME}` (`sync_status`, `created_at`)"
+          },
+          {
+            "name": "ix_bt_local_api",
+            "unique": false,
+            "columnNames": [
+              "sync_status",
+              "pump_number",
+              "completed_at"
+            ],
+            "orders": [
+              "ASC",
+              "ASC",
+              "DESC"
+            ],
+            "createSql": "CREATE INDEX IF NOT EXISTS `ix_bt_local_api` ON `${TABLE_NAME}` (`sync_status` ASC, `pump_number` ASC, `completed_at` DESC)"
+          },
+          {
+            "name": "ix_bt_cleanup",
+            "unique": false,
+            "columnNames": [
+              "sync_status",
+              "updated_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `ix_bt_cleanup` ON `${TABLE_NAME}` (`sync_status`, `updated_at`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "pre_auth_records",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `site_code` TEXT NOT NULL, `odoo_order_id` TEXT NOT NULL, `pump_number` INTEGER NOT NULL, `nozzle_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, `currency_code` TEXT NOT NULL, `requested_amount_minor_units` INTEGER NOT NULL, `unit_price_minor_per_litre` INTEGER, `authorized_amount_minor_units` INTEGER, `status` TEXT NOT NULL, `fcc_correlation_id` TEXT, `fcc_authorization_code` TEXT, `failure_reason` TEXT, `customer_name` TEXT, `customer_tax_id` TEXT, `raw_fcc_response` TEXT, `requested_at` TEXT NOT NULL, `authorized_at` TEXT, `completed_at` TEXT, `expires_at` TEXT NOT NULL, `is_cloud_synced` INTEGER NOT NULL, `cloud_sync_attempts` INTEGER NOT NULL, `last_cloud_sync_attempt_at` TEXT, `schema_version` INTEGER NOT NULL, `created_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "siteCode",
+            "columnName": "site_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "odooOrderId",
+            "columnName": "odoo_order_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pumpNumber",
+            "columnName": "pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nozzleNumber",
+            "columnName": "nozzle_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "productCode",
+            "columnName": "product_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currencyCode",
+            "columnName": "currency_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestedAmountMinorUnits",
+            "columnName": "requested_amount_minor_units",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "unitPrice",
+            "columnName": "unit_price_minor_per_litre",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "authorizedAmountMinorUnits",
+            "columnName": "authorized_amount_minor_units",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccCorrelationId",
+            "columnName": "fcc_correlation_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fccAuthorizationCode",
+            "columnName": "fcc_authorization_code",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "failureReason",
+            "columnName": "failure_reason",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "customerName",
+            "columnName": "customer_name",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "customerTaxId",
+            "columnName": "customer_tax_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "rawFccResponse",
+            "columnName": "raw_fcc_response",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "requestedAt",
+            "columnName": "requested_at",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorizedAt",
+            "columnName": "authorized_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completed_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expires_at",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCloudSynced",
+            "columnName": "is_cloud_synced",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cloudSyncAttempts",
+            "columnName": "cloud_sync_attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastCloudSyncAttemptAt",
+            "columnName": "last_cloud_sync_attempt_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schema_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "ix_par_idemp",
+            "unique": true,
+            "columnNames": [
+              "odoo_order_id",
+              "site_code"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `ix_par_idemp` ON `${TABLE_NAME}` (`odoo_order_id`, `site_code`)"
+          },
+          {
+            "name": "ix_par_unsent",
+            "unique": false,
+            "columnNames": [
+              "is_cloud_synced",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `ix_par_unsent` ON `${TABLE_NAME}` (`is_cloud_synced`, `created_at`)"
+          },
+          {
+            "name": "ix_par_expiry",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "expires_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `ix_par_expiry` ON `${TABLE_NAME}` (`status`, `expires_at`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "nozzles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `site_code` TEXT NOT NULL, `odoo_pump_number` INTEGER NOT NULL, `fcc_pump_number` INTEGER NOT NULL, `odoo_nozzle_number` INTEGER NOT NULL, `fcc_nozzle_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, `is_active` INTEGER NOT NULL, `synced_at` TEXT NOT NULL, `created_at` TEXT NOT NULL, `updated_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "siteCode",
+            "columnName": "site_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "odooPumpNumber",
+            "columnName": "odoo_pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccPumpNumber",
+            "columnName": "fcc_pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "odooNozzleNumber",
+            "columnName": "odoo_nozzle_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccNozzleNumber",
+            "columnName": "fcc_nozzle_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "productCode",
+            "columnName": "product_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "is_active",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncedAt",
+            "columnName": "synced_at",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "ix_nozzles_odoo_lookup",
+            "unique": true,
+            "columnNames": [
+              "site_code",
+              "odoo_pump_number",
+              "odoo_nozzle_number"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `ix_nozzles_odoo_lookup` ON `${TABLE_NAME}` (`site_code`, `odoo_pump_number`, `odoo_nozzle_number`)"
+          },
+          {
+            "name": "ix_nozzles_fcc_lookup",
+            "unique": true,
+            "columnNames": [
+              "site_code",
+              "fcc_pump_number",
+              "fcc_nozzle_number"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `ix_nozzles_fcc_lookup` ON `${TABLE_NAME}` (`site_code`, `fcc_pump_number`, `fcc_nozzle_number`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "sync_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `last_fcc_cursor` TEXT, `last_upload_at` TEXT, `last_status_poll_at` TEXT, `last_config_pull_at` TEXT, `last_config_version` INTEGER, `telemetry_sequence` INTEGER NOT NULL, `updated_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastFccCursor",
+            "columnName": "last_fcc_cursor",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastUploadAt",
+            "columnName": "last_upload_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastStatusPollAt",
+            "columnName": "last_status_poll_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastConfigPullAt",
+            "columnName": "last_config_pull_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastConfigVersion",
+            "columnName": "last_config_version",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "telemetrySequence",
+            "columnName": "telemetry_sequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "agent_config",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `config_json` TEXT NOT NULL, `config_version` INTEGER NOT NULL, `schema_version` INTEGER NOT NULL, `received_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "configJson",
+            "columnName": "config_json",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "configVersion",
+            "columnName": "config_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schema_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receivedAt",
+            "columnName": "received_at",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "audit_log",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `event_type` TEXT NOT NULL, `message` TEXT NOT NULL, `correlation_id` TEXT, `created_at` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventType",
+            "columnName": "event_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "message",
+            "columnName": "message",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "correlationId",
+            "columnName": "correlation_id",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "ix_al_time",
+            "unique": false,
+            "columnNames": [
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `ix_al_time` ON `${TABLE_NAME}` (`created_at`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "site_info",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`site_code` TEXT NOT NULL, `site_name` TEXT NOT NULL, `legal_entity_code` TEXT NOT NULL, `timezone` TEXT NOT NULL, `currency_code` TEXT NOT NULL, `operating_model` TEXT NOT NULL, `fcc_vendor` TEXT, `fcc_model` TEXT, `ingestion_mode` TEXT, `synced_at` TEXT NOT NULL, PRIMARY KEY(`site_code`))",
+        "fields": [
+          {
+            "fieldPath": "siteCode",
+            "columnName": "site_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "siteName",
+            "columnName": "site_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "legalEntityCode",
+            "columnName": "legal_entity_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timezone",
+            "columnName": "timezone",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currencyCode",
+            "columnName": "currency_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operatingModel",
+            "columnName": "operating_model",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccVendor",
+            "columnName": "fcc_vendor",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "fccModel",
+            "columnName": "fcc_model",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "ingestionMode",
+            "columnName": "ingestion_mode",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "syncedAt",
+            "columnName": "synced_at",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "site_code"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "local_products",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`fcc_product_code` TEXT NOT NULL, `canonical_product_code` TEXT NOT NULL, `display_name` TEXT NOT NULL, `active` INTEGER NOT NULL, PRIMARY KEY(`fcc_product_code`))",
+        "fields": [
+          {
+            "fieldPath": "fccProductCode",
+            "columnName": "fcc_product_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "canonicalProductCode",
+            "columnName": "canonical_product_code",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "active",
+            "columnName": "active",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "fcc_product_code"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "local_pumps",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`odoo_pump_number` INTEGER NOT NULL, `fcc_pump_number` INTEGER NOT NULL, `display_name` TEXT NOT NULL, PRIMARY KEY(`odoo_pump_number`))",
+        "fields": [
+          {
+            "fieldPath": "odooPumpNumber",
+            "columnName": "odoo_pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccPumpNumber",
+            "columnName": "fcc_pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "odoo_pump_number"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "local_nozzles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`odoo_nozzle_number` INTEGER NOT NULL, `odoo_pump_number` INTEGER NOT NULL, `fcc_nozzle_number` INTEGER NOT NULL, `fcc_pump_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, PRIMARY KEY(`odoo_nozzle_number`, `odoo_pump_number`))",
+        "fields": [
+          {
+            "fieldPath": "odooNozzleNumber",
+            "columnName": "odoo_nozzle_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "odooPumpNumber",
+            "columnName": "odoo_pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccNozzleNumber",
+            "columnName": "fcc_nozzle_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fccPumpNumber",
+            "columnName": "fcc_pump_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "productCode",
+            "columnName": "product_code",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "odoo_nozzle_number",
+            "odoo_pump_number"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '0aa68d14aa0e1d6bef2798afecca616c')"
+    ]
+  }
+}

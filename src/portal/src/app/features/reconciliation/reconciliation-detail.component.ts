@@ -1,11 +1,6 @@
-import {
-  Component,
-  DestroyRef,
-  OnInit,
-  inject,
-  signal,
-} from '@angular/core';
+import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { HttpErrorResponse } from '@angular/common/http';
 import { ActivatedRoute, Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
@@ -17,7 +12,10 @@ import { MessageService } from 'primeng/api';
 import { ToastModule } from 'primeng/toast';
 
 import { ReconciliationService } from '../../core/services/reconciliation.service';
-import { ReconciliationRecord } from '../../core/models/reconciliation.model';
+import {
+  ReconciliationRecord,
+  ReconciliationDecision,
+} from '../../core/models/reconciliation.model';
 import { ReconciliationStatus } from '../../core/models/transaction.model';
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
@@ -25,19 +23,26 @@ import { CurrencyMinorUnitsPipe } from '../../shared/pipes/currency-minor-units.
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
 import { StatusLabelPipe } from '../../shared/pipes/status-label.pipe';
 import { RoleVisibleDirective } from '../../shared/directives/role-visible.directive';
+import { RECONCILIATION_REVIEW_ROLES } from './reconciliation.roles';
 
 type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast';
 type PendingAction = 'approve' | 'reject';
 
 function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
   switch (status) {
-    case ReconciliationStatus.APPROVED: return 'success';
-    case ReconciliationStatus.VARIANCE_FLAGGED: return 'danger';
-    case ReconciliationStatus.UNMATCHED: return 'warn';
-    case ReconciliationStatus.REJECTED: return 'secondary';
+    case ReconciliationStatus.APPROVED:
+      return 'success';
+    case ReconciliationStatus.VARIANCE_FLAGGED:
+      return 'danger';
+    case ReconciliationStatus.UNMATCHED:
+      return 'warn';
+    case ReconciliationStatus.REJECTED:
+      return 'secondary';
     case ReconciliationStatus.MATCHED:
-    case ReconciliationStatus.VARIANCE_WITHIN_TOLERANCE: return 'success';
-    default: return 'info';
+    case ReconciliationStatus.VARIANCE_WITHIN_TOLERANCE:
+      return 'success';
+    default:
+      return 'info';
   }
 }
 
@@ -101,7 +106,7 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
             Reconciliation #<code>{{ record()!.id | slice: 0 : 8 }}</code>
           </h1>
           <app-status-badge
-            [label]="(record()!.reconciliationStatus | statusLabel)"
+            [label]="record()!.reconciliationStatus | statusLabel"
             [severity]="getSeverity(record()!.reconciliationStatus)"
           />
         </div>
@@ -121,7 +126,9 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               </div>
               <div class="field">
                 <span class="field-label">Pump / Nozzle</span>
-                <span class="field-value">{{ record()!.pumpNumber }} / {{ record()!.nozzleNumber }}</span>
+                <span class="field-value"
+                  >{{ record()!.pumpNumber }} / {{ record()!.nozzleNumber }}</span
+                >
               </div>
               <div class="field">
                 <span class="field-label">Product</span>
@@ -130,14 +137,19 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               <div class="field">
                 <span class="field-label">Authorised Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.requestedAmount !== null
-                      ? (record()!.requestedAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
-                      : '—' }}
+                  {{
+                    record()!.requestedAmount !== null
+                      ? (record()!.requestedAmount!
+                        | currencyMinorUnits: record()!.currencyCode ?? '')
+                      : '—'
+                  }}
                 </span>
               </div>
               <div class="field">
                 <span class="field-label">Pre-Auth Status</span>
-                <span class="field-value">{{ (record()!.preAuthStatus | statusLabel) || '—' }}</span>
+                <span class="field-value">{{
+                  (record()!.preAuthStatus | statusLabel) || '—'
+                }}</span>
               </div>
               @if (record()!.preAuthSummary; as pa) {
                 @if (pa.vehicleNumber) {
@@ -185,9 +197,12 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
                 <div class="field">
                   <span class="field-label">Actual Amount</span>
                   <span class="field-value amount">
-                    {{ record()!.actualAmount !== null
-                        ? (record()!.actualAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
-                        : '—' }}
+                    {{
+                      record()!.actualAmount !== null
+                        ? (record()!.actualAmount!
+                          | currencyMinorUnits: record()!.currencyCode ?? '')
+                        : '—'
+                    }}
                   </span>
                 </div>
                 @if (record()!.transactionSummary; as tx) {
@@ -226,17 +241,22 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
               <div class="field">
                 <span class="field-label">Authorised Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.requestedAmount !== null
-                      ? (record()!.requestedAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
-                      : '—' }}
+                  {{
+                    record()!.requestedAmount !== null
+                      ? (record()!.requestedAmount!
+                        | currencyMinorUnits: record()!.currencyCode ?? '')
+                      : '—'
+                  }}
                 </span>
               </div>
               <div class="field">
                 <span class="field-label">Actual Amount</span>
                 <span class="field-value amount">
-                  {{ record()!.actualAmount !== null
+                  {{
+                    record()!.actualAmount !== null
                       ? (record()!.actualAmount! | currencyMinorUnits: record()!.currencyCode ?? '')
-                      : '—' }}
+                      : '—'
+                  }}
                 </span>
               </div>
               <div class="field">
@@ -271,13 +291,21 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
           </p-card>
         </div>
 
-        <!-- Approve / Reject actions — only for authorized roles and VARIANCE_FLAGGED status -->
-        @if (record()!.reconciliationStatus === ReconciliationStatus.VARIANCE_FLAGGED) {
-          <ng-container *appRoleVisible="['SystemAdmin', 'OperationsManager']">
+        <!-- Approve / Reject actions — only for authorized roles and reviewable statuses -->
+        @if (
+          record()!.reconciliationStatus === ReconciliationStatus.VARIANCE_FLAGGED ||
+          record()!.reconciliationStatus === ReconciliationStatus.REVIEW_FUZZY_MATCH
+        ) {
+          <ng-container *appRoleVisible="reviewRoles">
             <p-card header="Review Action" styleClass="action-card">
               <p class="action-hint">
-                This record has a variance that exceeds the configured tolerance. Review the details
-                above and either approve or reject.
+                @if (record()!.reconciliationStatus === ReconciliationStatus.REVIEW_FUZZY_MATCH) {
+                  This record was matched using a fuzzy algorithm and requires manual verification.
+                  Review the details above and either approve or reject.
+                } @else {
+                  This record has a variance that exceeds the configured tolerance. Review the
+                  details above and either approve or reject.
+                }
               </p>
               <div class="action-buttons">
                 <p-button
@@ -310,8 +338,8 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
       <div class="dialog-body">
         <p class="dialog-description">
           @if (pendingAction() === 'approve') {
-            You are about to <strong>approve</strong> this variance exception. This action will
-            mark the record as reviewed and cannot be undone.
+            You are about to <strong>approve</strong> this variance exception. This action will mark
+            the record as reviewed and cannot be undone.
           } @else {
             You are about to <strong>reject</strong> this reconciliation record. The record will be
             marked as rejected and cannot be undone.
@@ -320,7 +348,7 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
         <div class="form-field">
           <label for="reason">
             Reason <span class="required">*</span>
-            <small class="char-count">({{ reason().length }} / min. 10)</small>
+            <small class="char-count">({{ reason().length }} / 2000)</small>
           </label>
           <textarea
             id="reason"
@@ -328,6 +356,7 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
             [ngModel]="reason()"
             (ngModelChange)="reason.set($event)"
             rows="4"
+            maxlength="2000"
             placeholder="Explain the reason for this decision…"
             style="width: 100%"
           ></textarea>
@@ -517,6 +546,8 @@ export class ReconciliationDetailComponent implements OnInit {
   private readonly destroyRef = inject(DestroyRef);
 
   readonly ReconciliationStatus = ReconciliationStatus;
+  readonly reviewRoles = RECONCILIATION_REVIEW_ROLES;
+  private readonly currencyPipe = new CurrencyMinorUnitsPipe();
 
   // ── State ─────────────────────────────────────────────────────────────────
   readonly loading = signal(false);
@@ -553,7 +584,7 @@ export class ReconciliationDetailComponent implements OnInit {
 
   submitAction(): void {
     const rec = this.record();
-    if (!rec || this.reason().length < 10) return;
+    if (!rec || this.reason().length < 10 || this.reason().length > 2000) return;
 
     this.submitting.set(true);
     const action$ =
@@ -562,8 +593,21 @@ export class ReconciliationDetailComponent implements OnInit {
         : this.reconService.reject(rec.id, this.reason());
 
     action$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: (updated) => {
-        this.record.set(updated);
+      next: (response) => {
+        // M-9: Merge the POST response into the existing record instead of
+        // refetching via GET, avoiding a race condition where the GET could
+        // fail even though the action succeeded.
+        const current = this.record();
+        if (current) {
+          this.record.set({
+            ...current,
+            reconciliationStatus: response.status as ReconciliationRecord['reconciliationStatus'],
+            decision: response.status as ReconciliationDecision,
+            decisionReason: response.reviewReason,
+            decidedBy: response.reviewedByUserId,
+            decidedAt: response.reviewedAtUtc,
+          });
+        }
         this.showDialog = false;
         this.submitting.set(false);
         const label = this.pendingAction() === 'approve' ? 'approved' : 'rejected';
@@ -574,12 +618,22 @@ export class ReconciliationDetailComponent implements OnInit {
           life: 4000,
         });
       },
-      error: () => {
+      error: (err: HttpErrorResponse) => {
         this.submitting.set(false);
+        let detail = 'Could not complete the action. Please try again.';
+        if (err.status === 409) {
+          detail = 'This record has already been reviewed and cannot be changed.';
+        } else if (err.status === 403) {
+          detail = 'You do not have permission to review this record.';
+        } else if (err.status === 404) {
+          detail = 'This reconciliation record no longer exists.';
+        } else if (err.status === 400) {
+          detail = 'The request was invalid. Please check your input and try again.';
+        }
         this.messageService.add({
           severity: 'error',
           summary: 'Action failed',
-          detail: 'Could not complete the action. Please try again.',
+          detail,
           life: 5000,
         });
       },
@@ -593,8 +647,12 @@ export class ReconciliationDetailComponent implements OnInit {
   formatVariance(): string {
     const rec = this.record();
     if (!rec || rec.amountVariance == null) return '—';
-    const sign = rec.amountVariance >= 0 ? '+' : '';
-    return `${sign}${(rec.amountVariance / 100).toFixed(2)} ${rec.currencyCode}`;
+    const sign = rec.amountVariance > 0 ? '+' : rec.amountVariance < 0 ? '-' : '';
+    const formatted = this.currencyPipe.transform(
+      Math.abs(rec.amountVariance),
+      rec.currencyCode ?? '',
+    );
+    return `${sign}${formatted}`;
   }
 
   formatVariancePct(): string {

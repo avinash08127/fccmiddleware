@@ -174,6 +174,10 @@ abstract class BufferDatabase : RoomDatabase() {
             )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                // Fallback for any database version gap not covered by explicit migrations.
+                // Transactions are re-uploaded from the buffer, so losing local rows is
+                // recoverable. Prevents a crash-loop on devices with an unexpected schema.
+                .fallbackToDestructiveMigration()
                 .build()
         }
     }

@@ -37,7 +37,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.fccmiddleware.edge.ui.ProvisioningViewModel
+import org.koin.android.ext.koin.androidApplication
 import org.koin.android.ext.koin.androidContext
+import org.koin.androidx.viewmodel.dsl.viewModel
 import org.koin.dsl.module
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -305,6 +308,21 @@ val appModule = module {
         OdooWebSocketServer(
             transactionDao = get(),
             serviceScope = get<CoroutineScope>(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // ViewModels (T-003)
+    // -------------------------------------------------------------------------
+    viewModel {
+        ProvisioningViewModel(
+            application = androidApplication(),
+            cloudApiClient = get(),
+            keystoreManager = get(),
+            encryptedPrefs = get(),
+            agentConfigDao = get(),
+            tokenProvider = get(),
+            siteDataManager = get(),
         )
     }
 

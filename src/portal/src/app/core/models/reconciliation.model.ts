@@ -109,6 +109,17 @@ export interface ApproveRejectRequest {
   reason: string;
 }
 
+/** Response from POST /reconciliation/:id/approve or /reject. */
+export interface ReconciliationReviewResponse {
+  reconciliationId: string;
+  status: string;
+  legalEntityId: string;
+  siteCode: string;
+  reviewedByUserId: string;
+  reviewedAtUtc: string;
+  reviewReason: string;
+}
+
 // ── Query params ──────────────────────────────────────────────────────────────
 
 export interface ReconciliationQueryParams {

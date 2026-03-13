@@ -31,4 +31,10 @@ public sealed record IngestTransactionCommand : IRequest<Result<IngestTransactio
     /// Populated by the controller from the incoming HTTP trace context.
     /// </summary>
     public required Guid CorrelationId { get; init; }
+
+    /// <summary>
+    /// How this transaction arrived at the cloud backend (e.g. FCC_PUSH, CLOUD_DIRECT, WEBHOOK).
+    /// Defaults to FCC_PUSH for backward compatibility with DLQ replay.
+    /// </summary>
+    public IngestionSource IngestionSource { get; init; } = IngestionSource.FCC_PUSH;
 }

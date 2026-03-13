@@ -23,6 +23,8 @@ public class FccConfig
     public IngestionMethod IngestionMethod { get; set; } = IngestionMethod.PUSH;
     public IngestionMode IngestionMode { get; set; } = IngestionMode.CLOUD_DIRECT;
     public int? PullIntervalSeconds { get; set; }
+    public int? CatchUpPullIntervalSeconds { get; set; }
+    public int? HybridCatchUpIntervalSeconds { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 60;
     public int HeartbeatTimeoutSeconds { get; set; } = 180;
     public bool IsActive { get; set; } = true;
@@ -54,8 +56,19 @@ public class FccConfig
     // ── Advatec EFD fields ──────────────────────────────────────────────────
     public int? AdvatecDevicePort { get; set; }
     public string? AdvatecWebhookToken { get; set; }
+
+    /// <summary>
+    /// SHA-256 hash of <see cref="AdvatecWebhookToken"/> for indexed DB lookup.
+    /// Avoids loading all Advatec configs into memory for token matching (H-04).
+    /// Populated by the application layer when the token is set/updated.
+    /// </summary>
+    public string? AdvatecWebhookTokenHash { get; set; }
+
     public string? AdvatecEfdSerialNumber { get; set; }
     public int? AdvatecCustIdType { get; set; }
+
+    /// <summary>JSON map of EFD serial number → pump number, e.g. {"10TZ101807": 1, "10TZ101808": 2}.</summary>
+    public string? AdvatecPumpMap { get; set; }
 
     // Navigation properties
     public Site Site { get; set; } = null!;

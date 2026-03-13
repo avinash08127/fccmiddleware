@@ -3,8 +3,8 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { Subject, EMPTY, interval } from 'rxjs';
-import { switchMap, catchError } from 'rxjs/operators';
+import { Subject, EMPTY, interval, merge } from 'rxjs';
+import { switchMap, catchError, debounceTime, exhaustMap } from 'rxjs/operators';
 import { TableModule } from 'primeng/table';
 import { ButtonModule } from 'primeng/button';
 import { CardModule } from 'primeng/card';
@@ -23,25 +23,14 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
 import { hasAnyRequiredRole, getCurrentAccount } from '../../core/auth/auth-state';
 import { MsalService } from '@azure/msal-angular';
 
-type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast';
-
 /** Offline threshold: 5 minutes without a heartbeat */
 const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
+const PAGE_SIZE = 100;
 
 function isAgentOffline(agent: AgentHealthSummary): boolean {
   if (agent.connectivityState === ConnectivityState.FULLY_OFFLINE) return true;
   if (!agent.lastSeenAt) return true;
   return Date.now() - new Date(agent.lastSeenAt).getTime() > OFFLINE_THRESHOLD_MS;
-}
-
-function connectivitySeverity(state: ConnectivityState | null): PrimeSeverity {
-  switch (state) {
-    case ConnectivityState.FULLY_ONLINE:     return 'success';
-    case ConnectivityState.INTERNET_DOWN:    return 'warn';
-    case ConnectivityState.FCC_UNREACHABLE:  return 'warn';
-    case ConnectivityState.FULLY_OFFLINE:    return 'danger';
-    default:                                 return 'secondary';
-  }
 }
 
 function connectivityLabel(state: ConnectivityState | null): string {
@@ -128,6 +117,13 @@ interface AgentFilters {
         </div>
       </div>
 
+      @if (legalEntitiesError()) {
+        <div class="error-msg">
+          <i class="pi pi-exclamation-triangle"></i>
+          Failed to load legal entities. Please refresh the page.
+        </div>
+      }
+
       @if (!selectedLegalEntityId()) {
         <app-empty-state
           icon="pi-building"
@@ -146,7 +142,7 @@ interface AgentFilters {
                 id="agent-filter-site-code"
                 [(ngModel)]="filters.siteCode"
                 placeholder="Search site code…"
-                (ngModelChange)="onFiltersChange()"
+                (ngModelChange)="onSiteCodeFilterChange()"
               />
             </div>
             <div class="filter-field">
@@ -157,7 +153,7 @@ interface AgentFilters {
                 [(ngModel)]="filters.connectivityState"
                 placeholder="All States"
                 [showClear]="true"
-                (ngModelChange)="onFiltersChange()"
+                (ngModelChange)="onConnectivityFilterChange()"
               />
             </div>
             <div class="filter-field filter-field--action">
@@ -243,11 +239,16 @@ interface AgentFilters {
           </p-card>
         }
 
-        <!-- All Agents Table -->
+        <!-- Online Agents Table -->
         <p-card styleClass="table-card">
           <ng-template pTemplate="header">
             <div class="card-header-row">
-              <span>All Agents</span>
+              <span>
+                Online Agents
+                @if (totalCount() !== null) {
+                  <span class="agent-count">— {{ agents().length }} of {{ totalCount() }} loaded</span>
+                }
+              </span>
               <span class="refresh-note">Auto-refreshes every 30 s</span>
             </div>
           </ng-template>
@@ -255,7 +256,7 @@ interface AgentFilters {
           <p-table
             [value]="filteredOnline()"
             sortMode="single"
-            [paginator]="true"
+            [paginator]="filteredOnline().length > 20"
             [rows]="20"
             [rowsPerPageOptions]="[20, 50, 100]"
             styleClass="p-datatable-sm p-datatable-striped p-datatable-hoverable-rows"
@@ -313,6 +314,24 @@ interface AgentFilters {
               </tr>
             </ng-template>
           </p-table>
+
+          @if (hasMore()) {
+            <div class="load-more-row">
+              <p-button
+                [label]="loadingMore() ? 'Loading…' : 'Load More Agents'"
+                icon="pi pi-chevron-down"
+                severity="secondary"
+                [loading]="loadingMore()"
+                [disabled]="loadingMore()"
+                (onClick)="loadMore()"
+              />
+              @if (totalCount() !== null) {
+                <span class="load-more-hint">
+                  {{ totalCount()! - agents().length }} more agent(s) not yet loaded
+                </span>
+              }
+            </div>
+          }
         </p-card>
       }
     </div>
@@ -402,10 +421,27 @@ interface AgentFilters {
       padding: 0.75rem 1rem;
       font-weight: 600;
     }
+    .agent-count {
+      font-size: 0.8rem;
+      font-weight: 400;
+      color: var(--p-text-muted-color, #64748b);
+    }
     .refresh-note {
       font-size: 0.75rem;
       color: var(--p-text-muted-color, #64748b);
       font-weight: 400;
+    }
+
+    .load-more-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem;
+      border-top: 1px solid var(--p-surface-border, #e2e8f0);
+    }
+    .load-more-hint {
+      font-size: 0.8rem;
+      color: var(--p-text-muted-color, #64748b);
     }
 
     .clickable-row { cursor: pointer; }
@@ -462,7 +498,7 @@ export class AgentListComponent {
 
   readonly isAdmin = computed(() => {
     const account = getCurrentAccount(this.msal.instance);
-    return account ? hasAnyRequiredRole(account, ['SystemAdmin']) : false;
+    return account ? hasAnyRequiredRole(account, ['SystemAdmin', 'SystemAdministrator']) : false;
   });
 
   // ── Legal entity ─────────────────────────────────────────────────────────
@@ -475,86 +511,142 @@ export class AgentListComponent {
   // ── Agent data ────────────────────────────────────────────────────────────
   readonly agents = signal<AgentHealthSummary[]>([]);
   readonly loading = signal(false);
+  readonly loadingMore = signal(false);
   readonly error = signal(false);
+  readonly hasMore = signal(false);
+  readonly totalCount = signal<number | null>(null);
+  readonly legalEntitiesError = signal(false);
+  private readonly nextCursor = signal<string | null>(null);
 
-  // ── Filters ───────────────────────────────────────────────────────────────
+  // ── Filters — now sent to backend as query params ─────────────────────────
   filters: AgentFilters = { siteCode: '', connectivityState: null };
-  private activeFilters = signal<AgentFilters>({ siteCode: '', connectivityState: null });
 
-  // ── Computed: split offline vs online after applying filters ──────────────
-  private readonly allFiltered = computed(() => {
-    const f = this.activeFilters();
-    return this.agents().filter((a) => {
-      if (f.siteCode && !a.siteCode.toLowerCase().includes(f.siteCode.toLowerCase())) return false;
-      if (f.connectivityState && a.connectivityState !== f.connectivityState) return false;
-      return true;
-    });
-  });
+  // ── Offline/online split from loaded pages (client-side categorisation) ───
+  readonly filteredOffline = computed(() => this.agents().filter(isAgentOffline));
+  readonly filteredOnline  = computed(() => this.agents().filter((a) => !isAgentOffline(a)));
 
-  readonly filteredOffline = computed(() => this.allFiltered().filter(isAgentOffline));
-  readonly filteredOnline  = computed(() => this.allFiltered().filter((a) => !isAgentOffline(a)));
-
-  // ── Load trigger ──────────────────────────────────────────────────────────
-  private readonly refresh$ = new Subject<void>();
+  // ── Refresh triggers ──────────────────────────────────────────────────────
+  private readonly immediateRefresh$ = new Subject<void>();
+  private readonly debouncedRefresh$ = new Subject<void>();
+  private readonly loadMore$         = new Subject<void>();
 
   readonly connectivityOptions = [
-    { label: 'Online',         value: ConnectivityState.FULLY_ONLINE },
-    { label: 'Internet Down',  value: ConnectivityState.INTERNET_DOWN },
-    { label: 'FCC Unreachable',value: ConnectivityState.FCC_UNREACHABLE },
-    { label: 'Offline',        value: ConnectivityState.FULLY_OFFLINE },
+    { label: 'Online',          value: ConnectivityState.FULLY_ONLINE },
+    { label: 'Internet Down',   value: ConnectivityState.INTERNET_DOWN },
+    { label: 'FCC Unreachable', value: ConnectivityState.FCC_UNREACHABLE },
+    { label: 'Offline',         value: ConnectivityState.FULLY_OFFLINE },
   ];
 
   constructor() {
     this.masterDataService
       .getLegalEntities()
       .pipe(takeUntilDestroyed())
-      .subscribe({ next: (entities) => this.legalEntities.set(entities) });
-
-    this.refresh$
-      .pipe(
-        switchMap(() => {
-          const entityId = this.selectedLegalEntityId();
-          if (!entityId) return EMPTY;
-          this.loading.set(true);
-          this.error.set(false);
-          return this.agentService.getAgents({ legalEntityId: entityId, pageSize: 500 }).pipe(
-            catchError(() => {
-              this.error.set(true);
-              this.loading.set(false);
-              return EMPTY;
-            }),
-          );
-        }),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe((result) => {
-        this.agents.set(result.data);
-        this.loading.set(false);
+      .subscribe({
+        next: (entities) => this.legalEntities.set(entities),
+        error: () => this.legalEntitiesError.set(true),
       });
 
-    // Auto-refresh every 30 seconds
+    // First-page load: immediate or debounced refresh → switchMap cancels in-flight request
+    merge(
+      this.immediateRefresh$,
+      this.debouncedRefresh$.pipe(debounceTime(400)),
+    ).pipe(
+      switchMap(() => {
+        const entityId = this.selectedLegalEntityId();
+        if (!entityId) return EMPTY;
+        this.loading.set(true);
+        this.error.set(false);
+        this.agents.set([]);
+        this.nextCursor.set(null);
+        this.hasMore.set(false);
+        this.totalCount.set(null);
+        return this.agentService.getAgents({
+          legalEntityId: entityId,
+          pageSize: PAGE_SIZE,
+          siteCode: this.filters.siteCode || undefined,
+          connectivityState: this.filters.connectivityState ?? undefined,
+        }).pipe(
+          catchError(() => {
+            this.error.set(true);
+            this.loading.set(false);
+            return EMPTY;
+          }),
+        );
+      }),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe((result) => {
+      this.agents.set(result.data);
+      this.hasMore.set(result.meta.hasMore);
+      this.nextCursor.set(result.meta.nextCursor);
+      this.totalCount.set(result.meta.totalCount);
+      this.loading.set(false);
+    });
+
+    // Load more: exhaustMap prevents concurrent fetches if the button is clicked rapidly
+    this.loadMore$.pipe(
+      exhaustMap(() => {
+        const entityId = this.selectedLegalEntityId();
+        const cursor   = this.nextCursor();
+        if (!entityId || !cursor) return EMPTY;
+        this.loadingMore.set(true);
+        return this.agentService.getAgents({
+          legalEntityId: entityId,
+          pageSize: PAGE_SIZE,
+          cursor,
+          siteCode: this.filters.siteCode || undefined,
+          connectivityState: this.filters.connectivityState ?? undefined,
+        }).pipe(
+          catchError(() => {
+            this.loadingMore.set(false);
+            return EMPTY;
+          }),
+        );
+      }),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe((result) => {
+      this.agents.update((current) => [...current, ...result.data]);
+      this.hasMore.set(result.meta.hasMore);
+      this.nextCursor.set(result.meta.nextCursor);
+      this.loadingMore.set(false);
+    });
+
+    // Auto-refresh every 30 seconds (skip when tab is hidden) — resets to page 1
     interval(30_000)
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => this.refresh$.next());
+      .subscribe(() => { if (!document.hidden) this.immediateRefresh$.next(); });
   }
 
   onLegalEntityChange(entityId: string | null): void {
     this.selectedLegalEntityId.set(entityId);
-    this.agents.set([]);
-    if (entityId) this.refresh$.next();
+    if (entityId) {
+      this.immediateRefresh$.next();
+    } else {
+      this.agents.set([]);
+      this.hasMore.set(false);
+      this.totalCount.set(null);
+      this.nextCursor.set(null);
+    }
   }
 
-  onFiltersChange(): void {
-    this.activeFilters.set({ ...this.filters });
+  onSiteCodeFilterChange(): void {
+    this.debouncedRefresh$.next();
+  }
+
+  onConnectivityFilterChange(): void {
+    this.immediateRefresh$.next();
   }
 
   clearFilters(): void {
     this.filters = { siteCode: '', connectivityState: null };
-    this.activeFilters.set({ ...this.filters });
+    this.immediateRefresh$.next();
   }
 
   manualRefresh(): void {
-    this.refresh$.next();
+    this.immediateRefresh$.next();
+  }
+
+  loadMore(): void {
+    this.loadMore$.next();
   }
 
   navigateToDetail(agent: AgentHealthSummary): void {
@@ -573,10 +665,6 @@ export class AgentListComponent {
 
   connectivityLabel(state: ConnectivityState | null): string {
     return connectivityLabel(state);
-  }
-
-  connectivitySeverity(state: ConnectivityState | null): PrimeSeverity {
-    return connectivitySeverity(state);
   }
 
   formatLag(seconds: number | null): string {

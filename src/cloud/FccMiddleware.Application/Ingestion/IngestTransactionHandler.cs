@@ -119,7 +119,32 @@ public sealed class IngestTransactionHandler
         }
 
         // ── Step 5: Normalize ─────────────────────────────────────────────────
-        var canonical = adapter.NormalizeTransaction(envelope);
+        // M-06: Wrap normalization in try-catch so exceptions (e.g., from race between
+        // validate and normalize, or edge cases not caught by validation) go to the
+        // dead-letter queue instead of propagating as unhandled 500s.
+        CanonicalTransaction canonical;
+        try
+        {
+            canonical = adapter.NormalizeTransaction(envelope);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JsonException or FormatException)
+        {
+            _logger.LogWarning(ex,
+                "Normalization failed for site {SiteCode} vendor {Vendor}: {Message}",
+                command.SiteCode, command.FccVendor, ex.Message);
+
+            await _deadLetterService.CreateAsync(
+                legalEntityId, command.SiteCode,
+                DeadLetterType.TRANSACTION, DeadLetterReason.NORMALIZATION_FAILURE,
+                "NORMALIZATION_ERROR",
+                $"Normalization failed: {ex.Message}",
+                rawPayloadJson: command.RawPayload,
+                cancellationToken: cancellationToken);
+
+            return Result<IngestTransactionResult>.Failure(
+                "NORMALIZATION_ERROR",
+                $"Normalization failed: {ex.Message}");
+        }
 
         // ── Step 6: Primary dedup check (Redis → PostgreSQL) ─────────────────
         var existingId = await _deduplicationService.FindExistingAsync(
@@ -185,7 +210,7 @@ public sealed class IngestTransactionHandler
             FiscalReceiptNumber = canonical.FiscalReceiptNumber,
             AttendantId = canonical.AttendantId,
             Status = TransactionStatus.PENDING,
-            IngestionSource = IngestionSource.FCC_PUSH,
+            IngestionSource = command.IngestionSource,
             OdooOrderId = canonical.OdooOrderId,
             CorrelationId = command.CorrelationId,
             ReconciliationStatus = fuzzyMatchFlagged ? ReconciliationStatus.REVIEW_FUZZY_MATCH : null,
@@ -207,9 +232,14 @@ public sealed class IngestTransactionHandler
                 canonical.FccTransactionId);
         }
 
-        // ── Step 10: Persist transaction + outbox event (single DB transaction) ──
+        // ── Step 10: Persist transaction + reconciliation + outbox (single DB transaction) ──
         _db.AddTransaction(transaction);
         _db.AddOutboxMessage(BuildIngestedOutboxMessage(transaction, command.CorrelationId));
+
+        // Run reconciliation matching before SaveChangesAsync so the transaction,
+        // its reconciliation result, and the outbox event are all committed atomically.
+        // This prevents reconciliation data loss if the process crashes mid-pipeline.
+        await _reconciliationMatchingService.MatchAsync(transaction, cancellationToken);
 
         try
         {
@@ -227,6 +257,12 @@ public sealed class IngestTransactionHandler
             var originalId = await _db.FindTransactionByDedupKeyAsync(
                 canonical.FccTransactionId, canonical.SiteCode, cancellationToken);
 
+            // Propagate fuzzy match flag to the winning transaction if this request detected one
+            if (fuzzyMatchFlagged && originalId.HasValue)
+            {
+                await _db.FlagFuzzyMatchAsync(originalId.Value, cancellationToken);
+            }
+
             return Result<IngestTransactionResult>.Success(new IngestTransactionResult
             {
                 TransactionId = Guid.Empty,
@@ -234,9 +270,6 @@ public sealed class IngestTransactionHandler
                 OriginalTransactionId = originalId
             });
         }
-
-        await _reconciliationMatchingService.MatchAsync(transaction, cancellationToken);
-        await _db.SaveChangesAsync(cancellationToken);
 
         // ── Step 11: Populate Redis cache after successful DB commit ──────────
         await _deduplicationService.SetCacheAsync(

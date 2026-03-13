@@ -16,6 +16,7 @@ import {
 import { PagedResult } from '../models';
 import { SiteOperatingModel, ConnectivityMode, IngestionMode } from '../models';
 import { FccVendor } from '../models';
+import { buildHttpParams } from './http-params.util';
 
 export interface SiteQueryParams {
   legalEntityId: string;
@@ -34,12 +35,8 @@ export class SiteService {
 
   getSites(params: SiteQueryParams): Observable<PagedResult<Site>> {
     return this.http.get<PagedResult<Site>>('/api/v1/sites', {
-      params: params as unknown as Record<string, string>,
+      params: buildHttpParams(params),
     });
-  }
-
-  getSiteById(id: string): Observable<Site> {
-    return this.http.get<Site>(`/api/v1/sites/${id}`);
   }
 
   getSiteDetail(id: string): Observable<SiteDetail> {

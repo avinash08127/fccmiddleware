@@ -121,47 +121,40 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
         string webhookToken,
         CancellationToken ct = default)
     {
-        // Load all active Advatec configs that have a webhook token set.
-        // We use constant-time comparison in memory to avoid timing attacks.
-        var candidates = await _dbContext.FccConfigs
-            .IgnoreQueryFilters()
-            .Where(cfg => cfg.IsActive
+        // H-04: Query by SHA-256 hash of the webhook token using indexed column,
+        // instead of loading all Advatec configs into memory (DOS vector).
+        var tokenHash = ComputeSha256Hex(webhookToken);
+
+        var row = await ProjectFccConfigRow(
+            q => q.Where(cfg => cfg.IsActive
                 && cfg.FccVendor == FccVendor.ADVATEC
-                && cfg.AdvatecWebhookToken != null)
-            .Select(cfg => new FccConfigProjection
-            {
-                SiteCode = cfg.Site.SiteCode,
-                FccVendor = cfg.FccVendor,
-                ConnectionProtocol = cfg.ConnectionProtocol,
-                HostAddress = cfg.HostAddress,
-                Port = cfg.Port,
-                IngestionMethod = cfg.IngestionMethod,
-                PullIntervalSeconds = cfg.PullIntervalSeconds,
-                LegalEntityId = cfg.Site.LegalEntityId,
-                CurrencyCode = cfg.LegalEntity.CurrencyCode,
-                DefaultTimezone = cfg.LegalEntity.DefaultTimezone,
-                SharedSecret = cfg.SharedSecret,
-                UsnCode = cfg.UsnCode,
-                AuthPort = cfg.AuthPort,
-                ClientId = cfg.ClientId,
-                ClientSecret = cfg.ClientSecret,
-                WebhookSecret = cfg.WebhookSecret,
-                OAuthTokenEndpoint = cfg.OAuthTokenEndpoint,
-                AdvatecWebhookToken = cfg.AdvatecWebhookToken,
-            })
-            .ToListAsync(ct);
+                && cfg.AdvatecWebhookTokenHash == tokenHash),
+            ct);
 
-        // M-11: Same HMAC-based constant-time comparison for Advatec tokens
-        var match = candidates.FirstOrDefault(c =>
-            ConstantTimeSecretEquals(c.AdvatecWebhookToken!, webhookToken));
-
-        if (match is null)
+        if (row is null)
         {
             _logger.LogWarning("No active Advatec FccConfig matched the provided webhook token");
             return null;
         }
 
-        return (BuildSiteFccConfig(match), match.LegalEntityId);
+        // Constant-time comparison against the actual stored token to confirm match
+        // (hash collision guard + timing-attack mitigation)
+        if (row.AdvatecWebhookToken is null || !ConstantTimeSecretEquals(row.AdvatecWebhookToken, webhookToken))
+        {
+            _logger.LogWarning("Advatec webhook token hash matched but constant-time comparison failed");
+            return null;
+        }
+
+        return (BuildSiteFccConfig(row), row.LegalEntityId);
+    }
+
+    /// <summary>
+    /// Computes a lowercase hex SHA-256 hash for indexed token lookup (H-04).
+    /// </summary>
+    private static string ComputeSha256Hex(string input)
+    {
+        var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     // ── Shared projection + builder ───────────────────────────────────────────
@@ -195,6 +188,7 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
                 AdvatecDevicePort = cfg.AdvatecDevicePort,
                 AdvatecEfdSerialNumber = cfg.AdvatecEfdSerialNumber,
                 AdvatecCustIdType = cfg.AdvatecCustIdType,
+                AdvatecPumpMapJson = cfg.AdvatecPumpMap,
                 // M-14: Project DOMS/Radix vendor fields
                 JplPort = cfg.JplPort,
                 DppPorts = cfg.DppPorts,
@@ -209,8 +203,11 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             .FirstOrDefaultAsync(ct);
     }
 
-    private static SiteFccConfig BuildSiteFccConfig(FccConfigProjection row) =>
-        new()
+    private SiteFccConfig BuildSiteFccConfig(FccConfigProjection row)
+    {
+        ValidateVendorRequiredFields(row);
+
+        return new SiteFccConfig
         {
             SiteCode = row.SiteCode,
             FccVendor = row.FccVendor,
@@ -236,6 +233,7 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             AdvatecDevicePort = row.AdvatecDevicePort,
             AdvatecEfdSerialNumber = row.AdvatecEfdSerialNumber,
             AdvatecCustIdType = row.AdvatecCustIdType,
+            AdvatecPumpMap = ParseAdvatecPumpMap(row.AdvatecPumpMapJson),
             // M-14: DOMS/Radix vendor-specific fields
             JplPort = row.JplPort,
             DppPorts = row.DppPorts,
@@ -247,12 +245,62 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             ConfiguredPumps = row.ConfiguredPumps,
             FccPumpAddressMap = ParsePumpAddressMap(row.FccPumpAddressMapJson),
         };
+    }
 
     /// <summary>
-    /// M-14: Deserializes the FccPumpAddressMap JSON string into a typed dictionary.
-    /// Returns null if the JSON is empty or malformed (fallback to offset-based pump resolution).
+    /// M-01: Validates that vendor-specific required fields are present at resolution time
+    /// rather than failing silently at adapter runtime.
     /// </summary>
-    private static IReadOnlyDictionary<int, RadixPumpAddress>? ParsePumpAddressMap(string? json)
+    private void ValidateVendorRequiredFields(FccConfigProjection row)
+    {
+        var errors = new List<string>();
+
+        switch (row.FccVendor)
+        {
+            case FccVendor.RADIX:
+                if (row.UsnCode is null)
+                    errors.Add("UsnCode is required for Radix");
+                if (row.AuthPort is null)
+                    errors.Add("AuthPort is required for Radix");
+                if (string.IsNullOrWhiteSpace(row.SharedSecret))
+                    errors.Add("SharedSecret is required for Radix");
+                break;
+
+            case FccVendor.DOMS:
+                if (row.JplPort is null)
+                    errors.Add("JplPort is required for DOMS");
+                break;
+
+            case FccVendor.PETRONITE:
+                if (string.IsNullOrWhiteSpace(row.ClientId))
+                    errors.Add("ClientId is required for Petronite");
+                if (string.IsNullOrWhiteSpace(row.ClientSecret))
+                    errors.Add("ClientSecret is required for Petronite");
+                break;
+
+            case FccVendor.ADVATEC:
+                // Advatec is push-only via webhook; no strictly required vendor fields
+                break;
+        }
+
+        if (errors.Count > 0)
+        {
+            _logger.LogWarning(
+                "FccConfig for site {SiteCode} (vendor {Vendor}) has missing required fields: {Errors}",
+                row.SiteCode, row.FccVendor, string.Join("; ", errors));
+
+            throw new InvalidOperationException(
+                $"FccConfig for site {row.SiteCode} ({row.FccVendor}) is missing required fields: " +
+                string.Join("; ", errors));
+        }
+    }
+
+    /// <summary>
+    /// Deserializes the FccPumpAddressMap JSON string into a typed dictionary.
+    /// Returns null if the JSON is empty. Throws on malformed JSON to prevent
+    /// silent fallback to offset-based pump resolution (M-03).
+    /// </summary>
+    private IReadOnlyDictionary<int, RadixPumpAddress>? ParsePumpAddressMap(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return null;
         try
@@ -260,9 +308,31 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             return JsonSerializer.Deserialize<Dictionary<int, RadixPumpAddress>>(json,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         }
-        catch
+        catch (JsonException ex)
         {
-            return null;
+            _logger.LogError(ex,
+                "Failed to parse Radix FccPumpAddressMap JSON. Pump mapping will be incorrect. Raw: {Json}",
+                json);
+            throw new InvalidOperationException(
+                $"Radix FccPumpAddressMap contains malformed JSON: {ex.Message}", ex);
+        }
+    }
+
+    private IReadOnlyDictionary<string, int>? ParseAdvatecPumpMap(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, int>>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex,
+                "Failed to parse Advatec PumpMap JSON. Pump mapping will be incorrect. Raw: {Json}",
+                json);
+            throw new InvalidOperationException(
+                $"Advatec PumpMap contains malformed JSON: {ex.Message}", ex);
         }
     }
 
@@ -305,6 +375,7 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
         public int? AdvatecDevicePort { get; init; }
         public string? AdvatecEfdSerialNumber { get; init; }
         public int? AdvatecCustIdType { get; init; }
+        public string? AdvatecPumpMapJson { get; init; }
         // M-14: DOMS/Radix vendor fields
         public int? JplPort { get; init; }
         public string? DppPorts { get; init; }

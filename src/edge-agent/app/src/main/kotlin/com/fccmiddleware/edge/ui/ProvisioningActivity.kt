@@ -3,11 +3,8 @@ package com.fccmiddleware.edge.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Build
-import android.provider.Settings
 import android.os.Bundle
 import android.text.InputType
-import android.util.Base64
 import com.fccmiddleware.edge.logging.AppLogger
 import android.view.Gravity
 import android.view.View
@@ -23,35 +20,20 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
-import com.fccmiddleware.edge.buffer.entity.AgentConfig
 import com.fccmiddleware.edge.config.CloudEnvironments
-import com.fccmiddleware.edge.config.EdgeAgentConfigJson
-import com.fccmiddleware.edge.config.SiteDataManager
-import com.fccmiddleware.edge.security.EncryptedPrefsManager
-import com.fccmiddleware.edge.security.KeystoreManager
 import com.fccmiddleware.edge.service.EdgeAgentForegroundService
-import com.fccmiddleware.edge.sync.CloudApiClient
-import com.fccmiddleware.edge.sync.CloudRegistrationResult
-import com.fccmiddleware.edge.sync.DeviceRegistrationRequest
-import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanIntentResult
 import com.journeyapps.barcodescanner.ScanOptions
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import androidx.activity.OnBackPressedCallback
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import org.koin.android.ext.android.inject
-import java.time.Instant
+import org.koin.androidx.viewmodel.ext.android.viewModel as koinViewModel
 
 /**
  * ProvisioningActivity — QR code scanner and manual entry device registration flow.
@@ -70,19 +52,7 @@ import java.time.Instant
  */
 class ProvisioningActivity : AppCompatActivity() {
 
-    companion object {
-        private const val TAG = "ProvisioningActivity"
-        private const val CAMERA_PERMISSION_REQUEST = 100
-    }
-
-    private val encryptedPrefs: EncryptedPrefsManager by inject()
-    private val keystoreManager: KeystoreManager by inject()
-    private val cloudApiClient: CloudApiClient by inject()
-    private val agentConfigDao: AgentConfigDao by inject()
-    private val tokenProvider: DeviceTokenProvider by inject()
-    private val siteDataManager: SiteDataManager by inject()
-
-    private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val provisioningViewModel: ProvisioningViewModel by koinViewModel()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -113,6 +83,16 @@ class ProvisioningActivity : AppCompatActivity() {
         onScanResult(result)
     }
 
+    companion object {
+        private const val TAG = "ProvisioningActivity"
+        private const val CAMERA_PERMISSION_REQUEST = 100
+        private const val STATE_CLOUD_URL = "state_cloud_url"
+        private const val STATE_SITE_CODE = "state_site_code"
+        private const val STATE_TOKEN = "state_token"
+        private const val STATE_ENV_INDEX = "state_env_index"
+        private const val STATE_MANUAL_VISIBLE = "state_manual_visible"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
@@ -121,11 +101,79 @@ class ProvisioningActivity : AppCompatActivity() {
         manualEntryButton.setOnClickListener { showManualEntryScreen() }
         manualBackButton.setOnClickListener { showMethodSelectionScreen() }
         manualRegisterButton.setOnClickListener { submitManualEntry() }
+
+        // Restore form state after rotation/process death
+        savedInstanceState?.let { state ->
+            if (state.getBoolean(STATE_MANUAL_VISIBLE, false)) {
+                showManualEntryScreen()
+                environmentSpinner.setSelection(state.getInt(STATE_ENV_INDEX, 0))
+                cloudUrlInput.setText(state.getString(STATE_CLOUD_URL, ""))
+                siteCodeInput.setText(state.getString(STATE_SITE_CODE, ""))
+                tokenInput.setText(state.getString(STATE_TOKEN, ""))
+            }
+        }
+
+        // Handle back press: if manual panel is showing, go back to method selection
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val registering = provisioningViewModel.registrationState.value is ProvisioningViewModel.RegistrationState.InProgress
+                if (manualPanel.visibility == View.VISIBLE && !registering) {
+                    showMethodSelectionScreen()
+                } else if (!registering) {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+                // If registering, ignore back press to avoid interrupting the flow
+            }
+        })
+
+        // Observe ViewModel state — must come last so that savedInstanceState panel/field
+        // restoration runs first, then the current registration state is applied on top.
+        lifecycleScope.launch {
+            provisioningViewModel.registrationState.collect { state ->
+                when (state) {
+                    is ProvisioningViewModel.RegistrationState.Idle -> Unit
+                    is ProvisioningViewModel.RegistrationState.InProgress -> {
+                        showProgress(state.message)
+                        scanButton.isEnabled = false
+                        manualRegisterButton.isEnabled = false
+                        manualBackButton.isEnabled = false
+                    }
+                    is ProvisioningViewModel.RegistrationState.Error -> {
+                        showError(state.message)
+                        scanButton.isEnabled = true
+                        manualRegisterButton.isEnabled = true
+                        manualBackButton.isEnabled = true
+                    }
+                    is ProvisioningViewModel.RegistrationState.Success -> {
+                        provisioningViewModel.onNavigationComplete()
+                        showProgress("Starting Edge Agent service...")
+                        try {
+                            val serviceIntent = Intent(
+                                this@ProvisioningActivity,
+                                EdgeAgentForegroundService::class.java,
+                            )
+                            startForegroundService(serviceIntent)
+                        } catch (e: Exception) {
+                            AppLogger.e(TAG, "Failed to start foreground service — will retry from DiagnosticsActivity", e)
+                        }
+                        val intent = Intent(this@ProvisioningActivity, DiagnosticsActivity::class.java)
+                        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                        startActivity(intent)
+                        finish()
+                    }
+                }
+            }
+        }
     }
 
-    override fun onDestroy() {
-        activityScope.cancel()
-        super.onDestroy()
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_MANUAL_VISIBLE, manualPanel.visibility == View.VISIBLE)
+        outState.putInt(STATE_ENV_INDEX, environmentSpinner.selectedItemPosition)
+        outState.putString(STATE_CLOUD_URL, cloudUrlInput.text.toString())
+        outState.putString(STATE_SITE_CODE, siteCodeInput.text.toString())
+        outState.putString(STATE_TOKEN, tokenInput.text.toString())
     }
 
     // ── Screen navigation ────────────────────────────────────────────────────
@@ -204,7 +252,7 @@ class ProvisioningActivity : AppCompatActivity() {
             return
         }
 
-        performRegistration(qrData)
+        provisioningViewModel.register(qrData)
     }
 
     // ── Manual entry path ────────────────────────────────────────────────────
@@ -243,7 +291,7 @@ class ProvisioningActivity : AppCompatActivity() {
             provisioningToken = token,
             environment = envKey,
         )
-        performRegistration(bootstrapData)
+        provisioningViewModel.register(bootstrapData)
     }
 
     // ── QR payload parsing ───────────────────────────────────────────────────
@@ -306,181 +354,6 @@ class ProvisioningActivity : AppCompatActivity() {
             AppLogger.e(TAG, "Failed to parse QR payload", e)
             null
         }
-    }
-
-    // ── Cloud registration (shared by both paths) ────────────────────────────
-
-    private fun performRegistration(qrData: QrBootstrapData) {
-        showProgress("Registering device with cloud...")
-        scanButton.isEnabled = false
-        manualRegisterButton.isEnabled = false
-        manualBackButton.isEnabled = false
-
-        activityScope.launch {
-            try {
-                val request = buildRegistrationRequest(qrData)
-                val result = withContext(Dispatchers.IO) {
-                    cloudApiClient.registerDevice(qrData.cloudBaseUrl, request)
-                }
-
-                when (result) {
-                    is CloudRegistrationResult.Success -> {
-                        handleRegistrationSuccess(qrData, result)
-                    }
-                    is CloudRegistrationResult.Rejected -> {
-                        showError("Registration rejected: ${result.errorCode} — ${result.message}")
-                        scanButton.isEnabled = true
-                        manualRegisterButton.isEnabled = true
-                        manualBackButton.isEnabled = true
-                    }
-                    is CloudRegistrationResult.TransportError -> {
-                        showError("Network error: ${result.message}. Check connectivity and try again.")
-                        scanButton.isEnabled = true
-                        manualRegisterButton.isEnabled = true
-                        manualBackButton.isEnabled = true
-                    }
-                }
-            } catch (e: Exception) {
-                AppLogger.e(TAG, "Registration failed", e)
-                showError("Registration failed: ${e.message}")
-                scanButton.isEnabled = true
-                manualRegisterButton.isEnabled = true
-                manualBackButton.isEnabled = true
-            }
-        }
-    }
-
-    private fun buildRegistrationRequest(qrData: QrBootstrapData): DeviceRegistrationRequest {
-        val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
-            ?: "unknown-${java.util.UUID.randomUUID().toString().take(8)}"
-
-        return DeviceRegistrationRequest(
-            provisioningToken = qrData.provisioningToken,
-            siteCode = qrData.siteCode,
-            deviceSerialNumber = androidId,
-            deviceModel = Build.MODEL,
-            osVersion = Build.VERSION.RELEASE,
-            agentVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "1.0.0",
-        )
-    }
-
-    private suspend fun handleRegistrationSuccess(
-        qrData: QrBootstrapData,
-        result: CloudRegistrationResult.Success,
-    ) {
-        val response = result.response
-        AppLogger.i(TAG, "Registration successful: deviceId=${response.deviceId}, site=${response.siteCode}")
-
-        showProgress("Storing credentials securely...")
-
-        withContext(Dispatchers.IO) {
-            // H-02: Clear stale Keystore keys and EncryptedPrefs from any previous registration
-            // to prevent cross-site data contamination during re-provisioning.
-            keystoreManager.clearAll()
-            encryptedPrefs.clearAll()
-
-            val parsedSiteConfig = response.siteConfig?.let { siteConfig ->
-                runCatching {
-                    EdgeAgentConfigJson.decode(
-                        json.encodeToString(JsonObject.serializer(), siteConfig),
-                    )
-                }.onFailure { e ->
-                    AppLogger.e(TAG, "Failed to parse registration siteConfig against canonical contract", e)
-                }.getOrNull()
-            }
-
-            val effectiveCloudBaseUrl = parsedSiteConfig?.sync?.cloudBaseUrl ?: qrData.cloudBaseUrl
-            cloudApiClient.updateBaseUrl(effectiveCloudBaseUrl)
-
-            // 1. Store tokens in Android Keystore (use DI singleton to keep in-memory state consistent)
-            val tokensStored = tokenProvider.storeTokens(response.deviceToken, response.refreshToken)
-            if (!tokensStored) {
-                throw IllegalStateException(
-                    "Failed to store device credentials in Android Keystore. " +
-                    "The device cannot authenticate with the cloud without stored tokens. " +
-                    "Please try again or clear app data and re-provision."
-                )
-            }
-
-            // 2. Store identity in EncryptedSharedPreferences
-            encryptedPrefs.saveRegistration(
-                deviceId = response.deviceId,
-                siteCode = response.siteCode,
-                legalEntityId = response.legalEntityId,
-                cloudBaseUrl = effectiveCloudBaseUrl,
-                environment = qrData.environment,
-            )
-
-            // 3. Persist bootstrap FCC host/port for diagnostics before the service starts.
-            parsedSiteConfig?.fcc?.hostAddress?.let { encryptedPrefs.fccHost = it }
-            parsedSiteConfig?.fcc?.port?.let { encryptedPrefs.fccPort = it }
-
-            // 4. Store initial config in AgentConfig table if siteConfig provided
-            //    H-01: Encrypt with AES-256-GCM via Keystore (matching ConfigManager.applyConfig behavior)
-            //    H-04: Retry once on failure and verify persistence to prevent race where service
-            //          starts without config and falls into degraded UNPROVISIONED bootstrap mode.
-            parsedSiteConfig?.let { siteConfig ->
-                val rawConfigJson = EdgeAgentConfigJson.encode(siteConfig)
-                val encryptedBytes = keystoreManager.storeSecret(KeystoreManager.ALIAS_CONFIG_INTEGRITY, rawConfigJson)
-                val persistedJson = if (encryptedBytes != null) {
-                    "ENC:" + Base64.encodeToString(encryptedBytes, Base64.NO_WRAP)
-                } else {
-                    AppLogger.w(TAG, "Config encryption failed — persisting raw JSON")
-                    rawConfigJson
-                }
-                val entity = AgentConfig(
-                    configJson = persistedJson,
-                    configVersion = siteConfig.configVersion,
-                    schemaVersion = siteConfig.schemaVersion.substringBefore(".").toIntOrNull() ?: 1,
-                    receivedAt = Instant.now().toString(),
-                )
-
-                var writeSucceeded = false
-                for (attempt in 1..2) {
-                    try {
-                        agentConfigDao.upsert(entity)
-                        // Verify the write persisted by reading back
-                        val stored = agentConfigDao.get()
-                        if (stored != null && stored.configVersion == siteConfig.configVersion) {
-                            writeSucceeded = true
-                            AppLogger.i(TAG, "Initial config stored in Room (encrypted, attempt=$attempt)")
-                            break
-                        } else {
-                            AppLogger.w(TAG, "Config write verification failed (attempt=$attempt) — stored config mismatch")
-                        }
-                    } catch (e: Exception) {
-                        AppLogger.e(TAG, "Failed to store initial config (attempt=$attempt)", e)
-                        if (attempt < 2) {
-                            kotlinx.coroutines.delay(200)
-                        }
-                    }
-                }
-                if (!writeSucceeded) {
-                    AppLogger.e(TAG, "Initial config could not be persisted after retries — service will fetch on first poll")
-                }
-            }
-
-            // 5. Persist site master data (products, pumps, nozzles) from config
-            parsedSiteConfig?.let { config ->
-                try {
-                    siteDataManager.syncFromConfig(config)
-                } catch (e: Exception) {
-                    AppLogger.e(TAG, "Failed to sync site data — will populate on first config poll", e)
-                }
-            }
-        }
-
-        showProgress("Starting Edge Agent service...")
-
-        // 6. Start the foreground service
-        val serviceIntent = Intent(this@ProvisioningActivity, EdgeAgentForegroundService::class.java)
-        startForegroundService(serviceIntent)
-
-        // 7. Navigate to diagnostics
-        val intent = Intent(this@ProvisioningActivity, DiagnosticsActivity::class.java)
-        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        startActivity(intent)
-        finish()
     }
 
     private fun showProgress(message: String) {
@@ -718,4 +591,10 @@ data class QrBootstrapData(
     val cloudBaseUrl: String,
     val provisioningToken: String,
     val environment: String? = null,
-)
+) {
+    // S-007: redact the token so it can never appear in a log line even if the
+    // object is accidentally passed to AppLogger or another logging call.
+    override fun toString(): String =
+        "QrBootstrapData(siteCode=$siteCode, cloudBaseUrl=$cloudBaseUrl, " +
+            "provisioningToken=***, environment=$environment)"
+}

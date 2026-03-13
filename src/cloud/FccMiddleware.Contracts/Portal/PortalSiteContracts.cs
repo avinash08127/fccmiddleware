@@ -87,6 +87,32 @@ public sealed record FccConfigurationDto
     public required int HeartbeatIntervalSeconds { get; init; }
     public required int HeartbeatTimeoutSeconds { get; init; }
     public required IReadOnlyList<string> PushSourceIpAllowList { get; init; }
+
+    // F10-01: DOMS TCP/JPL vendor-specific fields
+    public int? JplPort { get; init; }
+    public string? FcAccessCode { get; init; }
+    public string? DomsCountryCode { get; init; }
+    public string? PosVersionId { get; init; }
+    public string? ConfiguredPumps { get; init; }
+
+    // F10-01: Radix vendor-specific fields
+    public string? SharedSecret { get; init; }
+    public int? UsnCode { get; init; }
+    public int? AuthPort { get; init; }
+    public string? FccPumpAddressMap { get; init; }
+
+    // F10-01: Petronite OAuth2 vendor-specific fields
+    public string? ClientId { get; init; }
+    public string? ClientSecret { get; init; }
+    public string? WebhookSecret { get; init; }
+    public string? OAuthTokenEndpoint { get; init; }
+
+    // F10-01: Advatec EFD vendor-specific fields
+    public int? AdvatecDevicePort { get; init; }
+    public string? AdvatecWebhookToken { get; init; }
+    public string? AdvatecEfdSerialNumber { get; init; }
+    public int? AdvatecCustIdType { get; init; }
+    public string? AdvatecPumpMap { get; init; }
 }
 
 public sealed record SecretEnvelopeDto
@@ -129,8 +155,36 @@ public sealed record UpdateFccConfigRequestDto
     public string? TransactionMode { get; init; }
     public string? IngestionMode { get; init; }
     public int? PullIntervalSeconds { get; init; }
+    public int? CatchUpPullIntervalSeconds { get; init; }
+    public int? HybridCatchUpIntervalSeconds { get; init; }
     public int? HeartbeatIntervalSeconds { get; init; }
     public int? HeartbeatTimeoutSeconds { get; init; }
+
+    // F10-01: DOMS TCP/JPL vendor-specific fields
+    public int? JplPort { get; init; }
+    public string? FcAccessCode { get; init; }
+    public string? DomsCountryCode { get; init; }
+    public string? PosVersionId { get; init; }
+    public string? ConfiguredPumps { get; init; }
+
+    // F10-01: Radix vendor-specific fields
+    public string? SharedSecret { get; init; }
+    public int? UsnCode { get; init; }
+    public int? AuthPort { get; init; }
+    public string? FccPumpAddressMap { get; init; }
+
+    // F10-01: Petronite OAuth2 vendor-specific fields
+    public string? ClientId { get; init; }
+    public string? ClientSecret { get; init; }
+    public string? WebhookSecret { get; init; }
+    public string? OAuthTokenEndpoint { get; init; }
+
+    // F10-01: Advatec EFD vendor-specific fields
+    public int? AdvatecDevicePort { get; init; }
+    public string? AdvatecWebhookToken { get; init; }
+    public string? AdvatecEfdSerialNumber { get; init; }
+    public int? AdvatecCustIdType { get; init; }
+    public string? AdvatecPumpMap { get; init; }
 }
 
 public sealed record AddPumpRequestDto

@@ -2,7 +2,7 @@ import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { interval } from 'rxjs';
+import { interval, filter, Subject, EMPTY, switchMap, catchError } from 'rxjs';
 import { CardModule } from 'primeng/card';
 import { ButtonModule } from 'primeng/button';
 import { SelectModule } from 'primeng/select';
@@ -223,6 +223,10 @@ export class DashboardComponent {
   /** Auto-refresh interval — 60 s. Configurable via environment if needed. */
   private readonly REFRESH_INTERVAL_MS = 60_000;
 
+  // BUG-F01-5: Subjects allow switchMap to cancel previous in-flight requests when filter changes.
+  private readonly summaryTrigger$ = new Subject<void>();
+  private readonly alertsTrigger$ = new Subject<void>();
+
   // ── Legal entity filter ────────────────────────────────────────────────────
   private readonly legalEntities = signal<LegalEntity[]>([]);
   readonly selectedLegalEntityId = signal<string | null>(null);
@@ -255,18 +259,64 @@ export class DashboardComponent {
         error: () => {}, // Non-critical — selector simply stays empty
       });
 
+    // BUG-F01-5: switchMap cancels the previous in-flight request whenever the trigger fires,
+    // preventing stale responses from overwriting newer data when the filter changes rapidly.
+    this.summaryTrigger$
+      .pipe(
+        switchMap(() =>
+          this.dashboardService.getSummary(this.getParams()).pipe(
+            catchError(() => {
+              this.summaryError.set('Failed to load dashboard data. Please refresh.');
+              this.summaryLoading.set(false);
+              return EMPTY;
+            }),
+          ),
+        ),
+        takeUntilDestroyed(),
+      )
+      .subscribe((data) => {
+        this.summary.set(data);
+        this.summaryLoading.set(false);
+        this.lastRefreshedAt.set(new Date());
+      });
+
+    this.alertsTrigger$
+      .pipe(
+        switchMap(() =>
+          this.dashboardService.getAlerts(this.getParams()).pipe(
+            catchError(() => {
+              this.alertsError.set('Failed to load alerts.');
+              this.alertsLoading.set(false);
+              return EMPTY;
+            }),
+          ),
+        ),
+        takeUntilDestroyed(),
+      )
+      .subscribe((data) => {
+        this.alerts.set(data.alerts);
+        this.alertsLoading.set(false);
+      });
+
     // Initial data load
     this.loadAll();
 
-    // Auto-refresh
+    // Auto-refresh — pauses when the browser tab is backgrounded (BUG-F01-6 fix)
     interval(this.REFRESH_INTERVAL_MS)
-      .pipe(takeUntilDestroyed())
+      .pipe(
+        filter(() => typeof document === 'undefined' || document.visibilityState === 'visible'),
+        takeUntilDestroyed(),
+      )
       .subscribe(() => this.loadAll());
   }
 
   loadAll(): void {
-    this.loadSummary();
-    this.loadAlerts();
+    this.summaryLoading.set(true);
+    this.summaryError.set(null);
+    this.alertsLoading.set(true);
+    this.alertsError.set(null);
+    this.summaryTrigger$.next();
+    this.alertsTrigger$.next();
   }
 
   onLegalEntityChange(entityId: string | null): void {
@@ -277,44 +327,5 @@ export class DashboardComponent {
   private getParams(): DashboardQueryParams | undefined {
     const id = this.selectedLegalEntityId();
     return id ? { legalEntityId: id } : undefined;
-  }
-
-  private loadSummary(): void {
-    this.summaryLoading.set(true);
-    this.summaryError.set(null);
-
-    this.dashboardService
-      .getSummary(this.getParams())
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (data) => {
-          this.summary.set(data);
-          this.summaryLoading.set(false);
-          this.lastRefreshedAt.set(new Date());
-        },
-        error: () => {
-          this.summaryError.set('Failed to load dashboard data. Please refresh.');
-          this.summaryLoading.set(false);
-        },
-      });
-  }
-
-  private loadAlerts(): void {
-    this.alertsLoading.set(true);
-    this.alertsError.set(null);
-
-    this.dashboardService
-      .getAlerts(this.getParams())
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (data) => {
-          this.alerts.set(data.alerts);
-          this.alertsLoading.set(false);
-        },
-        error: () => {
-          this.alertsError.set('Failed to load alerts.');
-          this.alertsLoading.set(false);
-        },
-      });
   }
 }

@@ -13,6 +13,11 @@ public sealed class GenerateBootstrapTokenHandler
 {
     internal const int MaxActiveTokensPerSite = 5;
 
+    private static readonly HashSet<string> AllowedEnvironments = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "PRODUCTION", "STAGING", "DEVELOPMENT", "LOCAL"
+    };
+
     private readonly IRegistrationDbContext _db;
     private readonly ILogger<GenerateBootstrapTokenHandler> _logger;
 
@@ -34,6 +39,10 @@ public sealed class GenerateBootstrapTokenHandler
         if (site.LegalEntityId != request.LegalEntityId)
             return Result<GenerateBootstrapTokenResult>.Failure("SITE_ENTITY_MISMATCH",
                 "Site does not belong to the specified legal entity.");
+
+        if (request.Environment is not null && !AllowedEnvironments.Contains(request.Environment))
+            return Result<GenerateBootstrapTokenResult>.Failure("INVALID_ENVIRONMENT",
+                $"Invalid environment '{request.Environment}'. Allowed values: {string.Join(", ", AllowedEnvironments)}.");
 
         // Enforce active bootstrap token limit per site
         var activeCount = await _db.CountActiveBootstrapTokensForSiteAsync(
@@ -87,17 +96,29 @@ public sealed class GenerateBootstrapTokenHandler
 
         await _db.SaveChangesAsync(cancellationToken);
 
-        // L-06: Re-check active count after save to detect TOCTOU race.
-        // Two concurrent requests can both pass the initial check; this secondary
-        // check detects and logs when the limit was exceeded by a race.
+        // H-02: Re-check active count after save to detect TOCTOU race.
+        // Two concurrent requests can both pass the initial count check; this secondary
+        // check detects when the limit was exceeded and rolls back the excess token.
         var postSaveCount = await _db.CountActiveBootstrapTokensForSiteAsync(
             request.SiteCode, request.LegalEntityId, cancellationToken);
         if (postSaveCount > MaxActiveTokensPerSite)
         {
             _logger.LogWarning(
                 "Bootstrap token limit exceeded due to concurrent insertion for site {SiteCode} " +
-                "(count={Count}, limit={Limit}). Token was created but limit is soft-breached.",
+                "(count={Count}, limit={Limit}). Revoking the newly created token.",
                 request.SiteCode, postSaveCount, MaxActiveTokensPerSite);
+
+            // Revoke the just-created token to enforce the limit
+            var createdToken = await _db.FindBootstrapTokenByIdAsync(token.Id, cancellationToken);
+            if (createdToken is not null)
+            {
+                createdToken.Status = ProvisioningTokenStatus.REVOKED;
+                await _db.SaveChangesAsync(cancellationToken);
+            }
+
+            return Result<GenerateBootstrapTokenResult>.Failure("ACTIVE_TOKEN_LIMIT_REACHED",
+                $"Site '{request.SiteCode}' exceeded the bootstrap token limit ({MaxActiveTokensPerSite}) " +
+                "due to concurrent requests. The token was revoked. Please retry.");
         }
 
         _logger.LogInformation("Bootstrap token generated for site {SiteCode}, expires at {ExpiresAt}",

@@ -367,6 +367,28 @@ interface TransactionBufferDao {
     suspend fun getByFccTransactionId(fccTransactionId: String): BufferedTransaction?
 
     /**
+     * L-12: Cross-adapter dedup — find an existing transaction matching the same physical
+     * dispense event (same site, pump, completion time, and amount) but from a different adapter.
+     * Returns the existing record's fcc_transaction_id if found, or null.
+     */
+    @Query(
+        "SELECT fcc_transaction_id FROM buffered_transactions " +
+        "WHERE site_code = :siteCode " +
+        "AND pump_number = :pumpNumber " +
+        "AND completed_at = :completedAt " +
+        "AND amount_minor_units = :amountMinorUnits " +
+        "AND fcc_transaction_id != :fccTransactionId " +
+        "LIMIT 1"
+    )
+    suspend fun findCrossAdapterDuplicate(
+        siteCode: String,
+        pumpNumber: Int,
+        completedAt: String,
+        amountMinorUnits: Long,
+        fccTransactionId: String,
+    ): String?
+
+    /**
      * Update the fiscal receipt number on a buffered transaction (ADV-7.3).
      * Called after successful post-dispense fiscalization via [IFiscalizationService].
      */

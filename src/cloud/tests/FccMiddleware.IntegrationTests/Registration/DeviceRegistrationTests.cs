@@ -478,6 +478,28 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Decommission_ActiveDevice_WritesActorToAuditEvent()
+    {
+        var (deviceId, _) = await RegisterDeviceAsync("SN-DECOM-AUDIT-001");
+
+        var response = await _client.PostAsync($"/api/v1/admin/agent/{deviceId}/decommission", null);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var auditEvent = await db.AuditEvents.IgnoreQueryFilters()
+            .Where(a => a.EntityId == deviceId && a.EventType == "DEVICE_DECOMMISSIONED")
+            .OrderByDescending(a => a.CreatedAt)
+            .FirstOrDefaultAsync();
+
+        auditEvent.Should().NotBeNull();
+        using var payload = JsonDocument.Parse(auditEvent!.Payload);
+        payload.RootElement.GetProperty("DecommissionedBy").GetString().Should().Be("portal-admin");
+        payload.RootElement.GetProperty("DeviceId").GetGuid().Should().Be(deviceId);
+    }
+
+    [Fact]
     public async Task Decommission_WithoutPortalAuth_Returns401()
     {
         var (deviceId, _) = await RegisterDeviceAsync("SN-DECOM-NOAUTH-001");
@@ -531,6 +553,20 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
             new { refreshToken });
         // Revoked token returns Unauthorized
         refreshResp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task GetDiagnosticLogs_MaxBatchesAboveLimit_Returns400()
+    {
+        var (deviceId, _) = await RegisterDeviceAsync("SN-DIAG-LIMIT-001");
+
+        var response = await _client.GetAsync($"/api/v1/agents/{deviceId}/diagnostic-logs?maxBatches=101");
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("VALIDATION.INVALID_MAX_BATCHES");
+        body.GetProperty("message").GetString().Should().Be("maxBatches must be between 1 and 100.");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

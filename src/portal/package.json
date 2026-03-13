@@ -4,6 +4,7 @@
   "scripts": {
     "ng": "ng",
     "start": "ng serve",
+    "prebuild": "node scripts/validate-env.js",
     "build": "ng build",
     "build:analyze": "ng build --source-map --named-chunks && source-map-explorer dist/portal/browser/*.js --html dist/portal/bundle-report.html",
     "watch": "ng build --watch --configuration development",

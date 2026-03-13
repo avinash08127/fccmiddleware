@@ -46,6 +46,24 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
      * @throws SQLiteFullException if the insert still fails after emergency cleanup.
      */
     suspend fun bufferTransaction(tx: CanonicalTransaction): Boolean {
+        // L-12: Cross-adapter dedup — detect same physical dispense from different adapter
+        val crossDupe = dao.findCrossAdapterDuplicate(
+            siteCode = tx.siteCode,
+            pumpNumber = tx.pumpNumber,
+            completedAt = tx.completedAt,
+            amountMinorUnits = tx.amountMinorUnits,
+            fccTransactionId = tx.fccTransactionId,
+        )
+        if (crossDupe != null) {
+            AppLogger.w(
+                TAG,
+                "Cross-adapter duplicate detected: fccTxId=${tx.fccTransactionId} " +
+                    "matches existing $crossDupe (site=${tx.siteCode}, pump=${tx.pumpNumber}, " +
+                    "completedAt=${tx.completedAt}, amount=${tx.amountMinorUnits})"
+            )
+            return false
+        }
+
         val entity = tx.toEntity()
         return try {
             val rowId = dao.insert(entity)

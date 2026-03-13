@@ -89,6 +89,11 @@ public sealed class DomsCloudAdapter : IFccAdapter
                 "MISSING_REQUIRED_FIELD",
                 "DOMS field 'transactionId' is required but was null or empty.");
 
+        if (dto.TransactionId.Length > 200)
+            return ValidationResult.Fail(
+                "FIELD_TOO_LONG",
+                $"DOMS field 'transactionId' exceeds max length of 200 (got {dto.TransactionId.Length}).");
+
         if (dto.VolumeMicrolitres <= 0)
             return ValidationResult.Fail(
                 "MISSING_REQUIRED_FIELD",
@@ -119,10 +124,21 @@ public sealed class DomsCloudAdapter : IFccAdapter
                 "MISSING_REQUIRED_FIELD",
                 "DOMS field 'productCode' is required but was null or empty.");
 
+        if (dto.ProductCode.Length > 50)
+            return ValidationResult.Fail(
+                "FIELD_TOO_LONG",
+                $"DOMS field 'productCode' exceeds max length of 50 (got {dto.ProductCode.Length}).");
+
         if (dto.EndTime < dto.StartTime)
             return ValidationResult.Fail(
-                "MISSING_REQUIRED_FIELD",
-                "DOMS field 'endTime' must be >= 'startTime'.");
+                "INVALID_TIMESTAMP",
+                "DOMS field 'endTime' must be after 'startTime'.");
+
+        if (dto.EndTime == dto.StartTime)
+            return ValidationResult.Fail(
+                "INVALID_TIMESTAMP",
+                "DOMS transaction has zero duration (endTime == startTime). " +
+                "A valid fuel dispensing transaction must have a non-zero duration.");
 
         return ValidationResult.Ok();
     }
@@ -154,12 +170,11 @@ public sealed class DomsCloudAdapter : IFccAdapter
 
         if (!response.IsSuccessStatusCode)
         {
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
             bool recoverable = (int)response.StatusCode is 408 or 429 or >= 500;
 
             throw new InvalidOperationException(
                 $"DOMS returned HTTP {(int)response.StatusCode} for site {_config.SiteCode}. " +
-                $"Recoverable={recoverable}. Body: {body[..Math.Min(body.Length, 512)]}");
+                $"Recoverable={recoverable}.");
         }
 
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -200,28 +215,20 @@ public sealed class DomsCloudAdapter : IFccAdapter
 
     /// <summary>
     /// Parses the raw payload string as a single DOMS transaction.
-    /// DOMS may push either a bare transaction object or a wrapper object with a
-    /// "transactions" array; we accept both shapes without a config flag (§5.5).
-    /// Multi-item array shapes are rejected here — the caller must iterate.
+    /// Only the canonical bare transaction object shape is accepted:
+    ///   { "transactionId": "...", ... }
+    /// Wrapped array shapes must be unpacked by the caller before invoking this method.
     /// </summary>
     private static DomsTransactionDto ParseSingleTransaction(string payload)
     {
         using var doc = JsonDocument.Parse(payload);
         var root = doc.RootElement;
 
-        // Shape 1: { "transactions": [ {...} ] }  — single-item wrapper
-        if (root.TryGetProperty("transactions", out var arrayProp))
-        {
-            if (arrayProp.GetArrayLength() != 1)
-                throw new InvalidOperationException(
-                    "UNSUPPORTED_MESSAGE_TYPE: NormalizeTransaction accepts exactly one transaction. " +
-                    "Iterate multi-item arrays before calling this method.");
+        if (root.TryGetProperty("transactions", out _))
+            throw new InvalidOperationException(
+                "UNSUPPORTED_MESSAGE_TYPE: Wrapped array shape is not accepted. " +
+                "Submit each transaction as a bare object { \"transactionId\": \"...\", ... }.");
 
-            var single = arrayProp[0].GetRawText();
-            return JsonSerializer.Deserialize<DomsTransactionDto>(single, JsonOpts)!;
-        }
-
-        // Shape 2: bare transaction object { "transactionId": "...", ... }
         return JsonSerializer.Deserialize<DomsTransactionDto>(payload, JsonOpts)!;
     }
 

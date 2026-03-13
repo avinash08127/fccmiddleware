@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FccMiddleware.Adapter.Advatec.Internal;
+using FccMiddleware.Domain.Common;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Domain.Models.Adapter;
@@ -88,6 +89,12 @@ public sealed class AdvatecCloudAdapter : IFccAdapter
         if (string.IsNullOrWhiteSpace(envelope.Data.TransactionId))
             return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Advatec Receipt missing TransactionId.");
 
+        // FccTransactionId = "{siteCode}-{transactionId}" — DB max is 200 chars
+        if (envelope.Data.TransactionId.Length > 200)
+            return ValidationResult.Fail(
+                "FIELD_TOO_LONG",
+                $"Advatec TransactionId exceeds max length of 200 (got {envelope.Data.TransactionId.Length}).");
+
         if (envelope.Data.Items is null || envelope.Data.Items.Count == 0)
             return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Advatec Receipt has no Items.");
 
@@ -138,7 +145,7 @@ public sealed class AdvatecCloudAdapter : IFccAdapter
         var volumeMicrolitres = (long)(item.Quantity * 1_000_000m);
 
         // Amount: AmountInclusive * currency factor = minor units
-        var currencyFactor = GetCurrencyFactor(_config.CurrencyCode);
+        var currencyFactor = CurrencyHelper.GetCurrencyFactor(_config.CurrencyCode);
         var amountMinorUnits = (long)(receipt.AmountInclusive * currencyFactor);
 
         // Unit price: Item.Price * currency factor = minor per litre
@@ -151,15 +158,22 @@ public sealed class AdvatecCloudAdapter : IFccAdapter
             : rawProduct;
 
         // Timestamps: Date + Time with configured timezone -> UTC
+        // L-07: Reject transactions with unparseable timestamps instead of silently using UtcNow.
         var completedAt = ParseAdvatecTimestamp(receipt.Date, receipt.Time, _config.Timezone)
-            ?? DateTimeOffset.UtcNow;
+            ?? throw new InvalidOperationException(
+                $"Advatec timestamp failed to parse for transaction {fccTransactionId} " +
+                $"(date: '{receipt.Date}', time: '{receipt.Time}'). " +
+                "Cannot normalize transaction without a valid timestamp.");
         var startedAt = completedAt; // Only one timestamp available
+
+        // Resolve pump number from EFD serial → pump map, fallback to offset-based default
+        var pumpNumber = ResolvePumpNumber(receipt.Company?.SerialNumber);
 
         return new CanonicalTransaction
         {
             FccTransactionId = fccTransactionId,
             SiteCode = siteCode,
-            PumpNumber = 0 - _config.PumpNumberOffset, // AQ-3: pump not in receipt
+            PumpNumber = pumpNumber,
             NozzleNumber = 1, // AQ-9: no nozzle concept
             ProductCode = productCode,
             VolumeMicrolitres = volumeMicrolitres,
@@ -171,6 +185,19 @@ public sealed class AdvatecCloudAdapter : IFccAdapter
             FccVendor = FccVendor.ADVATEC,
             FiscalReceiptNumber = receipt.ReceiptCode,
         };
+    }
+
+    private int ResolvePumpNumber(string? efdSerialNumber)
+    {
+        if (_config.AdvatecPumpMap != null
+            && !string.IsNullOrWhiteSpace(efdSerialNumber)
+            && _config.AdvatecPumpMap.TryGetValue(efdSerialNumber, out var pump))
+        {
+            return pump;
+        }
+
+        // Fallback: no map or serial not found
+        return 0 - _config.PumpNumberOffset;
     }
 
     private static DateTimeOffset? ParseAdvatecTimestamp(
@@ -195,13 +222,4 @@ public sealed class AdvatecCloudAdapter : IFccAdapter
         }
     }
 
-    private static decimal GetCurrencyFactor(string currencyCode)
-    {
-        return currencyCode.ToUpperInvariant() switch
-        {
-            "KWD" or "BHD" or "OMR" => 1000m,
-            "JPY" or "KRW" or "TZS" or "UGX" or "RWF" => 1m,
-            _ => 100m
-        };
-    }
 }

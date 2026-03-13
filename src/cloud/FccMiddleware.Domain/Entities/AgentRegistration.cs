@@ -1,3 +1,5 @@
+using FccMiddleware.Domain.Interfaces;
+
 namespace FccMiddleware.Domain.Entities;
 
 /// <summary>
@@ -5,7 +7,7 @@ namespace FccMiddleware.Domain.Entities;
 /// The Id is the stable deviceId used in JWT claims.
 /// TokenHash stores a one-way hash of the device token — never the token itself.
 /// </summary>
-public class AgentRegistration
+public class AgentRegistration : ITenantScoped
 {
     public Guid Id { get; set; }
     public Guid SiteId { get; set; }

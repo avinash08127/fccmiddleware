@@ -173,6 +173,17 @@ data class WebSocketDto(
     val pumpStatusBroadcastIntervalSeconds: Int = 3,
     /** Whether LAN WebSocket connections require an API key. */
     val requireApiKeyForLan: Boolean = false,
+    /**
+     * S-005: Shared secret required in the `X-Api-Key` header for every incoming
+     * WebSocket connection. Null or blank disables authentication (legacy mode for
+     * Odoo POS deployments that cannot supply a header). Deliver via cloud config.
+     */
+    val sharedSecret: String? = null,
+    /**
+     * S-005: Maximum WebSocket command messages allowed per connection per minute.
+     * Excess messages are dropped with an error frame. 0 = unlimited (not recommended).
+     */
+    val commandRateLimitPerMinute: Int = 60,
 )
 
 @Serializable

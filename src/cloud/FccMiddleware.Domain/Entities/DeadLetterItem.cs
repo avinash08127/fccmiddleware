@@ -1,11 +1,12 @@
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Interfaces;
 
 namespace FccMiddleware.Domain.Entities;
 
 /// <summary>
 /// Operational dead-letter record surfaced to the portal for manual retry/discard flows.
 /// </summary>
-public class DeadLetterItem
+public class DeadLetterItem : ITenantScoped
 {
     public Guid Id { get; set; }
     public Guid LegalEntityId { get; set; }

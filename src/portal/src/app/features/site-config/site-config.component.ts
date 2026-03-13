@@ -10,10 +10,13 @@ import { CardModule } from 'primeng/card';
 import { SelectModule } from 'primeng/select';
 import { ToggleSwitchModule } from 'primeng/toggleswitch';
 import { PanelModule } from 'primeng/panel';
+import { ToastModule } from 'primeng/toast';
 import { FormsModule } from '@angular/forms';
+import { MessageService } from 'primeng/api';
 
 import { SiteService, SiteQueryParams } from '../../core/services/site.service';
 import { MasterDataService } from '../../core/services/master-data.service';
+import { LoggingService } from '../../core/services/logging.service';
 import {
   Site,
   SiteOperatingModel,
@@ -47,11 +50,14 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
     SelectModule,
     ToggleSwitchModule,
     PanelModule,
+    ToastModule,
     StatusBadgeComponent,
     EmptyStateComponent,
     StatusLabelPipe,
   ],
+  providers: [MessageService],
   template: `
+    <p-toast />
     <div class="page-container">
       <!-- Header -->
       <div class="page-header">
@@ -105,7 +111,7 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
 
             <div class="filter-field filter-field--toggle">
               <p-toggleswitch inputId="site-filter-active-only" [(ngModel)]="filterActiveOnly" (ngModelChange)="onFilterChange()" />
-              <label for="site-filter-active-only">Active only</label>
+              <label for="site-filter-active-only">Active sites only</label>
             </div>
           </div>
         </p-panel>
@@ -289,6 +295,8 @@ export class SiteConfigComponent {
   private readonly masterDataService = inject(MasterDataService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly messageService = inject(MessageService);
+  private readonly logger = inject(LoggingService);
 
   readonly pageSize = 20;
 
@@ -330,10 +338,23 @@ export class SiteConfigComponent {
   ];
 
   constructor() {
+    // F09-06: Error handler added — a failed legal-entity load leaves the page unusable,
+    // so we must surface the failure rather than silently leaving the dropdown empty.
     this.masterDataService
       .getLegalEntities()
       .pipe(takeUntilDestroyed())
-      .subscribe({ next: (entities) => this.legalEntities.set(entities) });
+      .subscribe({
+        next: (entities) => this.legalEntities.set(entities),
+        error: () => {
+          this.logger.error('SiteConfigComponent', 'Failed to load legal entities');
+          this.messageService.add({
+            severity: 'error',
+            summary: 'Load failed',
+            detail: 'Could not load legal entities. Please refresh the page.',
+            life: 0,
+          });
+        },
+      });
 
     this.load$
       .pipe(
@@ -348,10 +369,18 @@ export class SiteConfigComponent {
           if (req.connectivityMode) params.connectivityMode = req.connectivityMode;
           if (req.isActive != null) params.isActive = req.isActive;
           return this.siteService.getSites(params).pipe(
+            // F09-05: Surface load failures to the user instead of silently showing an empty table.
             catchError(() => {
               this.sites.set([]);
               this.totalRecords.set(0);
               this.loading.set(false);
+              this.logger.error('SiteConfigComponent', 'Failed to load sites');
+              this.messageService.add({
+                severity: 'error',
+                summary: 'Load failed',
+                detail: 'Could not load sites. Please try again.',
+                life: 5000,
+              });
               return EMPTY;
             }),
           );

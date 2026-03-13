@@ -1,6 +1,7 @@
 import { Component, DestroyRef, inject, signal, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
+import { distinctUntilChanged, map } from 'rxjs';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CardModule } from 'primeng/card';
 import { ButtonModule } from 'primeng/button';
@@ -23,12 +24,9 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
 function txSeverity(status: TransactionStatus): PrimeSeverity {
   switch (status) {
     case TransactionStatus.SYNCED_TO_ODOO:
-    case TransactionStatus.SYNCED:
       return 'success';
     case TransactionStatus.PENDING:
       return 'warn';
-    case TransactionStatus.STALE_PENDING:
-      return 'danger';
     case TransactionStatus.DUPLICATE:
     case TransactionStatus.ARCHIVED:
       return 'secondary';
@@ -246,6 +244,10 @@ function txSeverity(status: TransactionStatus): PrimeSeverity {
                   <span class="field-label">Schema Version</span>
                   <span class="field-value">{{ tx()!.schemaVersion }}</span>
                 </div>
+                <div class="field-item">
+                  <span class="field-label">Stale</span>
+                  <span class="field-value">{{ tx()!.isStale ? 'Yes' : 'No' }}</span>
+                </div>
               </div>
             </section>
 
@@ -278,6 +280,11 @@ function txSeverity(status: TransactionStatus): PrimeSeverity {
           <p-card header="Event Trail">
             @if (eventsLoading()) {
               <p-skeleton height="240px" />
+            } @else if (eventsError()) {
+              <div class="no-events no-events--error">
+                <i class="pi pi-exclamation-triangle"></i>
+                <span>{{ eventsError() }}</span>
+              </div>
             } @else if (auditEvents().length === 0) {
               <div class="no-events">
                 <i class="pi pi-history"></i>
@@ -447,6 +454,9 @@ function txSeverity(status: TransactionStatus): PrimeSeverity {
         padding: 1rem 0;
         font-size: 0.875rem;
       }
+      .no-events--error {
+        color: var(--p-red-500, #ef4444);
+      }
       .timeline-dot {
         color: var(--p-primary-color, #3b82f6);
         font-size: 0.6rem;
@@ -497,18 +507,30 @@ export class TransactionDetailComponent implements OnInit {
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
+  private currentId: string | null = null;
+
   readonly tx = signal<TransactionDetail | null>(null);
   readonly loading = signal(true);
   readonly error = signal<string | null>(null);
   readonly auditEvents = signal<AuditEvent[]>([]);
   readonly eventsLoading = signal(false);
+  readonly eventsError = signal<string | null>(null);
 
   ngOnInit(): void {
-    this.load();
+    this.route.paramMap
+      .pipe(
+        map(params => params.get('id')),
+        distinctUntilChanged(),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(id => {
+        this.currentId = id;
+        this.load();
+      });
   }
 
   load(): void {
-    const id = this.route.snapshot.paramMap.get('id');
+    const id = this.currentId;
     if (!id) {
       this.error.set('Invalid transaction ID.');
       this.loading.set(false);
@@ -560,6 +582,7 @@ export class TransactionDetailComponent implements OnInit {
 
   private loadAuditEvents(transaction: TransactionDetail): void {
     this.eventsLoading.set(true);
+    this.eventsError.set(null);
     this.auditService
       .getAuditEvents({
         legalEntityId: transaction.legalEntityId,
@@ -572,7 +595,10 @@ export class TransactionDetailComponent implements OnInit {
           this.auditEvents.set(result.data);
           this.eventsLoading.set(false);
         },
-        error: () => this.eventsLoading.set(false),
+        error: () => {
+          this.eventsError.set('Failed to load audit events.');
+          this.eventsLoading.set(false);
+        },
       });
   }
 }

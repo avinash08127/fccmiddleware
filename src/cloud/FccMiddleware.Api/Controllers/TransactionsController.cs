@@ -11,6 +11,7 @@ using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Ingestion;
 using FccMiddleware.Contracts.Transactions;
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Infrastructure.Adapters;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -58,6 +59,7 @@ public sealed class TransactionsController : ControllerBase
     /// <param name="request">FCC vendor, site code, capture timestamp and raw payload envelope.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     [HttpPost("ingest")]
+    [RequestSizeLimit(1_048_576)] // M-14: 1 MB max, matching webhook endpoints
     [Authorize(Policy = FccHmacAuthOptions.PolicyName)]
     [ProducesResponseType(typeof(IngestBatchResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(IngestResponse), StatusCodes.Status202Accepted)]
@@ -75,6 +77,14 @@ public sealed class TransactionsController : ControllerBase
             return BadRequest(BuildError(
                 "VALIDATION.INVALID_VENDOR",
                 $"Unknown FCC vendor '{request.FccVendor}'. Valid values: {string.Join(", ", Enum.GetNames<FccVendor>())}",
+                retryable: false));
+        }
+
+        if (!CloudFccAdapterFactoryRegistration.IsSupported(vendor))
+        {
+            return BadRequest(BuildError(
+                "VALIDATION.UNSUPPORTED_VENDOR",
+                $"Vendor '{vendor}' is not supported. Supported vendors: {string.Join(", ", CloudFccAdapterFactoryRegistration.SupportedVendors)}",
                 retryable: false));
         }
 
@@ -136,18 +146,28 @@ public sealed class TransactionsController : ControllerBase
         if (!Request.Headers.TryGetValue("X-Usn-Code", out var usnHeader)
             || !int.TryParse(usnHeader.FirstOrDefault(), out var usnCode))
         {
-            return BadRequest(Content(
-                "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>MISSING_USN_CODE</ERROR_CODE></RESP>",
-                "text/xml"));
+            return new ContentResult
+            {
+                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>MISSING_USN_CODE</ERROR_CODE></RESP>",
+                ContentType = "text/xml",
+                StatusCode = StatusCodes.Status400BadRequest
+            };
         }
 
         // ── Lookup site by USN code ───────────────────────────────────────────
         var siteResult = await _siteFccConfigProvider.GetByUsnCodeAsync(usnCode, cancellationToken);
         if (siteResult is null)
         {
-            return NotFound(Content(
-                "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>USN_NOT_FOUND</ERROR_CODE></RESP>",
-                "text/xml"));
+            // M-12: Log failed lookups to help detect USN enumeration attempts.
+            _logger.LogWarning(
+                "Radix ingest: USN code {UsnCode} not found (IP: {RemoteIp})",
+                usnCode, HttpContext.Connection.RemoteIpAddress);
+            return new ContentResult
+            {
+                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>USN_NOT_FOUND</ERROR_CODE></RESP>",
+                ContentType = "text/xml",
+                StatusCode = StatusCodes.Status404NotFound
+            };
         }
 
         var (siteConfig, _) = siteResult.Value;
@@ -173,9 +193,12 @@ public sealed class TransactionsController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(rawXml))
         {
-            return BadRequest(Content(
-                "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>EMPTY_PAYLOAD</ERROR_CODE></RESP>",
-                "text/xml"));
+            return new ContentResult
+            {
+                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>EMPTY_PAYLOAD</ERROR_CODE></RESP>",
+                ContentType = "text/xml",
+                StatusCode = StatusCodes.Status400BadRequest
+            };
         }
 
         // ── Feed into standard ingest pipeline with text/xml content type ─────
@@ -188,7 +211,8 @@ public sealed class TransactionsController : ControllerBase
             CapturedAt = DateTimeOffset.UtcNow,
             RawPayload = rawXml,
             ContentType = "text/xml",
-            CorrelationId = correlationId
+            CorrelationId = correlationId,
+            IngestionSource = IngestionSource.CLOUD_DIRECT
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -242,6 +266,13 @@ public sealed class TransactionsController : ControllerBase
 
         var webhookSecret = secretHeader.First()!;
 
+        if (webhookSecret.Length > 512)
+        {
+            return Unauthorized(BuildError(
+                "UNAUTHORIZED.INVALID_WEBHOOK_SECRET",
+                "Webhook secret exceeds maximum allowed length."));
+        }
+
         // ── Lookup site by webhook secret (constant-time comparison) ──────────
         var siteResult = await _siteFccConfigProvider.GetByWebhookSecretAsync(webhookSecret, cancellationToken);
         if (siteResult is null)
@@ -273,7 +304,8 @@ public sealed class TransactionsController : ControllerBase
             CapturedAt = DateTimeOffset.UtcNow,
             RawPayload = rawJson,
             ContentType = "application/json",
-            CorrelationId = correlationId
+            CorrelationId = correlationId,
+            IngestionSource = IngestionSource.WEBHOOK
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -331,6 +363,13 @@ public sealed class TransactionsController : ControllerBase
 
         var tokenValue = tokenHeader.First()!;
 
+        if (tokenValue.Length > 512)
+        {
+            return Unauthorized(BuildError(
+                "UNAUTHORIZED.INVALID_WEBHOOK_TOKEN",
+                "Webhook token exceeds maximum allowed length."));
+        }
+
         // ── Lookup site by Advatec webhook token (constant-time comparison) ──
         var siteResult = await _siteFccConfigProvider.GetByAdvatecWebhookTokenAsync(tokenValue, cancellationToken);
         if (siteResult is null)
@@ -362,7 +401,8 @@ public sealed class TransactionsController : ControllerBase
             CapturedAt = DateTimeOffset.UtcNow,
             RawPayload = rawJson,
             ContentType = "application/json",
-            CorrelationId = correlationId
+            CorrelationId = correlationId,
+            IngestionSource = IngestionSource.WEBHOOK
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -472,7 +512,8 @@ public sealed class TransactionsController : ControllerBase
         DateTimeOffset capturedAt,
         string rawPayload,
         Guid correlationId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IngestionSource ingestionSource = IngestionSource.FCC_PUSH)
     {
         // Detect content type: if the payload looks like XML, route as text/xml
         // so the adapter can apply vendor-specific XML validation (e.g., Radix signature).
@@ -487,7 +528,8 @@ public sealed class TransactionsController : ControllerBase
             CapturedAt = capturedAt,
             RawPayload = rawPayload,
             ContentType = contentType,
-            CorrelationId = correlationId
+            CorrelationId = correlationId,
+            IngestionSource = ingestionSource
         };
 
         return await _mediator.Send(command, cancellationToken);
@@ -602,6 +644,15 @@ public sealed class TransactionsController : ControllerBase
             return true;
         }
 
+        // M-13: Enforce batch size limit matching Upload/Acknowledge endpoints.
+        if (transactionArray.GetArrayLength() > 500)
+        {
+            error = BuildError(
+                "VALIDATION.BATCH_TOO_LARGE",
+                $"Batch size {transactionArray.GetArrayLength()} exceeds maximum of 500.");
+            return true;
+        }
+
         transactions = transactionArray.EnumerateArray().ToArray();
         return true;
     }
@@ -709,6 +760,13 @@ public sealed class TransactionsController : ControllerBase
         {
             return BadRequest(BuildError("VALIDATION.INVALID_LEI",
                 "JWT 'lei' claim is not a valid UUID."));
+        }
+
+        // M-15: Validate that every item's SiteCode matches the authenticated device's site claim.
+        if (request.Transactions.Any(t => !string.Equals(t.SiteCode, siteCode, StringComparison.OrdinalIgnoreCase)))
+        {
+            return BadRequest(BuildError("VALIDATION.SITE_MISMATCH",
+                "All transactions must belong to the authenticated device's site."));
         }
 
         var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
@@ -855,6 +913,10 @@ public sealed class TransactionsController : ControllerBase
         if (pageSize is < 1 or > 100)
             return BadRequest(BuildError("VALIDATION.INVALID_PAGE_SIZE",
                 "pageSize must be between 1 and 100."));
+
+        if (cursor is { Length: > 512 })
+            return BadRequest(BuildError("VALIDATION.INVALID_CURSOR",
+                "Cursor exceeds maximum allowed length."));
 
         var query = new PollTransactionsQuery
         {

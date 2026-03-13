@@ -8,6 +8,7 @@ import com.fccmiddleware.edge.security.KeystoreManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.net.URI
 import java.time.Instant
 
 /**
@@ -288,20 +289,83 @@ class ConfigManager(
     }
 
     /**
-     * M-16: Validate that URL fields use secure schemes.
+     * M-16 + M-23: Validate that URL fields use secure schemes and are not
+     * SSRF vectors (no localhost, loopback, private IPs, or non-standard ports).
      * Returns list of violation descriptions (empty = all OK).
      */
     private fun validateUrls(cfg: EdgeAgentConfigDto): List<String> {
         val violations = mutableListOf<String>()
-        if (!cfg.sync.cloudBaseUrl.startsWith("https://")) {
-            violations += "sync.cloudBaseUrl must use HTTPS (got: ${cfg.sync.cloudBaseUrl.take(8)}…)"
-        }
+
+        validateExternalUrl(cfg.sync.cloudBaseUrl, "sync.cloudBaseUrl", violations)
+
         cfg.fiscalization.taxAuthorityEndpoint?.let { endpoint ->
-            if (endpoint.isNotBlank() && !endpoint.startsWith("https://")) {
-                violations += "fiscalization.taxAuthorityEndpoint must use HTTPS"
+            if (endpoint.isNotBlank()) {
+                validateExternalUrl(endpoint, "fiscalization.taxAuthorityEndpoint", violations)
             }
         }
+
         return violations
+    }
+
+    /**
+     * M-23: Validates a single URL for HTTPS, SSRF-safe host, and valid port range.
+     */
+    private fun validateExternalUrl(url: String, fieldName: String, violations: MutableList<String>) {
+        if (!url.startsWith("https://")) {
+            violations += "$fieldName must use HTTPS (got: ${url.take(8)}…)"
+            return // remaining checks need a parseable HTTPS URL
+        }
+
+        val parsed = try {
+            URI(url)
+        } catch (e: Exception) {
+            violations += "$fieldName is not a valid URL: ${e.message}"
+            return
+        }
+
+        val host = parsed.host?.lowercase()
+        if (host.isNullOrBlank()) {
+            violations += "$fieldName has no host"
+            return
+        }
+
+        // Block localhost and loopback
+        if (host == "localhost" || host.startsWith("127.") || host == "::1" || host == "[::1]") {
+            violations += "$fieldName must not point to localhost/loopback"
+        }
+
+        // Block RFC-1918 private IP ranges and link-local
+        if (isPrivateOrReservedIp(host)) {
+            violations += "$fieldName must not point to a private/reserved IP address"
+        }
+
+        // Block non-standard ports (only 443 allowed for HTTPS)
+        val port = parsed.port
+        if (port != -1 && port != 443) {
+            violations += "$fieldName must use standard HTTPS port 443 (got: $port)"
+        }
+    }
+
+    /**
+     * M-23: Checks whether a hostname looks like a private, link-local, or reserved IP.
+     * Does NOT perform DNS resolution (which could itself be an SSRF vector).
+     */
+    private fun isPrivateOrReservedIp(host: String): Boolean {
+        // IPv4 patterns
+        if (host.startsWith("10.")) return true
+        if (host.startsWith("172.")) {
+            val second = host.removePrefix("172.").substringBefore(".").toIntOrNull()
+            if (second != null && second in 16..31) return true
+        }
+        if (host.startsWith("192.168.")) return true
+        if (host.startsWith("169.254.")) return true   // link-local
+        if (host.startsWith("0.")) return true           // "this" network
+        if (host == "0.0.0.0") return true
+        // IPv6 patterns (simplified — full IPv6 SSRF is complex)
+        val lower = host.removePrefix("[").removeSuffix("]")
+        if (lower.startsWith("fe80:")) return true       // link-local
+        if (lower.startsWith("fc") || lower.startsWith("fd")) return true // unique-local
+        return false
     }
 
     private fun validateFccSupport(cfg: EdgeAgentConfigDto): String? {

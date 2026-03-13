@@ -1,4 +1,5 @@
 using System.Xml.Linq;
+using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.Core.Adapter.Radix;
 
@@ -20,6 +21,17 @@ namespace FccDesktopAgent.Core.Adapter.Radix;
 /// </summary>
 public static class RadixXmlParser
 {
+    private static ILogger? _logger;
+
+    /// <summary>
+    /// Sets a logger for XML parsing diagnostics. Call once at startup.
+    /// Without a logger, parse failures are silent (backward compatible).
+    /// </summary>
+    public static void SetLogger(ILoggerFactory? loggerFactory)
+    {
+        _logger = loggerFactory?.CreateLogger(typeof(RadixXmlParser));
+    }
+
     // -----------------------------------------------------------------------
     // Public — Response parsing
     // -----------------------------------------------------------------------
@@ -77,8 +89,11 @@ public static class RadixXmlParser
                 CustomerData: customerData,
                 Signature: signature);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogWarning(ex,
+                "Failed to parse Radix transaction XML ({Length} chars): {Preview}",
+                xml.Length, xml.Length > 200 ? xml[..200] + "…" : xml);
             return null;
         }
     }
@@ -123,8 +138,11 @@ public static class RadixXmlParser
                 AckMsg: ChildText(fdcAck, "ACKMSG"),
                 Signature: signature);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogWarning(ex,
+                "Failed to parse Radix auth XML ({Length} chars): {Preview}",
+                xml.Length, xml.Length > 200 ? xml[..200] + "…" : xml);
             return null;
         }
     }
@@ -169,8 +187,11 @@ public static class RadixXmlParser
                 RespMsg: respMsg,
                 Products: products);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogWarning(ex,
+                "Failed to parse Radix product XML ({Length} chars): {Preview}",
+                xml.Length, xml.Length > 200 ? xml[..200] + "…" : xml);
             return null;
         }
     }

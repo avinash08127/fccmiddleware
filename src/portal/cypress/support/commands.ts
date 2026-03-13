@@ -1,7 +1,13 @@
 /// <reference types="cypress" />
 
 // ─── Role type ────────────────────────────────────────────────────────────────
-export type AppRole = 'SystemAdmin' | 'OperationsManager' | 'SiteSupervisor' | 'Auditor';
+export type AppRole =
+  | 'SystemAdmin'
+  | 'SystemAdministrator'
+  | 'OperationsManager'
+  | 'SiteSupervisor'
+  | 'Auditor'
+  | 'SupportReadOnly';
 
 // ─── MSAL session mock ────────────────────────────────────────────────────────
 // Instead of going through the real Azure Entra login flow, we inject MSAL
@@ -74,10 +80,7 @@ Cypress.Commands.add('loginAs', (role: AppRole) => {
     win.sessionStorage.setItem(idTokenKey, JSON.stringify(idToken));
     win.sessionStorage.setItem(accessTokenKey, JSON.stringify(accessToken));
     // MSAL active account key
-    win.sessionStorage.setItem(
-      `msal.${clientId}.active-account`,
-      accountKey,
-    );
+    win.sessionStorage.setItem(`msal.${clientId}.active-account`, accountKey);
   });
 });
 

@@ -16,21 +16,28 @@ import com.fccmiddleware.edge.R
 
 class SplashActivity : AppCompatActivity() {
 
+    private val handler = Handler(Looper.getMainLooper())
+    private val navigateRunnable = Runnable {
+        startActivity(Intent(this, LauncherActivity::class.java))
+        // L-01: Transition animation must be set before finish() to affect the outgoing transition
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            overrideActivityTransition(Activity.OVERRIDE_TRANSITION_CLOSE, android.R.anim.fade_in, android.R.anim.fade_out)
+        } else {
+            @Suppress("DEPRECATION")
+            overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
+        }
+        finish()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
+        handler.postDelayed(navigateRunnable, 2000)
+    }
 
-        Handler(Looper.getMainLooper()).postDelayed({
-            startActivity(Intent(this, LauncherActivity::class.java))
-            // L-01: Transition animation must be set before finish() to affect the outgoing transition
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                overrideActivityTransition(Activity.OVERRIDE_TRANSITION_CLOSE, android.R.anim.fade_in, android.R.anim.fade_out)
-            } else {
-                @Suppress("DEPRECATION")
-                overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
-            }
-            finish()
-        }, 2000)
+    override fun onDestroy() {
+        handler.removeCallbacks(navigateRunnable)
+        super.onDestroy()
     }
 
     private fun buildLayout(): FrameLayout {

@@ -129,30 +129,38 @@ import { environment } from '../../../environments/environment';
                 <span class="detail-label">Provisioning Token</span>
                 <div class="token-value-row">
                   <code class="token-code">{{ tokenDisplay() }}</code>
-                  <p-button
-                    [icon]="copied() ? 'pi pi-check' : 'pi pi-copy'"
-                    [severity]="copied() ? 'success' : 'secondary'"
-                    size="small"
-                    [rounded]="true"
-                    [text]="true"
-                    pTooltip="Copy to clipboard"
-                    (onClick)="copyToken()"
-                  />
-                  <p-button
-                    [icon]="tokenRevealed() ? 'pi pi-eye-slash' : 'pi pi-eye'"
-                    severity="secondary"
-                    size="small"
-                    [rounded]="true"
-                    [text]="true"
-                    [pTooltip]="tokenRevealed() ? 'Hide' : 'Reveal'"
-                    (onClick)="tokenRevealed.set(!tokenRevealed())"
-                  />
+                  @if (!tokenCleared()) {
+                    <p-button
+                      [icon]="copied() ? 'pi pi-check' : 'pi pi-copy'"
+                      [severity]="copied() ? 'success' : 'secondary'"
+                      size="small"
+                      [rounded]="true"
+                      [text]="true"
+                      pTooltip="Copy to clipboard & clear from memory"
+                      (onClick)="copyToken()"
+                    />
+                    <p-button
+                      [icon]="tokenRevealed() ? 'pi pi-eye-slash' : 'pi pi-eye'"
+                      severity="secondary"
+                      size="small"
+                      [rounded]="true"
+                      [text]="true"
+                      [pTooltip]="tokenRevealed() ? 'Hide' : 'Reveal'"
+                      (onClick)="tokenRevealed.set(!tokenRevealed())"
+                    />
+                  }
                 </div>
               </div>
 
-              <p-message severity="warn" styleClass="result-msg">
-                Copy this token now. It will not be shown again.
-              </p-message>
+              @if (tokenCleared()) {
+                <p-message severity="info" styleClass="result-msg">
+                  Token copied to clipboard and cleared from browser memory.
+                </p-message>
+              } @else {
+                <p-message severity="warn" styleClass="result-msg">
+                  Copy this token now. It will be cleared from memory after copying.
+                </p-message>
+              }
 
               @if (!tokenRevoked()) {
                 <div class="revoke-actions">
@@ -182,6 +190,10 @@ import { environment } from '../../../environments/environment';
                 <p class="qr-hint">
                   Scan this QR code with the Android edge agent to provision the device.
                 </p>
+                <p-message severity="warn" styleClass="qr-security-warn">
+                  This QR code contains the provisioning token. Do not leave printed copies unattended.
+                  The token expires in 72 hours.
+                </p-message>
                 <div class="qr-image-wrapper">
                   <img [src]="qrDataUrl()" alt="Provisioning QR Code" class="qr-image" />
                 </div>
@@ -333,6 +345,7 @@ import { environment } from '../../../environments/environment';
       border-radius: 0.5rem;
       box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
     }
+    .qr-security-warn { margin-bottom: 0.75rem; width: 100%; text-align: left; }
     .qr-actions {
       display: flex;
       justify-content: center;
@@ -378,15 +391,22 @@ export class BootstrapTokenComponent {
   readonly tokenRevealed = signal(false);
   readonly qrDataUrl = signal<string | null>(null);
 
+  // M-17: Hold the raw token separately so it can be cleared from memory
+  // after copy. The generatedToken signal retains metadata (tokenId, expiresAt, siteCode)
+  // but rawToken is scrubbed.
+  private rawTokenValue: string | null = null;
+  readonly tokenCleared = signal(false);
+
   // Revocation state
   readonly revoking = signal(false);
   readonly tokenRevoked = signal(false);
 
   readonly tokenDisplay = computed(() => {
-    const token = this.generatedToken();
-    if (!token) return '';
-    if (this.tokenRevealed()) return token.rawToken;
-    return token.rawToken.substring(0, 6) + '...' + token.rawToken.substring(token.rawToken.length - 4);
+    if (this.tokenCleared()) return '(cleared from memory)';
+    const raw = this.rawTokenValue;
+    if (!raw) return '';
+    if (this.tokenRevealed()) return raw;
+    return raw.substring(0, 6) + '...' + raw.substring(raw.length - 4);
   });
 
   constructor() {
@@ -411,6 +431,7 @@ export class BootstrapTokenComponent {
         .pipe(
           catchError(() => {
             this.loadingSites.set(false);
+            this.error.set('Failed to load sites. Please try again.');
             return EMPTY;
           }),
           takeUntilDestroyed(this.destroyRef),
@@ -430,6 +451,8 @@ export class BootstrapTokenComponent {
     this.generating.set(true);
     this.error.set(null);
     this.generatedToken.set(null);
+    this.rawTokenValue = null;
+    this.tokenCleared.set(false);
     this.copied.set(false);
     this.tokenRevealed.set(false);
     this.qrDataUrl.set(null);
@@ -445,7 +468,17 @@ export class BootstrapTokenComponent {
       .generate(req)
       .pipe(
         catchError((err) => {
-          const msg = err?.error?.message ?? 'Failed to generate bootstrap token.';
+          console.error('Bootstrap token generation failed:', err);
+          let msg: string;
+          if (err.status === 0) {
+            msg = 'Network error — please check your connection and try again.';
+          } else if (err.status === 403) {
+            msg = 'You do not have permission to generate tokens for this site.';
+          } else if (err.status === 422 || err.status === 400) {
+            msg = err?.error?.message ?? 'Invalid request — please check site and legal entity selection.';
+          } else {
+            msg = err?.error?.message ?? `Token generation failed (HTTP ${err.status}).`;
+          }
           this.error.set(msg);
           this.generating.set(false);
           return EMPTY;
@@ -453,7 +486,10 @@ export class BootstrapTokenComponent {
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe((result) => {
-        this.generatedToken.set(result);
+        // M-17: Store raw token separately so we can clear it from memory after copy.
+        this.rawTokenValue = result.rawToken;
+        // Store metadata without the raw token in the signal (visible in DevTools)
+        this.generatedToken.set({ ...result, rawToken: '' });
         this.generating.set(false);
         this.generateQrCode(result);
       });
@@ -485,14 +521,19 @@ export class BootstrapTokenComponent {
   }
 
   async copyToken(): Promise<void> {
-    const token = this.generatedToken();
-    if (!token) return;
+    const raw = this.rawTokenValue;
+    if (!raw) return;
     try {
-      await navigator.clipboard.writeText(token.rawToken);
+      await navigator.clipboard.writeText(raw);
       this.copied.set(true);
+      // M-17: Clear the raw token from memory after successful copy.
+      // The token is now only in the clipboard — not in component state or DevTools.
+      this.rawTokenValue = null;
+      this.tokenCleared.set(true);
+      this.tokenRevealed.set(false);
       setTimeout(() => this.copied.set(false), 2000);
     } catch {
-      // fallback: select text for manual copy
+      this.error.set('Failed to copy to clipboard. Please reveal the token and copy it manually.');
     }
   }
 
@@ -540,20 +581,38 @@ export class BootstrapTokenComponent {
     const win = window.open('', '_blank');
     if (!win) return;
 
-    win.document.write(`
-      <html>
-        <head><title>Provisioning QR — ${token.siteCode}</title></head>
-        <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;font-family:sans-serif">
-          <h2 style="margin:0 0 0.25rem">Provisioning QR Code</h2>
-          <p style="margin:0 0 1rem;color:#64748b">Site: <strong>${token.siteCode}</strong></p>
-          <img src="${dataUrl}" style="width:400px;height:400px" />
-          <p style="margin:1rem 0 0;font-size:0.8rem;color:#94a3b8">
-            Token ID: ${token.tokenId} &mdash; Expires: ${new Date(token.expiresAt).toLocaleString()}
-          </p>
-        </body>
-      </html>
-    `);
-    win.document.close();
+    const doc = win.document;
+    doc.title = `Provisioning QR — ${token.siteCode}`;
+
+    const body = doc.body;
+    body.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;font-family:sans-serif';
+
+    const heading = doc.createElement('h2');
+    heading.style.cssText = 'margin:0 0 0.25rem';
+    heading.textContent = 'Provisioning QR Code';
+    body.appendChild(heading);
+
+    const sitePara = doc.createElement('p');
+    sitePara.style.cssText = 'margin:0 0 1rem;color:#64748b';
+    const siteLabel = doc.createTextNode('Site: ');
+    const siteStrong = doc.createElement('strong');
+    siteStrong.textContent = token.siteCode;
+    sitePara.appendChild(siteLabel);
+    sitePara.appendChild(siteStrong);
+    body.appendChild(sitePara);
+
+    const img = doc.createElement('img');
+    img.src = dataUrl;
+    img.style.cssText = 'width:400px;height:400px';
+    img.alt = 'Provisioning QR Code';
+    body.appendChild(img);
+
+    const footerPara = doc.createElement('p');
+    footerPara.style.cssText = 'margin:1rem 0 0;font-size:0.8rem;color:#94a3b8';
+    footerPara.textContent = `Token ID: ${token.tokenId} — Expires: ${new Date(token.expiresAt).toLocaleString()}`;
+    body.appendChild(footerPara);
+
+    doc.close();
     win.focus();
     win.print();
   }

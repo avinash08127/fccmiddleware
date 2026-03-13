@@ -133,6 +133,16 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
 
     void IIngestDbContext.ClearTracked() => ChangeTracker.Clear();
 
+    async Task IIngestDbContext.FlagFuzzyMatchAsync(Guid transactionId, CancellationToken ct)
+    {
+        await Transactions
+            .IgnoreQueryFilters()
+            .Where(t => t.Id == transactionId && t.ReconciliationStatus == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.ReconciliationStatus, ReconciliationStatus.REVIEW_FUZZY_MATCH)
+                .SetProperty(t => t.UpdatedAt, DateTimeOffset.UtcNow), ct);
+    }
+
     async Task<Guid?> IIngestDbContext.FindTransactionByDedupKeyAsync(
         string fccTransactionId, string siteCode, CancellationToken ct) =>
         await Transactions
@@ -157,7 +167,7 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
              && t.AmountMinorUnits == amountMinorUnits
              && t.CompletedAt >= windowStart
              && t.CompletedAt <= windowEnd
-             && t.Status == TransactionStatus.PENDING,
+             && t.Status != TransactionStatus.DUPLICATE,
                 ct);
 
     // -------------------------------------------------------------------------

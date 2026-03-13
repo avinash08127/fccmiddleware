@@ -39,8 +39,9 @@ export class ShellComponent implements OnInit {
     { label: 'Reconciliation', icon: 'pi pi-check-square', route: '/reconciliation' },
     { label: 'Edge Agents', icon: 'pi pi-server', route: '/agents' },
     { label: 'Sites', icon: 'pi pi-map-marker', route: '/sites' },
-    { label: 'Master Data', icon: 'pi pi-database', route: '/master-data' },
-    { label: 'Audit Log', icon: 'pi pi-shield', route: '/audit' },
+    // Master Data route hidden until feature is implemented (L-1)
+    // { label: 'Master Data', icon: 'pi pi-database', route: '/master-data' },
+{ label: 'Audit Log', icon: 'pi pi-shield', route: '/audit' },
     { label: 'Dead-Letter Queue', icon: 'pi pi-inbox', route: '/dlq' },
     { label: 'Settings', icon: 'pi pi-cog', route: '/settings' },
   ];

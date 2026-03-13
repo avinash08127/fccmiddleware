@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using FccMiddleware.Api.Portal;
 using FccMiddleware.Contracts.Portal;
 using FccMiddleware.Infrastructure.Persistence;
@@ -13,11 +14,16 @@ namespace FccMiddleware.Api.Controllers;
 public sealed class MasterDataBrowserController : PortalControllerBase
 {
     private readonly FccMiddlewareDbContext _db;
+    private readonly IDbContextFactory<FccMiddlewareDbContext> _dbFactory;
     private readonly PortalAccessResolver _accessResolver;
 
-    public MasterDataBrowserController(FccMiddlewareDbContext db, PortalAccessResolver accessResolver)
+    public MasterDataBrowserController(
+        FccMiddlewareDbContext db,
+        IDbContextFactory<FccMiddlewareDbContext> dbFactory,
+        PortalAccessResolver accessResolver)
     {
         _db = db;
+        _dbFactory = dbFactory;
         _accessResolver = accessResolver;
     }
 
@@ -51,7 +57,6 @@ public sealed class MasterDataBrowserController : PortalControllerBase
                 CountryCode = item.CountryCode,
                 CountryName = item.CountryName,
                 CurrencyCode = item.CurrencyCode,
-                Country = item.CountryName,
                 OdooCompanyId = item.OdooCompanyId,
                 IsActive = item.IsActive,
                 UpdatedAt = item.UpdatedAt
@@ -108,76 +113,84 @@ public sealed class MasterDataBrowserController : PortalControllerBase
             ? null
             : access.ScopedLegalEntityIds.ToHashSet();
 
-        async Task<MasterDataSyncStatusDto> BuildAsync<T>(
-            string entityType,
-            IQueryable<T> query,
-            Func<T, DateTimeOffset> syncedAt,
-            Func<T, bool> isActive,
-            int staleThresholdHours)
-            where T : class
-        {
-            var items = await query.AsNoTracking().ToListAsync(cancellationToken);
-            var lastSync = items.Count == 0 ? (DateTimeOffset?)null : items.Max(syncedAt);
-            var activeCount = items.Count(isActive);
-            var deactivatedCount = items.Count - activeCount;
-
-            return new MasterDataSyncStatusDto
-            {
-                EntityType = entityType,
-                LastSyncAtUtc = lastSync,
-                UpsertedCount = activeCount,
-                DeactivatedCount = deactivatedCount,
-                ErrorCount = 0,
-                IsStale = !lastSync.HasValue || lastSync.Value < DateTimeOffset.UtcNow.AddHours(-staleThresholdHours),
-                StaleThresholdHours = staleThresholdHours
-            };
-        }
-
-        IQueryable<FccMiddleware.Domain.Entities.Site> FilterSites(IQueryable<FccMiddleware.Domain.Entities.Site> queryable) =>
-            legalEntityIds is null ? queryable : queryable.Where(item => legalEntityIds.Contains(item.LegalEntityId));
-
-        IQueryable<FccMiddleware.Domain.Entities.Product> FilterProducts(IQueryable<FccMiddleware.Domain.Entities.Product> queryable) =>
-            legalEntityIds is null ? queryable : queryable.Where(item => legalEntityIds.Contains(item.LegalEntityId));
-
-        IQueryable<FccMiddleware.Domain.Entities.Operator> FilterOperators(IQueryable<FccMiddleware.Domain.Entities.Operator> queryable) =>
-            legalEntityIds is null ? queryable : queryable.Where(item => legalEntityIds.Contains(item.LegalEntityId));
-
-        var statuses = new List<MasterDataSyncStatusDto>
-        {
-            await BuildAsync(
+        // Run all 5 entity-type queries in parallel. Each call creates its own
+        // DbContext via IDbContextFactory to avoid concurrent-access violations.
+        var statuses = await Task.WhenAll(
+            BuildEntityStats(
                 "legal_entities",
-                _db.LegalEntities.IgnoreQueryFilters().Where(item => legalEntityIds == null || legalEntityIds.Contains(item.Id)),
+                db => db.LegalEntities.IgnoreQueryFilters()
+                    .Where(item => legalEntityIds == null || legalEntityIds.Contains(item.Id)),
                 item => item.SyncedAt,
                 item => item.IsActive,
-                24),
-            await BuildAsync(
+                24, cancellationToken),
+            BuildEntityStats(
                 "sites",
-                FilterSites(_db.Sites.IgnoreQueryFilters()),
+                db => db.Sites.IgnoreQueryFilters()
+                    .Where(item => legalEntityIds == null || legalEntityIds.Contains(item.LegalEntityId)),
                 item => item.SyncedAt,
                 item => item.IsActive,
-                24),
-            await BuildAsync(
+                24, cancellationToken),
+            BuildEntityStats(
                 "pumps",
-                legalEntityIds is null
-                    ? _db.Pumps.IgnoreQueryFilters()
-                    : _db.Pumps.IgnoreQueryFilters().Where(item => legalEntityIds.Contains(item.LegalEntityId)),
+                db => db.Pumps.IgnoreQueryFilters()
+                    .Where(item => legalEntityIds == null || legalEntityIds.Contains(item.LegalEntityId)),
                 item => item.SyncedAt,
                 item => item.IsActive,
-                24),
-            await BuildAsync(
+                24, cancellationToken),
+            BuildEntityStats(
                 "products",
-                FilterProducts(_db.Products.IgnoreQueryFilters()),
+                db => db.Products.IgnoreQueryFilters()
+                    .Where(item => legalEntityIds == null || legalEntityIds.Contains(item.LegalEntityId)),
                 item => item.SyncedAt,
                 item => item.IsActive,
-                24),
-            await BuildAsync(
+                24, cancellationToken),
+            BuildEntityStats(
                 "operators",
-                FilterOperators(_db.Operators.IgnoreQueryFilters()),
+                db => db.Operators.IgnoreQueryFilters()
+                    .Where(item => legalEntityIds == null || legalEntityIds.Contains(item.LegalEntityId)),
                 item => item.SyncedAt,
                 item => item.IsActive,
-                24)
-        };
+                24, cancellationToken));
 
         return Ok(statuses);
+    }
+
+    // Computes aggregate stats for one entity type using server-side SQL (no full table scan).
+    // Creates its own DbContext so callers can safely run multiple instances in parallel.
+    private async Task<MasterDataSyncStatusDto> BuildEntityStats<T>(
+        string entityType,
+        Func<FccMiddlewareDbContext, IQueryable<T>> queryFactory,
+        Expression<Func<T, DateTimeOffset>> syncedAtSelector,
+        Expression<Func<T, bool>> isActiveSelector,
+        int staleThresholdHours,
+        CancellationToken cancellationToken)
+        where T : class
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = queryFactory(db).AsNoTracking();
+
+        var totalCount = await query.CountAsync(cancellationToken);
+        DateTimeOffset? lastSync = null;
+        var activeCount = 0;
+
+        if (totalCount > 0)
+        {
+            lastSync = await query
+                .Select(syncedAtSelector)
+                .Select(d => (DateTimeOffset?)d)
+                .MaxAsync(cancellationToken);
+            activeCount = await query.CountAsync(isActiveSelector, cancellationToken);
+        }
+
+        return new MasterDataSyncStatusDto
+        {
+            EntityType = entityType,
+            LastSyncAtUtc = lastSync,
+            TotalActiveCount = activeCount,
+            DeactivatedCount = totalCount - activeCount,
+            ErrorCount = 0,
+            IsStale = !lastSync.HasValue || lastSync.Value < DateTimeOffset.UtcNow.AddHours(-staleThresholdHours),
+            StaleThresholdHours = staleThresholdHours
+        };
     }
 }

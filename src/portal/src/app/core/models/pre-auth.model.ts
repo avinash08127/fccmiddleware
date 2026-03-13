@@ -42,9 +42,9 @@ export interface PreAuthRecord {
   actualAmount: number | null;
   /** Actual dispensed volume in millilitres (1 L = 1,000). Null until COMPLETED. */
   actualVolume: number | null;
-  /** actualAmount − requestedAmount in minor units. Null until COMPLETED. */
+  /** actualAmount − authorizedAmount in minor units. Null until COMPLETED. */
   amountVariance: number | null;
-  /** ABS(amountVariance) / requestedAmount × 10 000. Null until COMPLETED. */
+  /** ABS(amountVariance) / authorizedAmount × 10 000. Null until COMPLETED. */
   varianceBps: number | null;
   authorizedAt: string | null;
   dispensingAt: string | null;

@@ -1,10 +1,12 @@
+using FccMiddleware.Domain.Interfaces;
+
 namespace FccMiddleware.Domain.Entities;
 
 /// <summary>
 /// Stores diagnostic log entries uploaded from Edge Agent devices.
 /// WARN/ERROR entries only, 7-day retention.
 /// </summary>
-public sealed class AgentDiagnosticLog
+public sealed class AgentDiagnosticLog : ITenantScoped
 {
     public Guid Id { get; set; }
     public Guid DeviceId { get; set; }

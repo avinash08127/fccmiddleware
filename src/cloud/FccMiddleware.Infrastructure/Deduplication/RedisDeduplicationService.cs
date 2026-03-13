@@ -76,6 +76,64 @@ public sealed class RedisDeduplicationService : IDeduplicationService
         }
     }
 
+    /// <inheritdoc />
+    public async Task<UploadTransactionBatchResult?> GetBatchResultAsync(
+        string uploadBatchId,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var db = _redis.GetDatabase();
+            var cacheKey = BuildBatchCacheKey(uploadBatchId);
+            var cached = await db.StringGetAsync(cacheKey);
+            if (cached.HasValue)
+            {
+                var result = System.Text.Json.JsonSerializer.Deserialize<UploadTransactionBatchResult>(cached.ToString());
+                if (result is not null)
+                {
+                    _logger.LogDebug("Batch cache hit for batchId={BatchId}", uploadBatchId);
+                    return result;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal: caller will process the batch normally
+            _logger.LogWarning(ex, "Redis batch cache unavailable for batchId={BatchId}", uploadBatchId);
+        }
+
+        return null;
+    }
+
+    /// <inheritdoc />
+    public async Task SetBatchResultAsync(
+        string uploadBatchId,
+        UploadTransactionBatchResult result,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var db = _redis.GetDatabase();
+            var cacheKey = BuildBatchCacheKey(uploadBatchId);
+            var json = System.Text.Json.JsonSerializer.Serialize(result);
+            await db.StringSetAsync(cacheKey, json, BatchResultTtl);
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal: worst case is the edge retries and cloud re-processes (dedup handles it)
+            _logger.LogWarning(ex, "Failed to cache batch result for batchId={BatchId}", uploadBatchId);
+        }
+    }
+
     private static string BuildCacheKey(string fccTransactionId, string siteCode) =>
         $"dedup:{siteCode}:{fccTransactionId}";
+
+    private static string BuildBatchCacheKey(string uploadBatchId) =>
+        $"batch:{uploadBatchId}";
+
+    /// <summary>
+    /// Batch result cache TTL. 10 minutes is sufficient for edge retry windows
+    /// while keeping Redis memory bounded.
+    /// </summary>
+    private static readonly TimeSpan BatchResultTtl = TimeSpan.FromMinutes(10);
 }

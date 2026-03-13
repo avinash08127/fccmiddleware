@@ -2,7 +2,7 @@ import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { Subject, forkJoin, EMPTY } from 'rxjs';
+import { Subject, EMPTY } from 'rxjs';
 import { switchMap, catchError } from 'rxjs/operators';
 import { TableModule, TableLazyLoadEvent } from 'primeng/table';
 import { TabsModule } from 'primeng/tabs';
@@ -44,6 +44,8 @@ function statusSeverity(status: ReconciliationStatus): PrimeSeverity {
       return 'warn';
     case ReconciliationStatus.REJECTED:
       return 'secondary';
+    case ReconciliationStatus.REVIEW_FUZZY_MATCH:
+      return 'info';
     case ReconciliationStatus.MATCHED:
     case ReconciliationStatus.VARIANCE_WITHIN_TOLERANCE:
       return 'success';
@@ -52,6 +54,8 @@ function statusSeverity(status: ReconciliationStatus): PrimeSeverity {
   }
 }
 
+// F04-06: error field surfaces API failures in the empty template
+// F04-04: pageSize field detects when user changes rows-per-page
 interface TabState {
   data: ReconciliationException[];
   loading: boolean;
@@ -59,10 +63,21 @@ interface TabState {
   tableFirst: number;
   cursors: (string | null)[];
   currentPage: number;
+  error: string | null;
+  pageSize: number;
 }
 
-function emptyTabState(): TabState {
-  return { data: [], loading: false, totalRecords: 0, tableFirst: 0, cursors: [null], currentPage: 0 };
+function emptyTabState(pageSize = 20): TabState {
+  return {
+    data: [],
+    loading: false,
+    totalRecords: 0,
+    tableFirst: 0,
+    cursors: [null],
+    currentPage: 0,
+    error: null,
+    pageSize,
+  };
 }
 
 interface LoadRequest {
@@ -128,13 +143,22 @@ interface LoadRequest {
             <p-tab value="variance">
               Variance Flagged
               @if (varianceTab().totalRecords > 0) {
-                <p-badge [value]="varianceTab().totalRecords" severity="danger" styleClass="tab-badge" />
+                <!-- F04-05: pass string to p-badge [value] -->
+                <p-badge [value]="varianceTab().totalRecords.toString()" severity="danger" styleClass="tab-badge" />
               }
             </p-tab>
             <p-tab value="unmatched">
               Unmatched
               @if (unmatchedTab().totalRecords > 0) {
-                <p-badge [value]="unmatchedTab().totalRecords" severity="warn" styleClass="tab-badge" />
+                <!-- F04-05: pass string to p-badge [value] -->
+                <p-badge [value]="unmatchedTab().totalRecords.toString()" severity="warn" styleClass="tab-badge" />
+              }
+            </p-tab>
+            <!-- F04-01: Fuzzy Match tab so REVIEW_FUZZY_MATCH records are visible -->
+            <p-tab value="fuzzy">
+              Fuzzy Match
+              @if (fuzzyTab().totalRecords > 0) {
+                <p-badge [value]="fuzzyTab().totalRecords.toString()" severity="info" styleClass="tab-badge" />
               }
             </p-tab>
             <p-tab value="reviewed">Reviewed</p-tab>
@@ -149,7 +173,7 @@ interface LoadRequest {
                   [lazy]="true"
                   [loading]="varianceTab().loading"
                   [paginator]="true"
-                  [rows]="pageSize"
+                  [rows]="varianceTab().pageSize"
                   [first]="varianceTab().tableFirst"
                   [totalRecords]="varianceTab().totalRecords"
                   [rowsPerPageOptions]="[20, 50, 100]"
@@ -197,14 +221,23 @@ interface LoadRequest {
                       <td>{{ ex.createdAt | utcDate: 'short' }}</td>
                     </tr>
                   </ng-template>
+                  <!-- F04-06: show error message instead of generic empty state on API failure -->
                   <ng-template pTemplate="emptymessage">
                     <tr>
                       <td colspan="10">
-                        <app-empty-state
-                          icon="pi-check-circle"
-                          title="No variance flagged exceptions"
-                          description="All variances are within tolerance or have been reviewed."
-                        />
+                        @if (varianceTab().error) {
+                          <app-empty-state
+                            icon="pi-exclamation-circle"
+                            title="Failed to load data"
+                            [description]="varianceTab().error!"
+                          />
+                        } @else {
+                          <app-empty-state
+                            icon="pi-check-circle"
+                            title="No variance flagged exceptions"
+                            description="All variances are within tolerance or have been reviewed."
+                          />
+                        }
                       </td>
                     </tr>
                   </ng-template>
@@ -220,7 +253,7 @@ interface LoadRequest {
                   [lazy]="true"
                   [loading]="unmatchedTab().loading"
                   [paginator]="true"
-                  [rows]="pageSize"
+                  [rows]="unmatchedTab().pageSize"
                   [first]="unmatchedTab().tableFirst"
                   [totalRecords]="unmatchedTab().totalRecords"
                   [rowsPerPageOptions]="[20, 50, 100]"
@@ -265,14 +298,103 @@ interface LoadRequest {
                       <td>{{ ex.createdAt | utcDate: 'short' }}</td>
                     </tr>
                   </ng-template>
+                  <!-- F04-06: show error message instead of generic empty state on API failure -->
                   <ng-template pTemplate="emptymessage">
                     <tr>
                       <td colspan="10">
-                        <app-empty-state
-                          icon="pi-link"
-                          title="No unmatched records"
-                          description="All pre-auth records have been matched to a transaction."
+                        @if (unmatchedTab().error) {
+                          <app-empty-state
+                            icon="pi-exclamation-circle"
+                            title="Failed to load data"
+                            [description]="unmatchedTab().error!"
+                          />
+                        } @else {
+                          <app-empty-state
+                            icon="pi-link"
+                            title="No unmatched records"
+                            description="All pre-auth records have been matched to a transaction."
+                          />
+                        }
+                      </td>
+                    </tr>
+                  </ng-template>
+                </p-table>
+              </p-card>
+            </p-tabpanel>
+
+            <!-- ── Fuzzy Match (F04-01) ── -->
+            <p-tabpanel value="fuzzy">
+              <p-card styleClass="table-card">
+                <p-table
+                  [value]="fuzzyTab().data"
+                  [lazy]="true"
+                  [loading]="fuzzyTab().loading"
+                  [paginator]="true"
+                  [rows]="fuzzyTab().pageSize"
+                  [first]="fuzzyTab().tableFirst"
+                  [totalRecords]="fuzzyTab().totalRecords"
+                  [rowsPerPageOptions]="[20, 50, 100]"
+                  (onLazyLoad)="onFuzzyLazyLoad($event)"
+                  styleClass="p-datatable-sm p-datatable-striped p-datatable-hoverable-rows"
+                  [tableStyle]="{ 'min-width': '1100px' }"
+                >
+                  <ng-template pTemplate="header">
+                    <tr>
+                      <th>Site</th>
+                      <th style="width:5rem">Pump</th>
+                      <th style="width:5rem">Nozzle</th>
+                      <th style="width:10rem">Authorised Amt</th>
+                      <th style="width:10rem">Actual Amt</th>
+                      <th style="width:10rem">Variance</th>
+                      <th style="width:7rem">Var %</th>
+                      <th>Match Method</th>
+                      <th style="width:9rem">Status</th>
+                      <th style="width:11rem">Created At</th>
+                    </tr>
+                  </ng-template>
+                  <ng-template pTemplate="body" let-ex>
+                    <tr class="clickable-row" tabindex="0" (click)="onRowClick(ex)" (keydown.enter)="onRowClick(ex)">
+                      <td>{{ ex.siteCode }}</td>
+                      <td>{{ ex.pumpNumber }}</td>
+                      <td>{{ ex.nozzleNumber }}</td>
+                      <td>{{ ex.requestedAmount | currencyMinorUnits: ex.currencyCode }}</td>
+                      <td>{{ ex.actualAmount !== null ? (ex.actualAmount | currencyMinorUnits: ex.currencyCode) : '—' }}</td>
+                      <td>
+                        <span [class]="varianceClass(ex)">
+                          {{ formatVariance(ex) }}
+                        </span>
+                      </td>
+                      <td [class]="variancePctClass(ex)">{{ formatVariancePct(ex) }}</td>
+                      <td>{{ ex.matchMethod ?? '—' }}</td>
+                      <td>
+                        <app-status-badge
+                          [label]="ex.reconciliationStatus | statusLabel"
+                          [severity]="getSeverity(ex.reconciliationStatus)"
                         />
+                        @if (ex.ambiguityFlag) {
+                          <i class="pi pi-exclamation-triangle ambiguity-icon" title="Ambiguous match"></i>
+                        }
+                      </td>
+                      <td>{{ ex.createdAt | utcDate: 'short' }}</td>
+                    </tr>
+                  </ng-template>
+                  <!-- F04-06: show error message instead of generic empty state on API failure -->
+                  <ng-template pTemplate="emptymessage">
+                    <tr>
+                      <td colspan="10">
+                        @if (fuzzyTab().error) {
+                          <app-empty-state
+                            icon="pi-exclamation-circle"
+                            title="Failed to load data"
+                            [description]="fuzzyTab().error!"
+                          />
+                        } @else {
+                          <app-empty-state
+                            icon="pi-search"
+                            title="No fuzzy match records"
+                            description="No records are pending fuzzy match review."
+                          />
+                        }
                       </td>
                     </tr>
                   </ng-template>
@@ -282,13 +404,27 @@ interface LoadRequest {
 
             <!-- ── Reviewed ── -->
             <p-tabpanel value="reviewed">
+              <div class="reviewed-status-filter">
+                <p-select
+                  [options]="reviewedStatusOptions"
+                  [ngModel]="reviewedStatusFilter()"
+                  (ngModelChange)="onReviewedStatusChange($event)"
+                  optionLabel="label"
+                  optionValue="value"
+                  styleClass="reviewed-status-select"
+                />
+              </div>
               <p-card styleClass="table-card">
                 <p-table
                   [value]="reviewedTab().data"
-                  [lazy]="false"
+                  [lazy]="true"
                   [loading]="reviewedTab().loading"
                   [paginator]="true"
-                  [rows]="pageSize"
+                  [rows]="reviewedTab().pageSize"
+                  [first]="reviewedTab().tableFirst"
+                  [totalRecords]="reviewedTab().totalRecords"
+                  [rowsPerPageOptions]="[20, 50, 100]"
+                  (onLazyLoad)="onReviewedLazyLoad($event)"
                   styleClass="p-datatable-sm p-datatable-striped p-datatable-hoverable-rows"
                   [tableStyle]="{ 'min-width': '1100px' }"
                 >
@@ -329,14 +465,23 @@ interface LoadRequest {
                       <td>{{ (ex.decidedAt ?? ex.updatedAt) | utcDate: 'short' }}</td>
                     </tr>
                   </ng-template>
+                  <!-- F04-06: show error message instead of generic empty state on API failure -->
                   <ng-template pTemplate="emptymessage">
                     <tr>
                       <td colspan="10">
-                        <app-empty-state
-                          icon="pi-history"
-                          title="No reviewed records"
-                          description="Approved and rejected exceptions will appear here."
-                        />
+                        @if (reviewedTab().error) {
+                          <app-empty-state
+                            icon="pi-exclamation-circle"
+                            title="Failed to load data"
+                            [description]="reviewedTab().error!"
+                          />
+                        } @else {
+                          <app-empty-state
+                            icon="pi-history"
+                            title="No reviewed records"
+                            description="Approved and rejected exceptions will appear here."
+                          />
+                        }
                       </td>
                     </tr>
                   </ng-template>
@@ -405,6 +550,12 @@ interface LoadRequest {
         font-size: 0.8rem;
         vertical-align: middle;
       }
+      .reviewed-status-filter {
+        margin-bottom: 0.75rem;
+      }
+      .reviewed-status-select {
+        min-width: 180px;
+      }
     `,
   ],
 })
@@ -414,6 +565,9 @@ export class ReconciliationListComponent {
   private readonly siteService = inject(SiteService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+
+  // F04-03: single shared instance instead of new CurrencyMinorUnitsPipe() per cell render
+  private readonly currencyPipe = new CurrencyMinorUnitsPipe();
 
   readonly pageSize = 20;
 
@@ -431,7 +585,16 @@ export class ReconciliationListComponent {
   readonly activeTab = signal<string>('variance');
   readonly varianceTab = signal<TabState>(emptyTabState());
   readonly unmatchedTab = signal<TabState>(emptyTabState());
+  // F04-01: state for the new Fuzzy Match tab
+  readonly fuzzyTab = signal<TabState>(emptyTabState());
   readonly reviewedTab = signal<TabState>(emptyTabState());
+
+  // ── Reviewed tab status filter ──────────────────────────────────────────
+  readonly reviewedStatusFilter = signal<ReconciliationStatus>(ReconciliationStatus.APPROVED);
+  readonly reviewedStatusOptions = [
+    { label: 'Approved', value: ReconciliationStatus.APPROVED },
+    { label: 'Rejected', value: ReconciliationStatus.REJECTED },
+  ];
 
   private currentFilters: ReconciliationFilters = {
     ...EMPTY_RECON_FILTERS,
@@ -441,6 +604,8 @@ export class ReconciliationListComponent {
   // ── Load subjects (switchMap cancels in-flight) ───────────────────────────
   private readonly loadVariance$ = new Subject<LoadRequest>();
   private readonly loadUnmatched$ = new Subject<LoadRequest>();
+  // F04-01: subject for the new Fuzzy Match tab
+  private readonly loadFuzzy$ = new Subject<LoadRequest>();
   private readonly loadReviewed$ = new Subject<LoadRequest>();
 
   constructor() {
@@ -453,11 +618,17 @@ export class ReconciliationListComponent {
     this.loadVariance$
       .pipe(
         switchMap((req) => {
-          this.varianceTab.update((s) => ({ ...s, loading: true }));
+          this.varianceTab.update((s) => ({ ...s, loading: true, error: null }));
           const params = this.buildParams(req, ReconciliationStatus.VARIANCE_FLAGGED);
           return this.reconService.getExceptions(params).pipe(
+            // F04-06: surface error in tab state so the template can show feedback
             catchError(() => {
-              this.varianceTab.update((s) => ({ ...s, loading: false, data: [] }));
+              this.varianceTab.update((s) => ({
+                ...s,
+                loading: false,
+                data: [],
+                error: 'Failed to load data. Please try again.',
+              }));
               return EMPTY;
             }),
           );
@@ -466,13 +637,13 @@ export class ReconciliationListComponent {
       )
       .subscribe((result) => {
         this.varianceTab.update((s) => {
-          const next = { ...s, loading: false, data: result.data };
+          const next = { ...s, loading: false, data: result.data, error: null };
           if (result.meta.nextCursor != null) next.cursors[s.currentPage + 1] = result.meta.nextCursor;
-          next.totalRecords =
-            result.meta.totalCount ??
-            (result.meta.hasMore
-              ? (s.currentPage + 2) * this.pageSize
-              : s.currentPage * this.pageSize + result.data.length);
+          // F04-07: Math.max prevents totalRecords from shrinking when navigating later pages
+          const estimate = result.meta.hasMore
+            ? (s.currentPage + 2) * s.pageSize
+            : s.currentPage * s.pageSize + result.data.length;
+          next.totalRecords = result.meta.totalCount ?? Math.max(s.totalRecords, estimate);
           return next;
         });
       });
@@ -481,11 +652,16 @@ export class ReconciliationListComponent {
     this.loadUnmatched$
       .pipe(
         switchMap((req) => {
-          this.unmatchedTab.update((s) => ({ ...s, loading: true }));
+          this.unmatchedTab.update((s) => ({ ...s, loading: true, error: null }));
           const params = this.buildParams(req, ReconciliationStatus.UNMATCHED);
           return this.reconService.getExceptions(params).pipe(
             catchError(() => {
-              this.unmatchedTab.update((s) => ({ ...s, loading: false, data: [] }));
+              this.unmatchedTab.update((s) => ({
+                ...s,
+                loading: false,
+                data: [],
+                error: 'Failed to load data. Please try again.',
+              }));
               return EMPTY;
             }),
           );
@@ -494,48 +670,78 @@ export class ReconciliationListComponent {
       )
       .subscribe((result) => {
         this.unmatchedTab.update((s) => {
-          const next = { ...s, loading: false, data: result.data };
+          const next = { ...s, loading: false, data: result.data, error: null };
           if (result.meta.nextCursor != null) next.cursors[s.currentPage + 1] = result.meta.nextCursor;
-          next.totalRecords =
-            result.meta.totalCount ??
-            (result.meta.hasMore
-              ? (s.currentPage + 2) * this.pageSize
-              : s.currentPage * this.pageSize + result.data.length);
+          const estimate = result.meta.hasMore
+            ? (s.currentPage + 2) * s.pageSize
+            : s.currentPage * s.pageSize + result.data.length;
+          next.totalRecords = result.meta.totalCount ?? Math.max(s.totalRecords, estimate);
           return next;
         });
       });
 
-    // Reviewed subscription (loads APPROVED + REJECTED via forkJoin, sorts by decidedAt DESC)
-    this.loadReviewed$
+    // Fuzzy Match subscription (F04-01)
+    this.loadFuzzy$
       .pipe(
         switchMap((req) => {
-          this.reviewedTab.update((s) => ({ ...s, loading: true }));
-          const approvedParams = this.buildParams(req, ReconciliationStatus.APPROVED, 50);
-          const rejectedParams = this.buildParams(req, ReconciliationStatus.REJECTED, 50);
-          return forkJoin([
-            this.reconService.getExceptions(approvedParams),
-            this.reconService.getExceptions(rejectedParams),
-          ]).pipe(
+          this.fuzzyTab.update((s) => ({ ...s, loading: true, error: null }));
+          const params = this.buildParams(req, ReconciliationStatus.REVIEW_FUZZY_MATCH);
+          return this.reconService.getExceptions(params).pipe(
             catchError(() => {
-              this.reviewedTab.update((s) => ({ ...s, loading: false, data: [] }));
+              this.fuzzyTab.update((s) => ({
+                ...s,
+                loading: false,
+                data: [],
+                error: 'Failed to load data. Please try again.',
+              }));
               return EMPTY;
             }),
           );
         }),
         takeUntilDestroyed(this.destroyRef),
       )
-      .subscribe(([approved, rejected]) => {
-        const combined = [...approved.data, ...rejected.data].sort((a, b) => {
-          const aTime = new Date(a.decidedAt ?? a.updatedAt).getTime();
-          const bTime = new Date(b.decidedAt ?? b.updatedAt).getTime();
-          return bTime - aTime;
+      .subscribe((result) => {
+        this.fuzzyTab.update((s) => {
+          const next = { ...s, loading: false, data: result.data, error: null };
+          if (result.meta.nextCursor != null) next.cursors[s.currentPage + 1] = result.meta.nextCursor;
+          const estimate = result.meta.hasMore
+            ? (s.currentPage + 2) * s.pageSize
+            : s.currentPage * s.pageSize + result.data.length;
+          next.totalRecords = result.meta.totalCount ?? Math.max(s.totalRecords, estimate);
+          return next;
         });
-        this.reviewedTab.update((s) => ({
-          ...s,
-          loading: false,
-          data: combined,
-          totalRecords: combined.length,
-        }));
+      });
+
+    // Reviewed subscription
+    this.loadReviewed$
+      .pipe(
+        switchMap((req) => {
+          this.reviewedTab.update((s) => ({ ...s, loading: true, error: null }));
+          const params = this.buildParams(req, this.reviewedStatusFilter());
+          return this.reconService.getExceptions(params).pipe(
+            catchError(() => {
+              this.reviewedTab.update((s) => ({
+                ...s,
+                loading: false,
+                data: [],
+                error: 'Failed to load data. Please try again.',
+              }));
+              return EMPTY;
+            }),
+          );
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((result) => {
+        this.reviewedTab.update((s) => {
+          const next = { ...s, loading: false, data: result.data, error: null };
+          if (result.meta.nextCursor != null) next.cursors[s.currentPage + 1] = result.meta.nextCursor;
+          const estimate = result.meta.hasMore
+            ? (s.currentPage + 2) * s.pageSize
+            : s.currentPage * s.pageSize + result.data.length;
+          next.totalRecords = result.meta.totalCount ?? Math.max(s.totalRecords, estimate);
+          return next;
+        });
       });
   }
 
@@ -568,31 +774,72 @@ export class ReconciliationListComponent {
   onVarianceLazyLoad(event: TableLazyLoadEvent): void {
     const entityId = this.selectedLegalEntityId();
     if (!entityId) return;
-    const page = Math.floor((event.first ?? 0) / (event.rows ?? this.pageSize));
-    this.varianceTab.update((s) => {
-      return { ...s, currentPage: page, tableFirst: event.first ?? 0 };
-    });
+    const newRows = event.rows ?? this.pageSize;
+    // F04-04: cursor array was built for the old page size — reset state and reload from page 0
+    if (newRows !== this.varianceTab().pageSize) {
+      this.varianceTab.set(emptyTabState(newRows));
+      this.loadVariance$.next({ entityId, cursor: undefined, pageSize: newRows, filters: this.currentFilters });
+      return;
+    }
+    const page = Math.floor((event.first ?? 0) / newRows);
+    this.varianceTab.update((s) => ({ ...s, currentPage: page, tableFirst: event.first ?? 0 }));
     const cursor = this.varianceTab().cursors[page] ?? undefined;
-    this.loadVariance$.next({
-      entityId,
-      cursor,
-      pageSize: event.rows ?? this.pageSize,
-      filters: this.currentFilters,
-    });
+    this.loadVariance$.next({ entityId, cursor, pageSize: newRows, filters: this.currentFilters });
   }
 
   onUnmatchedLazyLoad(event: TableLazyLoadEvent): void {
     const entityId = this.selectedLegalEntityId();
     if (!entityId) return;
-    const page = Math.floor((event.first ?? 0) / (event.rows ?? this.pageSize));
+    const newRows = event.rows ?? this.pageSize;
+    // F04-04: cursor array was built for the old page size — reset state and reload from page 0
+    if (newRows !== this.unmatchedTab().pageSize) {
+      this.unmatchedTab.set(emptyTabState(newRows));
+      this.loadUnmatched$.next({ entityId, cursor: undefined, pageSize: newRows, filters: this.currentFilters });
+      return;
+    }
+    const page = Math.floor((event.first ?? 0) / newRows);
     this.unmatchedTab.update((s) => ({ ...s, currentPage: page, tableFirst: event.first ?? 0 }));
     const cursor = this.unmatchedTab().cursors[page] ?? undefined;
-    this.loadUnmatched$.next({
-      entityId,
-      cursor,
-      pageSize: event.rows ?? this.pageSize,
-      filters: this.currentFilters,
-    });
+    this.loadUnmatched$.next({ entityId, cursor, pageSize: newRows, filters: this.currentFilters });
+  }
+
+  // F04-01: lazy load handler for the new Fuzzy Match tab
+  onFuzzyLazyLoad(event: TableLazyLoadEvent): void {
+    const entityId = this.selectedLegalEntityId();
+    if (!entityId) return;
+    const newRows = event.rows ?? this.pageSize;
+    // F04-04: cursor array was built for the old page size — reset state and reload from page 0
+    if (newRows !== this.fuzzyTab().pageSize) {
+      this.fuzzyTab.set(emptyTabState(newRows));
+      this.loadFuzzy$.next({ entityId, cursor: undefined, pageSize: newRows, filters: this.currentFilters });
+      return;
+    }
+    const page = Math.floor((event.first ?? 0) / newRows);
+    this.fuzzyTab.update((s) => ({ ...s, currentPage: page, tableFirst: event.first ?? 0 }));
+    const cursor = this.fuzzyTab().cursors[page] ?? undefined;
+    this.loadFuzzy$.next({ entityId, cursor, pageSize: newRows, filters: this.currentFilters });
+  }
+
+  onReviewedStatusChange(status: ReconciliationStatus): void {
+    this.reviewedStatusFilter.set(status);
+    this.reviewedTab.set(emptyTabState());
+    this.triggerTabLoad('reviewed');
+  }
+
+  onReviewedLazyLoad(event: TableLazyLoadEvent): void {
+    const entityId = this.selectedLegalEntityId();
+    if (!entityId) return;
+    const newRows = event.rows ?? this.pageSize;
+    // F04-04: cursor array was built for the old page size — reset state and reload from page 0
+    if (newRows !== this.reviewedTab().pageSize) {
+      this.reviewedTab.set(emptyTabState(newRows));
+      this.loadReviewed$.next({ entityId, cursor: undefined, pageSize: newRows, filters: this.currentFilters });
+      return;
+    }
+    const page = Math.floor((event.first ?? 0) / newRows);
+    this.reviewedTab.update((s) => ({ ...s, currentPage: page, tableFirst: event.first ?? 0 }));
+    const cursor = this.reviewedTab().cursors[page] ?? undefined;
+    this.loadReviewed$.next({ entityId, cursor, pageSize: newRows, filters: this.currentFilters });
   }
 
   onRowClick(ex: ReconciliationException): void {
@@ -605,9 +852,10 @@ export class ReconciliationListComponent {
 
   formatVariance(ex: ReconciliationException): string {
     if (ex.amountVariance == null) return '—';
-    const sign = ex.amountVariance >= 0 ? '+' : '';
-    const divisor = 100;
-    return `${sign}${(ex.amountVariance / divisor).toFixed(2)} ${ex.currencyCode}`;
+    const sign = ex.amountVariance > 0 ? '+' : ex.amountVariance < 0 ? '-' : '';
+    // F04-03: use the shared pipe instance
+    const formatted = this.currencyPipe.transform(Math.abs(ex.amountVariance), ex.currencyCode ?? '');
+    return `${sign}${formatted}`;
   }
 
   formatVariancePct(ex: ReconciliationException): string {
@@ -634,6 +882,7 @@ export class ReconciliationListComponent {
 
   private getTabState(tab: string): typeof this.varianceTab {
     if (tab === 'unmatched') return this.unmatchedTab;
+    if (tab === 'fuzzy') return this.fuzzyTab;
     if (tab === 'reviewed') return this.reviewedTab;
     return this.varianceTab;
   }
@@ -649,12 +898,14 @@ export class ReconciliationListComponent {
     };
     if (tab === 'variance') this.loadVariance$.next(req);
     else if (tab === 'unmatched') this.loadUnmatched$.next(req);
+    else if (tab === 'fuzzy') this.loadFuzzy$.next(req);
     else if (tab === 'reviewed') this.loadReviewed$.next(req);
   }
 
   private resetAllTabs(): void {
     this.varianceTab.set(emptyTabState());
     this.unmatchedTab.set(emptyTabState());
+    this.fuzzyTab.set(emptyTabState());
     this.reviewedTab.set(emptyTabState());
   }
 
@@ -676,8 +927,9 @@ export class ReconciliationListComponent {
   }
 
   private loadSitesForEntity(entityId: string): void {
+    // F04-08: increased limit from 500 to 1000 to reduce risk of silently truncated site lists
     this.siteService
-      .getSites({ legalEntityId: entityId, pageSize: 500 })
+      .getSites({ legalEntityId: entityId, pageSize: 1000 })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (result) => {

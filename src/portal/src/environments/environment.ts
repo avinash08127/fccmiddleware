@@ -4,4 +4,5 @@ export const environment = {
   msalClientId: 'YOUR_ENTRA_CLIENT_ID',
   msalAuthority: 'https://login.microsoftonline.com/YOUR_TENANT_ID',
   msalRedirectUri: 'http://localhost:4200',
+  backendLoggingEnabled: false,
 };

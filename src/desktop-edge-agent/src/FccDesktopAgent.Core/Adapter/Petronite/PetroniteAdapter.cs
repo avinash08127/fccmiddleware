@@ -19,6 +19,9 @@ namespace FccDesktopAgent.Core.Adapter.Petronite;
 /// </summary>
 public sealed class PetroniteAdapter : IFccAdapter, IAsyncDisposable
 {
+    /// <inheritdoc />
+    public PumpStatusCapability PumpStatusCapability => PumpStatusCapability.Synthesized;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>Default port for the local webhook listener when none is configured.</summary>
@@ -253,6 +256,8 @@ public sealed class PetroniteAdapter : IFccAdapter, IAsyncDisposable
                     "Petronite webhook listener failed to start on port {Port}; "
                     + "push transactions will not be received until the port is available", port);
                 // Non-fatal: adapter continues but push won't work.
+                // Do NOT set _initialized so the next call retries listener startup.
+                return;
             }
 
             // Run startup reconciliation (PN-3.4).

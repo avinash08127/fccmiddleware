@@ -2,6 +2,7 @@ using System.Text;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace FccMiddleware.Infrastructure.Storage;
@@ -14,26 +15,36 @@ public interface IArchiveObjectStore
 
 /// <summary>
 /// Stores archive artifacts in S3 when configured and falls back to the local filesystem for dev/test.
+/// Local fallback is only permitted in Development; non-dev environments fail closed.
 /// </summary>
 public sealed class ArchiveObjectStore : IArchiveObjectStore, IDisposable
 {
     private readonly string? _bucketName;
     private readonly string? _kmsKeyId;
     private readonly string _localRoot;
+    private readonly bool _allowLocalFallback;
     private readonly ILogger<ArchiveObjectStore> _logger;
     private readonly AmazonS3Client? _s3Client;
 
-    public ArchiveObjectStore(IConfiguration configuration, ILogger<ArchiveObjectStore> logger)
+    public ArchiveObjectStore(IConfiguration configuration, IHostEnvironment environment, ILogger<ArchiveObjectStore> logger)
     {
         _bucketName = configuration["Storage:ArchiveBucket"];
         _kmsKeyId = configuration["Storage:ArchiveKmsKeyId"];
         _localRoot = configuration["Storage:ArchiveLocalRoot"]
             ?? Path.Combine(Path.GetTempPath(), "fccmiddleware-archive");
+        _allowLocalFallback = environment.IsDevelopment();
         _logger = logger;
 
         if (!string.IsNullOrWhiteSpace(_bucketName))
         {
             _s3Client = new AmazonS3Client();
+        }
+        else if (!_allowLocalFallback)
+        {
+            throw new InvalidOperationException(
+                "Storage:ArchiveBucket is not configured. " +
+                "Local filesystem fallback is only permitted in the Development environment. " +
+                "Configure an S3 bucket for archive storage in non-development environments.");
         }
     }
 
@@ -65,6 +76,9 @@ public sealed class ArchiveObjectStore : IArchiveObjectStore, IDisposable
             await _s3Client.PutObjectAsync(request, ct);
             return $"s3://{_bucketName}/{key}";
         }
+
+        // Local fallback — only reachable in Development (constructor guards non-dev).
+        _logger.LogWarning("S3 not configured — writing archive artifact to local filesystem (development only)");
 
         var fullPath = Path.Combine(_localRoot, key.Replace('/', Path.DirectorySeparatorChar));
         var directory = Path.GetDirectoryName(fullPath);

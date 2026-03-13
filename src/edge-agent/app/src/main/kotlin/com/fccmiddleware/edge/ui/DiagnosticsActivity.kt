@@ -3,14 +3,13 @@ package com.fccmiddleware.edge.ui
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.fccmiddleware.edge.buffer.dao.AuditLogDao
@@ -21,10 +20,10 @@ import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.logging.StructuredFileLogger
-import kotlinx.coroutines.CoroutineScope
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.koin.android.ext.android.inject
@@ -52,9 +51,12 @@ class DiagnosticsActivity : AppCompatActivity() {
     private val configManager: ConfigManager by inject()
     private val fileLogger: StructuredFileLogger by inject()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val handler = Handler(Looper.getMainLooper())
-    private val refreshRunnable = Runnable { refreshData() }
+    private var isShareInProgress = false
+
+    // P-003: Reusable TextView pools — updated in-place on each refresh to avoid
+    // removeAllViews/addView churn and the GC pressure it causes on low-end devices.
+    private val errorTextViews = mutableListOf<TextView>()
+    private val structuredLogTextViews = mutableListOf<TextView>()
 
     // UI references for dynamic updates
     private lateinit var connectivityValue: TextView
@@ -75,6 +77,8 @@ class DiagnosticsActivity : AppCompatActivity() {
 
     // Constants moved to bottom companion object
 
+    private var refreshJob: kotlinx.coroutines.Job? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
@@ -83,52 +87,61 @@ class DiagnosticsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        handler.postDelayed(refreshRunnable, REFRESH_INTERVAL_MS)
+        startAutoRefresh()
     }
 
     override fun onPause() {
         super.onPause()
-        handler.removeCallbacks(refreshRunnable)
+        refreshJob?.cancel()
+        refreshJob = null
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        scope.cancel()
+    private fun startAutoRefresh() {
+        refreshJob?.cancel()
+        refreshJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(REFRESH_INTERVAL_MS)
+                refreshData()
+            }
+        }
     }
+
+    private data class DiagnosticsSnapshot(
+        val bufferDepth: Int,
+        val syncState: com.fccmiddleware.edge.buffer.dao.SyncStateEntity?,
+        val recentLogs: List<com.fccmiddleware.edge.buffer.dao.AuditLogEntry>,
+        val siteInfo: com.fccmiddleware.edge.buffer.dao.SiteInfoEntity?,
+        val productCount: Int,
+        val pumpCount: Int,
+        val nozzleCount: Int,
+        val structuredEntries: List<String>,
+        val logSizeBytes: Long,
+    )
 
     private fun refreshData() {
-        scope.launch {
+        lifecycleScope.launch {
             val connState = connectivityManager.state.value
             val heartbeatAge = connectivityManager.fccHeartbeatAgeSeconds()
-
-            val bufferDepth = withContext(Dispatchers.IO) {
-                try { transactionDao.countForLocalApi() } catch (_: Exception) { 0 }
-            }
-
-            val syncState = withContext(Dispatchers.IO) {
-                try { syncStateDao.get() } catch (_: Exception) { null }
-            }
-
-            val recentLogs = withContext(Dispatchers.IO) {
-                try { auditLogDao.getRecent(RECENT_LOG_LIMIT) } catch (_: Exception) { emptyList() }
-            }
-
             val configVersion = configManager.currentConfigVersion
 
-            val siteInfo = withContext(Dispatchers.IO) {
-                try { siteDataDao.getSiteInfo() } catch (_: Exception) { null }
-            }
-            val productCount = withContext(Dispatchers.IO) {
-                try { siteDataDao.getAllProducts().size } catch (_: Exception) { 0 }
-            }
-            val pumpCount = withContext(Dispatchers.IO) {
-                try { siteDataDao.getAllPumps().size } catch (_: Exception) { 0 }
-            }
-            val nozzleCount = withContext(Dispatchers.IO) {
-                try { siteDataDao.getAllNozzles().size } catch (_: Exception) { 0 }
+            // Batch all IO/DAO calls into a single context switch
+            val snapshot = withContext(Dispatchers.IO) {
+                val bufferDepth = try { transactionDao.countForLocalApi() } catch (_: Exception) { 0 }
+                val syncState = try { syncStateDao.get() } catch (_: Exception) { null }
+                val recentLogs = try { auditLogDao.getRecent(RECENT_LOG_LIMIT) } catch (_: Exception) { emptyList() }
+                val siteInfo = try { siteDataDao.getSiteInfo() } catch (_: Exception) { null }
+                val productCount = try { siteDataDao.getAllProducts().size } catch (_: Exception) { 0 }
+                val pumpCount = try { siteDataDao.getAllPumps().size } catch (_: Exception) { 0 }
+                val nozzleCount = try { siteDataDao.getAllNozzles().size } catch (_: Exception) { 0 }
+                val structuredEntries = try { fileLogger.getRecentDiagnosticEntries(STRUCTURED_LOG_LIMIT) } catch (_: Exception) { emptyList() }
+                val logSizeBytes = try { fileLogger.totalLogSizeBytes() } catch (_: Exception) { 0L }
+                DiagnosticsSnapshot(bufferDepth, syncState, recentLogs, siteInfo, productCount, pumpCount, nozzleCount, structuredEntries, logSizeBytes)
             }
 
-            val lastSyncUtc = syncState?.lastUploadAt
+            // Guard against updating a destroyed activity
+            if (isFinishing || isDestroyed) return@launch
+
+            val lastSyncUtc = snapshot.syncState?.lastUploadAt
 
             val syncLagSeconds = if (lastSyncUtc != null) {
                 try {
@@ -157,11 +170,11 @@ class DiagnosticsActivity : AppCompatActivity() {
                 }
             )
 
-            bufferDepthValue.text = bufferDepth.toString()
+            bufferDepthValue.text = snapshot.bufferDepth.toString()
             bufferDepthValue.setTextColor(
                 when {
-                    bufferDepth == 0 -> COLOR_GREEN
-                    bufferDepth < 100 -> COLOR_YELLOW
+                    snapshot.bufferDepth == 0 -> COLOR_GREEN
+                    snapshot.bufferDepth < 100 -> COLOR_YELLOW
                     else -> COLOR_RED
                 }
             )
@@ -180,15 +193,15 @@ class DiagnosticsActivity : AppCompatActivity() {
             configVersionValue.text = configVersion?.toString() ?: "None"
 
             // Site data
-            if (siteInfo != null) {
-                val vendor = siteInfo.fccVendor ?: "Unknown"
-                val model = siteInfo.fccModel ?: ""
+            if (snapshot.siteInfo != null) {
+                val vendor = snapshot.siteInfo.fccVendor ?: "Unknown"
+                val model = snapshot.siteInfo.fccModel ?: ""
                 fccTypeValue.text = if (model.isNotEmpty()) "$vendor / $model" else vendor
                 fccTypeValue.setTextColor(COLOR_TEXT)
-                productCountValue.text = productCount.toString()
-                pumpCountValue.text = pumpCount.toString()
-                nozzleCountValue.text = nozzleCount.toString()
-                siteLastSyncValue.text = siteInfo.syncedAt.take(19)
+                productCountValue.text = snapshot.productCount.toString()
+                pumpCountValue.text = snapshot.pumpCount.toString()
+                nozzleCountValue.text = snapshot.nozzleCount.toString()
+                siteLastSyncValue.text = snapshot.siteInfo.syncedAt.take(19)
             } else {
                 fccTypeValue.text = "No site data"
                 fccTypeValue.setTextColor(COLOR_GRAY)
@@ -198,51 +211,77 @@ class DiagnosticsActivity : AppCompatActivity() {
                 siteLastSyncValue.text = "-"
             }
 
-            // Recent audit log entries
-            recentErrorsContainer.removeAllViews()
-            if (recentLogs.isEmpty()) {
-                recentErrorsContainer.addView(makeSecondary("No recent audit entries"))
+            // Recent audit log entries — update in-place (P-003: avoid removeAllViews churn)
+            val errorEntries = snapshot.recentLogs
+            val errorNeeded = errorEntries.size.coerceAtLeast(1)
+            while (errorTextViews.size < errorNeeded) {
+                val tv = TextView(this@DiagnosticsActivity)
+                errorTextViews.add(tv)
+                recentErrorsContainer.addView(tv)
+            }
+            if (errorEntries.isEmpty()) {
+                errorTextViews[0].apply {
+                    text = "No recent audit entries"
+                    textSize = 12f
+                    setTypeface(null, Typeface.NORMAL)
+                    setTextColor(COLOR_GRAY)
+                    setPadding(0, dp(4), 0, dp(4))
+                    visibility = View.VISIBLE
+                }
+                for (i in 1 until errorTextViews.size) errorTextViews[i].visibility = View.GONE
             } else {
-                for (entry in recentLogs) {
-                    val line = TextView(this@DiagnosticsActivity).apply {
+                for (i in errorEntries.indices) {
+                    val entry = errorEntries[i]
+                    errorTextViews[i].apply {
                         text = "${entry.createdAt.take(19)} [${entry.eventType}] ${entry.message}"
                         textSize = 11f
+                        setTypeface(null, Typeface.NORMAL)
                         setTextColor(
                             if (entry.eventType.contains("ERROR") ||
                                 entry.eventType.contains("FAIL")) COLOR_RED else COLOR_TEXT
                         )
                         setPadding(0, dp(2), 0, dp(2))
+                        visibility = View.VISIBLE
                     }
-                    recentErrorsContainer.addView(line)
                 }
+                for (i in errorEntries.size until errorTextViews.size) errorTextViews[i].visibility = View.GONE
             }
 
-            // Structured file logs (WARN/ERROR)
-            val structuredEntries = withContext(Dispatchers.IO) {
-                try { fileLogger.getRecentDiagnosticEntries(STRUCTURED_LOG_LIMIT) } catch (_: Exception) { emptyList() }
+            // Structured file logs (WARN/ERROR) — update in-place (P-003)
+            val structuredEntries = snapshot.structuredEntries
+            val structuredNeeded = structuredEntries.size.coerceAtLeast(1)
+            while (structuredLogTextViews.size < structuredNeeded) {
+                val tv = TextView(this@DiagnosticsActivity)
+                structuredLogTextViews.add(tv)
+                structuredLogsContainer.addView(tv)
             }
-            structuredLogsContainer.removeAllViews()
             if (structuredEntries.isEmpty()) {
-                structuredLogsContainer.addView(makeSecondary("No recent WARN/ERROR file log entries"))
+                structuredLogTextViews[0].apply {
+                    text = "No recent WARN/ERROR file log entries"
+                    textSize = 12f
+                    setTypeface(null, Typeface.NORMAL)
+                    setTextColor(COLOR_GRAY)
+                    setPadding(0, dp(4), 0, dp(4))
+                    visibility = View.VISIBLE
+                }
+                for (i in 1 until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
             } else {
-                for (entry in structuredEntries) {
-                    val line = TextView(this@DiagnosticsActivity).apply {
+                for (i in structuredEntries.indices) {
+                    val entry = structuredEntries[i]
+                    structuredLogTextViews[i].apply {
                         text = entry.take(200)
                         textSize = 10f
                         setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
                         setTextColor(if (entry.contains("\"lvl\":\"ERROR\"") || entry.contains("\"lvl\":\"FATAL\"")) COLOR_RED else COLOR_YELLOW)
                         setPadding(0, dp(1), 0, dp(1))
+                        visibility = View.VISIBLE
                     }
-                    structuredLogsContainer.addView(line)
                 }
+                for (i in structuredEntries.size until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
             }
 
-            logFileSizeValue.text = "${fileLogger.totalLogSizeBytes() / 1024} KB"
+            logFileSizeValue.text = "${snapshot.logSizeBytes / 1024} KB"
             lastRefreshValue.text = "Last refresh: ${Instant.now().toString().take(19)}"
-
-            // Schedule next refresh
-            handler.removeCallbacks(refreshRunnable)
-            handler.postDelayed(refreshRunnable, REFRESH_INTERVAL_MS)
         }
     }
 
@@ -405,11 +444,15 @@ class DiagnosticsActivity : AppCompatActivity() {
     // ── Phase 2B: Share Logs ────────────────────────────────────────────────
 
     private fun shareLogs() {
-        scope.launch {
+        if (isShareInProgress) return
+        isShareInProgress = true
+
+        lifecycleScope.launch {
             try {
                 val logFiles = withContext(Dispatchers.IO) { fileLogger.getLogFiles() }
                 if (logFiles.isEmpty()) {
                     AppLogger.i(TAG, "No log files to share")
+                    Toast.makeText(this@DiagnosticsActivity, "No log files to share", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
@@ -441,6 +484,9 @@ class DiagnosticsActivity : AppCompatActivity() {
                 AppLogger.i(TAG, "Log share initiated, ${logFiles.size} files zipped")
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Failed to share logs", e)
+                Toast.makeText(this@DiagnosticsActivity, "Failed to share logs", Toast.LENGTH_SHORT).show()
+            } finally {
+                isShareInProgress = false
             }
         }
     }

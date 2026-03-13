@@ -1,3 +1,5 @@
+using FccMiddleware.Domain.Interfaces;
+
 namespace FccMiddleware.Domain.Entities;
 
 /// <summary>
@@ -6,7 +8,7 @@ namespace FccMiddleware.Domain.Entities;
 /// Payload is stored as serialized JSON (jsonb column).
 /// No UpdatedAt — events are immutable.
 /// </summary>
-public class AuditEvent
+public class AuditEvent : ITenantScoped
 {
     public Guid Id { get; set; }
     public DateTimeOffset CreatedAt { get; set; }  // Partition key — part of composite PK
@@ -18,4 +20,10 @@ public class AuditEvent
 
     /// <summary>Event-specific payload stored as JSON in a jsonb column.</summary>
     public string Payload { get; set; } = null!;
+
+    /// <summary>
+    /// The primary entity this event pertains to (e.g. DeviceId for agent-scoped events).
+    /// Null for events not tied to a specific entity. Indexed for direct lookup by device/entity.
+    /// </summary>
+    public Guid? EntityId { get; set; }
 }

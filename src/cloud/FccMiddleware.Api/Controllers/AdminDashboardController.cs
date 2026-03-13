@@ -69,13 +69,33 @@ public sealed class AdminDashboardController : PortalControllerBase
         var telemetry = await FilterByLegalEntity(_db.AgentTelemetrySnapshots.IgnoreQueryFilters(), scopedIds)
             .AsNoTracking()
             .ToListAsync(cancellationToken);
-        var deadLetters = await FilterByLegalEntity(_db.DeadLetterItems.IgnoreQueryFilters(), scopedIds)
+        // BUG-F01-1: Replace ToListAsync with database-level COUNT queries for DLQ and reconciliation.
+        // BUG-F01-4: Scope the health-window DLQ count to the 15-minute health window.
+        var recentDeadLetterCount = await FilterByLegalEntity(_db.DeadLetterItems.IgnoreQueryFilters(), scopedIds)
             .AsNoTracking()
-            .Where(item => item.Status != DeadLetterStatus.RESOLVED && item.Status != DeadLetterStatus.DISCARDED)
-            .ToListAsync(cancellationToken);
-        var reconciliation = await FilterByLegalEntity(_db.ReconciliationRecords.IgnoreQueryFilters(), scopedIds)
+            .CountAsync(item => item.Status != DeadLetterStatus.RESOLVED
+                                && item.Status != DeadLetterStatus.DISCARDED
+                                && item.CreatedAt >= healthWindowStart, cancellationToken);
+
+        var dlqDepth = await FilterByLegalEntity(_db.DeadLetterItems.IgnoreQueryFilters(), scopedIds)
             .AsNoTracking()
-            .ToListAsync(cancellationToken);
+            .CountAsync(item => item.Status != DeadLetterStatus.RESOLVED
+                                && item.Status != DeadLetterStatus.DISCARDED, cancellationToken);
+
+        var reconciliationBase = FilterByLegalEntity(_db.ReconciliationRecords.IgnoreQueryFilters(), scopedIds).AsNoTracking();
+        var reconciliationPendingExceptions = await reconciliationBase
+            .CountAsync(item => item.Status == ReconciliationStatus.UNMATCHED
+                             || item.Status == ReconciliationStatus.VARIANCE_FLAGGED
+                             || item.Status == ReconciliationStatus.REVIEW_FUZZY_MATCH, cancellationToken);
+        var reconciliationAutoApproved = await reconciliationBase
+            .CountAsync(item => item.Status == ReconciliationStatus.MATCHED
+                             || item.Status == ReconciliationStatus.VARIANCE_WITHIN_TOLERANCE
+                             || item.Status == ReconciliationStatus.APPROVED, cancellationToken);
+        var reconciliationFlagged = await reconciliationBase
+            .CountAsync(item => item.Status == ReconciliationStatus.VARIANCE_FLAGGED
+                             || item.Status == ReconciliationStatus.REVIEW_FUZZY_MATCH, cancellationToken);
+        var reconciliationLastUpdatedAt = await reconciliationBase
+            .MaxAsync(item => (DateTimeOffset?)item.UpdatedAt, cancellationToken);
 
         var telemetryByDevice = telemetry.ToDictionary(item => item.DeviceId);
         var offlineAgents = agents
@@ -112,13 +132,9 @@ public sealed class AdminDashboardController : PortalControllerBase
         var degradedCount = Math.Max(agents.Count - onlineCount - offlineCount, 0);
 
         var currentStaleCount = await CountStaleTransactionsAsync(scopedIds, staleCutoff, cancellationToken);
-        var previousStaleCount = await FilterByLegalEntity(_db.Transactions.IgnoreQueryFilters(), scopedIds)
-            .AsNoTracking()
-            .CountAsync(item =>
-                item.Status == TransactionStatus.PENDING
-                && item.CreatedAt >= previousStaleWindowStart
-                && item.CreatedAt < staleCutoff,
-                cancellationToken);
+        // BUG-F01-7: Use the same unbounded definition as currentStaleCount but anchored one period earlier,
+        // so both values represent "all pending transactions older than the threshold" at comparable points in time.
+        var previousStaleCount = await CountStaleTransactionsAsync(scopedIds, previousStaleWindowStart, cancellationToken);
 
         var summary = new DashboardSummaryDto
         {
@@ -147,14 +163,14 @@ public sealed class AdminDashboardController : PortalControllerBase
             IngestionHealth = new IngestionHealthDataDto
             {
                 TransactionsPerMinute = Math.Round(recentTransactions.Count / 15m, 2),
-                SuccessRate = recentTransactions.Count + deadLetters.Count == 0
+                SuccessRate = recentTransactions.Count + recentDeadLetterCount == 0
                     ? 1m
-                    : Math.Round(recentTransactions.Count / (decimal)(recentTransactions.Count + deadLetters.Count), 2),
-                ErrorRate = recentTransactions.Count + deadLetters.Count == 0
+                    : Math.Round(recentTransactions.Count / (decimal)(recentTransactions.Count + recentDeadLetterCount), 2),
+                ErrorRate = recentTransactions.Count + recentDeadLetterCount == 0
                     ? 0m
-                    : Math.Round(deadLetters.Count / (decimal)(recentTransactions.Count + deadLetters.Count), 2),
-                LatencyP95Ms = 0,
-                DlqDepth = deadLetters.Count,
+                    : Math.Round(recentDeadLetterCount / (decimal)(recentTransactions.Count + recentDeadLetterCount), 2),
+                LatencyP95Ms = null, // BUG-F01-2: not yet computed — null serialises to null; frontend shows "N/A"
+                DlqDepth = dlqDepth,
                 PeriodMinutes = 15
             },
             AgentStatus = new AgentStatusSummaryDataDto
@@ -167,10 +183,10 @@ public sealed class AdminDashboardController : PortalControllerBase
             },
             Reconciliation = new ReconciliationSummaryDataDto
             {
-                PendingExceptions = reconciliation.Count(item => item.Status is ReconciliationStatus.UNMATCHED or ReconciliationStatus.VARIANCE_FLAGGED or ReconciliationStatus.REVIEW_FUZZY_MATCH),
-                AutoApproved = reconciliation.Count(item => item.Status is ReconciliationStatus.MATCHED or ReconciliationStatus.VARIANCE_WITHIN_TOLERANCE or ReconciliationStatus.APPROVED),
-                Flagged = reconciliation.Count(item => item.Status is ReconciliationStatus.VARIANCE_FLAGGED or ReconciliationStatus.REVIEW_FUZZY_MATCH),
-                LastUpdatedAt = reconciliation.Count == 0 ? now : reconciliation.Max(item => item.UpdatedAt)
+                PendingExceptions = reconciliationPendingExceptions,
+                AutoApproved = reconciliationAutoApproved,
+                Flagged = reconciliationFlagged,
+                LastUpdatedAt = reconciliationLastUpdatedAt ?? now
             },
             StaleTransactions = new StaleTransactionsDataDto
             {

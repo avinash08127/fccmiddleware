@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.Core.Adapter.Radix;
@@ -38,11 +39,13 @@ public sealed class RadixPushListener : IDisposable
     private Task? _listenTask;
     private int _isRunning;
 
-    /// <summary>Thread-safe queue of raw XML payloads received from the FDC.</summary>
-    private readonly ConcurrentQueue<PushedTransactionPayload> _incomingQueue = new();
-
-    /// <summary>Atomic counter tracking queue size to avoid TOCTOU race on size check + enqueue.</summary>
-    private int _queueCount;
+    /// <summary>
+    /// H-06: Bounded channel replaces ConcurrentQueue + manual counter.
+    /// Channel.CreateBounded provides atomic, race-free capacity enforcement —
+    /// TryWrite returns false when the channel is full, eliminating the TOCTOU
+    /// gap between increment-then-check and enqueue.
+    /// </summary>
+    private readonly Channel<PushedTransactionPayload> _incomingChannel;
 
     /// <summary>RESP_CODE for unsolicited push transactions from the FDC.</summary>
     public const int RespCodeUnsolicited = 30;
@@ -54,7 +57,7 @@ public sealed class RadixPushListener : IDisposable
     public bool IsRunning => Volatile.Read(ref _isRunning) == 1;
 
     /// <summary>Number of transactions currently queued and not yet drained by the adapter.</summary>
-    public int QueueSize => _incomingQueue.Count;
+    public int QueueSize => _incomingChannel.Reader.Count;
 
     /// <summary>
     /// Creates a new push listener instance.
@@ -73,6 +76,14 @@ public sealed class RadixPushListener : IDisposable
         _expectedUsnCode = expectedUsnCode;
         _sharedSecret = sharedSecret;
         _logger = logger;
+
+        _incomingChannel = Channel.CreateBounded<PushedTransactionPayload>(
+            new BoundedChannelOptions(MaxQueueSize)
+            {
+                FullMode = BoundedChannelFullMode.DropWrite,
+                SingleReader = false,
+                SingleWriter = false,
+            });
     }
 
     /// <summary>
@@ -171,8 +182,7 @@ public sealed class RadixPushListener : IDisposable
             _listenTask = null;
 
             // Clear queue
-            while (_incomingQueue.TryDequeue(out _)) { }
-            Interlocked.Exchange(ref _queueCount, 0);
+            while (_incomingChannel.Reader.TryRead(out _)) { }
         }
     }
 
@@ -186,14 +196,13 @@ public sealed class RadixPushListener : IDisposable
     /// <returns>List of pushed transaction payloads, oldest first.</returns>
     public List<PushedTransactionPayload> DrainQueue(int maxCount = 200)
     {
-        var result = new List<PushedTransactionPayload>(Math.Min(maxCount, _incomingQueue.Count));
+        var result = new List<PushedTransactionPayload>(Math.Min(maxCount, _incomingChannel.Reader.Count));
 
         for (var i = 0; i < maxCount; i++)
         {
-            if (!_incomingQueue.TryDequeue(out var item))
+            if (!_incomingChannel.Reader.TryRead(out var item))
                 break;
 
-            Interlocked.Decrement(ref _queueCount);
             result.Add(item);
         }
 
@@ -340,25 +349,23 @@ public sealed class RadixPushListener : IDisposable
             }
 
             // Step 6: Enqueue for adapter processing (with back-pressure guard).
-            // Use atomic increment-then-check to avoid TOCTOU race between
-            // concurrent push requests that could each pass a size check
-            // before any of them enqueue.
-            var newCount = Interlocked.Increment(ref _queueCount);
-            if (newCount > MaxQueueSize)
+            // H-06: Bounded channel handles capacity enforcement atomically —
+            // TryWrite returns false when full, eliminating the TOCTOU race
+            // between size check and enqueue.
+            var pushed = new PushedTransactionPayload(
+                RawXml: rawXml,
+                ReceivedAt: DateTimeOffset.UtcNow);
+
+            if (!_incomingChannel.Writer.TryWrite(pushed))
             {
-                Interlocked.Decrement(ref _queueCount);
                 _logger.LogWarning("RadixPushListener: queue full ({MaxSize}) — dropping transaction", MaxQueueSize);
                 await SendResponseAsync(response, HttpStatusCode.ServiceUnavailable,
                     BuildErrorResponse("Queue full")).ConfigureAwait(false);
                 return;
             }
 
-            var pushed = new PushedTransactionPayload(
-                RawXml: rawXml,
-                ReceivedAt: DateTimeOffset.UtcNow);
-
-            _incomingQueue.Enqueue(pushed);
-            _logger.LogDebug("RadixPushListener: enqueued pushed transaction (queue size={QueueSize})", newCount);
+            _logger.LogDebug("RadixPushListener: enqueued pushed transaction (queue size={QueueSize})",
+                _incomingChannel.Reader.Count);
 
             // Step 7: Return XML ACK to FDC
             await SendResponseAsync(response, HttpStatusCode.OK, BuildAckResponse()).ConfigureAwait(false);

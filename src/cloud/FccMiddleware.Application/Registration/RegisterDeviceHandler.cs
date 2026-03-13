@@ -154,6 +154,7 @@ public sealed class RegisterDeviceHandler
             CreatedAt = now,
             LegalEntityId = bootstrapToken.LegalEntityId,
             EventType = "DEVICE_REGISTERED",
+            EntityId = deviceId,
             CorrelationId = Guid.NewGuid(),
             SiteCode = request.SiteCode,
             Source = "RegisterDeviceHandler",

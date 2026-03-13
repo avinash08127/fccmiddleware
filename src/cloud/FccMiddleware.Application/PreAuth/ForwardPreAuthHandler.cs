@@ -66,7 +66,11 @@ public sealed class ForwardPreAuthHandler
     {
         if (existing.Status == command.Status)
         {
-            // Idempotent: same status, return existing record unchanged
+            // Idempotent: same status — apply any mutable field updates from the retry
+            // (e.g. FccCorrelationId, CustomerName arriving on a retried forward after network failure)
+            ApplyMutableFields(existing, command);
+            await _db.SaveChangesAsync(cancellationToken);
+
             _logger.LogInformation(
                 "Idempotent pre-auth forward for {OdooOrderId}/{SiteCode}, status already {Status}",
                 command.OdooOrderId, command.SiteCode, command.Status);

@@ -13,11 +13,16 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import android.os.SystemClock
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.LocalOverrideManager
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.runtime.CadenceController
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.koin.android.ext.android.inject
 
 /**
@@ -66,10 +71,50 @@ class SettingsActivity : AppCompatActivity() {
     // Status
     private lateinit var statusText: TextView
 
+    // Debounce: track last save click time
+    private var lastSaveClickTime = 0L
+
+    // Track active dialog to dismiss on destroy
+    private var activeDialog: AlertDialog? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
         populateFields()
+
+        // Restore form state after rotation
+        savedInstanceState?.let { state ->
+            fccIpInput.setText(state.getString(STATE_FCC_IP, fccIpInput.text.toString()))
+            fccPortInput.setText(state.getString(STATE_FCC_PORT, fccPortInput.text.toString()))
+            fccJplPortInput.setText(state.getString(STATE_FCC_JPL_PORT, fccJplPortInput.text.toString()))
+            fccAccessCodeInput.setText(state.getString(STATE_FCC_ACCESS_CODE, fccAccessCodeInput.text.toString()))
+            wsPortInput.setText(state.getString(STATE_WS_PORT, wsPortInput.text.toString()))
+            val statusMsg = state.getString(STATE_STATUS_TEXT)
+            if (!statusMsg.isNullOrEmpty()) {
+                statusText.text = statusMsg
+                statusText.setTextColor(state.getInt(STATE_STATUS_COLOR, COLOR_GREEN))
+                statusText.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_FCC_IP, fccIpInput.text.toString())
+        outState.putString(STATE_FCC_PORT, fccPortInput.text.toString())
+        outState.putString(STATE_FCC_JPL_PORT, fccJplPortInput.text.toString())
+        outState.putString(STATE_FCC_ACCESS_CODE, fccAccessCodeInput.text.toString())
+        outState.putString(STATE_WS_PORT, wsPortInput.text.toString())
+        if (statusText.visibility == View.VISIBLE) {
+            outState.putString(STATE_STATUS_TEXT, statusText.text.toString())
+            outState.putInt(STATE_STATUS_COLOR, statusText.currentTextColor)
+        }
+    }
+
+    override fun onDestroy() {
+        activeDialog?.dismiss()
+        activeDialog = null
+        super.onDestroy()
     }
 
     // ── Field population ─────────────────────────────────────────────────────
@@ -91,7 +136,10 @@ class SettingsActivity : AppCompatActivity() {
         fccJplPortInput.setText(
             (localOverrideManager.jplPort ?: cloudJplPort)?.toString() ?: ""
         )
-        fccAccessCodeInput.setText(localOverrideManager.fccCredential ?: cloudCredential)
+        // Only populate credential field if there's a local override;
+        // never pre-fill the cloud credential to avoid plaintext exposure.
+        fccAccessCodeInput.setText(localOverrideManager.fccCredential ?: "")
+        fccAccessCodeInput.hint = if (cloudCredential.isNotEmpty()) "Cloud credential set (hidden)" else "Access code"
         wsPortInput.setText(
             (localOverrideManager.wsPort ?: cloudWsPort)?.toString() ?: ""
         )
@@ -142,6 +190,11 @@ class SettingsActivity : AppCompatActivity() {
     // ── Save & Reconnect ─────────────────────────────────────────────────────
 
     private fun saveAndReconnect() {
+        // Debounce: ignore rapid double-taps
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastSaveClickTime < DEBOUNCE_MS) return
+        lastSaveClickTime = now
+
         val errors = mutableListOf<String>()
 
         val fccIp = fccIpInput.text.toString().trim()
@@ -182,76 +235,85 @@ class SettingsActivity : AppCompatActivity() {
             return
         }
 
-        // Save overrides (only save non-empty values; clear empty ones)
-        try {
-            if (fccIp.isNotEmpty()) {
-                localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_HOST, fccIp)
-            } else {
-                localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_HOST)
+        // Save overrides off the main thread (EncryptedSharedPreferences writes can
+        // block 10-50 ms due to encryption — P-005)
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                if (fccIp.isNotEmpty()) {
+                    localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_HOST, fccIp)
+                } else {
+                    localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_HOST)
+                }
+
+                if (fccPort.isNotEmpty()) {
+                    localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_PORT, fccPort)
+                } else {
+                    localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_PORT)
+                }
+
+                if (fccJplPort.isNotEmpty()) {
+                    localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_JPL_PORT, fccJplPort)
+                } else {
+                    localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_JPL_PORT)
+                }
+
+                if (fccAccessCode.isNotEmpty()) {
+                    localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_CREDENTIAL, fccAccessCode)
+                } else {
+                    localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_CREDENTIAL)
+                }
+
+                if (wsPort.isNotEmpty()) {
+                    localOverrideManager.saveOverride(LocalOverrideManager.KEY_WS_PORT, wsPort)
+                } else {
+                    localOverrideManager.clearOverride(LocalOverrideManager.KEY_WS_PORT)
+                }
+
+                AppLogger.i(TAG, "Overrides saved, requesting FCC reconnect")
+                cadenceController.requestFccReconnect()
+
+                withContext(Dispatchers.Main) {
+                    statusText.text = "Settings saved. FCC reconnecting..."
+                    statusText.setTextColor(COLOR_GREEN)
+                    statusText.visibility = View.VISIBLE
+                    populateFields()
+                    Toast.makeText(this@SettingsActivity, "Settings saved & reconnecting", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to save overrides", e)
+                withContext(Dispatchers.Main) {
+                    statusText.text = "Error: ${e.message}"
+                    statusText.setTextColor(COLOR_RED)
+                    statusText.visibility = View.VISIBLE
+                }
             }
-
-            if (fccPort.isNotEmpty()) {
-                localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_PORT, fccPort)
-            } else {
-                localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_PORT)
-            }
-
-            if (fccJplPort.isNotEmpty()) {
-                localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_JPL_PORT, fccJplPort)
-            } else {
-                localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_JPL_PORT)
-            }
-
-            if (fccAccessCode.isNotEmpty()) {
-                localOverrideManager.saveOverride(LocalOverrideManager.KEY_FCC_CREDENTIAL, fccAccessCode)
-            } else {
-                localOverrideManager.clearOverride(LocalOverrideManager.KEY_FCC_CREDENTIAL)
-            }
-
-            if (wsPort.isNotEmpty()) {
-                localOverrideManager.saveOverride(LocalOverrideManager.KEY_WS_PORT, wsPort)
-            } else {
-                localOverrideManager.clearOverride(LocalOverrideManager.KEY_WS_PORT)
-            }
-
-            AppLogger.i(TAG, "Overrides saved, requesting FCC reconnect")
-            cadenceController.requestFccReconnect()
-
-            statusText.text = "Settings saved. FCC reconnecting..."
-            statusText.setTextColor(COLOR_GREEN)
-            statusText.visibility = View.VISIBLE
-
-            // Refresh override indicators
-            populateFields()
-
-            Toast.makeText(this, "Settings saved & reconnecting", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            AppLogger.e(TAG, "Failed to save overrides", e)
-            statusText.text = "Error: ${e.message}"
-            statusText.setTextColor(COLOR_RED)
-            statusText.visibility = View.VISIBLE
         }
     }
 
     // ── Reset to Cloud Defaults ──────────────────────────────────────────────
 
     private fun resetToCloudDefaults() {
-        AlertDialog.Builder(this)
+        activeDialog?.dismiss()
+        activeDialog = AlertDialog.Builder(this)
             .setTitle("Reset to Cloud Defaults")
             .setMessage("Clear all local overrides and revert to cloud-delivered configuration?")
             .setPositiveButton("Reset") { _, _ ->
-                localOverrideManager.clearAllOverrides()
-                AppLogger.i(TAG, "All overrides cleared, requesting FCC reconnect")
-                cadenceController.requestFccReconnect()
-                populateFields()
-
-                statusText.text = "Overrides cleared. Using cloud defaults."
-                statusText.setTextColor(COLOR_GREEN)
-                statusText.visibility = View.VISIBLE
-
-                Toast.makeText(this, "Reset to cloud defaults", Toast.LENGTH_SHORT).show()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    localOverrideManager.clearAllOverrides()
+                    AppLogger.i(TAG, "All overrides cleared, requesting FCC reconnect")
+                    cadenceController.requestFccReconnect()
+                    withContext(Dispatchers.Main) {
+                        populateFields()
+                        statusText.text = "Overrides cleared. Using cloud defaults."
+                        statusText.setTextColor(COLOR_GREEN)
+                        statusText.visibility = View.VISIBLE
+                        Toast.makeText(this@SettingsActivity, "Reset to cloud defaults", Toast.LENGTH_SHORT).show()
+                        activeDialog = null
+                    }
+                }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton("Cancel") { _, _ -> activeDialog = null }
+            .setOnCancelListener { activeDialog = null }
             .show()
     }
 
@@ -307,7 +369,7 @@ class SettingsActivity : AppCompatActivity() {
 
         fccAccessCodeOverrideLabel = makeOverrideIndicator()
         fccAccessCodeInput = EditText(this).apply {
-            hint = "Access code"
+            hint = "Access code" // updated dynamically in populateFields()
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setSingleLine()
             setPadding(halfPad, halfPad, halfPad, halfPad)
@@ -469,6 +531,17 @@ class SettingsActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "SettingsActivity"
+        private const val DEBOUNCE_MS = 1000L
+
+        // Instance state keys
+        private const val STATE_FCC_IP = "state_fcc_ip"
+        private const val STATE_FCC_PORT = "state_fcc_port"
+        private const val STATE_FCC_JPL_PORT = "state_fcc_jpl_port"
+        private const val STATE_FCC_ACCESS_CODE = "state_fcc_access_code"
+        private const val STATE_WS_PORT = "state_ws_port"
+        private const val STATE_STATUS_TEXT = "state_status_text"
+        private const val STATE_STATUS_COLOR = "state_status_color"
+
         private const val COLOR_GREEN = 0xFF2E7D32.toInt()
         private const val COLOR_RED = 0xFFC62828.toInt()
         private const val COLOR_GRAY = 0xFF9E9E9E.toInt()

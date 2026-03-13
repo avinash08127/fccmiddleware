@@ -22,7 +22,7 @@ export interface IngestionHealthData {
   transactionsPerMinute: number;
   successRate: number; // 0–1
   errorRate: number; // 0–1
-  latencyP95Ms: number;
+  latencyP95Ms: number | null;
   dlqDepth: number;
   periodMinutes: number;
 }

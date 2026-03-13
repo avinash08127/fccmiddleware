@@ -52,7 +52,7 @@ class RadixAdapter(
     private val httpClient: HttpClient = HttpClient(OkHttp),
 ) : IFccAdapter, Closeable {
 
-    override val pumpStatusCapability = PumpStatusCapability.NOT_SUPPORTED
+    override val pumpStatusCapability = PumpStatusCapability.SYNTHESIZED
 
     override val preAuthMatcher: IPreAuthMatcher = object : IPreAuthMatcher {
         override val matchingStrategy = PreAuthMatchingStrategy.DETERMINISTIC
@@ -86,6 +86,21 @@ class RadixAdapter(
                     odooOrderId = preAuth.odooOrderId,
                 )
             }
+        }
+
+        override fun purgeStale(): Int {
+            val cutoff = Instant.now().minusSeconds(PREAUTH_TTL_MINUTES * 60)
+            var purged = 0
+            val iterator = activePreAuths.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (entry.value.createdAt.isBefore(cutoff)) {
+                    iterator.remove()
+                    purged++
+                    AppLogger.d(TAG, "IPreAuthMatcher.purgeStale: token=${entry.key}, age > ${PREAUTH_TTL_MINUTES}m")
+                }
+            }
+            return purged
         }
     }
 
@@ -393,6 +408,7 @@ class RadixAdapter(
      * Signature errors (RESP_CODE=251) are logged as warnings (config issue, not transient).
      */
     override suspend fun heartbeat(): Boolean {
+        purgeStalePreAuths()
         return try {
             withTimeout(HEARTBEAT_TIMEOUT_MS) {
                 val token = nextToken().toString()
@@ -1089,8 +1105,24 @@ class RadixAdapter(
     // IFccAdapter — getPumpStatus
     // -----------------------------------------------------------------------
 
-    /** Radix does not expose real-time pump status. Always returns empty list. */
-    override suspend fun getPumpStatus(): List<PumpStatus> = emptyList()
+    /**
+     * Synthesizes pump status from configured pumps and active pre-auth state.
+     *
+     * Radix protocol does not expose real-time pump status, but we can derive
+     * meaningful state: pumps with active pre-auths are AUTHORIZED, others are IDLE.
+     * Uses [PumpStatusSynthesizer] with pump numbers extracted from [pumpAddressMap].
+     */
+    override suspend fun getPumpStatus(): List<PumpStatus> {
+        val configuredPumps = pumpAddressMap.keys
+        if (configuredPumps.isEmpty()) return emptyList()
+
+        return PumpStatusSynthesizer.synthesize(
+            configuredPumps = configuredPumps,
+            activePreAuths = preAuthMatcher.getActivePreAuths(),
+            siteCode = config.siteCode,
+            currencyCode = config.currencyCode,
+        )
+    }
 
     // -----------------------------------------------------------------------
     // IFccAdapter — acknowledgeTransactions
@@ -1166,19 +1198,32 @@ class RadixAdapter(
 
         return try {
             val result = mutableMapOf<Int, PumpAddressEntry>()
+            val skipped = mutableListOf<String>()
             val root = org.json.JSONObject(json)
             for (key in root.keys()) {
-                val pumpNumber = key.toIntOrNull() ?: continue
+                val pumpNumber = key.toIntOrNull()
+                if (pumpNumber == null) {
+                    skipped.add("key '$key' is not a valid pump number")
+                    continue
+                }
                 val obj = root.getJSONObject(key)
                 val pumpAddr = obj.optInt("pumpAddr", -1)
                 val fp = obj.optInt("fp", -1)
-                if (pumpAddr >= 0 && fp >= 0) {
-                    result[pumpNumber] = PumpAddressEntry(pumpAddr, fp)
+                if (pumpAddr < 0 || fp < 0) {
+                    skipped.add("pump $pumpNumber has invalid pumpAddr=$pumpAddr or fp=$fp")
+                    continue
                 }
+                result[pumpNumber] = PumpAddressEntry(pumpAddr, fp)
+            }
+            if (skipped.isNotEmpty()) {
+                AppLogger.w(TAG, "Skipped ${skipped.size} invalid pump entries: ${skipped.joinToString("; ")}")
+            }
+            if (result.isEmpty() && root.length() > 0) {
+                AppLogger.e(TAG, "fccPumpAddressMap had ${root.length()} entries but ALL were invalid — pre-auth will not work")
             }
             result
         } catch (e: Exception) {
-            AppLogger.w(TAG, "Failed to parse fccPumpAddressMap: ${e.message}")
+            AppLogger.e(TAG, "Failed to parse fccPumpAddressMap — pre-auth will not work: ${e.message}", e)
             emptyMap()
         }
     }
@@ -1196,11 +1241,9 @@ class RadixAdapter(
         /** Returns true if this adapter has a working implementation. */
         const val IS_IMPLEMENTED = true
 
-        /** Hard timeout for heartbeat probe (5 seconds). */
-        const val HEARTBEAT_TIMEOUT_MS = 5000L
-
-        /** Hard timeout for pre-auth requests (10 seconds). */
-        const val PREAUTH_TIMEOUT_MS = 10_000L
+        /** M-22: Use centralised timeout constants. */
+        val HEARTBEAT_TIMEOUT_MS = AdapterTimeouts.HEARTBEAT_TIMEOUT_MS
+        val PREAUTH_TIMEOUT_MS = AdapterTimeouts.PREAUTH_TIMEOUT_MS
 
         /** Maximum number of transactions to fetch in a single batch. */
         const val MAX_FETCH_LIMIT = 200

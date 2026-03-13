@@ -667,6 +667,11 @@ export class SettingsComponent implements OnInit {
   };
 
   ngOnInit(): void {
+    this.destroyRef.onDestroy(() => {
+      if (this.feedbackTimer !== null) {
+        clearTimeout(this.feedbackTimer);
+      }
+    });
     this.loadSettings();
     this.masterDataService
       .getLegalEntities()
@@ -679,7 +684,7 @@ export class SettingsComponent implements OnInit {
   saveGlobalDefaults(): void {
     const req: UpdateGlobalDefaultsRequest = {
       tolerance: { ...this.tolerance },
-      retention: { ...this.retention },
+      retention: {},
     };
     this.saving.set(true);
     this.settingsService
@@ -693,7 +698,7 @@ export class SettingsComponent implements OnInit {
 
   saveRetentionPolicies(): void {
     const req: UpdateGlobalDefaultsRequest = {
-      tolerance: { ...this.tolerance },
+      tolerance: {},
       retention: { ...this.retention },
     };
     this.saving.set(true);
@@ -775,9 +780,23 @@ export class SettingsComponent implements OnInit {
 
   // ── Email chip helpers ─────────────────────────────────────────────────────
 
+  private static readonly EMAIL_PATTERN = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+
+  private isValidEmail(value: string): boolean {
+    return SettingsComponent.EMAIL_PATTERN.test(value);
+  }
+
   addEmailHigh(): void {
     const email = this.newEmailHigh.trim();
-    if (email && !this.emailRecipientsHigh.includes(email)) {
+    if (!email) {
+      this.newEmailHigh = '';
+      return;
+    }
+    if (!this.isValidEmail(email)) {
+      this.setFeedback('error', `"${email}" is not a valid email address.`);
+      return;
+    }
+    if (!this.emailRecipientsHigh.includes(email)) {
       this.emailRecipientsHigh = [...this.emailRecipientsHigh, email];
     }
     this.newEmailHigh = '';
@@ -789,7 +808,15 @@ export class SettingsComponent implements OnInit {
 
   addEmailCritical(): void {
     const email = this.newEmailCritical.trim();
-    if (email && !this.emailRecipientsCritical.includes(email)) {
+    if (!email) {
+      this.newEmailCritical = '';
+      return;
+    }
+    if (!this.isValidEmail(email)) {
+      this.setFeedback('error', `"${email}" is not a valid email address.`);
+      return;
+    }
+    if (!this.emailRecipientsCritical.includes(email)) {
       this.emailRecipientsCritical = [...this.emailRecipientsCritical, email];
     }
     this.newEmailCritical = '';
@@ -847,10 +874,22 @@ export class SettingsComponent implements OnInit {
     this.setFeedback('error', message);
   }
 
+  private feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
   private setFeedback(severity: 'success' | 'error', message: string): void {
+    if (this.feedbackTimer !== null) {
+      clearTimeout(this.feedbackTimer);
+      this.feedbackTimer = null;
+    }
     this.feedbackSeverity.set(severity);
     this.feedbackMessage.set(message);
-    setTimeout(() => this.feedbackMessage.set(null), 5000);
+    // Only auto-dismiss success messages; errors stay until the user acts.
+    if (severity === 'success') {
+      this.feedbackTimer = setTimeout(() => {
+        this.feedbackMessage.set(null);
+        this.feedbackTimer = null;
+      }, 5000);
+    }
   }
 
   private emptyOverrideForm(): UpsertLegalEntityOverrideRequest {

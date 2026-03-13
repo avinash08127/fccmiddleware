@@ -8,6 +8,7 @@ using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace FccMiddleware.Api.Controllers;
@@ -71,9 +72,7 @@ public sealed class DlqController : PortalControllerBase
         }
 
         var query = _db.DeadLetterItems
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Where(item => item.LegalEntityId == legalEntityId);
+            .ForPortal(access, legalEntityId);
 
         if (!string.IsNullOrWhiteSpace(siteCode))
         {
@@ -100,23 +99,14 @@ public sealed class DlqController : PortalControllerBase
             query = query.Where(item => item.CreatedAt <= to.Value);
         }
 
+        var totalCount = await query.CountAsync(cancellationToken);
+
         if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
         {
             query = query.Where(item =>
                 item.CreatedAt > cursorTimestamp
                 || (item.CreatedAt == cursorTimestamp && item.Id.CompareTo(cursorId) > 0));
         }
-
-        var totalCount = await _db.DeadLetterItems
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Where(item => item.LegalEntityId == legalEntityId)
-            .Where(item => string.IsNullOrWhiteSpace(siteCode) || item.SiteCode == siteCode)
-            .Where(item => !parsedReason.HasValue || item.FailureReason == parsedReason.Value)
-            .Where(item => !parsedStatus.HasValue || item.Status == parsedStatus.Value)
-            .Where(item => !from.HasValue || item.CreatedAt >= from.Value)
-            .Where(item => !to.HasValue || item.CreatedAt <= to.Value)
-            .CountAsync(cancellationToken);
 
         var rows = await query
             .OrderBy(item => item.CreatedAt)
@@ -175,7 +165,8 @@ public sealed class DlqController : PortalControllerBase
             return Forbid();
         }
 
-        return Ok(MapDeadLetterDetail(item));
+        var canViewSensitive = PortalAccessResolver.HasSensitiveDataAccess(User);
+        return Ok(MapDeadLetterDetail(item, includeSensitivePayload: canViewSensitive));
     }
 
     [HttpPost("{id:guid}/retry")]
@@ -247,11 +238,34 @@ public sealed class DlqController : PortalControllerBase
             return Forbid();
         }
 
+        var now = DateTimeOffset.UtcNow;
+        var userId = _accessResolver.ResolveUserId(User);
+
         item.Status = DeadLetterStatus.DISCARDED;
         item.DiscardReason = request.Reason;
-        item.DiscardedBy = _accessResolver.ResolveUserId(User);
-        item.DiscardedAt = DateTimeOffset.UtcNow;
-        item.UpdatedAt = DateTimeOffset.UtcNow;
+        item.DiscardedBy = userId;
+        item.DiscardedAt = now;
+        item.UpdatedAt = now;
+
+        _db.AuditEvents.Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = item.LegalEntityId,
+            EventType = "DEAD_LETTER_DISCARDED",
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = item.SiteCode,
+            Source = "DlqController",
+            Payload = JsonSerializer.Serialize(new
+            {
+                DeadLetterId = item.Id,
+                item.SiteCode,
+                Reason = request.Reason,
+                DiscardedBy = userId,
+            }),
+            EntityId = item.Id
+        });
+
         await _db.SaveChangesAsync(cancellationToken);
 
         return Ok();
@@ -276,9 +290,11 @@ public sealed class DlqController : PortalControllerBase
             .Where(item => request.Ids.Contains(item.Id))
             .ToListAsync(cancellationToken);
 
-        var succeeded = new List<Guid>();
-        var failed = new List<BatchRetryFailureDto>();
+        var succeeded = new ConcurrentBag<Guid>();
+        var failed = new ConcurrentBag<BatchRetryFailureDto>();
+        var toReplay = new List<Guid>();
 
+        // Validate access and state synchronously before dispatching replay tasks.
         foreach (var id in request.Ids)
         {
             var row = rows.FirstOrDefault(item => item.Id == id);
@@ -300,21 +316,34 @@ public sealed class DlqController : PortalControllerBase
                 continue;
             }
 
-            var result = await _replayService.ReplayAsync(id, cancellationToken);
-            if (result.Success)
-            {
-                succeeded.Add(id);
-            }
-            else
-            {
-                failed.Add(new BatchRetryFailureDto { Id = id, Error = result.ErrorMessage ?? "Replay failed." });
-            }
+            toReplay.Add(id);
         }
+
+        // Replay eligible items in parallel with bounded concurrency.
+        using var semaphore = new SemaphoreSlim(5);
+        var replayTasks = toReplay.Select(async id =>
+        {
+            await semaphore.WaitAsync(cancellationToken);
+            try
+            {
+                var result = await _replayService.ReplayAsync(id, cancellationToken);
+                if (result.Success)
+                    succeeded.Add(id);
+                else
+                    failed.Add(new BatchRetryFailureDto { Id = id, Error = result.ErrorMessage ?? "Replay failed." });
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+
+        await Task.WhenAll(replayTasks);
 
         return Ok(new BatchRetryResultDto
         {
-            Succeeded = succeeded,
-            Failed = failed
+            Succeeded = [.. succeeded],
+            Failed = [.. failed]
         });
     }
 
@@ -336,6 +365,9 @@ public sealed class DlqController : PortalControllerBase
             .Where(item => request.Items.Select(batchItem => batchItem.Id).Contains(item.Id))
             .ToListAsync(cancellationToken);
 
+        var now = DateTimeOffset.UtcNow;
+        var userId = _accessResolver.ResolveUserId(User);
+
         foreach (var batchItem in request.Items)
         {
             var row = rows.FirstOrDefault(item => item.Id == batchItem.Id);
@@ -346,9 +378,28 @@ public sealed class DlqController : PortalControllerBase
 
             row.Status = DeadLetterStatus.DISCARDED;
             row.DiscardReason = batchItem.Reason;
-            row.DiscardedBy = _accessResolver.ResolveUserId(User);
-            row.DiscardedAt = DateTimeOffset.UtcNow;
-            row.UpdatedAt = DateTimeOffset.UtcNow;
+            row.DiscardedBy = userId;
+            row.DiscardedAt = now;
+            row.UpdatedAt = now;
+
+            _db.AuditEvents.Add(new AuditEvent
+            {
+                Id = Guid.NewGuid(),
+                CreatedAt = now,
+                LegalEntityId = row.LegalEntityId,
+                EventType = "DEAD_LETTER_DISCARDED",
+                CorrelationId = Guid.NewGuid(),
+                SiteCode = row.SiteCode,
+                Source = "DlqController",
+                Payload = JsonSerializer.Serialize(new
+                {
+                    DeadLetterId = row.Id,
+                    row.SiteCode,
+                    Reason = batchItem.Reason,
+                    DiscardedBy = userId,
+                }),
+                EntityId = row.Id
+            });
         }
 
         await _db.SaveChangesAsync(cancellationToken);
@@ -382,7 +433,7 @@ public sealed class DlqController : PortalControllerBase
             UpdatedAt = item.UpdatedAt
         };
 
-    private static DeadLetterDetailDto MapDeadLetterDetail(DeadLetterItem item) =>
+    private static DeadLetterDetailDto MapDeadLetterDetail(DeadLetterItem item, bool includeSensitivePayload = false) =>
         new()
         {
             Id = item.Id,
@@ -402,7 +453,9 @@ public sealed class DlqController : PortalControllerBase
             DiscardedAt = item.DiscardedAt,
             CreatedAt = item.CreatedAt,
             UpdatedAt = item.UpdatedAt,
-            RawPayload = string.IsNullOrWhiteSpace(item.RawPayloadJson) ? null : PortalJson.ParseJson(item.RawPayloadJson),
+            RawPayload = includeSensitivePayload && !string.IsNullOrWhiteSpace(item.RawPayloadJson)
+                ? PortalJson.ParseJson(item.RawPayloadJson)
+                : null,
             RetryHistory = DeserializeHistory(item)
         };
 

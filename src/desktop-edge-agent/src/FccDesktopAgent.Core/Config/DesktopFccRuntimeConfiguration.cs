@@ -57,6 +57,27 @@ internal static class DesktopFccRuntimeConfiguration
             }
         }
 
+        if (vendor == FccVendor.Radix)
+        {
+            if (string.IsNullOrWhiteSpace(config.Fcc.SharedSecret))
+            {
+                error = "Radix requires SharedSecret for SHA-1 message signing.";
+                return false;
+            }
+
+            if (config.Fcc.UsnCode is null or <= 0)
+            {
+                error = "Radix requires UsnCode (Unique Station Number, 1–999999).";
+                return false;
+            }
+
+            if (config.Fcc.AuthPort is null or <= 0)
+            {
+                error = "Radix requires AuthPort (external authorization port).";
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -114,7 +135,10 @@ internal static class DesktopFccRuntimeConfiguration
             SiteCode: siteCode,
             ConnectionProtocol: fccSection?.ConnectionProtocol,
             JplPort: resolvedJplPort,
-            AuthPort: fccSection?.Port,
+            AuthPort: fccSection?.AuthPort ?? fccSection?.Port,
+            SharedSecret: fccSection?.SharedSecret,
+            UsnCode: fccSection?.UsnCode,
+            FccPumpAddressMap: fccSection?.FccPumpAddressMap,
             HeartbeatIntervalSeconds: fccSection?.HeartbeatIntervalSeconds,
             LegalEntityId: siteConfig?.Identity?.LegalEntityId,
             CurrencyCode: siteConfig?.Site?.Currency,
@@ -127,7 +151,10 @@ internal static class DesktopFccRuntimeConfiguration
             AdvatecWebhookListenerPort: advatecWebhookListenerPort,
             AdvatecWebhookToken: advatecWebhookToken,
             AdvatecEfdSerialNumber: advatecEfdSerialNumber,
-            AdvatecCustIdType: advatecCustIdType);
+            AdvatecCustIdType: advatecCustIdType,
+            PreAuthTimeoutSeconds: fccSection?.PreAuthTimeoutSeconds,
+            FiscalReceiptTimeoutSeconds: fccSection?.FiscalReceiptTimeoutSeconds,
+            ApiRequestTimeoutSeconds: fccSection?.ApiRequestTimeoutSeconds);
 
         return new ResolvedFccRuntimeConfiguration(vendor, connectionConfig);
     }

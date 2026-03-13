@@ -37,6 +37,20 @@ public sealed class ReviewReconciliationHandler
                 "reason is required.");
         }
 
+        if (reason.Length < ReviewReconciliationCommand.MinimumReasonLength)
+        {
+            return Result<ReviewReconciliationResult>.Failure(
+                "VALIDATION.REASON_TOO_SHORT",
+                $"reason must be at least {ReviewReconciliationCommand.MinimumReasonLength} characters.");
+        }
+
+        if (reason.Length > 1000)
+        {
+            return Result<ReviewReconciliationResult>.Failure(
+                "VALIDATION.REASON_TOO_LONG",
+                "Reason must not exceed 1000 characters.");
+        }
+
         var record = await _db.FindByIdAsync(request.ReconciliationId, cancellationToken);
         if (record is null)
         {

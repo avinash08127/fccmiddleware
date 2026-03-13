@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Subject, EMPTY } from 'rxjs';
-import { switchMap, catchError } from 'rxjs/operators';
+import { switchMap, catchError, map } from 'rxjs/operators';
 import { TableModule, TableLazyLoadEvent } from 'primeng/table';
 import { ButtonModule } from 'primeng/button';
 import { CardModule } from 'primeng/card';
@@ -35,12 +35,9 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
 function txSeverity(status: TransactionStatus): PrimeSeverity {
   switch (status) {
     case TransactionStatus.SYNCED_TO_ODOO:
-    case TransactionStatus.SYNCED:
       return 'success';
     case TransactionStatus.PENDING:
       return 'warn';
-    case TransactionStatus.STALE_PENDING:
-      return 'danger';
     case TransactionStatus.DUPLICATE:
     case TransactionStatus.ARCHIVED:
       return 'secondary';
@@ -266,12 +263,30 @@ export class TransactionListComponent {
 
   // ── Load trigger (switchMap cancels in-flight requests) ───────────────────
   private readonly load$ = new Subject<LoadRequest>();
+  private readonly loadSites$ = new Subject<string>();
 
   constructor() {
     this.masterDataService
       .getLegalEntities()
       .pipe(takeUntilDestroyed())
       .subscribe({ next: (entities) => this.legalEntities.set(entities) });
+
+    this.loadSites$
+      .pipe(
+        switchMap((entityId) =>
+          this.siteService.getSites({ legalEntityId: entityId, pageSize: 500 }).pipe(
+            map((result) =>
+              result.data.map((s) => ({ label: `${s.siteName} (${s.siteCode})`, value: s.siteCode })),
+            ),
+            catchError(() => {
+              this.siteOptions.set([]);
+              return EMPTY;
+            }),
+          ),
+        ),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((options) => this.siteOptions.set(options));
 
     this.load$
       .pipe(
@@ -404,16 +419,7 @@ export class TransactionListComponent {
   }
 
   private loadSitesForEntity(entityId: string): void {
-    this.siteService
-      .getSites({ legalEntityId: entityId, pageSize: 500 })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (result) => {
-          this.siteOptions.set(
-            result.data.map((s) => ({ label: `${s.siteName} (${s.siteCode})`, value: s.siteCode })),
-          );
-        },
-        error: () => this.siteOptions.set([]),
-      });
+    this.siteOptions.set([]);
+    this.loadSites$.next(entityId);
   }
 }

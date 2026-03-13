@@ -395,7 +395,7 @@ public sealed class ReconciliationMatchingService
 
     private static double AbsMinutes(TimeSpan value) => Math.Abs(value.TotalMinutes);
 
-    private static void ApplyMatchedOutcome(
+    private void ApplyMatchedOutcome(
         Transaction transaction,
         PreAuthRecord preAuth,
         ReconciliationRecord record,
@@ -406,9 +406,8 @@ public sealed class ReconciliationMatchingService
         var authorizedAmount = preAuth.AuthorizedAmountMinorUnits!.Value;
         var variance = transaction.AmountMinorUnits - authorizedAmount;
         var absoluteVariance = Math.Abs(variance);
-        var variancePercent = authorizedAmount == 0
-            ? 0m
-            : decimal.Round((decimal)absoluteVariance * 100m / authorizedAmount, 4, MidpointRounding.AwayFromZero);
+        var variancePercent = CalculateVariancePercent(absoluteVariance, authorizedAmount);
+        var varianceBps = CalculateVarianceBps(variancePercent);
         var withinTolerance = absoluteVariance <= settings.AmountToleranceAbsolute
             || variancePercent <= settings.AmountTolerancePercent;
 
@@ -435,29 +434,30 @@ public sealed class ReconciliationMatchingService
         transaction.ReconciliationStatus = record.Status;
         transaction.UpdatedAt = matchedAt;
 
-        preAuth.MatchedTransactionId = transaction.Id;
-        preAuth.MatchedFccTransactionId = transaction.FccTransactionId;
-        preAuth.ActualAmountMinorUnits = transaction.AmountMinorUnits;
-        preAuth.ActualVolumeMillilitres = transaction.VolumeMicrolitres / 1000L;
-        preAuth.AmountVarianceMinorUnits = transaction.AmountMinorUnits - preAuth.RequestedAmountMinorUnits;
-        preAuth.VarianceBps = preAuth.RequestedAmountMinorUnits == 0
-            ? 0
-            : (int)Math.Round(
-                Math.Abs((double)(transaction.AmountMinorUnits - preAuth.RequestedAmountMinorUnits))
-                / preAuth.RequestedAmountMinorUnits
-                * 10000d,
-                MidpointRounding.AwayFromZero);
-        preAuth.CompletedAt = matchedAt;
-        preAuth.UpdatedAt = matchedAt;
-
         try
         {
             preAuth.Transition(PreAuthStatus.COMPLETED);
         }
-        catch (InvalidPreAuthTransitionException)
+        catch (InvalidPreAuthTransitionException ex)
         {
-            preAuth.Status = PreAuthStatus.COMPLETED;
+            _logger.LogWarning(
+                ex,
+                "Matched transaction {TransactionId} to pre-auth {PreAuthId}, but skipped completion stamping because transition {From} -> {To} is invalid",
+                transaction.Id,
+                preAuth.Id,
+                ex.From,
+                ex.To);
+            return;
         }
+
+        preAuth.MatchedTransactionId = transaction.Id;
+        preAuth.MatchedFccTransactionId = transaction.FccTransactionId;
+        preAuth.ActualAmountMinorUnits = transaction.AmountMinorUnits;
+        preAuth.ActualVolumeMillilitres = transaction.VolumeMicrolitres / 1000L;
+        preAuth.AmountVarianceMinorUnits = variance;
+        preAuth.VarianceBps = varianceBps;
+        preAuth.CompletedAt = matchedAt;
+        preAuth.UpdatedAt = matchedAt;
     }
 
     private void PublishEvents(
@@ -482,13 +482,9 @@ public sealed class ReconciliationMatchingService
             return;
         }
 
-        var varianceBps = record.AuthorizedAmountMinorUnits.GetValueOrDefault() <= 0
+        var varianceBps = !record.VariancePercent.HasValue
             ? 0
-            : (int)Math.Round(
-                (double)record.AbsoluteVarianceMinorUnits.GetValueOrDefault()
-                / record.AuthorizedAmountMinorUnits!.Value
-                * 10000d,
-                MidpointRounding.AwayFromZero);
+            : CalculateVarianceBps(record.VariancePercent.Value);
 
         _eventPublisher.Publish(new ReconciliationVarianceFlagged
         {
@@ -510,4 +506,12 @@ public sealed class ReconciliationMatchingService
         string MatchMethod,
         bool AmbiguityFlag,
         string? AmbiguityReason);
+
+    private static decimal CalculateVariancePercent(long absoluteVariance, long baselineAmount) =>
+        baselineAmount == 0
+            ? 0m
+            : decimal.Round((decimal)absoluteVariance * 100m / baselineAmount, 4, MidpointRounding.AwayFromZero);
+
+    private static int CalculateVarianceBps(decimal variancePercent) =>
+        (int)decimal.Round(variancePercent * 100m, 0, MidpointRounding.AwayFromZero);
 }

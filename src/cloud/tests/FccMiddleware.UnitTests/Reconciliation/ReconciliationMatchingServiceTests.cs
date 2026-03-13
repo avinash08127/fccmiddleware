@@ -58,6 +58,67 @@ public sealed class ReconciliationMatchingServiceTests
     }
 
     [Fact]
+    public async Task MatchAsync_TerminalPreAuth_DoesNotForceCompletionOrStampCompletionFields()
+    {
+        var sut = CreateSut();
+        var tx = CreateTransaction(fccCorrelationId: "CORR-LATE", amountMinorUnits: 5000);
+        var candidate = CreatePreAuth(
+            "ORDER-LATE",
+            authorizedAmount: 5000,
+            correlationId: "CORR-LATE",
+            status: PreAuthStatus.EXPIRED);
+
+        _db.FindByTransactionIdAsync(tx.Id, Arg.Any<CancellationToken>())
+            .Returns((ReconciliationRecord?)null);
+        _db.FindSiteContextAsync(tx.LegalEntityId, tx.SiteCode, Arg.Any<ReconciliationOptions>(), Arg.Any<CancellationToken>())
+            .Returns(CreateSiteContext(tx.LegalEntityId, tx.SiteCode));
+        _db.FindCorrelationCandidatesAsync(tx.LegalEntityId, tx.SiteCode, "CORR-LATE", Arg.Any<CancellationToken>())
+            .Returns([candidate]);
+
+        var result = await sut.MatchAsync(tx, CancellationToken.None);
+
+        result.Status.Should().Be(ReconciliationStatus.MATCHED);
+        tx.PreAuthId.Should().Be(candidate.Id);
+        candidate.Status.Should().Be(PreAuthStatus.EXPIRED);
+        candidate.MatchedTransactionId.Should().BeNull();
+        candidate.MatchedFccTransactionId.Should().BeNull();
+        candidate.ActualAmountMinorUnits.Should().BeNull();
+        candidate.ActualVolumeMillilitres.Should().BeNull();
+        candidate.AmountVarianceMinorUnits.Should().BeNull();
+        candidate.VarianceBps.Should().BeNull();
+        candidate.CompletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task MatchAsync_PartialAuthorization_UsesAuthorizedAmountForPreAuthVariance()
+    {
+        var sut = CreateSut();
+        var tx = CreateTransaction(fccCorrelationId: "CORR-PARTIAL", amountMinorUnits: 8400);
+        var candidate = CreatePreAuth(
+            "ORDER-PARTIAL",
+            authorizedAmount: 8000,
+            requestedAmount: 10000,
+            correlationId: "CORR-PARTIAL");
+        ReconciliationRecord? saved = null;
+
+        _db.FindByTransactionIdAsync(tx.Id, Arg.Any<CancellationToken>())
+            .Returns((ReconciliationRecord?)null);
+        _db.FindSiteContextAsync(tx.LegalEntityId, tx.SiteCode, Arg.Any<ReconciliationOptions>(), Arg.Any<CancellationToken>())
+            .Returns(CreateSiteContext(tx.LegalEntityId, tx.SiteCode));
+        _db.FindCorrelationCandidatesAsync(tx.LegalEntityId, tx.SiteCode, "CORR-PARTIAL", Arg.Any<CancellationToken>())
+            .Returns([candidate]);
+        _db.AddReconciliationRecord(Arg.Do<ReconciliationRecord>(r => saved = r));
+
+        var result = await sut.MatchAsync(tx, CancellationToken.None);
+
+        result.Status.Should().Be(ReconciliationStatus.VARIANCE_FLAGGED);
+        saved.Should().NotBeNull();
+        saved!.VariancePercent.Should().Be(5.0000m);
+        candidate.AmountVarianceMinorUnits.Should().Be(400);
+        candidate.VarianceBps.Should().Be(500);
+    }
+
+    [Fact]
     public async Task MatchAsync_PumpNozzleTimeStep_UsesSmallestDeltaTieBreaker()
     {
         var sut = CreateSut();
@@ -246,8 +307,10 @@ public sealed class ReconciliationMatchingServiceTests
     private static PreAuthRecord CreatePreAuth(
         string odooOrderId,
         long authorizedAmount,
+        long? requestedAmount = null,
         string? correlationId = null,
-        DateTimeOffset? authorizedAt = null) =>
+        DateTimeOffset? authorizedAt = null,
+        PreAuthStatus status = PreAuthStatus.AUTHORIZED) =>
         new()
         {
             Id = Guid.NewGuid(),
@@ -258,11 +321,12 @@ public sealed class ReconciliationMatchingServiceTests
             NozzleNumber = 1,
             ProductCode = "PMS",
             CurrencyCode = "MWK",
-            RequestedAmountMinorUnits = authorizedAmount,
+            RequestedAmountMinorUnits = requestedAmount ?? authorizedAmount,
             AuthorizedAmountMinorUnits = authorizedAmount,
-            Status = PreAuthStatus.AUTHORIZED,
+            Status = status,
             RequestedAt = DateTimeOffset.UtcNow.AddMinutes(-20),
             AuthorizedAt = authorizedAt ?? DateTimeOffset.UtcNow.AddMinutes(-5),
+            ExpiredAt = status == PreAuthStatus.EXPIRED ? DateTimeOffset.UtcNow.AddMinutes(-1) : null,
             ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(20),
             CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-20),
             UpdatedAt = DateTimeOffset.UtcNow.AddMinutes(-5),

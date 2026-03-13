@@ -1,8 +1,11 @@
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using FccMiddleware.Adapter.Radix.Internal;
+using FccMiddleware.Domain.Common;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Domain.Models.Adapter;
+using Microsoft.Extensions.Logging;
 
 namespace FccMiddleware.Adapter.Radix;
 
@@ -26,13 +29,34 @@ public sealed class RadixCloudAdapter : IFccAdapter
         PropertyNameCaseInsensitive = true
     };
 
+    // Matches a well-formed <TABLE ...>...</TABLE> or <TABLE>...</TABLE> element.
+    // Anchored to avoid partial/injected matches. Compiled for reuse.
+    private static readonly Regex TableElementRegex = new(
+        @"<TABLE(?:\s[^>]*)?>[\s\S]*?</TABLE>",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    // Matches <SIGNATURE>hex</SIGNATURE> with optional whitespace inside.
+    private static readonly Regex SignatureElementRegex = new(
+        @"<SIGNATURE>\s*([0-9a-fA-F]+)\s*</SIGNATURE>",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private readonly HttpClient _httpClient;
     private readonly SiteFccConfig _config;
+    private readonly ILogger<RadixCloudAdapter> _logger;
+    private readonly IReadOnlyDictionary<(int PumpAddr, int Fp), int>? _reversePumpMap;
 
-    public RadixCloudAdapter(HttpClient httpClient, SiteFccConfig config)
+    public RadixCloudAdapter(HttpClient httpClient, SiteFccConfig config, ILogger<RadixCloudAdapter> logger)
     {
         _httpClient = httpClient;
         _config = config;
+        _logger = logger;
+
+        // Build reverse lookup for O(1) pump resolution instead of O(n) scan
+        if (config.FccPumpAddressMap is { Count: > 0 })
+        {
+            _reversePumpMap = config.FccPumpAddressMap
+                .ToDictionary(kvp => (kvp.Value.PumpAddr, kvp.Value.Fp), kvp => kvp.Key);
+        }
     }
 
     // ── NormalizeTransaction ─────────────────────────────────────────────────
@@ -139,20 +163,41 @@ public sealed class RadixCloudAdapter : IFccAdapter
 
             // Validate signature if shared secret is configured.
             // Radix signs the <TABLE>...</TABLE> element: SHA1(<TABLE>...</TABLE> + secret).
-            // We must extract the raw <TABLE> content (preserving exact whitespace) from the
-            // original string, not from the parsed DOM, to match the character-exact hash.
+            // We extract the raw <TABLE> content (preserving exact whitespace) from the
+            // original string using regex to ensure structural validity and prevent
+            // malformed XML from bypassing signature validation.
             if (!string.IsNullOrEmpty(_config.SharedSecret))
             {
-                var tableContent = ExtractRawElement(payload, "TABLE");
-                var signatureText = ExtractRawElementText(payload, "SIGNATURE");
+                var tableMatch = TableElementRegex.Match(payload);
+                var sigMatch = SignatureElementRegex.Match(payload);
 
-                if (tableContent != null && signatureText != null)
+                if (!tableMatch.Success || !sigMatch.Success)
                 {
-                    if (!RadixSignatureHelper.ValidateSignature(
-                        signatureText, tableContent, _config.SharedSecret))
-                    {
-                        return ValidationResult.Fail("INVALID_SIGNATURE", "Radix XML signature validation failed.");
-                    }
+                    _logger.LogWarning(
+                        "Radix signature validation skipped: TABLE element {TableFound}, SIGNATURE element {SigFound}",
+                        tableMatch.Success ? "found" : "MISSING",
+                        sigMatch.Success ? "found" : "MISSING");
+                    return ValidationResult.Fail("MISSING_SIGNATURE_ELEMENTS",
+                        "Radix XML missing TABLE or SIGNATURE element required for signature validation.");
+                }
+
+                // Verify the parsed DOM also contains the TABLE element — guards against
+                // injection of a TABLE-like string outside the actual XML structure.
+                if (doc.Descendants("TABLE").FirstOrDefault() is null)
+                {
+                    return ValidationResult.Fail("INVALID_XML_STRUCTURE",
+                        "Radix XML TABLE element found in raw text but not in parsed DOM.");
+                }
+
+                var tableContent = tableMatch.Value;
+                var signatureText = sigMatch.Groups[1].Value;
+
+                if (!RadixSignatureHelper.ValidateSignature(signatureText, tableContent, _config.SharedSecret))
+                {
+                    _logger.LogWarning(
+                        "Radix signature mismatch. TABLE length={TableLength}, Signature={SignaturePrefix}...",
+                        tableContent.Length, signatureText.Length > 8 ? signatureText[..8] : signatureText);
+                    return ValidationResult.Fail("INVALID_SIGNATURE", "Radix XML signature validation failed.");
                 }
             }
 
@@ -167,6 +212,13 @@ public sealed class RadixCloudAdapter : IFccAdapter
 
             if (string.IsNullOrWhiteSpace(trn.Attribute("FDC_SAVE_NUM")?.Value))
                 return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Radix TRN missing FDC_SAVE_NUM.");
+
+            // FccTransactionId = "{FDC_NUM}-{FDC_SAVE_NUM}" — DB max is 200 chars
+            var compositeIdLen = trn.Attribute("FDC_NUM")!.Value.Length + 1 + trn.Attribute("FDC_SAVE_NUM")!.Value.Length;
+            if (compositeIdLen > 200)
+                return ValidationResult.Fail(
+                    "FIELD_TOO_LONG",
+                    $"Radix FDC_NUM-FDC_SAVE_NUM composite ID exceeds max length of 200 (got {compositeIdLen}).");
 
             return ValidationResult.Ok();
         }
@@ -183,8 +235,14 @@ public sealed class RadixCloudAdapter : IFccAdapter
             using var doc = System.Text.Json.JsonDocument.Parse(payload);
             var root = doc.RootElement;
 
-            if (!root.TryGetProperty("fccTransactionId", out _))
+            if (!root.TryGetProperty("fccTransactionId", out var fccTxnId))
                 return ValidationResult.Fail("MISSING_REQUIRED_FIELD", "Missing fccTransactionId in JSON payload.");
+
+            var txnIdStr = fccTxnId.GetString();
+            if (txnIdStr is not null && txnIdStr.Length > 200)
+                return ValidationResult.Fail(
+                    "FIELD_TOO_LONG",
+                    $"fccTransactionId exceeds max length of 200 (got {txnIdStr.Length}).");
 
             return ValidationResult.Ok();
         }
@@ -205,7 +263,7 @@ public sealed class RadixCloudAdapter : IFccAdapter
         var volumeMicrolitres = (long)(decimal.Parse(dto.Volume) * 1_000_000m);
 
         // Amount: decimal × currency factor = minor units
-        var currencyFactor = GetCurrencyFactor(_config.CurrencyCode);
+        var currencyFactor = CurrencyHelper.GetCurrencyFactor(_config.CurrencyCode);
         var amountMinorUnits = (long)(decimal.Parse(dto.Amount) * currencyFactor);
 
         // Unit price: decimal × currency factor = minor per litre
@@ -220,8 +278,8 @@ public sealed class RadixCloudAdapter : IFccAdapter
             : dto.ProductCode;
 
         // Timestamps: parse FDC local time → UTC
-        var startedAt = ParseRadixTimestamp(dto.StartTime);
-        var completedAt = ParseRadixTimestamp(dto.EndTime);
+        var startedAt = ParseRadixTimestamp(dto.StartTime, "StartTime", fccTransactionId);
+        var completedAt = ParseRadixTimestamp(dto.EndTime, "EndTime", fccTransactionId);
 
         return new CanonicalTransaction
         {
@@ -243,19 +301,14 @@ public sealed class RadixCloudAdapter : IFccAdapter
 
     private int ResolvePumpNumber(int pumpAddr, int fp)
     {
-        if (_config.FccPumpAddressMap != null)
-        {
-            foreach (var kvp in _config.FccPumpAddressMap)
-            {
-                if (kvp.Value.PumpAddr == pumpAddr && kvp.Value.Fp == fp)
-                    return kvp.Key;
-            }
-        }
+        if (_reversePumpMap != null && _reversePumpMap.TryGetValue((pumpAddr, fp), out var pumpNumber))
+            return pumpNumber;
+
         // Fallback: use PUMP_ADDR + offset (consistent with edge agent fallback logic)
         return pumpAddr + _config.PumpNumberOffset;
     }
 
-    private DateTimeOffset ParseRadixTimestamp(string timestamp)
+    private DateTimeOffset ParseRadixTimestamp(string timestamp, string fieldName, string fccTransactionId)
     {
         if (DateTimeOffset.TryParse(timestamp, out var parsed))
             return parsed;
@@ -267,49 +320,11 @@ public sealed class RadixCloudAdapter : IFccAdapter
             return new DateTimeOffset(localTime, tz.GetUtcOffset(localTime));
         }
 
-        return DateTimeOffset.UtcNow;
+        // L-07: Reject transactions with unparseable timestamps instead of silently using UtcNow,
+        // which would place them in the wrong time window.
+        throw new InvalidOperationException(
+            $"Radix {fieldName} failed to parse for transaction {fccTransactionId} (raw: '{timestamp}'). " +
+            "Cannot normalize transaction without a valid timestamp.");
     }
 
-    private static decimal GetCurrencyFactor(string currencyCode)
-    {
-        // Edge agents always normalize with factor 100. The cloud adapter must use
-        // the same factor to avoid double-normalization or factor mismatch when
-        // raw XML arrives via CLOUD_DIRECT mode.
-        return 100m;
-    }
-
-    /// <summary>
-    /// Extracts raw element text including its tags from the XML string.
-    /// Returns the substring from &lt;tagName through &lt;/tagName&gt; inclusive,
-    /// preserving exact whitespace for signature validation.
-    /// </summary>
-    private static string? ExtractRawElement(string xml, string tagName)
-    {
-        var openTag = $"<{tagName}";
-        var closeTag = $"</{tagName}>";
-        var startIdx = xml.IndexOf(openTag, StringComparison.Ordinal);
-        if (startIdx < 0) return null;
-
-        var endIdx = xml.IndexOf(closeTag, startIdx, StringComparison.Ordinal);
-        if (endIdx < 0) return null;
-
-        return xml.Substring(startIdx, endIdx - startIdx + closeTag.Length);
-    }
-
-    /// <summary>
-    /// Extracts the text content between &lt;tagName&gt; and &lt;/tagName&gt;,
-    /// trimming whitespace.
-    /// </summary>
-    private static string? ExtractRawElementText(string xml, string tagName)
-    {
-        var openTag = $"<{tagName}>";
-        var closeTag = $"</{tagName}>";
-        var startIdx = xml.IndexOf(openTag, StringComparison.Ordinal);
-        if (startIdx < 0) return null;
-
-        var endIdx = xml.IndexOf(closeTag, startIdx, StringComparison.Ordinal);
-        if (endIdx < 0) return null;
-
-        return xml.Substring(startIdx + openTag.Length, endIdx - startIdx - openTag.Length).Trim();
-    }
 }

@@ -8,5 +8,7 @@ public enum IngestionSource
 {
     FCC_PUSH,
     EDGE_UPLOAD,
-    CLOUD_PULL
+    CLOUD_PULL,
+    CLOUD_DIRECT,
+    WEBHOOK
 }

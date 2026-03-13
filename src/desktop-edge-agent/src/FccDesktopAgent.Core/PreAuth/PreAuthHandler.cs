@@ -121,30 +121,27 @@ public sealed class PreAuthHandler : IPreAuthHandler
                 "FCC adapter factory has not been configured for this agent");
         }
 
-        // ── Step 4: Upsert local record with Pending status ───────────────────
-        // When a terminal record exists for the same order, reset it in-place so the unique
-        // index (OdooOrderId, SiteCode) is respected. Otherwise create a new record.
+        // ── Step 4: Create new record with Pending status ────────────────────
+        // When a terminal record exists for the same order, delete it first so the unique
+        // index (OdooOrderId, SiteCode) allows the new insert. The terminal record's data
+        // has already been forwarded to cloud (or queued for sync), preserving the audit trail.
         // Persist BEFORE the FCC call so the record is never lost even if the process crashes mid-call.
-        PreAuthEntity record;
-
         if (existing is not null)
         {
-            // Reset the terminal record for the re-request
-            record = existing;
             _logger.LogInformation(
-                "Pre-auth {Id} reset from {OldStatus} for re-request on order {OrderId}",
+                "Removing terminal pre-auth {Id} (status={OldStatus}) before re-request on order {OrderId}",
                 existing.Id, existing.Status, request.OdooOrderId);
+            _db.PreAuths.Remove(existing);
+            await _db.SaveChangesAsync(ct);
         }
-        else
-        {
-            record = new PreAuthEntity { Id = Guid.NewGuid().ToString() };
-            _db.PreAuths.Add(record);
-        }
+
+        var record = new PreAuthEntity { Id = Guid.NewGuid().ToString() };
+        _db.PreAuths.Add(record);
 
         record.SiteCode = request.SiteCode;
         record.OdooOrderId = request.OdooOrderId;
-        record.PumpNumber = request.OdooPumpNumber;
-        record.NozzleNumber = request.OdooNozzleNumber;
+        record.PumpNumber = nozzle.FccPumpNumber;
+        record.NozzleNumber = nozzle.FccNozzleNumber;
         record.ProductCode = nozzle.ProductCode;
         record.RequestedAmount = request.RequestedAmountMinorUnits;
         record.UnitPrice = request.UnitPriceMinorPerLitre;
@@ -159,16 +156,7 @@ public sealed class PreAuthHandler : IPreAuthHandler
         record.RequestedAt = now;
         record.ExpiresAt = now.AddMinutes(config.PreAuthExpiryMinutes);
         record.UpdatedAt = now;
-        // Clear previous terminal timestamps
-        record.FailureReason = null;
-        record.FccCorrelationId = null;
-        record.FccAuthorizationCode = null;
-        record.AuthorizedAt = null;
-        record.CancelledAt = null;
-        record.ExpiredAt = null;
-        record.FailedAt = null;
-        if (existing is null)
-            record.CreatedAt = now;
+        record.CreatedAt = now;
 
         var preAuthId = record.Id;
         await _db.SaveChangesAsync(ct);

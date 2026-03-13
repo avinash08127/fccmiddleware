@@ -2,7 +2,6 @@ package com.fccmiddleware.edge.adapter.common
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.advatec.AdvatecAdapter
-import com.fccmiddleware.edge.adapter.doms.DomsAdapter
 import com.fccmiddleware.edge.adapter.petronite.PetroniteAdapter
 import com.fccmiddleware.edge.adapter.radix.RadixAdapter
 import com.fccmiddleware.edge.connectivity.NetworkBinder

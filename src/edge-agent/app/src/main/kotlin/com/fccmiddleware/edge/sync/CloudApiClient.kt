@@ -22,6 +22,7 @@ import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import okhttp3.CertificatePinner
+import java.util.concurrent.TimeUnit
 
 // ---------------------------------------------------------------------------
 // Status poll result type
@@ -600,6 +601,32 @@ class HttpCloudApiClient(
         private const val TAG = "HttpCloudApiClient"
 
         /**
+         * S-006: APK-bundled fallback certificate pins (SHA-256 SPKI hashes).
+         *
+         * These are used when no runtime pins have been delivered via SiteConfig yet
+         * (e.g. initial device registration, first config poll). They close the
+         * chicken-and-egg window where the device communicates with the cloud without
+         * any pinning.
+         *
+         * Format: "sha256/BASE64==" — same as SiteConfig certificatePins.
+         *
+         * HOW TO UPDATE:
+         *   1. Extract the pin from your TLS certificate:
+         *        openssl x509 -in cert.pem -pubkey -noout \
+         *          | openssl pkey -pubin -outform der \
+         *          | openssl dgst -sha256 -binary \
+         *          | base64
+         *      then prepend "sha256/".
+         *   2. Add both the primary certificate pin and a backup (next rotation cert).
+         *   3. Mirror the same values in res/xml/network_security_config.xml.
+         *   4. Remove expired pins after the rotation window has closed.
+         *
+         * TODO: Replace the empty list below with real pins once TLS certificates are
+         *       provisioned for the production and staging endpoints.
+         */
+        val BUNDLED_PINS: List<String> = emptyList()
+
+        /**
          * Factory for the production Ktor client.
          *
          * Uses OkHttp engine (matches the rest of the Edge Agent) with
@@ -613,6 +640,8 @@ class HttpCloudApiClient(
          *   Per security spec §5.3, pins are delivered via SiteConfig from cloud,
          *   enabling rotation without APK update. On pin mismatch, the connection
          *   is refused (no fallback to unpinned).
+         *   When empty, [BUNDLED_PINS] are used as a fallback so that initial
+         *   registration is never left completely unpinned (S-006).
          */
         fun create(
             cloudBaseUrl: String,
@@ -644,8 +673,12 @@ class HttpCloudApiClient(
                         chain.proceed(request)
                     }
 
+                    // S-006: merge runtime pins with APK-bundled fallback pins so that
+                    // initial registration (before SiteConfig is available) is never unpinned.
+                    val effectivePins = if (certificatePins.isNotEmpty()) certificatePins else BUNDLED_PINS
+
                     // Build certificate pinner if pins are configured
-                    val certPinner = if (certificatePins.isNotEmpty()) {
+                    val certPinner = if (effectivePins.isNotEmpty()) {
                         // M-07: Fail-fast if hostname cannot be extracted. Silently disabling
                         // pinning on a malformed URL is a security degradation that must not
                         // go unnoticed — it is better to crash at startup than to send
@@ -657,16 +690,26 @@ class HttpCloudApiClient(
                                     "remove certificate pins to proceed without pinning.",
                             )
                         val pinnerBuilder = CertificatePinner.Builder()
-                        for (pin in certificatePins) {
+                        for (pin in effectivePins) {
                             pinnerBuilder.add(hostname, pin)
                         }
-                        AppLogger.i(TAG, "Certificate pinning enabled for $hostname with ${certificatePins.size} pin(s)")
+                        val source = if (certificatePins.isNotEmpty()) "runtime" else "bundled-fallback"
+                        AppLogger.i(TAG, "Certificate pinning enabled for $hostname with ${effectivePins.size} pin(s) [$source]")
                         pinnerBuilder.build()
                     } else null
 
                     // Apply socket factory (for network binding) and cert pinner
                     // in a single config block — Ktor OkHttp engine only keeps the last one.
                     config {
+                        // P-001: Explicit timeouts for field devices with variable connectivity.
+                        // OkHttp defaults (10s each) are too short for slow-network upload bursts
+                        // and block the sync cadence tick for up to 30s on unresponsive servers.
+                        // connect: 15s covers slow LTE hand-off; read/write: 30s covers large
+                        // batch payloads on throttled connections.
+                        connectTimeout(15_000, TimeUnit.MILLISECONDS)
+                        readTimeout(30_000, TimeUnit.MILLISECONDS)
+                        writeTimeout(30_000, TimeUnit.MILLISECONDS)
+
                         if (socketFactory != null) {
                             socketFactory(socketFactory)
                         }

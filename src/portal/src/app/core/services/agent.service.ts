@@ -8,6 +8,7 @@ import {
   AgentTelemetry,
 } from '../models';
 import { PagedResult } from '../models';
+import { buildHttpParams } from './http-params.util';
 
 export interface AgentQueryParams {
   legalEntityId: string;
@@ -24,7 +25,7 @@ export class AgentService {
 
   getAgents(params: AgentQueryParams): Observable<PagedResult<AgentHealthSummary>> {
     return this.http.get<PagedResult<AgentHealthSummary>>('/api/v1/agents', {
-      params: params as unknown as Record<string, string>,
+      params: buildHttpParams(params),
     });
   }
 
@@ -47,6 +48,15 @@ export class AgentService {
       params: { maxBatches: maxBatches.toString() },
     });
   }
+
+  decommissionAgent(deviceId: string): Observable<DecommissionResponse> {
+    return this.http.post<DecommissionResponse>(`/api/v1/admin/agent/${deviceId}/decommission`, {});
+  }
+}
+
+export interface DecommissionResponse {
+  deviceId: string;
+  deactivatedAt: string;
 }
 
 export interface DiagnosticLogsResponse {

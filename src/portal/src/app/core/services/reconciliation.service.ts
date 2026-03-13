@@ -1,11 +1,11 @@
 import { inject, Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { switchMap } from 'rxjs/operators';
 import {
   ReconciliationException,
   ReconciliationQueryParams,
   ReconciliationRecord,
+  ReconciliationReviewResponse,
 } from '../models';
 import { PagedResult } from '../models';
 
@@ -30,17 +30,17 @@ export class ReconciliationService {
     return this.http.get<ReconciliationRecord>(`/api/v1/ops/reconciliation/${id}`);
   }
 
-  approve(id: string, reason: string): Observable<ReconciliationRecord> {
-    return this.http.post(
+  approve(id: string, reason: string): Observable<ReconciliationReviewResponse> {
+    return this.http.post<ReconciliationReviewResponse>(
       `/api/v1/ops/reconciliation/${id}/approve`,
       { reason }
-    ).pipe(switchMap(() => this.getById(id)));
+    );
   }
 
-  reject(id: string, reason: string): Observable<ReconciliationRecord> {
-    return this.http.post(
+  reject(id: string, reason: string): Observable<ReconciliationReviewResponse> {
+    return this.http.post<ReconciliationReviewResponse>(
       `/api/v1/ops/reconciliation/${id}/reject`,
       { reason }
-    ).pipe(switchMap(() => this.getById(id)));
+    );
   }
 }

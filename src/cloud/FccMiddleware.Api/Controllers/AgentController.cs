@@ -37,6 +37,8 @@ namespace FccMiddleware.Api.Controllers;
 [ApiController]
 public sealed class AgentController : ControllerBase
 {
+    private const int MaxDiagnosticLogBatches = 100;
+
     private readonly IMediator _mediator;
     private readonly ILogger<AgentController> _logger;
     private readonly IConfiguration _configuration;
@@ -337,7 +339,8 @@ public sealed class AgentController : ControllerBase
 
         var command = new DecommissionDeviceCommand
         {
-            DeviceId = deviceId
+            DeviceId = deviceId,
+            DecommissionedBy = _accessResolver.ResolveUserId(User) ?? "system"
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -606,28 +609,32 @@ public sealed class AgentController : ControllerBase
     [HttpGet("api/v1/agents/{deviceId}/diagnostic-logs")]
     [Authorize(Policy = "PortalUser")]
     [ProducesResponseType(typeof(GetDiagnosticLogsResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetDiagnosticLogs(
         Guid deviceId,
         [FromQuery] int maxBatches = 10,
         CancellationToken cancellationToken = default)
     {
+        if (maxBatches is < 1 or > MaxDiagnosticLogBatches)
+        {
+            return BadRequest(BuildError(
+                "VALIDATION.INVALID_MAX_BATCHES",
+                $"maxBatches must be between 1 and {MaxDiagnosticLogBatches}."));
+        }
+
         var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
             return Unauthorized();
 
         var device = await _dbContext.AgentRegistrations
-            .AsNoTracking()
-            .IgnoreQueryFilters()
+            .ForPortal(access)
             .Where(a => a.Id == deviceId)
             .Select(a => new { a.LegalEntityId })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (device is null)
             return NotFound(BuildError("DEVICE_NOT_FOUND", $"Device '{deviceId}' not found."));
-
-        if (!access.CanAccess(device.LegalEntityId))
-            return Forbid();
 
         var result = await _mediator.Send(new GetDiagnosticLogsQuery
         {

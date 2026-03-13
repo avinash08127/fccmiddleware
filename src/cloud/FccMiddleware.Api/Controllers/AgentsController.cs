@@ -39,6 +39,11 @@ public sealed class AgentsController : PortalControllerBase
         [FromQuery] string? connectivityState = null,
         CancellationToken cancellationToken = default)
     {
+        if (legalEntityId == Guid.Empty)
+        {
+            return BadRequest(BuildError("VALIDATION.LEGAL_ENTITY_REQUIRED", "legalEntityId is required."));
+        }
+
         if (pageSize is < 1 or > 500)
         {
             return BadRequest(BuildError("VALIDATION.INVALID_PAGE_SIZE", "pageSize must be between 1 and 500."));
@@ -65,47 +70,48 @@ public sealed class AgentsController : PortalControllerBase
             return BadRequest(BuildError("VALIDATION.INVALID_CONNECTIVITY_STATE", $"Unknown connectivity state '{connectivityState}'."));
         }
 
-        var query = _db.AgentRegistrations
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Include(agent => agent.Site)
-            .Where(agent => agent.LegalEntityId == legalEntityId);
+        // baseQuery holds all filter predicates but NO cursor predicate.
+        // totalCount is computed from baseQuery so it reflects the stable full set,
+        // not the shrinking remainder as the client pages forward (M-17 fix).
+        IQueryable<AgentRegistration> baseQuery = _db.AgentRegistrations
+            .ForPortal(access, legalEntityId)
+            .Include(agent => agent.Site);
 
         if (!string.IsNullOrWhiteSpace(siteCode))
         {
-            query = query.Where(agent => agent.SiteCode == siteCode);
+            baseQuery = baseQuery.Where(agent => agent.SiteCode.Contains(siteCode));
         }
 
         if (activeFilter.HasValue)
         {
-            query = query.Where(agent => agent.IsActive == activeFilter.Value);
-        }
-
-        if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
-        {
-            query = query.Where(agent =>
-                agent.RegisteredAt > cursorTimestamp
-                || (agent.RegisteredAt == cursorTimestamp && agent.Id.CompareTo(cursorId) > 0));
+            baseQuery = baseQuery.Where(agent => agent.IsActive == activeFilter.Value);
         }
 
         // Push connectivity filter into the SQL query by joining with telemetry snapshots,
         // so pagination and totalCount are correct when filtering by connectivity state.
         if (connectivityFilter.HasValue)
         {
-            query = query.Where(agent =>
+            baseQuery = baseQuery.Where(agent =>
                 _db.AgentTelemetrySnapshots
                     .IgnoreQueryFilters()
                     .Any(snapshot => snapshot.DeviceId == agent.Id
                                     && snapshot.ConnectivityState == connectivityFilter.Value));
         }
 
-        var orderedQuery = query
+        // pageQuery extends baseQuery with the cursor predicate (page-fetch only).
+        IQueryable<AgentRegistration> pageQuery = baseQuery;
+        if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
+        {
+            pageQuery = baseQuery.Where(agent =>
+                agent.RegisteredAt > cursorTimestamp
+                || (agent.RegisteredAt == cursorTimestamp && agent.Id.CompareTo(cursorId) > 0));
+        }
+
+        var totalCount = await baseQuery.CountAsync(cancellationToken);
+
+        var page = await pageQuery
             .OrderBy(agent => agent.RegisteredAt)
-            .ThenBy(agent => agent.Id);
-
-        var totalCount = await query.CountAsync(cancellationToken);
-
-        var page = await orderedQuery
+            .ThenBy(agent => agent.Id)
             .Take(pageSize + 1)
             .ToListAsync(cancellationToken);
 
@@ -133,6 +139,7 @@ public sealed class AgentsController : PortalControllerBase
                     LegalEntityId = agent.LegalEntityId,
                     AgentVersion = agent.AgentVersion,
                     Status = agent.IsActive ? "ACTIVE" : "DEACTIVATED",
+                    HasTelemetry = snapshot is not null,
                     ConnectivityState = snapshot?.ConnectivityState.ToString(),
                     BatteryPercent = snapshot?.BatteryPercent,
                     IsCharging = snapshot?.IsCharging,
@@ -176,18 +183,12 @@ public sealed class AgentsController : PortalControllerBase
         }
 
         var agent = await _db.AgentRegistrations
-            .IgnoreQueryFilters()
-            .AsNoTracking()
+            .ForPortal(access)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (agent is null)
         {
             return NotFound(BuildError("NOT_FOUND.AGENT", "Agent was not found."));
-        }
-
-        if (!access.CanAccess(agent.LegalEntityId))
-        {
-            return Forbid();
         }
 
         return Ok(ToAgentRegistrationDto(agent));
@@ -205,18 +206,12 @@ public sealed class AgentsController : PortalControllerBase
         }
 
         var agent = await _db.AgentRegistrations
-            .IgnoreQueryFilters()
-            .AsNoTracking()
+            .ForPortal(access)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (agent is null)
         {
             return NotFound(BuildError("NOT_FOUND.AGENT", "Agent was not found."));
-        }
-
-        if (!access.CanAccess(agent.LegalEntityId))
-        {
-            return Forbid();
         }
 
         var snapshot = await _db.AgentTelemetrySnapshots
@@ -235,6 +230,25 @@ public sealed class AgentsController : PortalControllerBase
             return NotFound(BuildError("NOT_FOUND.TELEMETRY", "Telemetry payload could not be read."));
         }
 
+        if (!PortalAccessResolver.HasSensitiveDataAccess(User))
+        {
+            // Non-sensitive roles see only operational-status fields.
+            // All FCC infrastructure details and failure counters are redacted.
+            telemetry = telemetry with
+            {
+                FccHealth = new FccHealthStatusDto
+                {
+                    IsReachable = telemetry.FccHealth.IsReachable,
+                    FccVendor = telemetry.FccHealth.FccVendor,
+                    FccHost = "***",
+                    FccPort = 0,
+                    LastHeartbeatAtUtc = null,
+                    HeartbeatAgeSeconds = null,
+                    ConsecutiveHeartbeatFailures = 0
+                }
+            };
+        }
+
         return Ok(telemetry);
     }
 
@@ -243,6 +257,7 @@ public sealed class AgentsController : PortalControllerBase
     public async Task<IActionResult> GetEvents(
         Guid id,
         [FromQuery] int limit = 20,
+        [FromQuery] string? cursor = null,
         CancellationToken cancellationToken = default)
     {
         if (limit is < 1 or > 100)
@@ -257,8 +272,7 @@ public sealed class AgentsController : PortalControllerBase
         }
 
         var agent = await _db.AgentRegistrations
-            .IgnoreQueryFilters()
-            .AsNoTracking()
+            .ForPortal(access)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (agent is null)
@@ -266,47 +280,47 @@ public sealed class AgentsController : PortalControllerBase
             return NotFound(BuildError("NOT_FOUND.AGENT", "Agent was not found."));
         }
 
-        if (!access.CanAccess(agent.LegalEntityId))
-        {
-            return Forbid();
-        }
+        var canViewSensitive = PortalAccessResolver.HasSensitiveDataAccess(User);
 
-        var rows = await _db.AuditEvents
+        // Single keyset-paginated query on the indexed entity_id column (M-18 fix).
+        // No in-memory loop — the DB does all filtering in O(log N) via ix_audit_entity_time.
+        IQueryable<AuditEvent> eventsQuery = _db.AuditEvents
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(item => item.LegalEntityId == agent.LegalEntityId && item.SiteCode == agent.SiteCode)
-            .Where(item =>
-                item.EventType.StartsWith("Agent")
-                || item.EventType == "ConnectivityChanged"
-                || item.EventType == "BufferThresholdExceeded")
+            .Where(item => item.EntityId == id);
+
+        if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
+        {
+            eventsQuery = eventsQuery.Where(item =>
+                item.CreatedAt < cursorTimestamp
+                || (item.CreatedAt == cursorTimestamp && item.Id.CompareTo(cursorId) < 0));
+        }
+
+        var rows = await eventsQuery
             .OrderByDescending(item => item.CreatedAt)
-            .Take(limit * 10)
+            .ThenByDescending(item => item.Id)
+            .Take(limit)
             .ToListAsync(cancellationToken);
 
-        var events = rows
-            .Select(item =>
+        var events = rows.Select(item =>
+        {
+            var payload = PortalJson.ParseJson(item.Payload);
+            return new AgentAuditEventDto
             {
-                var payload = PortalJson.ParseJson(item.Payload);
-                return new { Item = item, Payload = payload };
-            })
-            .Where(item => PortalJson.TryReadDeviceId(item.Payload, out var deviceId) && deviceId == id)
-            .Take(limit)
-            .Select(item => new AgentAuditEventDto
-            {
-                Id = item.Item.Id,
+                Id = item.Id,
                 DeviceId = id,
-                EventType = item.Item.EventType,
-                Description = PortalJson.TryReadString(item.Payload, "message")
-                    ?? PortalJson.TryReadString(item.Payload, "payload", "message")
-                    ?? item.Item.EventType,
-                PreviousState = PortalJson.TryReadString(item.Payload, "previousState")
-                    ?? PortalJson.TryReadString(item.Payload, "payload", "previousState"),
-                NewState = PortalJson.TryReadString(item.Payload, "newState")
-                    ?? PortalJson.TryReadString(item.Payload, "payload", "newState"),
-                OccurredAtUtc = PortalJson.ReadTimestamp(item.Item, item.Payload),
-                Metadata = item.Payload
-            })
-            .ToList();
+                EventType = item.EventType,
+                Description = PortalJson.TryReadString(payload, "message")
+                    ?? PortalJson.TryReadString(payload, "payload", "message")
+                    ?? item.EventType,
+                PreviousState = PortalJson.TryReadString(payload, "previousState")
+                    ?? PortalJson.TryReadString(payload, "payload", "previousState"),
+                NewState = PortalJson.TryReadString(payload, "newState")
+                    ?? PortalJson.TryReadString(payload, "payload", "newState"),
+                OccurredAtUtc = PortalJson.ReadTimestamp(item, payload),
+                Metadata = canViewSensitive ? payload : null
+            };
+        }).ToList();
 
         return Ok(events);
     }

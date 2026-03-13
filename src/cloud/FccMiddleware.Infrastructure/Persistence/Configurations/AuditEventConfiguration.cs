@@ -30,6 +30,9 @@ internal sealed class AuditEventConfiguration : IEntityTypeConfiguration<AuditEv
             .HasColumnType("jsonb")
             .IsRequired();
 
+        builder.Property(e => e.EntityId)
+            .HasColumnName("entity_id");
+
         // No UpdatedAt — audit events are append-only and immutable.
 
         // Trace lookup: find all events for a correlation ID.
@@ -39,5 +42,11 @@ internal sealed class AuditEventConfiguration : IEntityTypeConfiguration<AuditEv
         // Portal audit viewer: by tenant + event type, newest first.
         builder.HasIndex(e => new { e.LegalEntityId, e.EventType, e.CreatedAt })
             .HasDatabaseName("ix_audit_type_time");
+
+        // Entity-scoped event lookup (e.g. agent events by DeviceId), newest first.
+        // Partial index — only rows where entity_id IS NOT NULL are indexed.
+        builder.HasIndex(e => new { e.EntityId, e.CreatedAt })
+            .HasDatabaseName("ix_audit_entity_time")
+            .HasFilter("entity_id IS NOT NULL");
     }
 }

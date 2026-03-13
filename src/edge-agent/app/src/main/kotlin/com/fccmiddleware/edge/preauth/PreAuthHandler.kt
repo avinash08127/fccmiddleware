@@ -19,6 +19,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.net.ConnectException
+import com.fccmiddleware.edge.adapter.common.AdapterTimeouts
 import java.time.Instant
 import java.util.UUID
 
@@ -58,8 +59,8 @@ class PreAuthHandler(
     }
 
     data class PreAuthHandlerConfig(
-        /** FCC call timeout in milliseconds. Default 30 s per spec. */
-        val fccTimeoutMs: Long = 30_000L,
+        /** M-22: FCC call timeout — uses centralised default (2× adapter timeout to cover multi-step flows). */
+        val fccTimeoutMs: Long = AdapterTimeouts.PREAUTH_TIMEOUT_MS * 2,
         /**
          * Default pre-auth TTL in seconds — how far in the future expiresAt is set when
          * the FCC does not return an explicit expiry. Overridden by site config once

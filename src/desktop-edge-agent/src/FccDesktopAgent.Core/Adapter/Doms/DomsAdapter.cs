@@ -13,6 +13,9 @@ namespace FccDesktopAgent.Core.Adapter.Doms;
 /// </summary>
 public sealed class DomsAdapter : IFccAdapter
 {
+    /// <inheritdoc />
+    public PumpStatusCapability PumpStatusCapability => PumpStatusCapability.Live;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly IHttpClientFactory _httpFactory;

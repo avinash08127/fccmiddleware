@@ -115,7 +115,14 @@ public sealed record FccConnectionConfig(
     /// <summary>Resolved pump number offset applied during normalization.</summary>
     int PumpNumberOffset = 0,
     /// <summary>Resolved FCC product code mapping.</summary>
-    IReadOnlyDictionary<string, string>? ProductCodeMapping = null);
+    IReadOnlyDictionary<string, string>? ProductCodeMapping = null,
+    // ── Configurable timeouts ────────────────────────────────────────────────
+    /// <summary>Pre-auth request timeout in seconds. Null = adapter default.</summary>
+    int? PreAuthTimeoutSeconds = null,
+    /// <summary>Fiscal receipt wait timeout in seconds. Null = adapter default (30s).</summary>
+    int? FiscalReceiptTimeoutSeconds = null,
+    /// <summary>HTTP request timeout in seconds for FCC API calls. Null = adapter default (10s).</summary>
+    int? ApiRequestTimeoutSeconds = null);
 
 // ---------------------------------------------------------------------------
 // Pre-auth matching contract (GAP-5)

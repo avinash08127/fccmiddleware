@@ -37,8 +37,8 @@ import { IngestionHealthData } from '../../dashboard.model';
               <span class="metric__value">{{ data.errorRate * 100 | number: '1.1-1' }}%</span>
               <span class="metric__label">Error Rate</span>
             </div>
-            <div class="metric" [class.metric--warn]="data.latencyP95Ms > 2000" [class.metric--bad]="data.latencyP95Ms > 5000">
-              <span class="metric__value">{{ data.latencyP95Ms | number: '1.0-0' }}ms</span>
+            <div class="metric" [class.metric--warn]="data.latencyP95Ms != null && data.latencyP95Ms > 2000" [class.metric--bad]="data.latencyP95Ms != null && data.latencyP95Ms > 5000">
+              <span class="metric__value">{{ data.latencyP95Ms != null ? (data.latencyP95Ms | number: '1.0-0') + 'ms' : 'N/A' }}</span>
               <span class="metric__label">Latency p95</span>
             </div>
             <div class="metric dlq-metric" [class.metric--warn]="data.dlqDepth > 0" [class.metric--bad]="data.dlqDepth > 10">

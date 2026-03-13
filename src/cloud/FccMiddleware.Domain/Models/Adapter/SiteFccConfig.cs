@@ -128,6 +128,9 @@ public sealed record SiteFccConfig
 
     /// <summary>Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL).</summary>
     public int? AdvatecCustIdType { get; init; }
+
+    /// <summary>Advatec: Maps EFD serial numbers to canonical pump numbers, e.g. {"10TZ101807": 1}.</summary>
+    public IReadOnlyDictionary<string, int>? AdvatecPumpMap { get; init; }
 }
 
 /// <summary>Radix pump addressing: maps to the (PUMP_ADDR, FP) pair in the Radix protocol.</summary>

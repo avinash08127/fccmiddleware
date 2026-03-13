@@ -98,6 +98,9 @@ public sealed class TransactionBufferManager
             .Where(t => ids.Contains(t.Id) && t.SyncStatus == SyncStatus.Pending)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(t => t.SyncStatus, SyncStatus.Uploaded)
+                // M-08: Update Status to Synced to reflect that the transaction
+                // has been successfully uploaded to cloud.
+                .SetProperty(t => t.Status, TransactionStatus.Synced)
                 .SetProperty(t => t.UpdatedAt, now), ct);
     }
 
@@ -305,6 +308,9 @@ public sealed class TransactionBufferManager
             .Where(t => t.SyncStatus == SyncStatus.Pending && t.UploadAttempts >= MaxUploadAttempts)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(t => t.SyncStatus, SyncStatus.DeadLetter)
+                // M-08: Update Status to StalePending so the lifecycle status reflects
+                // that this transaction failed to sync and requires manual intervention.
+                .SetProperty(t => t.Status, TransactionStatus.StalePending)
                 .SetProperty(t => t.UpdatedAt, now), ct);
 
         if (count > 0)
@@ -327,6 +333,8 @@ public sealed class TransactionBufferManager
             .Where(t => t.SyncStatus == SyncStatus.Uploaded && t.UpdatedAt < cutoff)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(t => t.SyncStatus, SyncStatus.Pending)
+                // M-08: Reset Status back to Pending to keep it in sync with SyncStatus.
+                .SetProperty(t => t.Status, TransactionStatus.Pending)
                 .SetProperty(t => t.UploadAttempts, 0)
                 .SetProperty(t => t.UpdatedAt, now), ct);
 

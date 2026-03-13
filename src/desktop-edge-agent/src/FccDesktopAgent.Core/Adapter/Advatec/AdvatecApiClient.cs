@@ -11,32 +11,30 @@ namespace FccDesktopAgent.Core.Adapter.Advatec;
 ///
 /// In Scenario C, the Customer endpoint triggers pump authorization and fiscal
 /// receipt generation. The Advatec device is on localhost (no auth documented — AQ-6).
+///
+/// H-05: Accepts an externally-managed HttpClient (from IHttpClientFactory) instead of
+/// creating a raw HttpClient internally. The caller owns the HttpClient lifecycle.
 /// </summary>
-public sealed class AdvatecApiClient : IDisposable
+public sealed class AdvatecApiClient
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNameCaseInsensitive = true,
     };
 
-    private const int DefaultTimeoutSeconds = 10;
-
     private readonly HttpClient _httpClient;
     private readonly string _baseUrl;
     private readonly ILogger _logger;
 
     public AdvatecApiClient(
+        HttpClient httpClient,
         string deviceAddress,
         int devicePort,
-        ILogger logger,
-        TimeSpan? timeout = null)
+        ILogger logger)
     {
         _baseUrl = $"http://{deviceAddress}:{devicePort}";
         _logger = logger;
-        _httpClient = new HttpClient
-        {
-            Timeout = timeout ?? TimeSpan.FromSeconds(DefaultTimeoutSeconds),
-        };
+        _httpClient = httpClient;
     }
 
     /// <summary>
@@ -91,8 +89,6 @@ public sealed class AdvatecApiClient : IDisposable
 
     private static string TruncateForLog(string? s, int maxLen = 500)
         => s is null ? "(null)" : s.Length <= maxLen ? s : s[..maxLen] + "...";
-
-    public void Dispose() => _httpClient.Dispose();
 }
 
 /// <summary>

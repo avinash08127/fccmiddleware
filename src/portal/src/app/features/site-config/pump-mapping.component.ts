@@ -49,6 +49,8 @@ interface NozzleRow {
               label="Add Pump"
               icon="pi pi-plus"
               size="small"
+              [disabled]="mutating"
+              [loading]="mutating"
               (onClick)="openAddPump()"
             />
           }
@@ -86,6 +88,7 @@ interface NozzleRow {
                       severity="danger"
                       size="small"
                       [text]="true"
+                      [disabled]="mutating"
                       pTooltip="Remove pump"
                       (onClick)="onRemovePump(row.pumpId)"
                     />
@@ -128,6 +131,7 @@ interface NozzleRow {
                       icon="pi pi-pencil"
                       size="small"
                       [text]="true"
+                      [disabled]="mutating"
                       pTooltip="Edit product mapping"
                       (onClick)="startNozzleEdit(row)"
                     />
@@ -357,6 +361,7 @@ export class PumpMappingComponent {
   @Input() pumps: Pump[] = [];
   @Input() products: Product[] = [];
   @Input() editMode = false;
+  @Input() mutating = false;
   @Output() pumpRemoved = new EventEmitter<string>();
   @Output() pumpAdded = new EventEmitter<AddPumpRequest>();
   @Output() nozzleUpdated = new EventEmitter<NozzleUpdateEvent>();

@@ -193,6 +193,21 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Reject_RequiresReasonWithMinimumLength()
+    {
+        SetPortalAuth("SystemAdmin", "portal-admin", ScopedLegalEntityId);
+
+        var response = await _client.PostAsJsonAsync(
+            $"/api/v1/ops/reconciliation/{FlaggedReconciliationId}/reject",
+            new { reason = "too short" });
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("VALIDATION.REASON_TOO_SHORT");
+    }
+
+    [Fact]
     public async Task Approve_RejectsCrossTenantReview()
     {
         SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);

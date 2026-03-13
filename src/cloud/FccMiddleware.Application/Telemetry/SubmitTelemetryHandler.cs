@@ -91,6 +91,7 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
             CreatedAt = now,
             LegalEntityId = request.LegalEntityId,
             EventType = domainEvent.EventType,
+            EntityId = request.DeviceId,
             CorrelationId = correlationId,
             SiteCode = request.SiteCode,
             Source = "edge-agent",
@@ -99,7 +100,8 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
 
         var payloadJson = JsonSerializer.Serialize(request.Payload, JsonOptions);
         var snapshot = await _db.FindTelemetrySnapshotByDeviceIdAsync(request.DeviceId, cancellationToken);
-        if (snapshot is null)
+        var isNewSnapshot = snapshot is null;
+        if (isNewSnapshot)
         {
             snapshot = new AgentTelemetrySnapshot
             {
@@ -107,6 +109,32 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
                 CreatedAt = now
             };
             _db.AddTelemetrySnapshot(snapshot);
+        }
+
+        // Detect connectivity state change and emit audit event (skip for first telemetry)
+        var previousConnectivity = snapshot.ConnectivityState;
+        var newConnectivity = request.Payload.ConnectivityState;
+        if (!isNewSnapshot && previousConnectivity != newConnectivity)
+        {
+            _db.AddAuditEvent(new AuditEvent
+            {
+                Id = Guid.NewGuid(),
+                CreatedAt = now,
+                LegalEntityId = request.LegalEntityId,
+                EventType = "CONNECTIVITY_STATE_CHANGED",
+                EntityId = request.DeviceId,
+                CorrelationId = Guid.NewGuid(),
+                SiteCode = request.SiteCode,
+                Source = "SubmitTelemetryHandler",
+                Payload = JsonSerializer.Serialize(new
+                {
+                    deviceId = request.DeviceId,
+                    previousState = previousConnectivity.ToString(),
+                    newState = newConnectivity.ToString(),
+                    message = $"Connectivity changed from {previousConnectivity} to {newConnectivity}",
+                    occurredAt = now,
+                }, JsonOptions)
+            });
         }
 
         snapshot.LegalEntityId = request.LegalEntityId;

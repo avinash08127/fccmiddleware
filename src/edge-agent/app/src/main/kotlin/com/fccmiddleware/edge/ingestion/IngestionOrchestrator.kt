@@ -3,11 +3,14 @@ package com.fccmiddleware.edge.ingestion
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import com.fccmiddleware.edge.adapter.common.CanonicalTransaction
+import com.fccmiddleware.edge.adapter.common.FccVendor
 import com.fccmiddleware.edge.adapter.common.FetchCursor
 import com.fccmiddleware.edge.adapter.common.FiscalizationContext
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
+import com.fccmiddleware.edge.adapter.common.IngestionSource
 import com.fccmiddleware.edge.adapter.common.IFiscalizationService
 import com.fccmiddleware.edge.adapter.common.IngestionMode
+import com.fccmiddleware.edge.adapter.common.TransactionStatus
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
@@ -422,11 +425,15 @@ class IngestionOrchestrator(
                         currencyCode = tx.currencyCode,
                         startedAt = tx.startedAt,
                         completedAt = tx.completedAt,
-                        fccVendor = tx.fccVendor,
-                        status = tx.status,
-                        ingestionSource = tx.ingestionSource,
+                        fccVendor = FccVendor.valueOf(tx.fccVendor),
+                        legalEntityId = "",  // Not stored in buffer; populated upstream on cloud upload
+                        status = TransactionStatus.valueOf(tx.status),
+                        ingestionSource = IngestionSource.valueOf(tx.ingestionSource),
+                        ingestedAt = tx.createdAt,
+                        updatedAt = tx.updatedAt,
+                        schemaVersion = tx.schemaVersion,
+                        isDuplicate = false,
                         correlationId = tx.correlationId,
-                        ingestedAtUtc = tx.createdAt,
                         rawPayloadJson = tx.rawPayloadJson,
                     ),
                     context,

@@ -88,6 +88,20 @@ public sealed class PreAuthController : ControllerBase
                 "unitPrice must be greater than 0."));
         }
 
+        if (request.PumpNumber <= 0)
+        {
+            return BadRequest(BuildError(
+                "VALIDATION.INVALID_PUMP_NUMBER",
+                "pumpNumber must be greater than 0."));
+        }
+
+        if (request.NozzleNumber <= 0)
+        {
+            return BadRequest(BuildError(
+                "VALIDATION.INVALID_NOZZLE_NUMBER",
+                "nozzleNumber must be greater than 0."));
+        }
+
         var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
 
         var command = new ForwardPreAuthCommand

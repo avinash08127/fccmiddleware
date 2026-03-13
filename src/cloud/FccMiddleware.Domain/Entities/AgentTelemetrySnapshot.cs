@@ -1,4 +1,5 @@
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Interfaces;
 
 namespace FccMiddleware.Domain.Entities;
 
@@ -6,7 +7,7 @@ namespace FccMiddleware.Domain.Entities;
 /// Latest telemetry snapshot reported by an Edge Agent device.
 /// Stores the full payload as JSON plus indexed summary fields for portal dashboards.
 /// </summary>
-public class AgentTelemetrySnapshot
+public class AgentTelemetrySnapshot : ITenantScoped
 {
     public Guid DeviceId { get; set; }
     public Guid LegalEntityId { get; set; }

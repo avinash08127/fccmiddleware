@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using FccMiddleware.Api.Portal;
+using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.Transactions;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
@@ -22,15 +23,18 @@ public sealed class OpsTransactionsController : PortalControllerBase
     private readonly FccMiddlewareDbContext _db;
     private readonly IMediator _mediator;
     private readonly PortalAccessResolver _accessResolver;
+    private readonly IRawPayloadArchiver _rawPayloadArchiver;
 
     public OpsTransactionsController(
         FccMiddlewareDbContext db,
         IMediator mediator,
-        PortalAccessResolver accessResolver)
+        PortalAccessResolver accessResolver,
+        IRawPayloadArchiver rawPayloadArchiver)
     {
         _db = db;
         _mediator = mediator;
         _accessResolver = accessResolver;
+        _rawPayloadArchiver = rawPayloadArchiver;
     }
 
     [HttpGet]
@@ -60,6 +64,11 @@ public sealed class OpsTransactionsController : PortalControllerBase
             return BadRequest(BuildError("VALIDATION.INVALID_PAGE_SIZE", "pageSize must be between 1 and 100."));
         }
 
+        if (legalEntityId == Guid.Empty)
+        {
+            return BadRequest(BuildError("VALIDATION.LEGAL_ENTITY_REQUIRED", "legalEntityId is required."));
+        }
+
         var access = _accessResolver.Resolve(User);
         if (!access.CanAccess(legalEntityId))
         {
@@ -81,13 +90,10 @@ public sealed class OpsTransactionsController : PortalControllerBase
             return BadRequest(BuildError("VALIDATION.INVALID_INGESTION_SOURCE", $"Unknown ingestion source '{ingestionSource}'."));
         }
 
-        var skip = DecodeOffset(cursor);
         var descending = !string.Equals(sortOrder, "asc", StringComparison.OrdinalIgnoreCase);
+        var useKeysetPagination = string.IsNullOrWhiteSpace(sortField) || string.Equals(sortField?.Trim(), "completedAt", StringComparison.OrdinalIgnoreCase);
 
-        var query = _db.Transactions
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Where(item => item.LegalEntityId == legalEntityId);
+        var query = _db.Transactions.ForPortal(access, legalEntityId);
 
         if (!string.IsNullOrWhiteSpace(siteCode))
         {
@@ -101,12 +107,12 @@ public sealed class OpsTransactionsController : PortalControllerBase
 
         if (from.HasValue)
         {
-            query = query.Where(item => item.CompletedAt >= from.Value);
+            query = query.Where(item => item.StartedAt >= from.Value);
         }
 
         if (to.HasValue)
         {
-            query = query.Where(item => item.CompletedAt <= to.Value);
+            query = query.Where(item => item.StartedAt <= to.Value);
         }
 
         if (!string.IsNullOrWhiteSpace(productCode))
@@ -116,12 +122,14 @@ public sealed class OpsTransactionsController : PortalControllerBase
 
         if (!string.IsNullOrWhiteSpace(fccTransactionId))
         {
-            query = query.Where(item => EF.Functions.ILike(item.FccTransactionId, $"%{fccTransactionId.Trim()}%"));
+            var pattern = $"{EscapeILikePattern(fccTransactionId.Trim())}%";
+            query = query.Where(item => EF.Functions.ILike(item.FccTransactionId, pattern, "\\"));
         }
 
         if (!string.IsNullOrWhiteSpace(odooOrderId))
         {
-            query = query.Where(item => item.OdooOrderId != null && EF.Functions.ILike(item.OdooOrderId, $"%{odooOrderId.Trim()}%"));
+            var pattern = $"{EscapeILikePattern(odooOrderId.Trim())}%";
+            query = query.Where(item => item.OdooOrderId != null && EF.Functions.ILike(item.OdooOrderId, pattern, "\\"));
         }
 
         if (parsedVendor.HasValue)
@@ -144,11 +152,25 @@ public sealed class OpsTransactionsController : PortalControllerBase
             query = query.Where(item => item.IsStale);
         }
 
-        var totalCount = await query.CountAsync(cancellationToken);
         query = ApplyOrdering(query, sortField, descending);
 
+        if (useKeysetPagination && PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
+        {
+            query = descending
+                ? query.Where(item =>
+                    item.CompletedAt < cursorTimestamp
+                    || (item.CompletedAt == cursorTimestamp && item.Id.CompareTo(cursorId) < 0))
+                : query.Where(item =>
+                    item.CompletedAt > cursorTimestamp
+                    || (item.CompletedAt == cursorTimestamp && item.Id.CompareTo(cursorId) > 0));
+        }
+        else if (!useKeysetPagination)
+        {
+            var skip = DecodeOffset(cursor);
+            query = query.Skip(skip);
+        }
+
         var rows = await query
-            .Skip(skip)
             .Take(pageSize + 1)
             .Select(item => new PortalTransactionDto
             {
@@ -191,6 +213,21 @@ public sealed class OpsTransactionsController : PortalControllerBase
             rows.RemoveAt(rows.Count - 1);
         }
 
+        string? nextCursor = null;
+        if (hasMore && rows.Count > 0)
+        {
+            if (useKeysetPagination)
+            {
+                var last = rows[^1];
+                nextCursor = PortalCursor.Encode(last.CompletedAt, last.Id);
+            }
+            else
+            {
+                var currentOffset = DecodeOffset(cursor);
+                nextCursor = EncodeOffset(currentOffset + rows.Count);
+            }
+        }
+
         return Ok(new PortalPagedResult<PortalTransactionDto>
         {
             Data = rows,
@@ -198,8 +235,8 @@ public sealed class OpsTransactionsController : PortalControllerBase
             {
                 PageSize = rows.Count,
                 HasMore = hasMore,
-                NextCursor = hasMore ? EncodeOffset(skip + rows.Count) : null,
-                TotalCount = totalCount
+                NextCursor = nextCursor,
+                TotalCount = null
             }
         });
     }
@@ -216,8 +253,7 @@ public sealed class OpsTransactionsController : PortalControllerBase
         }
 
         var transaction = await _db.Transactions
-            .IgnoreQueryFilters()
-            .AsNoTracking()
+            .ForPortal(access)
             .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
 
         if (transaction is null)
@@ -225,10 +261,9 @@ public sealed class OpsTransactionsController : PortalControllerBase
             return NotFound(BuildError("NOT_FOUND.TRANSACTION", "Transaction was not found."));
         }
 
-        if (!access.CanAccess(transaction.LegalEntityId))
-        {
-            return Forbid();
-        }
+        var rawPayloadJson = !string.IsNullOrWhiteSpace(transaction.RawPayloadRef)
+            ? await _rawPayloadArchiver.RetrieveAsync(transaction.RawPayloadRef, cancellationToken)
+            : null;
 
         return Ok(new PortalTransactionDto
         {
@@ -260,7 +295,7 @@ public sealed class OpsTransactionsController : PortalControllerBase
             FiscalReceiptNumber = transaction.FiscalReceiptNumber,
             AttendantId = transaction.AttendantId,
             RawPayloadRef = transaction.RawPayloadRef,
-            RawPayloadJson = null,
+            RawPayloadJson = rawPayloadJson,
             IsStale = transaction.IsStale
         });
     }
@@ -273,7 +308,7 @@ public sealed class OpsTransactionsController : PortalControllerBase
         [FromBody] AcknowledgeRequest request,
         CancellationToken cancellationToken)
     {
-        if (request.Acknowledgements is { Count: 0 })
+        if (request.Acknowledgements is not { Count: > 0 })
         {
             return BadRequest(BuildError("VALIDATION.EMPTY_BATCH", "Acknowledgements must contain at least one item."));
         }
@@ -303,9 +338,11 @@ public sealed class OpsTransactionsController : PortalControllerBase
         {
             legalEntityId = legalEntityIds[0];
         }
-        else if (legalEntityIds.Count == 0 && access.ScopedLegalEntityIds.Count == 1)
+        else if (legalEntityIds.Count == 0)
         {
-            legalEntityId = access.ScopedLegalEntityIds.Single();
+            return BadRequest(BuildError(
+                "VALIDATION.NO_TRANSACTIONS_FOUND",
+                "None of the provided transaction IDs exist."));
         }
         else
         {
@@ -419,4 +456,7 @@ public sealed class OpsTransactionsController : PortalControllerBase
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
+
+    private static string EscapeILikePattern(string value) =>
+        value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 }

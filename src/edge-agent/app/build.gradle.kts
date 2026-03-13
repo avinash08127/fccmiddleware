@@ -13,7 +13,7 @@ android {
     defaultConfig {
         applicationId = "com.fccmiddleware.edge"
         minSdk = 31
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
 
@@ -69,7 +69,9 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.lifecycle:lifecycle-service:2.8.7")
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.security:security-crypto:1.0.0")
 
     // Room (SQLite)
     implementation("androidx.room:room-runtime:2.6.1")

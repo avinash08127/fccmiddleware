@@ -45,6 +45,8 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
             .HasDefaultValue(IngestionMode.CLOUD_DIRECT)
             .IsRequired();
         builder.Property(e => e.PullIntervalSeconds).HasColumnName("pull_interval_seconds");
+        builder.Property(e => e.CatchUpPullIntervalSeconds).HasColumnName("catchup_pull_interval_seconds");
+        builder.Property(e => e.HybridCatchUpIntervalSeconds).HasColumnName("hybrid_catchup_interval_seconds");
         builder.Property(e => e.HeartbeatIntervalSeconds).HasColumnName("heartbeat_interval_seconds").HasDefaultValue(60).IsRequired();
         builder.Property(e => e.HeartbeatTimeoutSeconds).HasColumnName("heartbeat_timeout_seconds").HasDefaultValue(180).IsRequired();
         builder.Property(e => e.IsActive).HasColumnName("is_active").HasDefaultValue(true);
@@ -76,8 +78,10 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
         // ── Advatec EFD fields ──────────────────────────────────────────────
         builder.Property(e => e.AdvatecDevicePort).HasColumnName("advatec_device_port");
         builder.Property(e => e.AdvatecWebhookToken).HasColumnName("advatec_webhook_token").HasMaxLength(500);
+        builder.Property(e => e.AdvatecWebhookTokenHash).HasColumnName("advatec_webhook_token_hash").HasMaxLength(64);
         builder.Property(e => e.AdvatecEfdSerialNumber).HasColumnName("advatec_efd_serial_number").HasMaxLength(100);
         builder.Property(e => e.AdvatecCustIdType).HasColumnName("advatec_cust_id_type");
+        builder.Property(e => e.AdvatecPumpMap).HasColumnName("advatec_pump_map");
 
         builder.HasOne(e => e.Site)
             .WithMany(s => s.FccConfigs)
@@ -88,6 +92,11 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
             .WithMany()
             .HasForeignKey(e => e.LegalEntityId)
             .HasConstraintName("fk_fcc_configs_legal_entity");
+
+        // H-04: Index on webhook token hash for O(1) lookup instead of full table scan
+        builder.HasIndex(e => e.AdvatecWebhookTokenHash)
+            .HasDatabaseName("ix_fcc_configs_advatec_webhook_token_hash")
+            .HasFilter("advatec_webhook_token_hash IS NOT NULL");
 
         builder.ToTable(t =>
         {

@@ -33,6 +33,9 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
     {
         _httpFactory = httpFactory;
         _loggerFactory = loggerFactory;
+
+        // M-09: Wire logger into static XML parser so parse failures are visible.
+        RadixXmlParser.SetLogger(loggerFactory);
     }
 
     /// <inheritdoc/>
@@ -118,8 +121,13 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
             if (_cachedAdvatecAdapter is not null && _cachedAdvatecFingerprint == fingerprint)
                 return _cachedAdvatecAdapter;
 
+            // H-05: Dispose the old adapter to release webhook listener and other resources.
+            // Previously the old adapter was silently abandoned, leaking HttpClient sockets.
+            _cachedAdvatecAdapter?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+
             _cachedAdvatecAdapter = new AdvatecAdapter(
                 config,
+                _httpFactory,
                 _loggerFactory);
             _cachedAdvatecFingerprint = fingerprint;
             return _cachedAdvatecAdapter;

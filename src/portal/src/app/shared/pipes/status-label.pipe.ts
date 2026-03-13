@@ -7,9 +7,7 @@ const STATUS_LABELS: Record<string, string> = {
   NORMALIZED: 'Normalized',
   DEDUP_PASSED: 'Dedup Passed',
   PENDING: 'Pending',
-  SYNCED: 'Synced',
   SYNCED_TO_ODOO: 'Synced to Odoo',
-  STALE_PENDING: 'Stale',
   DUPLICATE: 'Duplicate',
   ARCHIVED: 'Archived',
   RECONCILED: 'Reconciled',
@@ -26,12 +24,15 @@ const STATUS_LABELS: Record<string, string> = {
   EXCEPTION: 'Exception',
   APPROVED: 'Approved',
   REJECTED: 'Rejected',
+  REVIEW_FUZZY_MATCH: 'Fuzzy Match Review',
   VOID: 'Void',
 
   // Ingestion sources
   FCC_PUSH: 'FCC Push',
   EDGE_UPLOAD: 'Edge Upload',
   CLOUD_PULL: 'Cloud Pull',
+  CLOUD_DIRECT: 'Cloud Direct',
+  WEBHOOK: 'Webhook',
 
   // FCC Vendors
   DOMS: 'DOMS',

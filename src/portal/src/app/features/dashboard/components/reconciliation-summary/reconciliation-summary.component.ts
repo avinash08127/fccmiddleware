@@ -42,7 +42,7 @@ import { ReconciliationSummaryData } from '../../dashboard.model';
           <div class="recon-footer">
             <span class="last-updated">Updated {{ data.lastUpdatedAt | date: 'shortTime' }}</span>
             @if (data.flagged > 0 || data.pendingExceptions > 0) {
-              <a routerLink="/reconciliation" class="action-link">
+              <a routerLink="/reconciliation/exceptions" class="action-link">
                 Review exceptions <i class="pi pi-arrow-right"></i>
               </a>
             }

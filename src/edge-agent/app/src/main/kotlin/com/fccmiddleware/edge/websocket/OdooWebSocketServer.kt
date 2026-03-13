@@ -9,6 +9,7 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.origin
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.pingPeriod
@@ -42,6 +43,12 @@ import java.util.concurrent.ConcurrentHashMap
  * [FuelPumpStatusWsDto] individually to the specific client.
  *
  * All `mode` commands dispatched to [OdooWsMessageHandler].
+ *
+ * Security (S-005):
+ *  - If [WebSocketDto.sharedSecret] is set, every connection must supply it in
+ *    the `X-Api-Key` header or the upgrade is rejected with 4008 VIOLATED_POLICY.
+ *  - Inbound command messages are rate-limited per [WebSocketDto.commandRateLimitPerMinute].
+ *  - Every inbound command is logged with the client's remote IP for audit.
  */
 class OdooWebSocketServer(
     private val transactionDao: TransactionBufferDao,
@@ -49,6 +56,9 @@ class OdooWebSocketServer(
 ) {
     companion object {
         private const val TAG = "OdooWebSocketServer"
+
+        /** S-005: header name for the shared-secret authentication token. */
+        private const val API_KEY_HEADER = "X-Api-Key"
     }
 
     private val wsJson = Json {
@@ -71,8 +81,20 @@ class OdooWebSocketServer(
 
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
 
-    /** All connected sessions. Value = pump-status broadcast job for that session. */
-    private val clients = ConcurrentHashMap<WebSocketSession, Job>()
+    /**
+     * Per-session tracking: broadcast job, remote host, and rate-limit counters.
+     * Rate-limit fields are mutated only from that session's single reader coroutine,
+     * so no additional synchronisation is needed beyond the ConcurrentHashMap itself.
+     */
+    private data class ClientEntry(
+        val broadcastJob: Job,
+        val remoteHost: String,
+        var commandCountInWindow: Int = 0,
+        var windowStartMs: Long = System.currentTimeMillis(),
+    )
+
+    /** All connected sessions mapped to their [ClientEntry]. */
+    private val clients = ConcurrentHashMap<WebSocketSession, ClientEntry>()
 
     private val messageHandler = OdooWsMessageHandler(
         transactionDao = transactionDao,
@@ -114,7 +136,21 @@ class OdooWebSocketServer(
             }
             routing {
                 webSocket("/") {
-                    onClientConnected(this)
+                    // S-005(a): extract client IP for auth and audit logging
+                    val remoteHost = call.request.origin.remoteHost
+
+                    // S-005(a): reject connections without the shared secret when configured
+                    val secret = config.sharedSecret
+                    if (!secret.isNullOrBlank()) {
+                        val provided = call.request.headers[API_KEY_HEADER]
+                        if (provided != secret) {
+                            AppLogger.w(TAG, "Rejected unauthenticated WebSocket connection from $remoteHost")
+                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Unauthorized"))
+                            return@webSocket
+                        }
+                    }
+
+                    onClientConnected(this, remoteHost)
                 }
             }
         }.also {
@@ -125,7 +161,7 @@ class OdooWebSocketServer(
 
     fun stop() {
         // Cancel all pump-status broadcast jobs
-        clients.values.forEach { it.cancel() }
+        clients.values.forEach { it.broadcastJob.cancel() }
         clients.clear()
 
         server?.stop(1_000, 2_000)
@@ -137,9 +173,9 @@ class OdooWebSocketServer(
     // Connection lifecycle
     // -------------------------------------------------------------------------
 
-    private suspend fun onClientConnected(session: WebSocketSession) {
+    private suspend fun onClientConnected(session: WebSocketSession, remoteHost: String) {
         if (clients.size >= config.maxConnections) {
-            AppLogger.w(TAG, "Max connections (${config.maxConnections}) reached — rejecting client")
+            AppLogger.w(TAG, "Max connections (${config.maxConnections}) reached — rejecting $remoteHost")
             session.close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Max connections reached"))
             return
         }
@@ -148,25 +184,25 @@ class OdooWebSocketServer(
         val broadcastJob = serviceScope.launch {
             pumpStatusBroadcastLoop(session)
         }
-        clients[session] = broadcastJob
-        AppLogger.i(TAG, "Client connected (total=${clients.size})")
+        clients[session] = ClientEntry(broadcastJob = broadcastJob, remoteHost = remoteHost)
+        AppLogger.i(TAG, "Client connected from $remoteHost (total=${clients.size})")
 
         try {
             for (frame in session.incoming) {
                 if (frame is Frame.Text) {
                     val text = frame.readText()
-                    handleMessage(session, text)
+                    handleMessage(session, text, remoteHost)
                 }
             }
         } catch (e: Exception) {
-            AppLogger.d(TAG, "Client session ended: ${e.message}")
+            AppLogger.d(TAG, "Client session ended ($remoteHost): ${e.message}")
         } finally {
             onClientDisconnected(session)
         }
     }
 
     private fun onClientDisconnected(session: WebSocketSession) {
-        clients.remove(session)?.cancel()
+        clients.remove(session)?.broadcastJob?.cancel()
         AppLogger.i(TAG, "Client disconnected (remaining=${clients.size})")
     }
 
@@ -174,7 +210,26 @@ class OdooWebSocketServer(
     // Message routing
     // -------------------------------------------------------------------------
 
-    private suspend fun handleMessage(session: WebSocketSession, text: String) {
+    private suspend fun handleMessage(session: WebSocketSession, text: String, remoteHost: String) {
+        // S-005(b): rate limiting — sliding 60-second window per connection
+        val limit = config.commandRateLimitPerMinute
+        if (limit > 0) {
+            val entry = clients[session]
+            if (entry != null) {
+                val now = System.currentTimeMillis()
+                if (now - entry.windowStartMs > 60_000L) {
+                    entry.commandCountInWindow = 0
+                    entry.windowStartMs = now
+                }
+                entry.commandCountInWindow++
+                if (entry.commandCountInWindow > limit) {
+                    AppLogger.w(TAG, "Rate limit exceeded for $remoteHost — dropping message")
+                    sendToSession(session, WsErrorResponse(message = "Rate limit exceeded"))
+                    return
+                }
+            }
+        }
+
         try {
             val json = wsJson.parseToJsonElement(text)
             if (json !is JsonObject) {
@@ -183,6 +238,9 @@ class OdooWebSocketServer(
             }
 
             val mode = json["mode"]?.jsonPrimitive?.content?.lowercase() ?: ""
+
+            // S-005(c): audit-log every inbound command with client IP
+            AppLogger.i(TAG, "WS cmd mode=$mode from=$remoteHost")
 
             when (mode) {
                 "latest" -> messageHandler.handleLatest(session, json)
@@ -195,11 +253,12 @@ class OdooWebSocketServer(
                 "manager_manual_update" -> messageHandler.handleManagerManualUpdate(session, json)
                 "add_transaction" -> messageHandler.handleAddTransaction(session, json)
                 else -> {
+                    AppLogger.w(TAG, "Unknown WS mode='$mode' from=$remoteHost")
                     sendToSession(session, WsErrorResponse(message = "Unknown mode '$mode'"))
                 }
             }
         } catch (e: Exception) {
-            AppLogger.e(TAG, "Error handling WebSocket message", e)
+            AppLogger.e(TAG, "Error handling WebSocket message from $remoteHost", e)
             try {
                 sendToSession(session, WsErrorResponse(message = "Internal server error"))
             } catch (_: Exception) { /* connection may be closing */ }

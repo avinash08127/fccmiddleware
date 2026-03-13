@@ -1,6 +1,7 @@
 import { inject, Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { EMPTY, catchError } from 'rxjs';
+import { environment } from '../../../environments/environment';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -23,7 +24,7 @@ interface StructuredLogEntry {
 @Injectable({ providedIn: 'root' })
 export class LoggingService {
   private readonly http = inject(HttpClient);
-  private backendLoggingEnabled = false;
+  private backendLoggingEnabled = environment.backendLoggingEnabled;
 
   debug(source: string, msg: string, extra?: Record<string, unknown>): void {
     this.log('DEBUG', source, msg, extra);

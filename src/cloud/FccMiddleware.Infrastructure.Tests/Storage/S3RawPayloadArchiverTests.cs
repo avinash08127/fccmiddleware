@@ -1,6 +1,8 @@
 using FccMiddleware.Infrastructure.Storage;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 
 namespace FccMiddleware.Infrastructure.Tests.Storage;
 
@@ -21,7 +23,10 @@ public sealed class S3RawPayloadArchiverTests : IDisposable
             })
             .Build();
 
-        using var archiver = new S3RawPayloadArchiver(configuration, NullLogger<S3RawPayloadArchiver>.Instance);
+        var environment = Substitute.For<IHostEnvironment>();
+        environment.EnvironmentName.Returns(Environments.Development);
+
+        using var archiver = new S3RawPayloadArchiver(configuration, environment, NullLogger<S3RawPayloadArchiver>.Instance);
         const string rawPayload = """{ "transactionId": "TX-123", "amountMinorUnits": 1000 }""";
 
         var payloadRef = await archiver.ArchiveAsync(

@@ -5,7 +5,9 @@ namespace FccMiddleware.Api.Infrastructure;
 
 /// <summary>
 /// Writes health check results as structured JSON matching the HealthResponse schema in cloud-api.yaml.
-/// Shape: { status, timestamp, version, dependencies: { name: { status, latencyMs, message } } }
+/// Two response modes:
+///   - Minimal (unauthenticated /health): { status }
+///   - Detailed (authenticated /health/ready): { status, timestamp, version, dependencies }
 /// </summary>
 internal static class HealthResponseWriter
 {
@@ -18,7 +20,24 @@ internal static class HealthResponseWriter
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public static Task WriteResponse(HttpContext context, HealthReport report)
+    /// <summary>
+    /// Minimal liveness response — returns only aggregate status.
+    /// Safe for unauthenticated callers; does not disclose version, dependency names, or messages.
+    /// </summary>
+    public static Task WriteMinimalResponse(HttpContext context, HealthReport report)
+    {
+        context.Response.ContentType = "application/json; charset=utf-8";
+
+        var body = new { status = MapStatus(report.Status) };
+
+        return context.Response.WriteAsync(JsonSerializer.Serialize(body, _jsonOptions));
+    }
+
+    /// <summary>
+    /// Detailed readiness response — includes version and dependency breakdown.
+    /// Should only be served to authenticated/internal callers.
+    /// </summary>
+    public static Task WriteDetailedResponse(HttpContext context, HealthReport report)
     {
         context.Response.ContentType = "application/json; charset=utf-8";
 
@@ -32,8 +51,7 @@ internal static class HealthResponseWriter
                 e => (object)new
                 {
                     status = MapStatus(e.Value.Status),
-                    latencyMs = (long)Math.Round(e.Value.Duration.TotalMilliseconds),
-                    message = e.Value.Description
+                    latencyMs = (long)Math.Round(e.Value.Duration.TotalMilliseconds)
                 })
         };
 

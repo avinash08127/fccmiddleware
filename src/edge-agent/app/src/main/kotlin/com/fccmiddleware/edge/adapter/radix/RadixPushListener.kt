@@ -62,6 +62,9 @@ class RadixPushListener(
     /** Atomic counter tracking queue size to avoid TOCTOU race on size check + enqueue. */
     private val queueCount = AtomicInteger(0)
 
+    /** Tracks the total number of transactions dropped due to queue overflow since last drain. */
+    val droppedCount = AtomicInteger(0)
+
     /** Whether the listener is currently running. */
     private val running = AtomicBoolean(false)
 
@@ -256,9 +259,11 @@ class RadixPushListener(
             val newCount = queueCount.incrementAndGet()
             if (newCount > MAX_QUEUE_SIZE) {
                 queueCount.decrementAndGet()
-                AppLogger.w(TAG, "Queue full ($MAX_QUEUE_SIZE) — dropping transaction")
+                val totalDropped = droppedCount.incrementAndGet()
+                AppLogger.e(TAG, "Queue full ($MAX_QUEUE_SIZE) — dropping transaction (total dropped=$totalDropped). " +
+                    "FDC should retry on 503. Increase drain frequency or MAX_QUEUE_SIZE if this persists.")
                 call.respondText(
-                    buildErrorResponse("Queue full"),
+                    buildErrorResponse("Queue full — retry later"),
                     ContentType.Application.Xml,
                     HttpStatusCode.ServiceUnavailable,
                 )

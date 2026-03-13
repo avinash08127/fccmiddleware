@@ -7,6 +7,13 @@
         <item name="android:statusBarColor">#B8050F</item>
     </style>
 
+    <!-- Transparent theme for LauncherActivity — prevents brief empty window flash -->
+    <style name="Theme.FccEdgeAgent.Launcher" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+
     <style name="Theme.FccEdgeAgent.Splash" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:windowBackground">@drawable/splash_background</item>
         <item name="android:statusBarColor">#E30613</item>

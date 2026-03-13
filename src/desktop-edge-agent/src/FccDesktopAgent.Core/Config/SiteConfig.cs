@@ -54,8 +54,27 @@ public sealed class SiteConfigFcc
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatTimeoutSeconds { get; set; } = 60;
 
+    /// <summary>Pre-auth request timeout in seconds. Adapter default used when null.</summary>
+    public int? PreAuthTimeoutSeconds { get; set; }
+
+    /// <summary>Fiscal receipt wait timeout in seconds. Default: 30.</summary>
+    public int? FiscalReceiptTimeoutSeconds { get; set; }
+
+    /// <summary>HTTP request timeout in seconds for FCC API calls. Default: 10.</summary>
+    public int? ApiRequestTimeoutSeconds { get; set; }
+
     /// <summary>Petronite: local HTTP port for the webhook listener (default 8090).</summary>
     public int? WebhookListenerPort { get; set; }
+
+    // ── Radix fields ────────────────────────────────────────────────────────
+    /// <summary>Radix: SHA-1 signing password for message authentication.</summary>
+    public string? SharedSecret { get; set; }
+    /// <summary>Radix: Unique Station Number (1–999999), sent as USN-Code HTTP header.</summary>
+    public int? UsnCode { get; set; }
+    /// <summary>Radix: External Authorization port; transaction port is AuthPort + 1.</summary>
+    public int? AuthPort { get; set; }
+    /// <summary>Radix: JSON dictionary mapping canonical pump numbers to (PUMP_ADDR, FP) pairs.</summary>
+    public string? FccPumpAddressMap { get; set; }
 
     // ── Advatec EFD fields ──────────────────────────────────────────────────
     /// <summary>Advatec: Device HTTP port (default 5560).</summary>

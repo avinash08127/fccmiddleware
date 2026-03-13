@@ -26,6 +26,8 @@ export type FccConfigDraft = Pick<
   | 'transactionMode'
   | 'ingestionMode'
   | 'pullIntervalSeconds'
+  | 'catchUpPullIntervalSeconds'
+  | 'hybridCatchUpIntervalSeconds'
   | 'heartbeatIntervalSeconds'
   | 'heartbeatTimeoutSeconds'
   | 'enabled'
@@ -47,6 +49,7 @@ export type FccConfigDraft = Pick<
   | 'advatecWebhookToken'
   | 'advatecEfdSerialNumber'
   | 'advatecCustIdType'
+  | 'advatecPumpMap'
 >;
 
 @Component({
@@ -185,6 +188,36 @@ export type FccConfigDraft = Pick<
               <p-inputnumber
                 inputId="fcc-pull-interval"
                 [(ngModel)]="draft.pullIntervalSeconds"
+                [min]="5"
+                [max]="3600"
+                [showButtons]="false"
+                [useGrouping]="false"
+                [disabled]="!editMode"
+                (ngModelChange)="onDraftChange()"
+              />
+            </div>
+            <div class="form-field">
+              <label for="fcc-catchup-pull-interval">Catch-Up Pull Interval (seconds)</label>
+              <p-inputnumber
+                inputId="fcc-catchup-pull-interval"
+                [(ngModel)]="draft.catchUpPullIntervalSeconds"
+                [min]="5"
+                [max]="3600"
+                [showButtons]="false"
+                [useGrouping]="false"
+                [disabled]="!editMode"
+                (ngModelChange)="onDraftChange()"
+              />
+            </div>
+          }
+
+          <!-- Hybrid catch-up interval (only when HYBRID) -->
+          @if (draft.transactionMode === 'HYBRID') {
+            <div class="form-field">
+              <label for="fcc-hybrid-catchup-interval">Hybrid Catch-Up Interval (seconds)</label>
+              <p-inputnumber
+                inputId="fcc-hybrid-catchup-interval"
+                [(ngModel)]="draft.hybridCatchUpIntervalSeconds"
                 [min]="5"
                 [max]="3600"
                 [showButtons]="false"
@@ -332,6 +365,9 @@ export type FccConfigDraft = Pick<
                   [disabled]="!editMode"
                   (ngModelChange)="onDraftChange()"
                 ></textarea>
+                @if (editMode && pumpAddressMapError) {
+                  <small class="validation-error">{{ pumpAddressMapError }}</small>
+                }
               </div>
             </div>
           </div>
@@ -447,6 +483,19 @@ export type FccConfigDraft = Pick<
                   (ngModelChange)="onDraftChange()"
                 />
               </div>
+              <div class="form-field" style="grid-column: 1 / -1;">
+                <label for="fcc-advatec-pump-map">Pump Map (JSON: EFD Serial → Pump Number)</label>
+                <textarea pInputText rows="3"
+                  id="fcc-advatec-pump-map"
+                  [(ngModel)]="draft.advatecPumpMap"
+                  placeholder='{"10TZ101807": 1, "10TZ101808": 2}'
+                  [disabled]="!editMode"
+                  (ngModelChange)="onDraftChange()"
+                ></textarea>
+                @if (editMode && advatecPumpMapError) {
+                  <small class="validation-error">{{ advatecPumpMapError }}</small>
+                }
+              </div>
             </div>
           </div>
         }
@@ -545,6 +594,10 @@ export class FccConfigFormComponent implements OnChanges {
 
   draft: FccConfigDraft | null = null;
 
+  // M-16: JSON validation error messages for pump map textareas
+  pumpAddressMapError: string | null = null;
+  advatecPumpMapError: string | null = null;
+
   readonly vendorOptions = [
     { label: 'DOMS', value: FccVendor.DOMS },
     { label: 'RADIX', value: FccVendor.RADIX },
@@ -580,6 +633,8 @@ export class FccConfigFormComponent implements OnChanges {
         transactionMode: this.fccConfig.transactionMode,
         ingestionMode: this.fccConfig.ingestionMode,
         pullIntervalSeconds: this.fccConfig.pullIntervalSeconds,
+        catchUpPullIntervalSeconds: this.fccConfig.catchUpPullIntervalSeconds,
+        hybridCatchUpIntervalSeconds: this.fccConfig.hybridCatchUpIntervalSeconds,
         heartbeatIntervalSeconds: this.fccConfig.heartbeatIntervalSeconds,
         heartbeatTimeoutSeconds: this.fccConfig.heartbeatTimeoutSeconds,
         enabled: this.fccConfig.enabled,
@@ -605,19 +660,75 @@ export class FccConfigFormComponent implements OnChanges {
         advatecWebhookToken: this.fccConfig.advatecWebhookToken,
         advatecEfdSerialNumber: this.fccConfig.advatecEfdSerialNumber,
         advatecCustIdType: this.fccConfig.advatecCustIdType,
+        advatecPumpMap: this.fccConfig.advatecPumpMap,
       };
     }
   }
 
   onDraftChange(): void {
     if (this.draft) {
+      // M-16: Validate JSON pump maps on every change
+      this.pumpAddressMapError = this.validatePumpAddressMapJson(this.draft.fccPumpAddressMap);
+      this.advatecPumpMapError = this.validateAdvatecPumpMapJson(this.draft.advatecPumpMap);
       this.configChange.emit({ ...this.draft });
+    }
+  }
+
+  /**
+   * M-16: Validates Radix pump address map JSON structure.
+   * Expected: {"1": {"pumpAddr": N, "fp": N}, ...}
+   */
+  private validatePumpAddressMapJson(json: string | null | undefined): string | null {
+    if (!json?.trim()) return null; // empty is OK — field is optional
+    try {
+      const parsed = JSON.parse(json);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return 'Must be a JSON object, e.g. {"1": {"pumpAddr": 1, "fp": 1}}';
+      }
+      for (const [key, value] of Object.entries(parsed)) {
+        if (!/^\d+$/.test(key)) {
+          return `Key "${key}" must be a numeric pump number.`;
+        }
+        const entry = value as Record<string, unknown>;
+        if (typeof entry !== 'object' || entry === null) {
+          return `Value for pump ${key} must be an object with pumpAddr and fp.`;
+        }
+        if (typeof entry['pumpAddr'] !== 'number' || typeof entry['fp'] !== 'number') {
+          return `Pump ${key}: pumpAddr and fp must be numbers.`;
+        }
+      }
+      return null;
+    } catch (e) {
+      return `Invalid JSON: ${(e as SyntaxError).message}`;
+    }
+  }
+
+  /**
+   * M-16: Validates Advatec pump map JSON structure.
+   * Expected: {"serialNumber": pumpNumber, ...}
+   */
+  private validateAdvatecPumpMapJson(json: string | null | undefined): string | null {
+    if (!json?.trim()) return null; // empty is OK — field is optional
+    try {
+      const parsed = JSON.parse(json);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return 'Must be a JSON object, e.g. {"10TZ101807": 1}';
+      }
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value !== 'number' || !Number.isInteger(value)) {
+          return `Value for "${key}" must be an integer pump number.`;
+        }
+      }
+      return null;
+    } catch (e) {
+      return `Invalid JSON: ${(e as SyntaxError).message}`;
     }
   }
 
   isValid(): boolean {
     if (!this.draft) return false;
-    return (
+
+    const genericValid =
       !!this.draft.vendor &&
       !!this.draft.connectionProtocol &&
       !!this.draft.hostAddress?.trim() &&
@@ -625,7 +736,40 @@ export class FccConfigFormComponent implements OnChanges {
       this.draft.port >= 1 &&
       this.draft.port <= 65535 &&
       this.draft.heartbeatIntervalSeconds > 0 &&
-      this.draft.heartbeatTimeoutSeconds > 0
-    );
+      this.draft.heartbeatTimeoutSeconds > 0;
+
+    if (!genericValid) return false;
+
+    // Vendor-specific required fields
+    switch (this.draft.vendor) {
+      case FccVendor.DOMS:
+        return !!this.draft.fcAccessCode?.trim();
+
+      case FccVendor.RADIX:
+        return (
+          !!this.draft.sharedSecret?.trim() &&
+          this.draft.usnCode != null &&
+          this.draft.usnCode > 0 &&
+          !this.pumpAddressMapError
+        );
+
+      case FccVendor.PETRONITE:
+        return (
+          !!this.draft.clientId?.trim() &&
+          !!this.draft.clientSecret?.trim() &&
+          !!this.draft.oauthTokenEndpoint?.trim()
+        );
+
+      case FccVendor.ADVATEC:
+        return (
+          this.draft.advatecDevicePort != null &&
+          this.draft.advatecDevicePort >= 1 &&
+          this.draft.advatecDevicePort <= 65535 &&
+          !this.advatecPumpMapError
+        );
+
+      default:
+        return true;
+    }
   }
 }

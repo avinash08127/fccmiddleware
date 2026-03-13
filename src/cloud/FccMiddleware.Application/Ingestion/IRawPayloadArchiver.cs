@@ -17,4 +17,11 @@ public interface IRawPayloadArchiver
         string fccTransactionId,
         string rawPayload,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Retrieves the raw payload string from object storage using the opaque reference
+    /// returned by <see cref="ArchiveAsync"/>. Returns null if the reference is empty,
+    /// the payload cannot be retrieved, or the storage backend is unavailable.
+    /// </summary>
+    Task<string?> RetrieveAsync(string reference, CancellationToken ct = default);
 }

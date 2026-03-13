@@ -233,9 +233,10 @@ public sealed class PreAuthHandlerTests : IDisposable
     {
         await SeedNozzleMappingAsync();
 
+        var oldId = Guid.NewGuid().ToString();
         _db.PreAuths.Add(new PreAuthEntity
         {
-            Id = Guid.NewGuid().ToString(),
+            Id = oldId,
             OdooOrderId = "ORDER-001",
             SiteCode = "SITE-A",
             PumpNumber = 1,
@@ -257,9 +258,11 @@ public sealed class PreAuthHandlerTests : IDisposable
 
         result.IsSuccess.Should().BeTrue();
         result.Status.Should().Be(PreAuthStatus.Authorized);
-        // The terminal record is reset in-place — only one record per (OdooOrderId, SiteCode)
+        // Terminal record is deleted and a new one is created with a fresh ID
         var count = await _db.PreAuths.CountAsync();
         count.Should().Be(1);
+        var record = await _db.PreAuths.SingleAsync();
+        record.Id.Should().NotBe(oldId);
     }
 
     // ── HandleAsync: Nozzle mapping ───────────────────────────────────────────

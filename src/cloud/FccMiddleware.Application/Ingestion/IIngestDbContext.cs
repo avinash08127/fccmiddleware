@@ -32,8 +32,16 @@ public interface IIngestDbContext
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Secondary fuzzy match: checks whether a PENDING transaction at the same pump + nozzle
+    /// Sets ReconciliationStatus = REVIEW_FUZZY_MATCH on the transaction with the given ID,
+    /// if it is not already set. Used to propagate fuzzy match flags during dedup races.
+    /// </summary>
+    Task FlagFuzzyMatchAsync(Guid transactionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Secondary fuzzy match: checks whether a non-duplicate transaction at the same pump + nozzle
     /// with the same amount exists within a ±window of completedAt.
+    /// Matches against all statuses except DUPLICATE so that recently acknowledged (SYNCED_TO_ODOO)
+    /// transactions are still detected as potential fuzzy duplicates.
     /// </summary>
     Task<bool> HasFuzzyMatchAsync(
         Guid legalEntityId,

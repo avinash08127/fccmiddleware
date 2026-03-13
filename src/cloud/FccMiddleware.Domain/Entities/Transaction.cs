@@ -1,5 +1,6 @@
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Exceptions;
+using FccMiddleware.Domain.Interfaces;
 
 namespace FccMiddleware.Domain.Entities;
 
@@ -8,7 +9,7 @@ namespace FccMiddleware.Domain.Entities;
 /// The composite PK is (Id, CreatedAt) as required for PostgreSQL range partitioning.
 /// Currency amounts are stored as minor units (cents). Volume in microlitres.
 /// </summary>
-public class Transaction
+public class Transaction : ITenantScoped
 {
     public Guid Id { get; set; }
     public DateTimeOffset CreatedAt { get; set; }  // Partition key — part of composite PK

@@ -49,6 +49,7 @@ public sealed class DecommissionDeviceHandler
             CreatedAt = now,
             LegalEntityId = device.LegalEntityId,
             EventType = "DEVICE_DECOMMISSIONED",
+            EntityId = device.Id,
             CorrelationId = Guid.NewGuid(),
             SiteCode = device.SiteCode,
             Source = "DecommissionDeviceHandler",
@@ -56,6 +57,7 @@ public sealed class DecommissionDeviceHandler
             {
                 DeviceId = device.Id,
                 SiteCode = device.SiteCode,
+                DecommissionedBy = request.DecommissionedBy,
                 RevokedTokenCount = tokens.Count,
                 DeactivatedAt = now,
             })
@@ -63,8 +65,8 @@ public sealed class DecommissionDeviceHandler
 
         await _db.SaveChangesAsync(cancellationToken);
 
-        _logger.LogInformation("Device {DeviceId} decommissioned for site {SiteCode}",
-            device.Id, device.SiteCode);
+        _logger.LogInformation("Device {DeviceId} decommissioned for site {SiteCode} by {DecommissionedBy}",
+            device.Id, device.SiteCode, request.DecommissionedBy);
 
         return Result<DecommissionDeviceResult>.Success(new DecommissionDeviceResult
         {

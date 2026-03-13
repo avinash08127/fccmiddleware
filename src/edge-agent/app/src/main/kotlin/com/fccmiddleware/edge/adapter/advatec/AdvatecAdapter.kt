@@ -87,17 +87,33 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
                 )
             }
         }
+
+        override fun purgeStale(): Int {
+            val now = System.currentTimeMillis()
+            var purged = 0
+            val iterator = activePreAuths.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (now - entry.value.createdAtMillis >= PRE_AUTH_TTL_MILLIS) {
+                    iterator.remove()
+                    purged++
+                    AppLogger.d(TAG, "IPreAuthMatcher.purgeStale: pump=${entry.key}, correlationId=${entry.value.correlationId}")
+                }
+            }
+            return purged
+        }
     }
 
     companion object {
         private const val TAG = "AdvatecAdapter"
-        private const val HEARTBEAT_TIMEOUT_MS = 5000
+        /** M-22: Use centralised timeout constants. */
+        private val HEARTBEAT_TIMEOUT_MS = AdapterTimeouts.HEARTBEAT_TIMEOUT_MS.toInt()
         private const val DEFAULT_WEBHOOK_LISTENER_PORT = 8091
         private const val DEFAULT_DEVICE_PORT = 5560
-        private const val SUBMIT_TIMEOUT_MS = 10_000
+        private val SUBMIT_TIMEOUT_MS = AdapterTimeouts.SUBMIT_TIMEOUT_MS
 
-        /** Maximum age for an active pre-auth before it's considered stale. */
-        private const val PRE_AUTH_TTL_MILLIS = 30L * 60 * 1000 // 30 minutes
+        /** M-22: Maximum age for an active pre-auth before it's considered stale. */
+        private val PRE_AUTH_TTL_MILLIS = AdapterTimeouts.PRE_AUTH_TTL_MILLIS
 
         private val MICROLITRES_PER_LITRE = BigDecimal("1000000")
         private val DAR_ES_SALAAM = ZoneId.of("Africa/Dar_es_Salaam")
@@ -122,6 +138,9 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
     /**
      * Active pre-authorizations keyed by pump number. One active pre-auth per pump.
      * Populated by [sendPreAuth], consumed by receipt correlation in [normalizeReceipt].
+     *
+     * M-21: Concurrent requests on the same pump use [synchronized] on the pump key
+     * to detect and warn about overwrites rather than silently losing the first request.
      */
     private val activePreAuths = ConcurrentHashMap<Int, ActivePreAuth>()
 
@@ -147,6 +166,8 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
                 }
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Webhook listener init error on port $port: ${e.message} (non-fatal)")
+                // Do NOT set initialized so the next call retries listener startup.
+                return
             }
 
             initialized = true
@@ -393,8 +414,31 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
 
     // ── getPumpStatus ────────────────────────────────────────────────────────
 
+    /**
+     * Synthesizes pump status from active pre-auth state.
+     *
+     * Advatec is a fiscal device with no direct pump control, but pre-auth
+     * submissions trigger pump authorization. We synthesize status from the
+     * active pre-auth map so the dashboard shows which pumps are authorized.
+     * Returns empty list when no pre-auths are active (no configured pump list available).
+     */
     override suspend fun getPumpStatus(): List<PumpStatus> {
-        return emptyList()
+        val preAuths = preAuthMatcher.getActivePreAuths()
+        if (preAuths.isEmpty()) return emptyList()
+
+        val now = Instant.now().toString()
+        return preAuths.map { snapshot ->
+            PumpStatus(
+                siteCode = config.siteCode,
+                pumpNumber = snapshot.pumpNumber,
+                nozzleNumber = 1,
+                state = PumpState.AUTHORIZED,
+                currencyCode = config.currencyCode,
+                statusSequence = 0,
+                observedAtUtc = now,
+                source = PumpStatusSource.EDGE_SYNTHESIZED,
+            )
+        }
     }
 
     // ── sendPreAuth (ADV-4.3) ────────────────────────────────────────────────
@@ -479,8 +523,16 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
             createdAtMillis = System.currentTimeMillis(),
         )
 
-        // One pre-auth per pump — overwrite any stale entry
-        activePreAuths[command.pumpNumber] = activePreAuth
+        // M-21: One pre-auth per pump — detect and log overwrites instead of silently losing data.
+        val evicted = activePreAuths.put(command.pumpNumber, activePreAuth)
+        if (evicted != null) {
+            AppLogger.w(
+                TAG,
+                "Pre-auth overwrite on Pump=${command.pumpNumber}: evicted CorrelationId=${evicted.correlationId} " +
+                    "(OdooOrderId=${evicted.odooOrderId}, age=${(System.currentTimeMillis() - evicted.createdAtMillis) / 1000}s) " +
+                    "in favour of CorrelationId=$correlationId (OdooOrderId=${command.odooOrderId})",
+            )
+        }
 
         AppLogger.i(
             TAG,
@@ -524,6 +576,7 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
     // ── heartbeat ────────────────────────────────────────────────────────────
 
     override suspend fun heartbeat(): Boolean {
+        purgeStalePreAuths()
         val host = config.advatecDeviceAddress ?: "127.0.0.1"
         val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
         return try {

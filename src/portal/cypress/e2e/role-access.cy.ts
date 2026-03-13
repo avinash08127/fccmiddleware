@@ -57,8 +57,7 @@ describe('Role-Based Access Control', () => {
       cy.visit('/reconciliation/exceptions/recon-001');
       cy.wait('@getReconciliationDetail');
 
-      // Auditors should not see the Review Action card
-      // (RoleVisibleDirective hides it for non-SystemAdmin/OperationsManager)
+      // Auditors can read reconciliation details but cannot review them.
       cy.contains('Approve Variance').should('not.exist');
       cy.contains('button', 'Reject').should('not.exist');
     });
@@ -142,6 +141,41 @@ describe('Role-Based Access Control', () => {
       cy.visit('/settings');
       // SystemAdmin should be able to access settings
       cy.url().should('include', '/settings');
+    });
+  });
+
+  // ─── SystemAdministrator ───────────────────────────────────────────────────
+
+  describe('SystemAdministrator role', () => {
+    beforeEach(() => {
+      cy.visit('/');
+      cy.loginAs('SystemAdministrator');
+    });
+
+    it('should access reconciliation and see approve/reject buttons', () => {
+      cy.visit('/reconciliation/exceptions/recon-001');
+      cy.wait('@getReconciliationDetail');
+
+      cy.contains('Approve Variance').should('be.visible');
+      cy.contains('Reject').should('be.visible');
+    });
+  });
+
+  // ─── SupportReadOnly ───────────────────────────────────────────────────────
+
+  describe('SupportReadOnly role', () => {
+    beforeEach(() => {
+      cy.visit('/');
+      cy.loginAs('SupportReadOnly');
+    });
+
+    it('should access reconciliation detail in read-only mode', () => {
+      cy.visit('/reconciliation/exceptions/recon-001');
+      cy.wait('@getReconciliationDetail');
+
+      cy.contains('Reconciliation #').should('be.visible');
+      cy.contains('Approve Variance').should('not.exist');
+      cy.contains('button', 'Reject').should('not.exist');
     });
   });
 });

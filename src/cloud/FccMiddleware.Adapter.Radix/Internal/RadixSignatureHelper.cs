@@ -21,11 +21,17 @@ internal static class RadixSignatureHelper
         return ComputeSha1(xmlContent + sharedSecret);
     }
 
-    /// <summary>Validate a received signature against expected.</summary>
+    /// <summary>Validate a received signature against expected using constant-time comparison.</summary>
     internal static bool ValidateSignature(string receivedSignature, string xmlContent, string sharedSecret)
     {
         var expected = ComputeSha1(xmlContent + sharedSecret);
-        return string.Equals(receivedSignature, expected, StringComparison.OrdinalIgnoreCase);
+
+        // Use constant-time comparison to prevent timing side-channel attacks.
+        // SHA-1 is retained for vendor protocol compatibility (Radix FDC spec).
+        var expectedBytes = Encoding.UTF8.GetBytes(expected);
+        var receivedBytes = Encoding.UTF8.GetBytes(receivedSignature.ToLowerInvariant());
+
+        return CryptographicOperations.FixedTimeEquals(expectedBytes, receivedBytes);
     }
 
     private static string ComputeSha1(string input)

@@ -10,6 +10,7 @@ public sealed class PortalAccessResolver
             .SelectMany(claim => claim.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // "SystemAdministrator" is a legacy alias — kept for backward-compatible JWT recognition.
         var allowAll = roles.Contains("SystemAdmin") || roles.Contains("SystemAdministrator");
         var legalEntityClaims = user.FindAll("legal_entities")
             .Select(claim => claim.Value)
@@ -37,6 +38,28 @@ public sealed class PortalAccessResolver
         ?? user.FindFirstValue("sub")
         ?? user.FindFirstValue("preferred_username")
         ?? user.Identity?.Name;
+
+    /// <summary>
+    /// Returns true if the user has a role that grants access to sensitive operational
+    /// payloads (raw DLQ payloads, full telemetry, audit event payloads).
+    /// SupportReadOnly users receive redacted/summary views only.
+    /// </summary>
+    public static bool HasSensitiveDataAccess(ClaimsPrincipal user)
+    {
+        var roles = user.FindAll("roles")
+            .SelectMany(claim => claim.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return roles.Overlaps(SensitiveDataRoles);
+    }
+
+    private static readonly HashSet<string> SensitiveDataRoles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "OperationsManager",
+        "SystemAdmin",
+        "SystemAdministrator", // legacy alias — kept for backward-compatible JWT recognition
+        "Auditor"
+    };
 }
 
 public sealed record PortalAccess(

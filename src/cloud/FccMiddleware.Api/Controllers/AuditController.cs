@@ -53,9 +53,7 @@ public sealed class AuditController : PortalControllerBase
         }
 
         var query = _db.AuditEvents
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Where(item => item.LegalEntityId == legalEntityId);
+            .ForPortal(access, legalEntityId);
 
         if (correlationId.HasValue)
         {
@@ -82,23 +80,14 @@ public sealed class AuditController : PortalControllerBase
             query = query.Where(item => item.CreatedAt <= to.Value);
         }
 
+        var totalCount = await query.CountAsync(cancellationToken);
+
         if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
         {
             query = query.Where(item =>
                 item.CreatedAt > cursorTimestamp
                 || (item.CreatedAt == cursorTimestamp && item.Id.CompareTo(cursorId) > 0));
         }
-
-        var totalCount = await _db.AuditEvents
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .Where(item => item.LegalEntityId == legalEntityId)
-            .Where(item => !correlationId.HasValue || item.CorrelationId == correlationId.Value)
-            .Where(item => eventTypes == null || eventTypes.Count == 0 || eventTypes.Contains(item.EventType))
-            .Where(item => string.IsNullOrWhiteSpace(siteCode) || item.SiteCode == siteCode)
-            .Where(item => !from.HasValue || item.CreatedAt >= from.Value)
-            .Where(item => !to.HasValue || item.CreatedAt <= to.Value)
-            .CountAsync(cancellationToken);
 
         var rows = await query
             .OrderBy(item => item.CreatedAt)
@@ -119,7 +108,8 @@ public sealed class AuditController : PortalControllerBase
             nextCursor = PortalCursor.Encode(last.CreatedAt, last.Id);
         }
 
-        var data = rows.Select(ToAuditEventDto).ToList();
+        var canViewSensitive = PortalAccessResolver.HasSensitiveDataAccess(User);
+        var data = rows.Select(row => ToAuditEventDto(row, canViewSensitive)).ToList();
 
         return Ok(new PortalPagedResult<AuditEventDto>
         {
@@ -161,10 +151,11 @@ public sealed class AuditController : PortalControllerBase
             return Forbid();
         }
 
-        return Ok(ToAuditEventDto(auditEvent));
+        var canViewSensitive = PortalAccessResolver.HasSensitiveDataAccess(User);
+        return Ok(ToAuditEventDto(auditEvent, canViewSensitive));
     }
 
-    private static AuditEventDto ToAuditEventDto(Domain.Entities.AuditEvent auditEvent)
+    private static AuditEventDto ToAuditEventDto(Domain.Entities.AuditEvent auditEvent, bool includePayload)
     {
         var payload = PortalJson.ParseJson(auditEvent.Payload);
 
@@ -178,7 +169,7 @@ public sealed class AuditController : PortalControllerBase
             CorrelationId = auditEvent.CorrelationId,
             LegalEntityId = auditEvent.LegalEntityId,
             SiteCode = auditEvent.SiteCode,
-            Payload = payload
+            Payload = includePayload ? payload : default
         };
     }
 }

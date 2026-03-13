@@ -63,7 +63,7 @@ internal sealed class ReconciliationRecordConfiguration : IEntityTypeConfigurati
         {
             t.HasCheckConstraint(
                 "chk_reconciliation_status",
-                "status IN ('UNMATCHED','MATCHED','VARIANCE_WITHIN_TOLERANCE','VARIANCE_FLAGGED','APPROVED','REJECTED')");
+                "status IN ('UNMATCHED','MATCHED','VARIANCE_WITHIN_TOLERANCE','VARIANCE_FLAGGED','APPROVED','REJECTED','REVIEW_FUZZY_MATCH')");
         });
     }
 }

@@ -43,6 +43,13 @@ import java.util.concurrent.atomic.AtomicLong
  * Authentication:
  *   - Requests from 127.0.0.1 / ::1 bypass API key check (same-device Odoo POS).
  *   - LAN requests require `X-Api-Key: <key>` header (constant-time comparison).
+ *   - Optionally, [LocalApiServerConfig.lanApiIpAllowlist] restricts LAN access to a
+ *     specific set of source IPs (defense-in-depth on top of the API key).
+ *
+ * Security note: LAN mode traffic is plain HTTP (no TLS). It must only be used on
+ *   physically isolated or trusted networks (e.g., dedicated POS LAN segment). Do NOT
+ *   enable LAN mode on open or shared WiFi networks — API key material and transaction
+ *   data would be visible to any device on the same network segment.
  *
  * Architecture rule: localhost mode must never regress when LAN mode is enabled.
  */
@@ -79,6 +86,15 @@ class LocalApiServer(
         val enableLanApi: Boolean = false,
         /** Required when [enableLanApi] = true. Validated with constant-time comparison. */
         val lanApiKey: String? = null,
+        /**
+         * Optional source-IP allowlist for LAN mode (defense-in-depth, S-004).
+         * When non-null and non-empty, only requests originating from one of these IP addresses
+         * will be accepted (in addition to the API key check). Localhost is always allowed
+         * regardless of this list. Set to null to disable allowlist enforcement.
+         *
+         * Example: setOf("192.168.1.50", "192.168.1.51")
+         */
+        val lanApiIpAllowlist: Set<String>? = null,
         /** Max requests per second for mutating endpoints (preauth, pull). */
         val rateLimitMutatingRps: Int = 10,
         /** Max requests per second for read endpoints (transactions, status, pump-status). */
@@ -129,6 +145,13 @@ class LocalApiServer(
         }.also {
             it.start(wait = false)
             AppLogger.i(tag, "Local API server started on ${config.bindAddress}:${config.port} (lanApi=${config.enableLanApi})")
+            if (config.enableLanApi) {
+                AppLogger.w(tag, "LAN API mode is active — traffic is plain HTTP (no TLS). " +
+                    "Ensure this device is on a physically isolated or trusted network segment.")
+                if (!config.lanApiIpAllowlist.isNullOrEmpty()) {
+                    AppLogger.i(tag, "LAN API IP allowlist active: ${config.lanApiIpAllowlist}")
+                }
+            }
         }
     }
 
@@ -176,7 +199,7 @@ class LocalApiServer(
             return
         }
 
-        install(LanApiKeyAuthPlugin(storedKey))
+        install(LanApiKeyAuthPlugin(storedKey, config.lanApiIpAllowlist))
     }
 
     private fun Application.configureRateLimiting() {
@@ -213,12 +236,14 @@ class LocalApiServer(
                 connectivityManager = connectivityManager,
                 lanApiKey = config.lanApiKey,
                 enableLanApi = config.enableLanApi,
+                lanApiIpAllowlist = config.lanApiIpAllowlist,
             )
             preAuthRoutes(
                 handler = preAuthHandler,
                 connectivityManager = connectivityManager,
                 lanApiKey = config.lanApiKey,
                 enableLanApi = config.enableLanApi,
+                lanApiIpAllowlist = config.lanApiIpAllowlist,
             )
             pumpStatusRoutes(pumpStatusCache)
             statusRoutes(
@@ -242,8 +267,8 @@ class LocalApiServer(
 /**
  * Defense-in-depth auth check callable from individual route handlers.
  *
- * Returns true if the request is authorized (localhost or valid API key).
- * If unauthorized, responds with 401 and returns false — the caller must `return`.
+ * Returns true if the request is authorized (localhost or valid API key + optional IP allowlist).
+ * If unauthorized, responds with 401/403 and returns false — the caller must `return`.
  *
  * This supplements the global [LanApiKeyAuthPlugin] so that even if the global
  * plugin is misconfigured or bypassed, each route independently verifies access.
@@ -252,6 +277,7 @@ internal suspend fun routeRequiresAuth(
     call: io.ktor.server.application.ApplicationCall,
     lanApiKey: String?,
     enableLanApi: Boolean,
+    lanApiIpAllowlist: Set<String>? = null,
 ): Boolean {
     val remoteAddress = call.request.origin.remoteHost
     val isLocalhost = remoteAddress == "127.0.0.1" ||
@@ -288,6 +314,20 @@ internal suspend fun routeRequiresAuth(
         return false
     }
 
+    // IP allowlist check (defense-in-depth, S-004)
+    if (!lanApiIpAllowlist.isNullOrEmpty() && remoteAddress !in lanApiIpAllowlist) {
+        call.respond(
+            HttpStatusCode.Forbidden,
+            ErrorResponse(
+                errorCode = "IP_NOT_ALLOWED",
+                message = "Source IP is not in the LAN API allowlist",
+                traceId = UUID.randomUUID().toString(),
+                timestamp = Instant.now().toString(),
+            )
+        )
+        return false
+    }
+
     val headerKey = call.request.headers["X-Api-Key"]
     if (headerKey == null || !lanApiKeyEquals(headerKey, lanApiKey)) {
         call.respond(
@@ -315,8 +355,10 @@ internal suspend fun routeRequiresAuth(
  * Requests from localhost (127.0.0.1, ::1) bypass the check.
  * All other clients must include `X-Api-Key: <key>` matching the stored key.
  * Comparison is constant-time to prevent timing side-channels.
+ * When [ipAllowlist] is non-null and non-empty, only requests from those source IPs
+ * are accepted (defense-in-depth on top of the API key, S-004).
  */
-private fun LanApiKeyAuthPlugin(storedKey: String): ApplicationPlugin<Unit> =
+private fun LanApiKeyAuthPlugin(storedKey: String, ipAllowlist: Set<String>?): ApplicationPlugin<Unit> =
     createApplicationPlugin("LanApiKeyAuth") {
         onCall { call ->
             val remoteAddress = call.request.origin.remoteHost
@@ -325,6 +367,20 @@ private fun LanApiKeyAuthPlugin(storedKey: String): ApplicationPlugin<Unit> =
                 remoteAddress == "0:0:0:0:0:0:0:1"
 
             if (!isLocalhost) {
+                // IP allowlist check (S-004)
+                if (!ipAllowlist.isNullOrEmpty() && remoteAddress !in ipAllowlist) {
+                    call.respond(
+                        HttpStatusCode.Forbidden,
+                        ErrorResponse(
+                            errorCode = "IP_NOT_ALLOWED",
+                            message = "Source IP is not in the LAN API allowlist",
+                            traceId = UUID.randomUUID().toString(),
+                            timestamp = Instant.now().toString(),
+                        )
+                    )
+                    return@onCall
+                }
+
                 val headerKey = call.request.headers["X-Api-Key"]
                 if (headerKey == null || !lanApiKeyEquals(headerKey, storedKey)) {
                     call.respond(

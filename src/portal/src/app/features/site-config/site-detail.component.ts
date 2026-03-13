@@ -2,6 +2,7 @@ import {
   Component,
   DestroyRef,
   OnInit,
+  ViewChild,
   inject,
   signal,
 } from '@angular/core';
@@ -9,7 +10,7 @@ import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
-import { forkJoin } from 'rxjs';
+import { concatMap, of, catchError, map } from 'rxjs';
 import { ButtonModule } from 'primeng/button';
 import { CardModule } from 'primeng/card';
 import { SelectModule } from 'primeng/select';
@@ -186,6 +187,18 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
                 <span class="field-value">{{ site()!.connectivityMode ?? '—' }}</span>
               }
             </div>
+
+            <div class="field">
+              <span class="field-label">Uses Pre-Auth</span>
+              @if (editMode()) {
+                <p-toggleswitch
+                  inputId="site-uses-preauth"
+                  [(ngModel)]="draftSiteUsesPreAuth"
+                />
+              } @else {
+                <span class="field-value">{{ site()!.siteUsesPreAuth ? 'Yes' : 'No' }}</span>
+              }
+            </div>
           </div>
         </p-card>
 
@@ -202,6 +215,7 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
           [pumps]="pumps()"
           [products]="products()"
           [editMode]="editMode()"
+          [mutating]="pumpMutating()"
           (pumpAdded)="onPumpAdded($event)"
           (pumpRemoved)="onPumpRemoved($event)"
           (nozzleUpdated)="onNozzleUpdated($event)"
@@ -295,7 +309,7 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
               }
             </div>
 
-            @if (draftFiscalization.mode !== 'NONE' && draftFiscalization.mode) {
+            @if (editMode() ? (draftFiscalization.mode !== 'NONE' && draftFiscalization.mode) : (site()!.fiscalization?.mode !== 'NONE' && site()!.fiscalization?.mode)) {
               <div class="form-field">
                 <label for="fiscal-tax-endpoint">Tax Authority Endpoint</label>
                 @if (editMode()) {
@@ -314,21 +328,38 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
             }
 
             <div class="form-field form-field--toggle">
-              <p-toggleswitch
-                id="fiscal-require-tax-id"
-                [(ngModel)]="draftFiscalization.requireCustomerTaxId"
-                [disabled]="!editMode()"
-              />
+              @if (editMode()) {
+                <p-toggleswitch
+                  id="fiscal-require-tax-id"
+                  [(ngModel)]="draftFiscalization.requireCustomerTaxId"
+                />
+              } @else {
+                <p-toggleswitch
+                  id="fiscal-require-tax-id"
+                  [ngModel]="site()!.fiscalization?.requireCustomerTaxId ?? false"
+                  [disabled]="true"
+                />
+              }
               <label for="fiscal-require-tax-id">Require Customer Tax ID</label>
             </div>
 
             <div class="form-field form-field--toggle">
-              <p-toggleswitch
-                id="fiscal-receipt-required"
-                [(ngModel)]="draftFiscalization.fiscalReceiptRequired"
-                [disabled]="!editMode()"
-              />
+              @if (editMode()) {
+                <p-toggleswitch
+                  id="fiscal-receipt-required"
+                  [(ngModel)]="draftFiscalization.fiscalReceiptRequired"
+                />
+              } @else {
+                <p-toggleswitch
+                  id="fiscal-receipt-required"
+                  [ngModel]="site()!.fiscalization?.fiscalReceiptRequired ?? false"
+                  [disabled]="true"
+                />
+              }
               <label for="fiscal-receipt-required">Fiscal Receipt Required</label>
+              @if (!editMode() && site()!.fiscalization?.mode === 'FCC_DIRECT') {
+                <small class="fcc-direct-hint">Always enforced for FCC_DIRECT mode</small>
+              }
             </div>
           </div>
         </p-card>
@@ -454,6 +485,11 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
         font-weight: 500;
         color: var(--p-text-color);
       }
+      .fcc-direct-hint {
+        font-size: 0.75rem;
+        color: var(--p-orange-600, #ea580c);
+        font-style: italic;
+      }
     `,
   ],
 })
@@ -464,9 +500,13 @@ export class SiteDetailComponent implements OnInit {
   private readonly messageService = inject(MessageService);
   private readonly destroyRef = inject(DestroyRef);
 
+  // F10-02: Reference to FCC config form for validation
+  @ViewChild(FccConfigFormComponent) fccConfigForm?: FccConfigFormComponent;
+
   // ── State ─────────────────────────────────────────────────────────────────
   readonly loading = signal(false);
   readonly saving = signal(false);
+  readonly pumpMutating = signal(false); // F10-07: loading state for pump/nozzle mutations
   readonly site = signal<SiteDetail | null>(null);
   readonly pumps = signal<Pump[]>([]);
   readonly products = signal<Product[]>([]);
@@ -475,6 +515,7 @@ export class SiteDetailComponent implements OnInit {
   // ── Edit drafts ───────────────────────────────────────────────────────────
   draftOperatingModel: SiteOperatingModel | null = null;
   draftConnectivityMode: ConnectivityMode | null = null;
+  draftSiteUsesPreAuth = false;
   draftFccConfig: FccConfigDraft | null = null;
   draftTolerance: ToleranceConfig = {
     amountTolerancePct: 0,
@@ -529,6 +570,7 @@ export class SiteDetailComponent implements OnInit {
     if (!s) return;
     this.draftOperatingModel = s.operatingModel;
     this.draftConnectivityMode = s.connectivityMode;
+    this.draftSiteUsesPreAuth = s.siteUsesPreAuth;
     this.draftFccConfig = s.fcc
       ? {
           vendor: s.fcc.vendor,
@@ -538,6 +580,8 @@ export class SiteDetailComponent implements OnInit {
           transactionMode: s.fcc.transactionMode,
           ingestionMode: s.fcc.ingestionMode,
           pullIntervalSeconds: s.fcc.pullIntervalSeconds,
+          catchUpPullIntervalSeconds: s.fcc.catchUpPullIntervalSeconds,
+          hybridCatchUpIntervalSeconds: s.fcc.hybridCatchUpIntervalSeconds,
           heartbeatIntervalSeconds: s.fcc.heartbeatIntervalSeconds,
           heartbeatTimeoutSeconds: s.fcc.heartbeatTimeoutSeconds,
           enabled: s.fcc.enabled,
@@ -559,6 +603,7 @@ export class SiteDetailComponent implements OnInit {
           advatecWebhookToken: s.fcc.advatecWebhookToken,
           advatecEfdSerialNumber: s.fcc.advatecEfdSerialNumber,
           advatecCustIdType: s.fcc.advatecCustIdType,
+          advatecPumpMap: s.fcc.advatecPumpMap,
         }
       : null;
     this.draftTolerance = s.tolerance
@@ -578,7 +623,10 @@ export class SiteDetailComponent implements OnInit {
   }
 
   canSave(): boolean {
-    return !this.saving() && !!this.draftOperatingModel;
+    if (this.saving() || !this.draftOperatingModel) return false;
+    // F10-02: Validate FCC config form when present
+    if (this.draftFccConfig && this.fccConfigForm && !this.fccConfigForm.isValid()) return false;
+    return true;
   }
 
   onFccConfigChange(draft: FccConfigDraft): void {
@@ -594,6 +642,7 @@ export class SiteDetailComponent implements OnInit {
     const siteUpdate: UpdateSiteRequest = {
       operatingModel: this.draftOperatingModel ?? undefined,
       connectivityMode: this.draftConnectivityMode ?? undefined,
+      siteUsesPreAuth: this.draftSiteUsesPreAuth,
       tolerance: { ...this.draftTolerance },
       fiscalization: {
         mode: this.draftFiscalization.mode ?? undefined,
@@ -607,10 +656,33 @@ export class SiteDetailComponent implements OnInit {
 
     if (this.draftFccConfig) {
       const fccPayload: Partial<FccConfig> = { ...this.draftFccConfig } as Partial<FccConfig>;
-      forkJoin([siteUpdate$, this.siteService.updateFccConfig(s.id, fccPayload)])
-        .pipe(takeUntilDestroyed(this.destroyRef))
+      // F10-04: Sequential saves — site first, then FCC config.
+      // If site succeeds but FCC fails, user sees partial-save warning.
+      siteUpdate$
+        .pipe(
+          concatMap((updatedSite) =>
+            this.siteService.updateFccConfig(s.id, fccPayload).pipe(
+              map(() => ({ updatedSite, fccSaved: true })),
+              catchError(() => of({ updatedSite, fccSaved: false })),
+            ),
+          ),
+          takeUntilDestroyed(this.destroyRef),
+        )
         .subscribe({
-          next: ([updatedSite]) => this.onSaveSuccess(updatedSite),
+          next: ({ updatedSite, fccSaved }) => {
+            if (fccSaved) {
+              this.onSaveSuccess(updatedSite);
+            } else {
+              this.site.set(updatedSite);
+              this.saving.set(false);
+              this.messageService.add({
+                severity: 'warn',
+                summary: 'Partial save',
+                detail: 'Site settings saved, but FCC configuration update failed. Please retry.',
+                life: 5000,
+              });
+            }
+          },
           error: () => this.onSaveError(),
         });
     } else {
@@ -623,13 +695,15 @@ export class SiteDetailComponent implements OnInit {
 
   onPumpAdded(req: AddPumpRequest): void {
     const s = this.site();
-    if (!s) return;
+    if (!s || this.pumpMutating()) return;
+    this.pumpMutating.set(true);
     this.siteService
       .addPump(s.id, req)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (pump) => {
           this.pumps.update((list) => [...list, pump]);
+          this.pumpMutating.set(false);
           this.messageService.add({
             severity: 'success',
             summary: 'Pump added',
@@ -638,6 +712,7 @@ export class SiteDetailComponent implements OnInit {
           });
         },
         error: () => {
+          this.pumpMutating.set(false);
           this.messageService.add({
             severity: 'error',
             summary: 'Failed to add pump',
@@ -650,13 +725,15 @@ export class SiteDetailComponent implements OnInit {
 
   onPumpRemoved(pumpId: string): void {
     const s = this.site();
-    if (!s) return;
+    if (!s || this.pumpMutating()) return;
+    this.pumpMutating.set(true);
     this.siteService
       .removePump(s.id, pumpId)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: () => {
           this.pumps.update((list) => list.filter((p) => p.id !== pumpId));
+          this.pumpMutating.set(false);
           this.messageService.add({
             severity: 'success',
             summary: 'Pump removed',
@@ -665,6 +742,7 @@ export class SiteDetailComponent implements OnInit {
           });
         },
         error: () => {
+          this.pumpMutating.set(false);
           this.messageService.add({
             severity: 'error',
             summary: 'Failed to remove pump',
@@ -677,13 +755,15 @@ export class SiteDetailComponent implements OnInit {
 
   onNozzleUpdated(event: NozzleUpdateEvent): void {
     const s = this.site();
-    if (!s) return;
+    if (!s || this.pumpMutating()) return;
+    this.pumpMutating.set(true);
     const req: UpdateNozzleRequest = { canonicalProductCode: event.canonicalProductCode };
     this.siteService
       .updateNozzle(s.id, event.pumpId, event.nozzleNumber, req)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: () => {
+          this.pumpMutating.set(false);
           this.messageService.add({
             severity: 'success',
             summary: 'Nozzle updated',
@@ -692,6 +772,7 @@ export class SiteDetailComponent implements OnInit {
           });
         },
         error: () => {
+          this.pumpMutating.set(false);
           this.messageService.add({
             severity: 'error',
             summary: 'Failed to update nozzle',

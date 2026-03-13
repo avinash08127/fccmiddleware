@@ -325,7 +325,7 @@ interface LoadRequest {
           placeholder="Reason for discarding..."
           maxlength="500"
         ></textarea>
-        <small class="reason-hint">{{ batchDiscardReason.length }}/500 characters</small>
+        <small class="reason-hint">{{ batchDiscardReason.length }}/500 characters (min. 10)</small>
         <ng-template pTemplate="footer">
           <p-button
             label="Cancel"
@@ -337,7 +337,7 @@ interface LoadRequest {
             label="Discard All"
             severity="danger"
             icon="pi pi-ban"
-            [disabled]="!batchDiscardReason.trim() || batchActionLoading()"
+            [disabled]="batchDiscardReason.trim().length < 10 || batchActionLoading()"
             [loading]="batchActionLoading()"
             (onClick)="confirmBatchDiscard()"
           />
@@ -567,6 +567,12 @@ export class DlqListComponent {
   private readonly load$ = new Subject<LoadRequest>();
 
   constructor() {
+    this.destroyRef.onDestroy(() => {
+      if (this.feedbackTimer !== null) {
+        clearTimeout(this.feedbackTimer);
+      }
+    });
+
     this.masterDataService
       .getLegalEntities()
       .pipe(takeUntilDestroyed())
@@ -682,7 +688,7 @@ export class DlqListComponent {
 
   confirmBatchDiscard(): void {
     const reason = this.batchDiscardReason.trim();
-    if (!reason) return;
+    if (reason.length < 10) return;
     const items = this.selectedItems.map((i) => ({ id: i.id, reason }));
     this.batchActionLoading.set(true);
     this.feedbackMessage.set(null);
@@ -755,9 +761,21 @@ export class DlqListComponent {
     this.triggerLoad(entityId, state.currentPage, this.pageSize, cursor);
   }
 
+  private feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
   private setFeedback(severity: 'success' | 'error', message: string): void {
+    if (this.feedbackTimer !== null) {
+      clearTimeout(this.feedbackTimer);
+      this.feedbackTimer = null;
+    }
     this.feedbackSeverity.set(severity);
     this.feedbackMessage.set(message);
-    setTimeout(() => this.feedbackMessage.set(null), 5000);
+    // Only auto-dismiss success messages; errors stay until the user acts.
+    if (severity === 'success') {
+      this.feedbackTimer = setTimeout(() => {
+        this.feedbackMessage.set(null);
+        this.feedbackTimer = null;
+      }, 5000);
+    }
   }
 }

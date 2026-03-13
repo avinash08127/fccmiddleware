@@ -4,8 +4,10 @@ export interface LegalEntity {
   id: string;
   code: string;
   name: string;
+  countryCode: string;
+  countryName: string;
   currencyCode: string;
-  country: string | null;
+  odooCompanyId: string;
   isActive: boolean;
   updatedAt: string | null;
 }
@@ -27,7 +29,7 @@ export interface MasterDataSyncResponse {
 export interface MasterDataSyncStatus {
   entityType: MasterDataEntityType;
   lastSyncAtUtc: string | null;
-  upsertedCount: number;
+  totalActiveCount: number;
   deactivatedCount: number;
   errorCount: number;
   isStale: boolean;

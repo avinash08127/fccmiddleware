@@ -124,12 +124,14 @@ class PreAuthCloudForwardWorker(
 
         for (record in unsynced) {
             if (record.unitPrice == null) {
+                // M-20: Legacy records with null unitPrice can never be forwarded.
+                // Mark as cloud-synced so they don't stay in the unsynced queue forever.
                 val attemptNow = Instant.now().toString()
-                dao.recordCloudSyncFailure(record.id, attemptNow)
+                dao.markCloudSynced(record.id, attemptNow)
                 AppLogger.w(
                     TAG,
-                    "Skipping pre-auth ${record.odooOrderId} cloud forward: unitPrice is missing " +
-                        "for a legacy local record.",
+                    "Pre-auth ${record.odooOrderId} marked as synced (incomplete): unitPrice is missing " +
+                        "for a legacy local record — record will not be forwarded to cloud.",
                 )
                 continue
             }

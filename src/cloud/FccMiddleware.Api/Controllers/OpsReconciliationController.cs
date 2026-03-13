@@ -75,18 +75,7 @@ public sealed class OpsReconciliationController : PortalControllerBase
         }
 
         var query = _db.ReconciliationRecords
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .AsQueryable();
-
-        if (legalEntityId.HasValue)
-        {
-            query = query.Where(item => item.LegalEntityId == legalEntityId.Value);
-        }
-        else if (!access.AllowAllLegalEntities)
-        {
-            query = query.Where(item => access.ScopedLegalEntityIds.Contains(item.LegalEntityId));
-        }
+            .ForPortal(access, legalEntityId);
 
         if (!string.IsNullOrWhiteSpace(siteCode))
         {
@@ -296,6 +285,14 @@ public sealed class OpsReconciliationController : PortalControllerBase
             return BadRequest(BuildError("VALIDATION.REASON_REQUIRED", "reason is required."));
         }
 
+        var reason = request.Reason.Trim();
+        if (reason.Length < ReviewReconciliationCommand.MinimumReasonLength)
+        {
+            return BadRequest(BuildError(
+                "VALIDATION.REASON_TOO_SHORT",
+                $"reason must be at least {ReviewReconciliationCommand.MinimumReasonLength} characters."));
+        }
+
         var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
         {
@@ -312,7 +309,7 @@ public sealed class OpsReconciliationController : PortalControllerBase
         {
             ReconciliationId = id,
             TargetStatus = targetStatus,
-            Reason = request.Reason,
+            Reason = reason,
             ReviewedByUserId = reviewedBy,
             ScopedLegalEntityIds = access.ScopedLegalEntityIds,
             AllowAllLegalEntities = access.AllowAllLegalEntities
@@ -322,7 +319,7 @@ public sealed class OpsReconciliationController : PortalControllerBase
         {
             return result.Error!.Code switch
             {
-                "VALIDATION.REASON_REQUIRED" or "VALIDATION.INVALID_STATUS" =>
+                "VALIDATION.REASON_REQUIRED" or "VALIDATION.REASON_TOO_SHORT" or "VALIDATION.INVALID_STATUS" =>
                     BadRequest(BuildError(result.Error.Code, result.Error.Message)),
                 "NOT_FOUND.RECONCILIATION" =>
                     NotFound(BuildError(result.Error.Code, result.Error.Message)),

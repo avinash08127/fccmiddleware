@@ -79,21 +79,22 @@ class JplTcpClient(
         disconnect() // Clean up any previous connection
 
         val sock = Socket()
-
-        // Bind socket to a specific network (e.g. WiFi) before connecting.
-        // Must happen before connect() per Android Network.bindSocket() contract.
-        if (socketBinder != null) {
-            try {
+        try {
+            // Bind socket to a specific network (e.g. WiFi) before connecting.
+            // Must happen before connect() per Android Network.bindSocket() contract.
+            if (socketBinder != null) {
                 socketBinder.invoke(sock)
                 AppLogger.d(TAG, "Socket bound to designated network for FCC connection")
-            } catch (e: Exception) {
-                AppLogger.w(TAG, "Failed to bind FCC socket to network: ${e.message}")
             }
-        }
 
-        sock.connect(InetSocketAddress(host, port), connectTimeoutMs.toInt())
-        sock.soTimeout = 0 // Non-blocking read loop uses coroutine cancellation
-        sock.tcpNoDelay = true
+            sock.connect(InetSocketAddress(host, port), connectTimeoutMs.toInt())
+            sock.soTimeout = 0 // Non-blocking read loop uses coroutine cancellation
+            sock.tcpNoDelay = true
+        } catch (e: Exception) {
+            // H-13: Close socket on any failure to prevent file descriptor leak.
+            try { sock.close() } catch (_: Exception) { }
+            throw e
+        }
 
         socket = sock
         inputStream = sock.getInputStream()

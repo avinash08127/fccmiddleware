@@ -81,6 +81,21 @@ class PetroniteAdapter(
                 )
             }
         }
+
+        override fun purgeStale(): Int {
+            val cutoffMillis = System.currentTimeMillis() - STALE_ORDER_THRESHOLD_MS
+            var purged = 0
+            val iterator = activePreAuths.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (entry.value.createdAtMillis < cutoffMillis) {
+                    iterator.remove()
+                    purged++
+                    AppLogger.d(TAG, "IPreAuthMatcher.purgeStale: orderId=${entry.key}, age > 30m")
+                }
+            }
+            return purged
+        }
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -564,6 +579,7 @@ class PetroniteAdapter(
      * Never throws -- returns true/false.
      */
     override suspend fun heartbeat(): Boolean {
+        preAuthMatcher.purgeStale()
         return try {
             withTimeout(HEARTBEAT_TIMEOUT_MS) {
                 val success = tryHeartbeatOnce()
@@ -953,11 +969,9 @@ class PetroniteAdapter(
         /** Returns true if this adapter has a working implementation. */
         const val IS_IMPLEMENTED = true
 
-        /** Hard timeout for heartbeat probe (5 seconds). */
-        const val HEARTBEAT_TIMEOUT_MS = 5_000L
-
-        /** Hard timeout for pre-auth requests (15 seconds -- two HTTP round-trips). */
-        const val PREAUTH_TIMEOUT_MS = 15_000L
+        /** M-22: Use centralised timeout constants. */
+        val HEARTBEAT_TIMEOUT_MS = AdapterTimeouts.HEARTBEAT_TIMEOUT_MS
+        val PREAUTH_TIMEOUT_MS = AdapterTimeouts.PREAUTH_TIMEOUT_MS
 
         /**
          * Duration after which a pending order found during startup reconciliation

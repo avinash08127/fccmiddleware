@@ -197,6 +197,7 @@ try
             policy
                 .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
                 .RequireAuthenticatedUser()
+                // "SystemAdministrator" is a legacy alias for "SystemAdmin" — kept for backward-compatible JWT recognition.
                 .RequireAssertion(context => HasAnyRole(context,
                     "OperationsManager",
                     "SystemAdmin",
@@ -212,7 +213,7 @@ try
                 .RequireAssertion(context => HasAnyRole(context,
                     "OperationsManager",
                     "SystemAdmin",
-                    "SystemAdministrator")));
+                    "SystemAdministrator"))); // legacy alias
 
         opts.AddPolicy("PortalAdminWrite", policy =>
             policy
@@ -221,7 +222,7 @@ try
                 .RequireAssertion(context => HasAnyRole(context,
                     "OperationsManager",
                     "SystemAdmin",
-                    "SystemAdministrator")));
+                    "SystemAdministrator"))); // legacy alias
 
         // H-13: Pin to JWT Bearer scheme so HMAC-authenticated clients with
         // matching "site"/"lei" claims cannot satisfy this policy.
@@ -371,6 +372,12 @@ try
             sp.GetRequiredService<IConfiguration>().GetConnectionString("FccMiddleware")
             ?? string.Empty));
 
+    // Factory for creating short-lived contexts used in parallel query scenarios
+    builder.Services.AddDbContextFactory<FccMiddlewareDbContext>((sp, opts) =>
+        opts.UseNpgsql(
+            sp.GetRequiredService<IConfiguration>().GetConnectionString("FccMiddleware")
+            ?? string.Empty), ServiceLifetime.Scoped);
+
     // Register DbContext as application + dedup + poll interfaces
     builder.Services.AddScoped<IIngestDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IDeduplicationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
@@ -446,6 +453,9 @@ try
         };
     });
 
+    // I-1: Swagger:Enabled must be false in production configuration.
+    // When true, Swagger UI is accessible to any authenticated portal user,
+    // exposing the full API surface. Only enable in dev/staging environments.
     var swaggerEnabled = builder.Configuration.GetValue<bool?>("Swagger:Enabled")
                          ?? app.Environment.IsDevelopment();
     if (swaggerEnabled)
@@ -469,18 +479,18 @@ try
     app.UseMiddleware<TenantScopeMiddleware>();
     app.UseAuthorization();
 
-    // /health       → liveness  (is the process up?)
-    // /health/ready → readiness (are DB + Redis reachable?)
+    // /health       → liveness  (is the process up?) — minimal, unauthenticated
+    // /health/ready → readiness (are DB + Redis reachable?) — detailed, authenticated
     app.MapHealthChecks("/health", new HealthCheckOptions
     {
         Predicate      = check => check.Tags.Contains("live"),
-        ResponseWriter = HealthResponseWriter.WriteResponse
+        ResponseWriter = HealthResponseWriter.WriteMinimalResponse
     });
     app.MapHealthChecks("/health/ready", new HealthCheckOptions
     {
         Predicate      = check => check.Tags.Contains("ready"),
-        ResponseWriter = HealthResponseWriter.WriteResponse
-    });
+        ResponseWriter = HealthResponseWriter.WriteDetailedResponse
+    }).RequireAuthorization("PortalUser");
 
     app.MapControllers();
 

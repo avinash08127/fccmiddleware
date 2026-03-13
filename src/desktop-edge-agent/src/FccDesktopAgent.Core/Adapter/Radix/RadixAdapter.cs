@@ -133,7 +133,17 @@ public sealed class RadixAdapter : IFccAdapter
     private string AuthPortUrl => $"http://{HostAddress}:{AuthPort}";
 
     /// <summary>Currency decimal factor for converting amount strings to minor units.</summary>
-    private static readonly decimal CurrencyDecimalFactor = 100m;
+    private readonly decimal CurrencyDecimalFactor;
+
+    /// <summary>Resolved heartbeat timeout from config or default.</summary>
+    private TimeSpan HeartbeatTimeout => _config.ApiRequestTimeoutSeconds is > 0
+        ? TimeSpan.FromSeconds(_config.ApiRequestTimeoutSeconds.Value)
+        : DefaultHeartbeatTimeout;
+
+    /// <summary>Resolved pre-auth timeout from config or default.</summary>
+    private TimeSpan PreAuthTimeout => _config.PreAuthTimeoutSeconds is > 0
+        ? TimeSpan.FromSeconds(_config.PreAuthTimeoutSeconds.Value)
+        : DefaultPreAuthTimeout;
 
     /// <summary>Volume conversion factor: 1 litre = 1,000,000 microlitres.</summary>
     private static readonly decimal MicrolitresPerLitre = 1_000_000m;
@@ -158,6 +168,7 @@ public sealed class RadixAdapter : IFccAdapter
         _timezone = timezone;
         _pumpNumberOffset = pumpNumberOffset;
         _productCodeMapping = productCodeMapping;
+        CurrencyDecimalFactor = CurrencyHelper.GetCurrencyFactorOrDefault(currencyCode);
 
         _pumpAddressMap = new Lazy<Dictionary<int, (int PumpAddr, int Fp)>>(
             () => ParsePumpAddressMap(_config.FccPumpAddressMap));
@@ -249,10 +260,31 @@ public sealed class RadixAdapter : IFccAdapter
     {
         var records = new List<RawPayloadEnvelope>();
 
-        // Step 1: Ensure ON_DEMAND mode
-        if (!await EnsureModeAsync(ModeOnDemand, ct).ConfigureAwait(false))
+        // Step 1: Ensure ON_DEMAND mode (L-10: retry up to 3 times with backoff)
+        const int modeRetryMax = 3;
+        var modeSet = false;
+        for (var attempt = 1; attempt <= modeRetryMax; attempt++)
         {
-            _logger.LogWarning("FetchTransactionsPull: failed to set ON_DEMAND mode");
+            if (await EnsureModeAsync(ModeOnDemand, ct).ConfigureAwait(false))
+            {
+                modeSet = true;
+                break;
+            }
+
+            _logger.LogWarning(
+                "FetchTransactionsPull: EnsureMode attempt {Attempt}/{Max} failed",
+                attempt, modeRetryMax);
+
+            if (attempt < modeRetryMax)
+            {
+                var delay = TimeSpan.FromMilliseconds(500 * attempt);
+                await Task.Delay(delay, ct).ConfigureAwait(false);
+            }
+        }
+
+        if (!modeSet)
+        {
+            _logger.LogWarning("FetchTransactionsPull: failed to set ON_DEMAND mode after {Max} attempts", modeRetryMax);
             return new TransactionBatch(records, null, false);
         }
 
@@ -495,6 +527,7 @@ public sealed class RadixAdapter : IFccAdapter
             CorrelationId = correlationId,
             RawPayloadJson = rawPayload.RawJson,
             PreAuthId = preAuthEntry?.PreAuthId,
+            OdooOrderId = preAuthEntry?.OdooOrderId,
         };
     }
 
@@ -529,12 +562,25 @@ public sealed class RadixAdapter : IFccAdapter
             }
 
             // Step 2: Generate TOKEN and track pre-auth
+            // L-09: 16-bit modulo token (1-65535) can repeat after 65K+ requests.
+            // Detect and log when a new pre-auth overwrites an existing (unclaimed) one.
             var token = NextToken();
             var preAuth = new ActivePreAuth(
                 Token: token,
                 PumpNumber: command.FccPumpNumber,
                 PreAuthId: command.PreAuthId,
-                CreatedAt: DateTimeOffset.UtcNow);
+                CreatedAt: DateTimeOffset.UtcNow,
+                OdooOrderId: command.FccCorrelationId);
+
+            if (_activePreAuths.TryGetValue(token, out var existing))
+            {
+                _logger.LogWarning(
+                    "Pre-auth token collision: TOKEN={Token} already held by PreAuthId={ExistingPreAuthId} " +
+                    "(Pump={ExistingPump}, Age={AgeMs}ms). Overwriting with PreAuthId={NewPreAuthId}",
+                    token, existing.PreAuthId, existing.PumpNumber,
+                    (DateTimeOffset.UtcNow - existing.CreatedAt).TotalMilliseconds,
+                    command.PreAuthId);
+            }
 
             _activePreAuths[token] = preAuth;
 
@@ -755,8 +801,11 @@ public sealed class RadixAdapter : IFccAdapter
         }
         catch (Exception ex)
         {
+            // M-15: Do NOT reset _currentMode on heartbeat failures. Heartbeat uses the
+            // auth port (CMD_CODE=14), which is independent of the transaction transfer mode.
+            // Resetting mode on transient heartbeat errors causes unnecessary CMD_CODE=20
+            // mode-change commands on every subsequent fetch cycle.
             _logger.LogDebug("Heartbeat: {ErrorType}: {Message}", ex.GetType().Name, ex.Message);
-            ResetModeState();
             return false;
         }
     }
@@ -812,6 +861,9 @@ public sealed class RadixAdapter : IFccAdapter
             if (responseBody is null)
             {
                 _logger.LogWarning("EnsureMode: HTTP request failed");
+                // M-07: Reset cached mode so the next call retries CMD_CODE=20
+                // instead of incorrectly assuming the FCC is already in the right mode.
+                ResetModeState();
                 return false;
             }
 
@@ -819,6 +871,7 @@ public sealed class RadixAdapter : IFccAdapter
             if (parseResult is null)
             {
                 _logger.LogWarning("EnsureMode: failed to parse response");
+                ResetModeState();
                 return false;
             }
 
@@ -830,6 +883,9 @@ public sealed class RadixAdapter : IFccAdapter
             }
 
             _logger.LogWarning("EnsureMode: RESP_CODE={RespCode}", parseResult.RespCode);
+            // M-07: Non-success RESP_CODE means the FCC rejected the mode change.
+            // Reset so we don't assume the old mode is still valid.
+            ResetModeState();
             return false;
         }
         catch (OperationCanceledException)
@@ -1220,11 +1276,11 @@ public sealed class RadixAdapter : IFccAdapter
     /// <summary>Returns true if this adapter has a working implementation.</summary>
     public const bool IsImplemented = true;
 
-    /// <summary>Hard timeout for heartbeat probe (5 seconds).</summary>
-    public static readonly TimeSpan HeartbeatTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>Default timeout for heartbeat probe (5 seconds).</summary>
+    public static readonly TimeSpan DefaultHeartbeatTimeout = TimeSpan.FromSeconds(5);
 
-    /// <summary>Hard timeout for pre-auth requests (10 seconds).</summary>
-    public static readonly TimeSpan PreAuthTimeout = TimeSpan.FromSeconds(10);
+    /// <summary>Default timeout for pre-auth requests (10 seconds).</summary>
+    public static readonly TimeSpan DefaultPreAuthTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>TTL for pre-auth entries: entries older than this are purged to prevent memory leaks.</summary>
     public static readonly TimeSpan PreAuthTtl = TimeSpan.FromMinutes(30);
@@ -1297,4 +1353,6 @@ public sealed record ActivePreAuth(
     /// <summary>Pre-auth ID for correlation, if provided.</summary>
     string? PreAuthId,
     /// <summary>When this pre-auth was created.</summary>
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    /// <summary>Odoo order ID from PreAuthCommand.FccCorrelationId (L-11: consistent with Advatec).</summary>
+    string? OdooOrderId = null);

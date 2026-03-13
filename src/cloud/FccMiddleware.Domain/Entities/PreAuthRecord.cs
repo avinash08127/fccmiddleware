@@ -1,6 +1,7 @@
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Exceptions;
 using FccMiddleware.Domain.Common;
+using FccMiddleware.Domain.Interfaces;
 
 namespace FccMiddleware.Domain.Entities;
 
@@ -11,7 +12,7 @@ namespace FccMiddleware.Domain.Entities;
 /// CustomerTaxId is sensitive — never log this field.
 /// Matches pre-auth-record.schema.json.
 /// </summary>
-public class PreAuthRecord
+public class PreAuthRecord : ITenantScoped
 {
     public Guid Id { get; set; }
     public Guid LegalEntityId { get; set; }
@@ -32,10 +33,16 @@ public class PreAuthRecord
     public long? ActualAmountMinorUnits { get; set; }
     public long? ActualVolumeMillilitres { get; set; }
 
-    /// <summary>actualAmount - requestedAmount in minor units. Negative = under-dispense. Populated at COMPLETED.</summary>
+    /// <summary>
+    /// actualAmount - authorizedAmount in minor units.
+    /// Negative = under-dispense relative to the FCC-approved amount. Populated at COMPLETED.
+    /// </summary>
     public long? AmountVarianceMinorUnits { get; set; }
 
-    /// <summary>ABS(amountVariance) / requestedAmount * 10000, rounded. Units: basis points. Populated at COMPLETED.</summary>
+    /// <summary>
+    /// ABS(amountVariance) / authorizedAmount * 10000, rounded.
+    /// Units: basis points. Populated at COMPLETED.
+    /// </summary>
     public int? VarianceBps { get; set; }
 
     public PreAuthStatus Status { get; set; } = PreAuthStatus.PENDING;

@@ -29,16 +29,26 @@ public sealed class AdvatecFiscalizationService : IFiscalizationService, IAsyncD
         PropertyNameCaseInsensitive = true,
     };
 
-    /// <summary>Maximum time to wait for a Receipt webhook after Customer data submission.</summary>
-    private static readonly TimeSpan ReceiptTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>Default time to wait for a Receipt webhook after Customer data submission.</summary>
+    private const int DefaultReceiptTimeoutSeconds = 30;
 
     private const int DefaultWebhookListenerPort = 8091;
     private const int DefaultDevicePort = 5560;
-    private const int HeartbeatTimeoutMs = 5000;
+    private const int DefaultHeartbeatTimeoutMs = 5000;
 
     private readonly FccConnectionConfig _config;
     private readonly ILogger<AdvatecFiscalizationService> _logger;
     private readonly ILoggerFactory _loggerFactory;
+
+    /// <summary>Resolved fiscal receipt timeout from config or default.</summary>
+    private TimeSpan ReceiptTimeout => _config.FiscalReceiptTimeoutSeconds is > 0
+        ? TimeSpan.FromSeconds(_config.FiscalReceiptTimeoutSeconds.Value)
+        : TimeSpan.FromSeconds(DefaultReceiptTimeoutSeconds);
+
+    /// <summary>Resolved heartbeat timeout from config or default.</summary>
+    private int HeartbeatTimeoutMs => (_config.ApiRequestTimeoutSeconds ?? 5) * 1000 is > 0 and var ms
+        ? ms
+        : DefaultHeartbeatTimeoutMs;
 
     // ── API client ────────────────────────────────────────────────────────────
 
@@ -96,7 +106,7 @@ public sealed class AdvatecFiscalizationService : IFiscalizationService, IAsyncD
             var custIdType = context.CustomerIdType ?? _config.AdvatecCustIdType ?? 6;
 
             // Build payment from transaction amount (convert minor → major units)
-            var currencyFactor = GetCurrencyFactor(transaction.CurrencyCode);
+            var currencyFactor = CurrencyHelper.GetCurrencyFactor(transaction.CurrencyCode);
             var amountMajor = currencyFactor > 0
                 ? transaction.AmountMinorUnits / currencyFactor
                 : 0m;
@@ -277,19 +287,12 @@ public sealed class AdvatecFiscalizationService : IFiscalizationService, IAsyncD
 
             var host = _config.AdvatecDeviceAddress ?? "127.0.0.1";
             var port = _config.AdvatecDevicePort ?? DefaultDevicePort;
-            _apiClient = new AdvatecApiClient(host, port, _logger);
+            var httpClient = new HttpClient();
+            var apiTimeout = _config.ApiRequestTimeoutSeconds ?? 10;
+            httpClient.Timeout = TimeSpan.FromSeconds(apiTimeout);
+            _apiClient = new AdvatecApiClient(httpClient, host, port, _logger);
             return _apiClient;
         }
-    }
-
-    private static decimal GetCurrencyFactor(string currencyCode)
-    {
-        return currencyCode.ToUpperInvariant() switch
-        {
-            "KWD" or "BHD" or "OMR" => 1000m,
-            "JPY" or "KRW" or "TZS" or "UGX" or "RWF" => 1m,
-            _ => 100m,
-        };
     }
 
     // ── IAsyncDisposable ─────────────────────────────────────────────────────
@@ -303,7 +306,6 @@ public sealed class AdvatecFiscalizationService : IFiscalizationService, IAsyncD
             _webhookListener = null;
         }
 
-        _apiClient?.Dispose();
         _apiClient = null;
 
         _initLock.Dispose();
