@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FccMiddleware.Api.Portal;
 using FccMiddleware.Contracts.Common;
@@ -1029,14 +1031,30 @@ public sealed class SitesController : PortalControllerBase
         // Petronite OAuth2 fields
         if (request.ClientId is not null) config.ClientId = request.ClientId;
         if (request.ClientSecret is not null) config.ClientSecret = request.ClientSecret;
-        if (request.WebhookSecret is not null) config.WebhookSecret = request.WebhookSecret;
+        if (request.WebhookSecret is not null)
+        {
+            config.WebhookSecret = request.WebhookSecret;
+            // TX-P05: Keep hash in sync for indexed O(1) webhook secret lookup
+            config.WebhookSecretHash = ComputeSha256Hex(request.WebhookSecret);
+        }
         if (request.OAuthTokenEndpoint is not null) config.OAuthTokenEndpoint = request.OAuthTokenEndpoint;
 
         // Advatec EFD fields
         if (request.AdvatecDevicePort.HasValue) config.AdvatecDevicePort = request.AdvatecDevicePort.Value;
-        if (request.AdvatecWebhookToken is not null) config.AdvatecWebhookToken = request.AdvatecWebhookToken;
+        if (request.AdvatecWebhookToken is not null)
+        {
+            config.AdvatecWebhookToken = request.AdvatecWebhookToken;
+            // H-04: Keep hash in sync for indexed O(1) webhook token lookup
+            config.AdvatecWebhookTokenHash = ComputeSha256Hex(request.AdvatecWebhookToken);
+        }
         if (request.AdvatecEfdSerialNumber is not null) config.AdvatecEfdSerialNumber = request.AdvatecEfdSerialNumber;
         if (request.AdvatecCustIdType.HasValue) config.AdvatecCustIdType = request.AdvatecCustIdType.Value;
         if (request.AdvatecPumpMap is not null) config.AdvatecPumpMap = request.AdvatecPumpMap;
+    }
+
+    private static string ComputeSha256Hex(string input)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 }

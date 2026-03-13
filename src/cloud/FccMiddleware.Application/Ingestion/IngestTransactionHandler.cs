@@ -8,6 +8,7 @@ using FccMiddleware.Domain.Exceptions;
 using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Domain.Models.Adapter;
 using MediatR;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace FccMiddleware.Application.Ingestion;
@@ -29,29 +30,29 @@ public sealed class IngestTransactionHandler
     private readonly IFccAdapterFactory _adapterFactory;
     private readonly ISiteFccConfigProvider _siteFccConfigProvider;
     private readonly IDeduplicationService _deduplicationService;
-    private readonly IRawPayloadArchiver _rawPayloadArchiver;
     private readonly IIngestDbContext _db;
     private readonly ReconciliationMatchingService _reconciliationMatchingService;
     private readonly IDeadLetterService _deadLetterService;
+    private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly ILogger<IngestTransactionHandler> _logger;
 
     public IngestTransactionHandler(
         IFccAdapterFactory adapterFactory,
         ISiteFccConfigProvider siteFccConfigProvider,
         IDeduplicationService deduplicationService,
-        IRawPayloadArchiver rawPayloadArchiver,
         IIngestDbContext db,
         ReconciliationMatchingService reconciliationMatchingService,
         IDeadLetterService deadLetterService,
+        IServiceScopeFactory serviceScopeFactory,
         ILogger<IngestTransactionHandler> logger)
     {
         _adapterFactory = adapterFactory;
         _siteFccConfigProvider = siteFccConfigProvider;
         _deduplicationService = deduplicationService;
-        _rawPayloadArchiver = rawPayloadArchiver;
         _db = db;
         _reconciliationMatchingService = reconciliationMatchingService;
         _deadLetterService = deadLetterService;
+        _serviceScopeFactory = serviceScopeFactory;
         _logger = logger;
     }
 
@@ -217,20 +218,8 @@ public sealed class IngestTransactionHandler
             SchemaVersion = 1
         };
 
-        // ── Step 9: Archive raw payload to S3 (non-fatal on failure) ─────────
-        try
-        {
-            transaction.RawPayloadRef = await _rawPayloadArchiver.ArchiveAsync(
-                legalEntityId.ToString(), command.SiteCode,
-                canonical.FccTransactionId, command.RawPayload,
-                cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Raw payload archiving failed for {FccTransactionId}; continuing without ref.",
-                canonical.FccTransactionId);
-        }
+        // ── Step 9: S3 archival deferred to background (TX-P06) ──────────────
+        // RawPayloadRef is populated asynchronously after the transaction is saved.
 
         // ── Step 10: Persist transaction + reconciliation + outbox (single DB transaction) ──
         _db.AddTransaction(transaction);
@@ -276,6 +265,11 @@ public sealed class IngestTransactionHandler
             canonical.FccTransactionId, canonical.SiteCode,
             transaction.Id, DefaultDedupWindowDays, cancellationToken);
 
+        // TX-P06: Fire-and-forget S3 archival so it doesn't block the response.
+        // RawPayloadRef is updated on the saved transaction row once archival completes.
+        _ = Task.Run(() => ArchiveRawPayloadInBackgroundAsync(
+            legalEntityId, command, canonical, transaction.Id));
+
         _logger.LogInformation(
             "Transaction {TransactionId} ingested as PENDING for site {SiteCode} vendor {Vendor}",
             transaction.Id, canonical.SiteCode, canonical.FccVendor);
@@ -289,6 +283,37 @@ public sealed class IngestTransactionHandler
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// TX-P06: Archives the raw payload to S3 in a background task with its own DI scope,
+    /// then updates the transaction row with the returned reference.
+    /// Runs after the response is returned to the caller to avoid S3 latency on the hot path.
+    /// </summary>
+    private async Task ArchiveRawPayloadInBackgroundAsync(
+        Guid legalEntityId,
+        IngestTransactionCommand command,
+        CanonicalTransaction canonical,
+        Guid transactionId)
+    {
+        await using var scope = _serviceScopeFactory.CreateAsyncScope();
+        var archiver = scope.ServiceProvider.GetRequiredService<IRawPayloadArchiver>();
+        var db = scope.ServiceProvider.GetRequiredService<IIngestDbContext>();
+        try
+        {
+            var rawPayloadRef = await archiver.ArchiveAsync(
+                legalEntityId.ToString(), command.SiteCode,
+                canonical.FccTransactionId, command.RawPayload,
+                CancellationToken.None);
+
+            await db.SetRawPayloadRefAsync(transactionId, rawPayloadRef, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Background raw payload archiving failed for {FccTransactionId}; RawPayloadRef not set.",
+                canonical.FccTransactionId);
+        }
+    }
 
     private async Task WriteDeduplicatedEventAsync(
         CanonicalTransaction canonical,

@@ -9,8 +9,8 @@ namespace FccDesktopAgent.Core.Adapter.Doms.Mapping;
 ///
 /// Conversion rules (NO floating-point):
 ///   Volume : centilitres x 10,000 = microlitres (1 cL = 10,000 uL)
-///   Amount : DOMS x10 value x 10  = minor currency units (e.g., cents)
-///   Unit price: DOMS x10 value x 10 = minor currency units per litre
+///   Amount : DOMS x10 value / 10  = minor currency units (e.g., cents)
+///   Unit price: DOMS x10 value / 10 = minor currency units per litre
 ///   Timestamp: "yyyyMMddHHmmss" in site local time -> UTC DateTimeOffset
 ///   Pump number: fpId + pumpNumberOffset
 ///   Product code: raw code -> canonical via productCodeMapping (fallback: raw)
@@ -100,10 +100,12 @@ public static class DomsCanonicalMapper
 
     /// <summary>
     /// Convert DOMS x10 amount to minor currency units.
-    /// DOMS stores amounts as value / 10 of the minor unit.
-    /// rawValue * 10 = minor units.
+    /// DOMS FcSupParam stores amounts as (minor_currency_units × 10).
+    /// The x10 suffix means the wire value is 10× the actual minor unit value.
+    /// To recover minor units: divide by 10.
+    /// Example: $12.34 = 1234 cents. DOMS stores 12340. 12340 / 10 = 1234 cents.
     /// </summary>
-    public static long DomsAmountToMinorUnits(long domsX10Value) => domsX10Value * 10L;
+    public static long DomsAmountToMinorUnits(long domsX10Value) => domsX10Value / 10L;
 
     /// <summary>
     /// Parse DOMS local timestamp and convert to UTC DateTimeOffset.

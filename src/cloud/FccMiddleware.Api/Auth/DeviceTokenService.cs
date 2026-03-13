@@ -20,6 +20,46 @@ public sealed class DeviceTokenService : IDeviceTokenService
         _config = config;
     }
 
+    /// <inheritdoc />
+    public Guid? ExtractDeviceIdFromExpiredToken(string token)
+    {
+        var jwtSection = _config.GetSection(DeviceJwtOptions.SectionName);
+        var signingKey = jwtSection["SigningKey"] ?? string.Empty;
+        var issuer = jwtSection["Issuer"] ?? DeviceJwtOptions.DefaultIssuer;
+        var audience = jwtSection["Audience"] ?? DeviceJwtOptions.DefaultAudience;
+
+        if (string.IsNullOrWhiteSpace(signingKey))
+            return null;
+
+        var keyBytes = Encoding.UTF8.GetBytes(signingKey);
+        var key = new SymmetricSecurityKey(keyBytes);
+
+        var validationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = issuer,
+            ValidateAudience = true,
+            ValidAudience = audience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = key,
+            ValidateLifetime = false, // FM-S03: Allow expired tokens
+        };
+
+        try
+        {
+            var handler = new JwtSecurityTokenHandler();
+            var principal = handler.ValidateToken(token, validationParameters, out _);
+            var sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
+                   ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+
+            return sub is not null && Guid.TryParse(sub, out var deviceId) ? deviceId : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public (string Token, DateTimeOffset ExpiresAt) GenerateDeviceToken(
         Guid deviceId, string siteCode, Guid legalEntityId)
     {

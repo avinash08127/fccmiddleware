@@ -15,6 +15,7 @@ import io.ktor.server.application.ApplicationPlugin
 import io.ktor.server.application.call
 import io.ktor.server.application.createApplicationPlugin
 import io.ktor.server.application.install
+import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.cio.CIO
 import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
@@ -25,7 +26,9 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.response.respond
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import com.fccmiddleware.edge.logging.CorrelationIdElement
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
@@ -165,15 +168,21 @@ class LocalApiServer(
     // -------------------------------------------------------------------------
 
     /**
-     * Phase 5: Extract X-Correlation-Id from incoming requests, set on AppLogger
-     * so all downstream logging and outbound cloud API calls carry the same ID.
+     * Phase 5: Extract X-Correlation-Id from incoming requests and scope it to
+     * the request's coroutine via [CorrelationIdElement] (AF-002).
+     *
+     * Each request gets its own correlation ID that is propagated through the
+     * coroutine context, preventing concurrent requests from overwriting each
+     * other's IDs on the shared logger.
      */
     private fun Application.configureCorrelationId() {
-        intercept(io.ktor.server.application.ApplicationCallPipeline.Setup) {
+        intercept(ApplicationCallPipeline.Setup) {
             val incomingId = call.request.headers["X-Correlation-Id"]
             val correlationId = incomingId ?: UUID.randomUUID().toString()
-            AppLogger.correlationId = correlationId
             call.response.headers.append("X-Correlation-Id", correlationId)
+            withContext(CorrelationIdElement(correlationId)) {
+                proceed()
+            }
         }
     }
 

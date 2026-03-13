@@ -320,7 +320,7 @@ class PreAuthHandlerTest {
             expiresAtUtc = "2030-01-01T00:05:00Z",
         )
 
-        val statusSlot = slot<String>()
+        val statusSlot = slot<PreAuthStatus>()
         val authCodeSlot = slot<String>()
         coEvery {
             preAuthDao.updateStatus(any(), capture(statusSlot), any(), capture(authCodeSlot), any(), any(), any())
@@ -328,7 +328,7 @@ class PreAuthHandlerTest {
 
         handler.handle(baseCommand())
 
-        assertEquals(PreAuthStatus.AUTHORIZED.name, statusSlot.captured)
+        assertEquals(PreAuthStatus.AUTHORIZED, statusSlot.captured)
         assertEquals("AUTH-123", authCodeSlot.captured)
     }
 
@@ -343,14 +343,14 @@ class PreAuthHandlerTest {
             message = "Pump offline",
         )
 
-        val statusSlot = slot<String>()
+        val statusSlot = slot<PreAuthStatus>()
         coEvery {
             preAuthDao.updateStatus(any(), capture(statusSlot), any(), any(), any(), any(), any())
         } returns Unit
 
         handler.handle(baseCommand())
 
-        assertEquals(PreAuthStatus.FAILED.name, statusSlot.captured)
+        assertEquals(PreAuthStatus.FAILED, statusSlot.captured)
     }
 
     @Test
@@ -364,14 +364,14 @@ class PreAuthHandlerTest {
             message = "FCC timeout",
         )
 
-        val statusSlot = slot<String>()
+        val statusSlot = slot<PreAuthStatus>()
         coEvery {
             preAuthDao.updateStatus(any(), capture(statusSlot), any(), any(), any(), any(), any())
         } returns Unit
 
         handler.handle(baseCommand())
 
-        assertEquals(PreAuthStatus.FAILED.name, statusSlot.captured)
+        assertEquals(PreAuthStatus.FAILED, statusSlot.captured)
     }
 
     // -------------------------------------------------------------------------
@@ -390,7 +390,7 @@ class PreAuthHandlerTest {
         val result = handler.handle(baseCommand())
 
         assertEquals(PreAuthResultStatus.TIMEOUT, result.status)
-        assertTrue(result.message!!.contains("timeout"))
+        assertEquals("FCC_TIMEOUT", result.message)
     }
 
     @Test
@@ -480,7 +480,7 @@ class PreAuthHandlerTest {
 
         assertFalse(result.success)
         assertNotNull(result.message)
-        coVerify(exactly = 0) { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { preAuthDao.markCancelledAndUnsync(any(), any(), any(), any()) }
     }
 
     @Test
@@ -488,15 +488,14 @@ class PreAuthHandlerTest {
         val handler = buildHandler(adapter = fccAdapter)
         coEvery { preAuthDao.getByOdooOrderId("order-1", "SITE-A") } returns stubRecord(status = PreAuthStatus.PENDING.name)
 
-        val statusSlot = slot<String>()
-        coEvery {
-            preAuthDao.updateStatus(any(), capture(statusSlot), any(), any(), any(), any(), any())
-        } returns Unit
+        coEvery { preAuthDao.markCancelledAndUnsync(any(), any(), any(), any()) } returns Unit
 
         val result = handler.cancel("order-1", "SITE-A")
 
         assertTrue(result.success)
-        assertEquals(PreAuthStatus.CANCELLED.name, statusSlot.captured)
+        coVerify {
+            preAuthDao.markCancelledAndUnsync(any(), PreAuthStatus.CANCELLED, any(), null)
+        }
     }
 
     @Test
@@ -507,15 +506,14 @@ class PreAuthHandlerTest {
             authCode = "AUTH-TO-CANCEL",
         )
 
-        val statusSlot = slot<String>()
-        coEvery {
-            preAuthDao.updateStatus(any(), capture(statusSlot), any(), any(), any(), any(), any())
-        } returns Unit
+        coEvery { preAuthDao.markCancelledAndUnsync(any(), any(), any(), any()) } returns Unit
 
         val result = handler.cancel("order-1", "SITE-A")
 
         assertTrue(result.success)
-        assertEquals(PreAuthStatus.CANCELLED.name, statusSlot.captured)
+        coVerify {
+            preAuthDao.markCancelledAndUnsync(any(), PreAuthStatus.CANCELLED, any(), null)
+        }
     }
 
     @Test
@@ -526,14 +524,14 @@ class PreAuthHandlerTest {
         val result = handler.cancel("order-1", "SITE-A")
 
         assertTrue(result.success)
-        coVerify(exactly = 0) { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { preAuthDao.markCancelledAndUnsync(any(), any(), any(), any()) }
     }
 
     @Test
     fun `cancel writes audit log for PENDING to CANCELLED transition`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         coEvery { preAuthDao.getByOdooOrderId("order-1", "SITE-A") } returns stubRecord(status = PreAuthStatus.PENDING.name)
-        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { preAuthDao.markCancelledAndUnsync(any(), any(), any(), any()) } returns Unit
 
         handler.cancel("order-1", "SITE-A")
 
@@ -549,11 +547,11 @@ class PreAuthHandlerTest {
     @Test
     fun `runExpiryCheck does nothing when no expired records`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
-        coEvery { preAuthDao.getExpiring(any()) } returns emptyList()
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns emptyList()
 
         handler.runExpiryCheck()
 
-        coVerify(exactly = 0) { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) }
         coVerify(exactly = 0) { auditLogDao.insert(any()) }
     }
 
@@ -561,58 +559,55 @@ class PreAuthHandlerTest {
     fun `runExpiryCheck transitions expired PENDING records to EXPIRED`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         val expiredRecord = stubRecord(status = PreAuthStatus.PENDING.name)
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(expiredRecord)
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(expiredRecord)
 
-        val statusSlot = slot<String>()
-        coEvery {
-            preAuthDao.updateStatus(any(), capture(statusSlot), any(), any(), any(), any(), any())
-        } returns Unit
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
 
         handler.runExpiryCheck()
 
-        assertEquals(PreAuthStatus.EXPIRED.name, statusSlot.captured)
+        coVerify {
+            preAuthDao.markExpiredAndUnsync(any(), PreAuthStatus.EXPIRED, any(), any())
+        }
     }
 
     @Test
     fun `runExpiryCheck transitions expired AUTHORIZED records to EXPIRED`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         val expiredRecord = stubRecord(status = PreAuthStatus.AUTHORIZED.name, authCode = "OLD-AUTH")
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(expiredRecord)
-        coEvery { fccAdapter.sendPreAuth(any()) } returns PreAuthResult(status = PreAuthResultStatus.DECLINED)
-
-        val statusSlot = slot<String>()
-        coEvery {
-            preAuthDao.updateStatus(any(), capture(statusSlot), any(), any(), any(), any(), any())
-        } returns Unit
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(expiredRecord)
+        coEvery { fccAdapter.cancelPreAuth(any()) } returns true
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
 
         handler.runExpiryCheck()
 
-        assertEquals(PreAuthStatus.EXPIRED.name, statusSlot.captured)
+        coVerify {
+            preAuthDao.markExpiredAndUnsync(any(), PreAuthStatus.EXPIRED, any(), any())
+        }
     }
 
     @Test
     fun `runExpiryCheck attempts FCC deauth for AUTHORIZED expired records when adapter available`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         val expiredRecord = stubRecord(status = PreAuthStatus.AUTHORIZED.name)
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(expiredRecord)
-        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
-        coEvery { fccAdapter.sendPreAuth(any()) } returns PreAuthResult(status = PreAuthResultStatus.DECLINED)
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(expiredRecord)
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.cancelPreAuth(any()) } returns true
 
         handler.runExpiryCheck()
 
-        coVerify(exactly = 1) { fccAdapter.sendPreAuth(any()) }
+        coVerify(exactly = 1) { fccAdapter.cancelPreAuth(any()) }
     }
 
     @Test
     fun `runExpiryCheck does NOT call FCC for PENDING expired records`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         val expiredRecord = stubRecord(status = PreAuthStatus.PENDING.name)
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(expiredRecord)
-        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(expiredRecord)
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
 
         handler.runExpiryCheck()
 
-        coVerify(exactly = 0) { fccAdapter.sendPreAuth(any()) }
+        coVerify(exactly = 0) { fccAdapter.cancelPreAuth(any()) }
     }
 
     @Test
@@ -620,8 +615,8 @@ class PreAuthHandlerTest {
         val handler = buildHandler(adapter = null)
         val record1 = stubRecord(id = "id-1", status = PreAuthStatus.PENDING.name)
         val record2 = stubRecord(id = "id-2", status = PreAuthStatus.PENDING.name)
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(record1, record2)
-        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(record1, record2)
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
 
         handler.runExpiryCheck()
 
@@ -633,15 +628,15 @@ class PreAuthHandlerTest {
         val handler = buildHandler(adapter = fccAdapter)
         val record1 = stubRecord(id = "id-1", status = PreAuthStatus.AUTHORIZED.name)
         val record2 = stubRecord(id = "id-2", status = PreAuthStatus.AUTHORIZED.name)
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(record1, record2)
-        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
-        coEvery { fccAdapter.sendPreAuth(any()) } throws RuntimeException("FCC connection error")
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(record1, record2)
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.cancelPreAuth(any()) } throws RuntimeException("FCC connection error")
 
         handler.runExpiryCheck()
 
         // Neither record should be marked EXPIRED — they stay AUTHORIZED for retry next cycle
         coVerify(exactly = 0) {
-            preAuthDao.updateStatus(any(), PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
+            preAuthDao.markExpiredAndUnsync(any(), PreAuthStatus.EXPIRED, any(), any())
         }
     }
 
@@ -649,14 +644,14 @@ class PreAuthHandlerTest {
     fun `runExpiryCheck marks AUTHORIZED record EXPIRED only after successful FCC deauth`() = runTest {
         val handler = buildHandler(adapter = fccAdapter)
         val record = stubRecord(id = "id-1", status = PreAuthStatus.AUTHORIZED.name)
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(record)
-        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
-        coEvery { fccAdapter.sendPreAuth(any()) } returns PreAuthResult(status = PreAuthResultStatus.DECLINED)
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(record)
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.cancelPreAuth(any()) } returns true
 
         handler.runExpiryCheck()
 
         coVerify(exactly = 1) {
-            preAuthDao.updateStatus("id-1", PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
+            preAuthDao.markExpiredAndUnsync("id-1", PreAuthStatus.EXPIRED, any(), any())
         }
     }
 
@@ -665,18 +660,18 @@ class PreAuthHandlerTest {
         val handler = buildHandler(adapter = fccAdapter)
         val authorizedRecord = stubRecord(id = "id-1", status = PreAuthStatus.AUTHORIZED.name)
         val pendingRecord = stubRecord(id = "id-2", status = PreAuthStatus.PENDING.name)
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(authorizedRecord, pendingRecord)
-        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
-        coEvery { fccAdapter.sendPreAuth(any()) } throws RuntimeException("FCC down")
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(authorizedRecord, pendingRecord)
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.cancelPreAuth(any()) } throws RuntimeException("FCC down")
 
         handler.runExpiryCheck()
 
         // AUTHORIZED record skipped (deauth failed), PENDING record expired normally
         coVerify(exactly = 0) {
-            preAuthDao.updateStatus("id-1", PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
+            preAuthDao.markExpiredAndUnsync("id-1", PreAuthStatus.EXPIRED, any(), any())
         }
         coVerify(exactly = 1) {
-            preAuthDao.updateStatus("id-2", PreAuthStatus.EXPIRED.name, any(), any(), any(), any(), any())
+            preAuthDao.markExpiredAndUnsync("id-2", PreAuthStatus.EXPIRED, any(), any())
         }
     }
 
@@ -733,7 +728,7 @@ class PreAuthHandlerTest {
         currencyCode = "ZMW",
         requestedAmountMinorUnits = 50_00L,
         authorizedAmountMinorUnits = null,
-        status = status,
+        status = PreAuthStatus.valueOf(status),
         fccCorrelationId = null,
         fccAuthorizationCode = authCode,
         failureReason = null,

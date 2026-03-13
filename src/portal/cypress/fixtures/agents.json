@@ -37,5 +37,5 @@
       "syncLagSeconds": 9000
     }
   ],
-  "meta": { "pageSize": 500, "hasMore": false, "nextCursor": null, "totalCount": 3 }
+  "meta": { "pageSize": 500, "hasMore": false, "nextCursor": null, "totalCount": null }
 }

@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Subject, EMPTY } from 'rxjs';
-import { switchMap, catchError } from 'rxjs/operators';
+import { switchMap, catchError, map } from 'rxjs/operators';
 import { TableModule, TableLazyLoadEvent } from 'primeng/table';
 import { TabsModule } from 'primeng/tabs';
 import { ButtonModule } from 'primeng/button';
@@ -52,6 +52,17 @@ function statusSeverity(status: ReconciliationStatus): PrimeSeverity {
     default:
       return 'info';
   }
+}
+
+function resolveVariancePercent(
+  variancePercent: number | null | undefined,
+  varianceBps: number | null | undefined,
+): number | null {
+  if (variancePercent != null) {
+    return variancePercent;
+  }
+
+  return varianceBps == null ? null : varianceBps / 100;
 }
 
 // F04-06: error field surfaces API failures in the empty template
@@ -580,6 +591,9 @@ export class ReconciliationListComponent {
 
   // ── Site filter options ───────────────────────────────────────────────────
   readonly siteOptions = signal<{ label: string; value: string }[]>([]);
+  // RC-P05: cache prevents re-fetching when the user switches back to a previously loaded entity
+  private readonly siteCache = new Map<string, { label: string; value: string }[]>();
+  private readonly loadSites$ = new Subject<string>();
 
   // ── Tab state ─────────────────────────────────────────────────────────────
   readonly activeTab = signal<string>('variance');
@@ -745,6 +759,33 @@ export class ReconciliationListComponent {
       });
   }
 
+    // RC-P05: switchMap cancels any in-flight site request when a new entity is selected;
+    // siteCache prevents redundant fetches on returning to a previously loaded entity.
+    this.loadSites$
+      .pipe(
+        switchMap((entityId) => {
+          const cached = this.siteCache.get(entityId);
+          if (cached) {
+            this.siteOptions.set(cached);
+            return EMPTY;
+          }
+          return this.siteService.getSites({ legalEntityId: entityId, pageSize: 1000 }).pipe(
+            map((result) => ({ entityId, result })),
+            catchError(() => {
+              this.siteOptions.set([]);
+              return EMPTY;
+            }),
+          );
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(({ entityId, result }) => {
+        const opts = result.data.map((s) => ({ label: `${s.siteName} (${s.siteCode})`, value: s.siteCode }));
+        this.siteCache.set(entityId, opts);
+        this.siteOptions.set(opts);
+      });
+  }
+
   // ── Event handlers ────────────────────────────────────────────────────────
 
   onLegalEntityChange(entityId: string | null): void {
@@ -859,9 +900,10 @@ export class ReconciliationListComponent {
   }
 
   formatVariancePct(ex: ReconciliationException): string {
-    if (ex.varianceBps == null) return '—';
-    const sign = ex.varianceBps >= 0 ? '+' : '';
-    return `${sign}${(ex.varianceBps / 100).toFixed(2)}%`;
+    const variancePercent = resolveVariancePercent(ex.variancePercent, ex.varianceBps);
+    if (variancePercent == null) return '—';
+    const sign = variancePercent >= 0 ? '+' : '';
+    return `${sign}${variancePercent.toFixed(2)}%`;
   }
 
   varianceClass(ex: ReconciliationException): string {
@@ -871,8 +913,9 @@ export class ReconciliationListComponent {
   }
 
   variancePctClass(ex: ReconciliationException): string {
-    if (ex.varianceBps == null) return 'variance-null';
-    if (ex.varianceBps === 0) return 'variance-zero';
+    const variancePercent = resolveVariancePercent(ex.variancePercent, ex.varianceBps);
+    if (variancePercent == null) return 'variance-null';
+    if (variancePercent === 0) return 'variance-zero';
     return ex.reconciliationStatus === ReconciliationStatus.VARIANCE_FLAGGED
       ? 'variance-positive'
       : 'variance-zero';
@@ -927,17 +970,6 @@ export class ReconciliationListComponent {
   }
 
   private loadSitesForEntity(entityId: string): void {
-    // F04-08: increased limit from 500 to 1000 to reduce risk of silently truncated site lists
-    this.siteService
-      .getSites({ legalEntityId: entityId, pageSize: 1000 })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (result) => {
-          this.siteOptions.set(
-            result.data.map((s) => ({ label: `${s.siteName} (${s.siteCode})`, value: s.siteCode })),
-          );
-        },
-        error: () => this.siteOptions.set([]),
-      });
+    this.loadSites$.next(entityId);
   }
 }

@@ -228,6 +228,21 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
+        // AF-007: Cross-field validation — reject duplicate port assignments
+        val portEntries = mutableListOf<Pair<String, Int>>()
+        fccPort.toIntOrNull()?.let { portEntries += "FCC Port" to it }
+        fccJplPort.toIntOrNull()?.let { portEntries += "FCC JPL Port" to it }
+        wsPort.toIntOrNull()?.let { portEntries += "WebSocket Port" to it }
+        val seen = mutableMapOf<Int, String>()
+        for ((name, port) in portEntries) {
+            val existing = seen[port]
+            if (existing != null) {
+                errors += "$name conflicts with $existing (both use port $port)"
+            } else {
+                seen[port] = name
+            }
+        }
+
         if (errors.isNotEmpty()) {
             statusText.text = errors.joinToString("\n")
             statusText.setTextColor(COLOR_RED)

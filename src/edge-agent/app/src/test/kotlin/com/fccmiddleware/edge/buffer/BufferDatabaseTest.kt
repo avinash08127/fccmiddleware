@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.buffer
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 import com.fccmiddleware.edge.buffer.entity.AgentConfig
 import com.fccmiddleware.edge.buffer.entity.AuditLog
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
@@ -230,12 +231,31 @@ class BufferDatabaseTest {
         dao.insert(buildPreAuthRecord(odooOrderId = "FUTURE-PENDING", status = "PENDING", expiresAt = futureExpiry))
         dao.insert(buildPreAuthRecord(odooOrderId = "COMPLETED", status = "COMPLETED", expiresAt = pastExpiry))
 
-        val expiring = dao.getExpiring(now)
+        val expiring = dao.getExpiring(now, 50)
 
         assertEquals(2, expiring.size)
-        assertTrue(expiring.all { it.status in listOf("PENDING", "AUTHORIZED", "DISPENSING") })
+        assertTrue(expiring.all { it.status in listOf(PreAuthStatus.PENDING, PreAuthStatus.AUTHORIZED, PreAuthStatus.DISPENSING) })
         assertTrue(expiring.none { it.odooOrderId == "COMPLETED" })
         assertTrue(expiring.none { it.odooOrderId == "FUTURE-PENDING" })
+    }
+
+    @Test
+    fun `PreAuthDao getExpiring respects limit and returns oldest-first (PA-P02)`() = runBlocking {
+        val dao = db.preAuthDao()
+        val t1 = "2024-01-14T10:00:00Z"
+        val t2 = "2024-01-14T11:00:00Z"
+        val t3 = "2024-01-14T12:00:00Z"
+        val now = "2024-01-15T00:00:00Z"
+
+        dao.insert(buildPreAuthRecord(odooOrderId = "OLD-1", status = "PENDING", expiresAt = t1))
+        dao.insert(buildPreAuthRecord(odooOrderId = "OLD-2", status = "PENDING", expiresAt = t2))
+        dao.insert(buildPreAuthRecord(odooOrderId = "OLD-3", status = "PENDING", expiresAt = t3))
+
+        val limited = dao.getExpiring(now, 2)
+
+        assertEquals(2, limited.size)
+        assertEquals("OLD-1", limited[0].odooOrderId)
+        assertEquals("OLD-2", limited[1].odooOrderId)
     }
 
     // -------------------------------------------------------------------------
@@ -413,7 +433,7 @@ class BufferDatabaseTest {
         requestedAmountMinorUnits = 50_000L,
         unitPrice = unitPrice,
         authorizedAmountMinorUnits = null,
-        status = status,
+        status = PreAuthStatus.valueOf(status),
         fccCorrelationId = null,
         fccAuthorizationCode = null,
         failureReason = null,

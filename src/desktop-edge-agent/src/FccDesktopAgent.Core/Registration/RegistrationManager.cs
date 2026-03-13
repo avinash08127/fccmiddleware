@@ -2,6 +2,7 @@ using System.Text.Json;
 using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.MasterData;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -22,22 +23,25 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
     };
 
     private readonly ILogger<RegistrationManager> _logger;
+    private readonly ICredentialStore? _credentialStore;
     private readonly SiteDataManager? _siteDataManager;
     private readonly string? _baseDirectoryOverride;
     private readonly object _lock = new();
     private RegistrationState? _cached;
 
-    public RegistrationManager(ILogger<RegistrationManager> logger, SiteDataManager siteDataManager)
+    public RegistrationManager(ILogger<RegistrationManager> logger, SiteDataManager siteDataManager, ICredentialStore credentialStore)
     {
         _logger = logger;
         _siteDataManager = siteDataManager;
+        _credentialStore = credentialStore;
     }
 
     /// <summary>Test constructor that overrides the data directory.</summary>
-    internal RegistrationManager(ILogger<RegistrationManager> logger, string baseDirectory)
+    internal RegistrationManager(ILogger<RegistrationManager> logger, string baseDirectory, ICredentialStore? credentialStore = null)
     {
         _logger = logger;
         _baseDirectoryOverride = baseDirectory;
+        _credentialStore = credentialStore;
         // L-04: _siteDataManager intentionally null in test constructor
     }
 
@@ -117,6 +121,12 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
     {
         var state = LoadState();
         state.IsDecommissioned = true;
+
+        // OB-S01: Purge device and refresh tokens from credential store on decommission.
+        // Server-side revocation makes tokens unusable, but plaintext/encrypted values
+        // should not persist in the platform credential store.
+        await PurgeTokensFromCredentialStoreAsync(ct);
+
         await SaveStateAsync(state, ct);
         _logger.LogWarning("Device marked as decommissioned");
         DeviceDecommissioned?.Invoke(this, EventArgs.Empty);
@@ -127,6 +137,11 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
         var state = LoadState();
         state.IsRegistered = false;
         state.IsDecommissioned = false;
+
+        // OB-S01: Purge device and refresh tokens before re-provisioning.
+        // New tokens will be issued during the next provisioning flow.
+        await PurgeTokensFromCredentialStoreAsync(ct);
+
         await SaveStateAsync(state, ct);
         _logger.LogWarning("Device marked for re-provisioning — restart to begin provisioning wizard");
         // M-10: Notify UI so it can show a re-provisioning prompt instead of
@@ -189,6 +204,30 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
     }
 
     // ── Private ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// OB-S01: Purges device JWT and refresh token from the platform credential store.
+    /// Best-effort — failures are logged but do not block decommission/re-provisioning.
+    /// </summary>
+    private async Task PurgeTokensFromCredentialStoreAsync(CancellationToken ct)
+    {
+        if (_credentialStore is null)
+        {
+            _logger.LogDebug("No credential store available — skipping token purge");
+            return;
+        }
+
+        try
+        {
+            await _credentialStore.DeleteSecretAsync(CredentialKeys.DeviceToken, ct);
+            await _credentialStore.DeleteSecretAsync(CredentialKeys.RefreshToken, ct);
+            _logger.LogInformation("Device and refresh tokens purged from credential store");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to purge tokens from credential store — tokens may remain in platform store");
+        }
+    }
 
     private string GetFilePath() =>
         Path.Combine(_baseDirectoryOverride ?? AgentDataDirectory.Resolve(), "registration.json");

@@ -883,6 +883,7 @@ class RadixAdapter(
      *    - 260 -> ERROR (system error / DSB offline)
      */
     override suspend fun sendPreAuth(command: PreAuthCommand): PreAuthResult {
+        var allocatedToken: Int? = null
         return try {
             withTimeout(PREAUTH_TIMEOUT_MS) {
                 // Step 1: Resolve pump address
@@ -896,6 +897,7 @@ class RadixAdapter(
 
                 // Step 2: Generate TOKEN and track pre-auth
                 val token = nextToken()
+                allocatedToken = token
                 val preAuthEntry = PreAuthEntry(
                     token = token,
                     pumpNumber = command.pumpNumber,
@@ -951,6 +953,7 @@ class RadixAdapter(
                 }
             }
         } catch (e: TimeoutCancellationException) {
+            allocatedToken?.let { activePreAuths.remove(it) }
             PreAuthResult(
                 status = PreAuthResultStatus.TIMEOUT,
                 message = "Pre-auth request timed out after ${PREAUTH_TIMEOUT_MS}ms",
@@ -958,6 +961,7 @@ class RadixAdapter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            allocatedToken?.let { activePreAuths.remove(it) }
             PreAuthResult(
                 status = PreAuthResultStatus.ERROR,
                 message = "Pre-auth failed: ${e::class.simpleName}: ${e.message}",

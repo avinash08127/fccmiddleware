@@ -172,11 +172,9 @@ class OfflineCrashRecoveryTest {
 
         val fccConfig = makeFccConfig()
         val orchestrator = IngestionOrchestrator(
-            adapter = adapter,
             bufferManager = bufferManager,
             syncStateDao = syncStateDao,
-            config = fccConfig,
-        )
+        ).also { it.wireRuntime(adapter, fccConfig) }
 
         val result = orchestrator.pollNow()
 
@@ -198,11 +196,9 @@ class OfflineCrashRecoveryTest {
 
         val fccConfig = makeFccConfig()
         val orchestrator = IngestionOrchestrator(
-            adapter = adapter,
             bufferManager = bufferManager,
             syncStateDao = syncStateDao,
-            config = fccConfig,
-        )
+        ).also { it.wireRuntime(adapter, fccConfig) }
 
         val result = orchestrator.pollNow()
 
@@ -224,11 +220,9 @@ class OfflineCrashRecoveryTest {
 
         val fccConfig = makeFccConfig()
         val orchestrator = IngestionOrchestrator(
-            adapter = adapter,
             bufferManager = bufferManager,
             syncStateDao = syncStateDao,
-            config = fccConfig,
-        )
+        ).also { it.wireRuntime(adapter, fccConfig) }
 
         val result = orchestrator.pollNow()
 
@@ -299,11 +293,9 @@ class OfflineCrashRecoveryTest {
 
         val fccConfig = makeFccConfig()
         val orchestrator = IngestionOrchestrator(
-            adapter = adapter,
             bufferManager = bufferManager,
             syncStateDao = syncStateDao,
-            config = fccConfig,
-        )
+        ).also { it.wireRuntime(adapter, fccConfig) }
 
         val result = orchestrator.pollNow()
 

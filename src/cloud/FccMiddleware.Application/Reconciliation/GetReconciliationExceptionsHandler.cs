@@ -25,6 +25,7 @@ public sealed class GetReconciliationExceptionsHandler
         CancellationToken cancellationToken)
     {
         var pageSize = Math.Clamp(request.PageSize, 1, 100);
+        var lowerBound = request.From ?? request.Since;
 
         DateTimeOffset? cursorCreatedAt = null;
         Guid? cursorId = null;
@@ -45,7 +46,8 @@ public sealed class GetReconciliationExceptionsHandler
             request.AllowAllLegalEntities,
             request.SiteCode,
             statuses,
-            request.Since,
+            lowerBound,
+            request.To,
             cursorCreatedAt,
             cursorId,
             pageSize + 1,

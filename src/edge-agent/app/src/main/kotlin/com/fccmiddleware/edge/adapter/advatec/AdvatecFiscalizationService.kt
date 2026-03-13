@@ -37,7 +37,8 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
         private const val RECEIPT_TIMEOUT_MS = 30_000L
         private const val HEARTBEAT_TIMEOUT_MS = 5000
         private const val DEFAULT_DEVICE_PORT = 5560
-        private const val DEFAULT_WEBHOOK_LISTENER_PORT = 8091
+        /** AF-021: Uses port 8092 by default to avoid conflict with AdvatecAdapter (8091). */
+        private const val DEFAULT_FISCAL_WEBHOOK_LISTENER_PORT = 8092
         private const val SUBMIT_TIMEOUT_MS = 10_000
         private const val POLL_INTERVAL_MS = 200L
 
@@ -196,7 +197,9 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
         synchronized(this) {
             if (initialized) return
 
-            val port = config.advatecWebhookListenerPort ?: DEFAULT_WEBHOOK_LISTENER_PORT
+            // AF-021: Use separate port to avoid BindException when both adapter and
+            // fiscalization service are active (Scenario C deployments).
+            val port = config.advatecFiscalWebhookListenerPort ?: DEFAULT_FISCAL_WEBHOOK_LISTENER_PORT
             try {
                 val listener = AdvatecWebhookListener(
                     listenPort = port,

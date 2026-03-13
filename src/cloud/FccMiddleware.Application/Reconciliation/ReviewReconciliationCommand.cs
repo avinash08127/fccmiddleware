@@ -7,6 +7,7 @@ namespace FccMiddleware.Application.Reconciliation;
 public sealed record ReviewReconciliationCommand : IRequest<Result<ReviewReconciliationResult>>
 {
     public const int MinimumReasonLength = 10;
+    public const int MaximumReasonLength = 1000;
 
     public required Guid ReconciliationId { get; init; }
     public required ReconciliationStatus TargetStatus { get; init; }

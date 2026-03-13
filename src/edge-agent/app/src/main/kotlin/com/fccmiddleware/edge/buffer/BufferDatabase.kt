@@ -5,6 +5,7 @@ import androidx.room.migration.Migration
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
 import com.fccmiddleware.edge.buffer.dao.AuditLogDao
@@ -57,9 +58,10 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
         LocalPump::class,
         LocalNozzle::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
+@TypeConverters(PreAuthStatusConverters::class)
 abstract class BufferDatabase : RoomDatabase() {
 
     abstract fun transactionDao(): TransactionBufferDao
@@ -69,6 +71,14 @@ abstract class BufferDatabase : RoomDatabase() {
     abstract fun agentConfigDao(): AgentConfigDao
     abstract fun auditLogDao(): AuditLogDao
     abstract fun siteDataDao(): SiteDataDao
+
+    /**
+     * AF-013: Truncate all tables so re-provisioning starts with a clean database.
+     * Prevents cross-site data contamination when a device is re-provisioned for a different site.
+     */
+    fun clearAllData() {
+        clearAllTables()
+    }
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -166,6 +176,19 @@ abstract class BufferDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration 5 → 6: AF-022 — Add acknowledged_at column for POS transaction acknowledge.
+         *
+         * The acknowledge endpoint was a no-op (only counted records). This column
+         * tracks when each transaction was marked as consumed by POS, and local API
+         * queries now exclude acknowledged records to prevent double-consumption.
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN acknowledged_at TEXT")
+            }
+        }
+
         fun create(context: Context): BufferDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
@@ -173,7 +196,7 @@ abstract class BufferDatabase : RoomDatabase() {
                 "fcc_buffer.db"
             )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 // Fallback for any database version gap not covered by explicit migrations.
                 // Transactions are re-uploaded from the buffer, so losing local rows is
                 // recoverable. Prevents a crash-loop on devices with an unexpected schema.

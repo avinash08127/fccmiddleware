@@ -53,7 +53,8 @@ public sealed class S3RawPayloadArchiver : IRawPayloadArchiver, IDisposable
     {
         // S3 path follows the event cold-archive convention from event-schema-design.md
         var now = DateTimeOffset.UtcNow;
-        var key = $"raw-payloads/{legalEntityId}/{siteCode}/{now:yyyy}/{now:MM}/{fccTransactionId}.json";
+        var safeTransactionId = SanitizeKeySegment(fccTransactionId);
+        var key = $"raw-payloads/{legalEntityId}/{siteCode}/{now:yyyy}/{now:MM}/{safeTransactionId}.json";
 
         if (_s3Client is not null && !string.IsNullOrWhiteSpace(_bucketName))
         {
@@ -143,6 +144,31 @@ public sealed class S3RawPayloadArchiver : IRawPayloadArchiver, IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Sanitizes a value for safe use as an S3 object key segment.
+    /// Removes path traversal sequences, directory separators, and null bytes
+    /// to prevent cross-tenant archive collisions.
+    /// </summary>
+    private static string SanitizeKeySegment(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "_empty_";
+
+        // Replace path separators and null bytes with underscores
+        var sanitized = value
+            .Replace("/", "_")
+            .Replace("\\", "_")
+            .Replace("\0", "_");
+
+        // Collapse any ".." sequences that could be used for path traversal
+        sanitized = sanitized.Replace("..", "_");
+
+        // Trim leading/trailing dots and spaces to avoid ambiguous S3 keys
+        sanitized = sanitized.Trim('.', ' ');
+
+        return string.IsNullOrWhiteSpace(sanitized) ? "_empty_" : sanitized;
     }
 
     public void Dispose()

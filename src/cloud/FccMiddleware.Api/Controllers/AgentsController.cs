@@ -3,6 +3,7 @@ using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Models;
 using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -71,8 +72,6 @@ public sealed class AgentsController : PortalControllerBase
         }
 
         // baseQuery holds all filter predicates but NO cursor predicate.
-        // totalCount is computed from baseQuery so it reflects the stable full set,
-        // not the shrinking remainder as the client pages forward (M-17 fix).
         IQueryable<AgentRegistration> baseQuery = _db.AgentRegistrations
             .ForPortal(access, legalEntityId)
             .Include(agent => agent.Site);
@@ -88,7 +87,7 @@ public sealed class AgentsController : PortalControllerBase
         }
 
         // Push connectivity filter into the SQL query by joining with telemetry snapshots,
-        // so pagination and totalCount are correct when filtering by connectivity state.
+        // so pagination is correct when filtering by connectivity state.
         if (connectivityFilter.HasValue)
         {
             baseQuery = baseQuery.Where(agent =>
@@ -107,8 +106,6 @@ public sealed class AgentsController : PortalControllerBase
                 || (agent.RegisteredAt == cursorTimestamp && agent.Id.CompareTo(cursorId) > 0));
         }
 
-        var totalCount = await baseQuery.CountAsync(cancellationToken);
-
         var page = await pageQuery
             .OrderBy(agent => agent.RegisteredAt)
             .ThenBy(agent => agent.Id)
@@ -121,10 +118,13 @@ public sealed class AgentsController : PortalControllerBase
             page.RemoveAt(page.Count - 1);
         }
 
+        // FM-T02: Extract IDs to an array so Npgsql translates to = ANY(@p)
+        // instead of generating N literal GUID parameters in the SQL.
+        var pageIds = page.Select(agent => agent.Id).ToArray();
         var snapshots = await _db.AgentTelemetrySnapshots
             .IgnoreQueryFilters()
             .AsNoTracking()
-            .Where(snapshot => snapshot.LegalEntityId == legalEntityId && page.Select(agent => agent.Id).Contains(snapshot.DeviceId))
+            .Where(snapshot => snapshot.LegalEntityId == legalEntityId && pageIds.Contains(snapshot.DeviceId))
             .ToDictionaryAsync(snapshot => snapshot.DeviceId, cancellationToken);
 
         var data = page
@@ -166,7 +166,7 @@ public sealed class AgentsController : PortalControllerBase
                 PageSize = data.Count,
                 HasMore = hasMore,
                 NextCursor = nextCursor,
-                TotalCount = totalCount
+                TotalCount = null
             }
         });
     }
@@ -224,7 +224,7 @@ public sealed class AgentsController : PortalControllerBase
             return NotFound(BuildError("NOT_FOUND.TELEMETRY", "Telemetry has not been reported for this agent."));
         }
 
-        var telemetry = JsonSerializer.Deserialize<AgentTelemetryDto>(snapshot.PayloadJson, PortalJson.SerializerOptions);
+        var telemetry = ToAgentTelemetryDto(snapshot);
         if (telemetry is null)
         {
             return NotFound(BuildError("NOT_FOUND.TELEMETRY", "Telemetry payload could not be read."));
@@ -340,6 +340,81 @@ public sealed class AgentsController : PortalControllerBase
             RegisteredAt = agent.RegisteredAt,
             LastSeenAt = agent.LastSeenAt
         };
+
+    private static AgentTelemetryDto? ToAgentTelemetryDto(AgentTelemetrySnapshot snapshot)
+    {
+        if (TelemetrySnapshotPayload.TryDeserialize(
+                snapshot.PayloadJson,
+                PortalJson.SerializerOptions,
+                out var compactPayload))
+        {
+            return new AgentTelemetryDto
+            {
+                SchemaVersion = compactPayload!.SchemaVersion,
+                DeviceId = snapshot.DeviceId,
+                SiteCode = snapshot.SiteCode,
+                LegalEntityId = snapshot.LegalEntityId,
+                ReportedAtUtc = snapshot.ReportedAtUtc,
+                SequenceNumber = compactPayload.SequenceNumber,
+                ConnectivityState = snapshot.ConnectivityState.ToString(),
+                Device = new DeviceStatusDto
+                {
+                    BatteryPercent = snapshot.BatteryPercent,
+                    IsCharging = snapshot.IsCharging,
+                    StorageFreeMb = compactPayload.Device.StorageFreeMb,
+                    StorageTotalMb = compactPayload.Device.StorageTotalMb,
+                    MemoryFreeMb = compactPayload.Device.MemoryFreeMb,
+                    MemoryTotalMb = compactPayload.Device.MemoryTotalMb,
+                    AppVersion = compactPayload.Device.AppVersion,
+                    AppUptimeSeconds = compactPayload.Device.AppUptimeSeconds,
+                    OsVersion = compactPayload.Device.OsVersion,
+                    DeviceModel = compactPayload.Device.DeviceModel
+                },
+                FccHealth = new FccHealthStatusDto
+                {
+                    IsReachable = compactPayload.FccHealth.IsReachable,
+                    LastHeartbeatAtUtc = snapshot.LastHeartbeatAtUtc,
+                    HeartbeatAgeSeconds = snapshot.HeartbeatAgeSeconds,
+                    FccVendor = snapshot.FccVendor.ToString(),
+                    FccHost = snapshot.FccHost,
+                    FccPort = snapshot.FccPort,
+                    ConsecutiveHeartbeatFailures = snapshot.ConsecutiveHeartbeatFailures
+                },
+                Buffer = new BufferStatusDto
+                {
+                    TotalRecords = compactPayload.Buffer.TotalRecords,
+                    PendingUploadCount = snapshot.PendingUploadCount,
+                    SyncedCount = compactPayload.Buffer.SyncedCount,
+                    SyncedToOdooCount = compactPayload.Buffer.SyncedToOdooCount,
+                    FailedCount = compactPayload.Buffer.FailedCount,
+                    OldestPendingAtUtc = compactPayload.Buffer.OldestPendingAtUtc,
+                    BufferSizeMb = compactPayload.Buffer.BufferSizeMb
+                },
+                Sync = new SyncStatusDto
+                {
+                    LastSyncAttemptUtc = compactPayload.Sync.LastSyncAttemptUtc,
+                    LastSuccessfulSyncUtc = compactPayload.Sync.LastSuccessfulSyncUtc,
+                    SyncLagSeconds = snapshot.SyncLagSeconds,
+                    LastStatusPollUtc = compactPayload.Sync.LastStatusPollUtc,
+                    LastConfigPullUtc = compactPayload.Sync.LastConfigPullUtc,
+                    ConfigVersion = compactPayload.Sync.ConfigVersion,
+                    UploadBatchSize = compactPayload.Sync.UploadBatchSize
+                },
+                ErrorCounts = new ErrorCountsDto
+                {
+                    FccConnectionErrors = compactPayload.ErrorCounts.FccConnectionErrors,
+                    CloudUploadErrors = compactPayload.ErrorCounts.CloudUploadErrors,
+                    CloudAuthErrors = compactPayload.ErrorCounts.CloudAuthErrors,
+                    LocalApiErrors = compactPayload.ErrorCounts.LocalApiErrors,
+                    BufferWriteErrors = compactPayload.ErrorCounts.BufferWriteErrors,
+                    AdapterNormalizationErrors = compactPayload.ErrorCounts.AdapterNormalizationErrors,
+                    PreAuthErrors = compactPayload.ErrorCounts.PreAuthErrors
+                }
+            };
+        }
+
+        return JsonSerializer.Deserialize<AgentTelemetryDto>(snapshot.PayloadJson, PortalJson.SerializerOptions);
+    }
 
     private static bool TryParseAgentStatus(string? status, out bool? isActive)
     {

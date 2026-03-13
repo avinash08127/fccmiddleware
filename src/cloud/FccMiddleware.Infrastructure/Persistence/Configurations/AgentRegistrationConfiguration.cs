@@ -43,5 +43,8 @@ internal sealed class AgentRegistrationConfiguration : IEntityTypeConfiguration<
 
         builder.HasIndex(e => new { e.SiteId, e.IsActive })
             .HasDatabaseName("ix_agent_site");
+
+        builder.HasIndex(e => new { e.LegalEntityId, e.IsActive, e.RegisteredAt })
+            .HasDatabaseName("ix_agent_legal_entity_active_registered");
     }
 }

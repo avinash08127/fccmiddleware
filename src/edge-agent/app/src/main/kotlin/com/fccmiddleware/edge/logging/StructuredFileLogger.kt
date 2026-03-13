@@ -60,9 +60,22 @@ class StructuredFileLogger(
     @Volatile
     private var currentWriter: BufferedWriter? = null
 
-    /** Correlation ID attached to all log entries in the current context. */
-    @Volatile
-    var correlationId: String? = null
+    /**
+     * Correlation ID attached to all log entries in the current context.
+     *
+     * AF-002: Uses a ThreadLocal so that concurrent Ktor request coroutines
+     * (which may be pinned to different threads) do not overwrite each other's
+     * correlation ID. Combined with [CorrelationIdElement] in the coroutine
+     * context, the value is propagated correctly across coroutine dispatches.
+     */
+    private val correlationIdThreadLocal = ThreadLocal<String?>()
+
+    var correlationId: String?
+        get() = correlationIdThreadLocal.get()
+        set(value) { correlationIdThreadLocal.set(value) }
+
+    /** Exposes the ThreadLocal for use with [CorrelationIdElement]. */
+    val correlationIdLocal: ThreadLocal<String?> get() = correlationIdThreadLocal
 
     // ── Public logging API ──────────────────────────────────────────────────
 

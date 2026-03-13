@@ -295,8 +295,11 @@ data class AgentFccConfig(
     /** Advatec: Device HTTP port (default 5560). */
     val advatecDevicePort: Int? = null,
 
-    /** Advatec: Port for the local webhook listener that receives Receipt callbacks. */
+    /** Advatec: Port for the local webhook listener that receives Receipt callbacks (adapter). */
     val advatecWebhookListenerPort: Int? = null,
+
+    /** AF-021: Advatec: Separate port for the fiscalization webhook listener (default 8092). */
+    val advatecFiscalWebhookListenerPort: Int? = null,
 
     /** Advatec: Shared token for webhook URL authentication. */
     @Sensitive val advatecWebhookToken: String? = null,

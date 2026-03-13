@@ -276,7 +276,28 @@
       "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent/src -name \"*.cs\" -type f | xargs grep -l \"ProvisioningWindow\\\\|Provisioning.*ViewModel\\\\|ProvisioningActivity\" | head -10)",
       "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent/src/FccDesktopAgent.Core -name \"*.cs\" -type f | xargs grep -l \"CredentialKeys\\\\|TokenRefreshResponse\\\\|CloudUrlGuard\" | head -5)",
       "Bash(./gradlew :app:testDebugUnitTest --tests \"com.fccmiddleware.edge.config.LocalOverrideManagerValidationTest\" --no-daemon -q 2>&1 | tail -30)",
-      "Bash(./gradlew :app:compileDebugKotlin --no-daemon -q 2>&1 | tail -20)"
+      "Bash(./gradlew :app:compileDebugKotlin --no-daemon -q 2>&1 | tail -20)",
+      "Bash(grep -l \"FM-T01\\\\|FM-T02\\\\|FM-T03\" /c/Users/a0812/fccmiddleware/*.md 2>/dev/null)",
+      "Bash(cd \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\" && ./gradlew :app:testDebugUnitTest 2>&1 | tail -80)",
+      "Bash(curl -s \"https://dl.google.com/dl/android/maven2/androidx/security/security-crypto/maven-metadata.xml\" 2>&1 | grep -E \"<version>\" | head -20)",
+      "Bash(cd \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\" && ./gradlew :app:testDebugUnitTest 2>&1 | tail -100)",
+      "Bash(cd \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\" && ./gradlew :app:testDebugUnitTest 2>&1 | tail -60)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -type f -name \"*sync*\" -o -name \"*network*\" -o -name \"*api*\" 2>/dev/null | grep -E \"\\\\.\\(kt|gradle\\)\" | head -30)",
+      "Bash(find /c/Users/a0812/fccmiddleware -name \"*.kt\" -path \"*preauth*\" -o -name \"*PreAuth*\" -type f | grep -E \"\\\\.\\(kt|cs\\)$\" | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware -name \"*.cs\" -type f -exec grep -l \"SensitiveData\\\\|class SensitiveDataAttribute\" {} \\\\; | head -20)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -name \"*.kt\" | xargs grep -l \"class PreAuthResult\\\\|data class PreAuthResult\" 2>/dev/null)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -name \"*.kt\" | xargs grep -l \"enum.*PreAuthResultStatus\\\\|enum.*PreAuthStatus\" 2>/dev/null)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -path \"*/Adapter/Common/*\" -name \"*.cs\" | xargs grep -l \"enum PreAuthStatus\\\\|class PreAuthStatus\")",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/desktop-edge-agent -name \"*.cs\" | xargs grep -l \"class PreAuthResult\\\\|record PreAuthResult\\\\|struct PreAuthResult\" 2>/dev/null)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -type f -name \"*Connectivity*\" -o -name \"*Network*\" | grep \"\\\\.kt$\")",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -type f -name \"*Socket*\" -o -name \"*Bind*\" | grep \"\\\\.kt$\")",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -type f -name \"*Worker*\" | grep \"\\\\.kt$\")",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent -type f \\\\\\( -name \"*Security*\" -o -name \"*Auth*\" -o -name \"*Keystore*\" -o -name \"*Encrypt*\" \\\\\\) | grep \"\\\\.kt$\")",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/test -type f -name \"*Registration*\" -o -name \"*Token*\" | grep \"\\\\.kt$\")",
+      "Bash(grep -r \"Retrofit\\\\|okhttp3\\\\|HttpClient\\\\|@GET\\\\|@POST\\\\|@PUT\\\\|@DELETE\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin --include=\"*.kt\" 2>/dev/null | head -30)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\\\\app\\\\src\\\\test\" -name \"*Advatec*\" -o -name \"*advatec*\" 2>/dev/null | head -20)",
+      "Bash(grep -r \"extends Worker\\\\|: Worker\\\\|RxWorker\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin --include=\"*.kt\" 2>/dev/null | cut -d: -f1 | sort -u)",
+      "Bash(grep -l \"WebSocket\\\\|ServerSocket\\\\|Socket\\\\|@Dao\\\\|@Entity\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/**/*.kt 2>/dev/null | head -20)"
     ]
   }
 }

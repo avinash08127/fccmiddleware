@@ -323,6 +323,7 @@ val appModule = module {
             agentConfigDao = get(),
             tokenProvider = get(),
             siteDataManager = get(),
+            bufferDatabase = get(),
         )
     }
 

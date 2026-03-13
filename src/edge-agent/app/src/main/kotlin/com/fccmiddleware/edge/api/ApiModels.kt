@@ -181,4 +181,9 @@ data class ManualPullResponse(
     val cursorAdvanced: Boolean,
     /** UTC timestamp when the pull was triggered. */
     val triggeredAtUtc: String,
+    /**
+     * AF-006: Number of newly buffered transactions matching the requested pumpNumber.
+     * Null when no pumpNumber filter was provided in the request.
+     */
+    val pumpMatchCount: Int? = null,
 )

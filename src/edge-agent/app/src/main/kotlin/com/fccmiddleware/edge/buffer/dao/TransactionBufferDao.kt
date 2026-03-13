@@ -37,12 +37,13 @@ interface TransactionBufferDao {
 
     /**
      * Buffer-backed query for GET /api/transactions (Odoo POS and portal).
-     * Excludes SYNCED_TO_ODOO records. Results ordered by completed_at DESC.
+     * Excludes SYNCED_TO_ODOO and acknowledged records. Results ordered by completed_at DESC.
      * Uses ix_bt_local_api; must remain <= 150 ms p95 at 30,000 records.
      */
     @Query(
         "SELECT * FROM buffered_transactions " +
-        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO') " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL " +
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
     )
@@ -53,7 +54,8 @@ interface TransactionBufferDao {
      */
     @Query(
         "SELECT * FROM buffered_transactions " +
-        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO') " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL " +
         "AND pump_number = :pumpNumber " +
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
@@ -192,14 +194,49 @@ interface TransactionBufferDao {
     suspend fun getUploadedFccTransactionIds(limit: Int): List<String>
 
     /**
-     * Total count of records visible to the local API (excludes SYNCED_TO_ODOO).
+     * Total count of records visible to the local API (excludes terminal states and acknowledged).
      * Used by CadenceController for backlog depth and by the /api/v1/status endpoint.
      */
     @Query(
         "SELECT COUNT(*) FROM buffered_transactions " +
-        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO')"
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL"
     )
     suspend fun countForLocalApi(): Int
+
+    /**
+     * AF-023: Filtered count for pump-specific queries, matching [getForLocalApiByPump].
+     */
+    @Query(
+        "SELECT COUNT(*) FROM buffered_transactions " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL " +
+        "AND pump_number = :pumpNumber"
+    )
+    suspend fun countForLocalApiByPump(pumpNumber: Int): Int
+
+    /**
+     * AF-023: Filtered count for time-based queries, matching [getForLocalApiSince].
+     */
+    @Query(
+        "SELECT COUNT(*) FROM buffered_transactions " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL " +
+        "AND completed_at >= :since"
+    )
+    suspend fun countForLocalApiSince(since: String): Int
+
+    /**
+     * AF-023: Filtered count for pump + time queries, matching [getForLocalApiByPumpSince].
+     */
+    @Query(
+        "SELECT COUNT(*) FROM buffered_transactions " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL " +
+        "AND pump_number = :pumpNumber " +
+        "AND completed_at >= :since"
+    )
+    suspend fun countForLocalApiByPumpSince(pumpNumber: Int, since: String): Int
 
     /**
      * Total record count across all statuses.
@@ -260,7 +297,8 @@ interface TransactionBufferDao {
      */
     @Query(
         "SELECT * FROM buffered_transactions " +
-        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO') " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL " +
         "AND completed_at >= :since " +
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
@@ -272,13 +310,29 @@ interface TransactionBufferDao {
      */
     @Query(
         "SELECT * FROM buffered_transactions " +
-        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO') " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL " +
         "AND pump_number = :pumpNumber " +
         "AND completed_at >= :since " +
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
     )
     suspend fun getForLocalApiByPumpSince(pumpNumber: Int, since: String, limit: Int, offset: Int): List<BufferedTransaction>
+
+    // ── AF-022: POS transaction acknowledge ────────────────────────────────
+
+    /**
+     * AF-022: Mark a batch of transactions as acknowledged by POS.
+     * Sets acknowledged_at so subsequent getForLocalApi queries exclude them.
+     * Returns the number of records updated.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "acknowledged_at = :now, " +
+        "updated_at = :now " +
+        "WHERE id IN (:ids) AND acknowledged_at IS NULL"
+    )
+    suspend fun markAcknowledged(ids: List<String>, now: String): Int
 
     // ── WebSocket backward-compat queries (Odoo POS cart workflow) ─────────
 

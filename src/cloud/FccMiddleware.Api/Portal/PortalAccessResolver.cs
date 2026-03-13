@@ -1,9 +1,17 @@
 using System.Security.Claims;
+using Microsoft.Extensions.Logging;
 
 namespace FccMiddleware.Api.Portal;
 
 public sealed class PortalAccessResolver
 {
+    private readonly ILogger<PortalAccessResolver> _logger;
+
+    public PortalAccessResolver(ILogger<PortalAccessResolver> logger)
+    {
+        _logger = logger;
+    }
+
     public PortalAccess Resolve(ClaimsPrincipal user)
     {
         var roles = user.FindAll("roles")
@@ -18,6 +26,13 @@ public sealed class PortalAccessResolver
 
         if (allowAll && (legalEntityClaims.Count == 0 || legalEntityClaims.Any(value => value.Trim() == "*")))
         {
+            // FM-S07: Log when a SystemAdmin is granted unrestricted cross-tenant access
+            // so that compromised admin sessions are traceable in audit logs.
+            var userId = ResolveUserId(user) ?? "(unknown)";
+            _logger.LogWarning(
+                "SystemAdmin granted AllowAllLegalEntities access. UserId={UserId}, HasLegalEntityClaims={HasClaims}",
+                userId,
+                legalEntityClaims.Count > 0);
             return new PortalAccess(true, Array.Empty<Guid>(), true);
         }
 

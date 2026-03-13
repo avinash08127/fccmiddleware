@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.benchmark
 
+import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import java.time.Instant
@@ -85,7 +86,13 @@ object SeedDataGenerator {
         count: Int = 100,
         baseTime: Instant = Instant.now(),
     ): List<PreAuthRecord> {
-        val statuses = listOf("PENDING", "AUTHORIZED", "DISPENSING", "COMPLETED", "EXPIRED")
+        val statuses = listOf(
+            PreAuthStatus.PENDING,
+            PreAuthStatus.AUTHORIZED,
+            PreAuthStatus.DISPENSING,
+            PreAuthStatus.COMPLETED,
+            PreAuthStatus.EXPIRED,
+        )
         return (0 until count).map { i ->
             val createdAt = baseTime.minusSeconds(i * 60L).toString()
             val status = statuses[i % statuses.size]
@@ -98,19 +105,19 @@ object SeedDataGenerator {
                 productCode = PRODUCTS[i % PRODUCTS.size],
                 currencyCode = CURRENCIES[i % CURRENCIES.size],
                 requestedAmountMinorUnits = ((i % 10) + 1) * 1000L,
-                authorizedAmountMinorUnits = if (status == "PENDING") null else ((i % 10) + 1) * 1000L,
+                authorizedAmountMinorUnits = if (status == PreAuthStatus.PENDING) null else ((i % 10) + 1) * 1000L,
                 status = status,
                 fccCorrelationId = if (i % 5 == 0) null else "CORR-${i.toString().padStart(6, '0')}",
-                fccAuthorizationCode = if (status == "AUTHORIZED" || status == "DISPENSING") "AUTH-$i" else null,
+                fccAuthorizationCode = if (status == PreAuthStatus.AUTHORIZED || status == PreAuthStatus.DISPENSING) "AUTH-$i" else null,
                 failureReason = null,
                 customerName = if (i % 3 == 0) null else "Customer $i",
                 customerTaxId = null,
                 rawFccResponse = null,
                 requestedAt = createdAt,
-                authorizedAt = if (status == "PENDING") null else createdAt,
-                completedAt = if (status == "COMPLETED") createdAt else null,
+                authorizedAt = if (status == PreAuthStatus.PENDING) null else createdAt,
+                completedAt = if (status == PreAuthStatus.COMPLETED) createdAt else null,
                 expiresAt = baseTime.plusSeconds(300L).toString(),
-                isCloudSynced = if (status == "COMPLETED") 1 else 0,
+                isCloudSynced = if (status == PreAuthStatus.COMPLETED) 1 else 0,
                 cloudSyncAttempts = 0,
                 lastCloudSyncAttemptAt = null,
                 schemaVersion = 1,

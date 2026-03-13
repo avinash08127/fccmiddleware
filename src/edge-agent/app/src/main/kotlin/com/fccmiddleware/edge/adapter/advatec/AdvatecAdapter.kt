@@ -643,17 +643,19 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
 
     /**
      * Attempts to find a matching active pre-auth for an incoming receipt.
-     * Strategy:
-     *   1. Match by CustomerId if both the receipt and a pre-auth have one.
-     *   2. Fallback: match the oldest active pre-auth within the TTL window (FIFO).
+     * Strategy: Match by CustomerId if both the receipt and a pre-auth have one.
      * Returns null if no match found (Normal Order).
+     *
+     * AF-020: FIFO fallback removed — it matched ANY active pre-auth across ALL pumps,
+     * which on multi-pump sites would misattribute Normal Order receipts to unrelated
+     * pre-auths on different pumps, corrupting Odoo reconciliation.
      */
     private fun tryMatchPreAuth(receipt: AdvatecReceiptData): ActivePreAuth? {
         if (activePreAuths.isEmpty()) return null
 
         val now = System.currentTimeMillis()
 
-        // Strategy 1: Match by CustomerId (receipt echoes back the customer data we submitted)
+        // Match by CustomerId (receipt echoes back the customer data we submitted)
         if (!receipt.customerId.isNullOrBlank()) {
             val iterator = activePreAuths.entries.iterator()
             while (iterator.hasNext()) {
@@ -673,31 +675,16 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
             }
         }
 
-        // Strategy 2: FIFO — oldest active pre-auth within TTL
-        // Advatec processes requests sequentially on a single device, so the oldest
-        // pending pre-auth is the most likely match for the next receipt.
-        var oldest: ActivePreAuth? = null
-        var oldestKey: Int? = null
-        for (entry in activePreAuths) {
-            val preAuth = entry.value
-            if ((now - preAuth.createdAtMillis) >= PRE_AUTH_TTL_MILLIS) continue
-
-            if (oldest == null || preAuth.createdAtMillis < oldest.createdAtMillis) {
-                oldest = preAuth
-                oldestKey = entry.key
-            }
-        }
-
-        if (oldest != null && oldestKey != null) {
-            activePreAuths.remove(oldestKey)
-            AppLogger.i(
+        // AF-020: No FIFO fallback — without a CustomerId match, treat as Normal Order.
+        // Receipts without matching customer data are not correlated to avoid cross-pump misattribution.
+        if (!receipt.customerId.isNullOrBlank()) {
+            AppLogger.d(
                 TAG,
-                "Receipt correlated by FIFO: Pump=${oldest.pumpNumber}, " +
-                    "CorrelationId=${oldest.correlationId}, OdooOrderId=${oldest.odooOrderId}",
+                "Receipt has CustomerId=${receipt.customerId} but no matching pre-auth found within TTL",
             )
         }
 
-        return oldest
+        return null
     }
 
     /**

@@ -9,6 +9,7 @@ import {
   RetryResult,
   BatchDiscardItem,
   BatchRetryResult,
+  BatchDiscardResult,
 } from '../models';
 import { PagedResult } from '../models';
 import { buildHttpParams } from './http-params.util';
@@ -39,7 +40,7 @@ export class DlqService {
     return this.http.post<BatchRetryResult>('/api/v1/dlq/retry-batch', { ids });
   }
 
-  discardBatch(items: BatchDiscardItem[]): Observable<void> {
-    return this.http.post<void>('/api/v1/dlq/discard-batch', { items });
+  discardBatch(items: BatchDiscardItem[]): Observable<BatchDiscardResult> {
+    return this.http.post<BatchDiscardResult>('/api/v1/dlq/discard-batch', { items });
   }
 }

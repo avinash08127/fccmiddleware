@@ -1,9 +1,10 @@
 import { Component, DestroyRef, inject, signal, computed, OnInit } from '@angular/core';
 import { CommonModule, DOCUMENT } from '@angular/common';
+import { HttpErrorResponse } from '@angular/common/http';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { forkJoin, interval, EMPTY, of, fromEvent } from 'rxjs';
-import { catchError, filter, switchMap } from 'rxjs/operators';
+import { catchError, filter, map, switchMap } from 'rxjs/operators';
 import { Subject } from 'rxjs';
 import { CardModule } from 'primeng/card';
 import { ButtonModule } from 'primeng/button';
@@ -31,6 +32,14 @@ const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 function isValidGuid(value: string): boolean {
   return GUID_REGEX.test(value);
+}
+
+// ── FM-S05: Defense-in-depth HTML sanitization for untrusted log entries ─────
+
+const HTML_TAG_REGEX = /<[^>]*>/g;
+
+function sanitizeLogEntry(entry: string): string {
+  return entry.replace(HTML_TAG_REGEX, '');
 }
 
 // ── Redaction detection (F08-09) ─────────────────────────────────────────────
@@ -137,7 +146,7 @@ interface TimelineEvent {
           <div>
             <h1 class="page-title">
               <i class="pi pi-server"></i>
-              {{ registration()?.siteCode ?? 'Loading\u2026' }}
+              {{ registration()?.siteCode ?? telemetry()?.siteCode ?? 'Loading\u2026' }}
             </h1>
             @if (registration()) {
               <p class="page-subtitle">
@@ -170,7 +179,7 @@ interface TimelineEvent {
               </span>
             }
           </ng-container>
-          <span class="refresh-note"><i class="pi pi-refresh"></i> Auto-refresh 30s</span>
+          <span class="refresh-note"><i class="pi pi-refresh"></i> Telemetry: 30s | Full: 3 min</span>
           <p-button
             icon="pi pi-refresh"
             severity="secondary"
@@ -779,6 +788,7 @@ export class AgentDetailComponent implements OnInit {
 
   private agentId = '';
   private readonly refresh$ = new Subject<void>();
+  private readonly telemetryRefresh$ = new Subject<void>();
 
   // ── F08-09: Detect redacted FCC host ───────────────────────────────────────
   readonly isFccRedacted = computed(() => {
@@ -819,49 +829,57 @@ export class AgentDetailComponent implements OnInit {
           this.loading.set(true);
           this.error.set(false);
           return forkJoin({
-            registration: this.agentService.getAgentById(this.agentId).pipe(
-              catchError(() => of(null)),
-            ),
-            telemetry: this.agentService.getAgentTelemetry(this.agentId).pipe(
-              catchError(() => of(null)),
-            ),
-            events: this.agentService.getAgentEvents(this.agentId, 20).pipe(
-              catchError(() => of([] as AgentAuditEvent[])),
-            ),
-          }).pipe(
-            catchError(() => {
-              this.error.set(true);
-              this.loading.set(false);
-              return EMPTY;
-            }),
-          );
+            registration: this.loadRegistration(),
+            telemetry: this.loadTelemetry(),
+            events: this.loadEvents(),
+          });
         }),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe((data) => {
-        if (data.registration === null && data.telemetry === null) {
+        if (data.registration === null && data.telemetry === null && !this.registration()) {
           this.error.set(true);
         } else {
           this.registration.set(data.registration);
           this.telemetry.set(data.telemetry);
           this.events.set(data.events);
-          this.loadDiagnosticLogs();
         }
         this.loading.set(false);
       });
 
-    // Initial load
-    this.triggerRefresh();
+    // FM-P02: Telemetry-only refresh — avoids redundant registration/events fetches on the 30s cycle
+    this.telemetryRefresh$
+      .pipe(
+        switchMap(() => this.loadTelemetry()),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((telemetry) => {
+        if (telemetry !== null) {
+          this.telemetry.set(telemetry);
+        }
+      });
 
-    // F08-04: Visibility-aware auto-refresh — pause when tab is hidden
+    // Initial load; diagnostic logs are on-demand only (not refreshed on the auto-refresh cycle)
+    this.triggerRefresh();
+    this.loadDiagnosticLogs();
+
+    // FM-P02: 30s interval — telemetry only when tab is visible
     interval(30_000)
+      .pipe(
+        filter(() => this.document.visibilityState === 'visible'),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(() => this.telemetryRefresh$.next());
+
+    // FM-P02: 3-minute interval — full refresh (registration + telemetry + events) when tab is visible
+    interval(3 * 60_000)
       .pipe(
         filter(() => this.document.visibilityState === 'visible'),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe(() => this.triggerRefresh());
 
-    // F08-04: Resume refresh immediately when tab becomes visible again
+    // F08-04: Resume with a full refresh immediately when tab becomes visible again
     fromEvent(this.document, 'visibilitychange')
       .pipe(
         filter(() => this.document.visibilityState === 'visible'),
@@ -886,22 +904,31 @@ export class AgentDetailComponent implements OnInit {
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe((response) => {
-        this.diagnosticLogs.set(response.batches);
+        // FM-S05: Defense-in-depth — strip HTML tags from untrusted edge device log entries
+        const sanitized = response.batches.map(batch => ({
+          ...batch,
+          logEntries: batch.logEntries.map(sanitizeLogEntry),
+        }));
+        this.diagnosticLogs.set(sanitized);
       });
   }
 
-  // F08-08: Decommission with confirmation
+  // F08-08 + FM-S04: Decommission with confirmation and required reason
   confirmDecommission(): void {
     const reg = this.registration();
     if (!reg) return;
 
-    const confirmed = window.confirm(
-      `Are you sure you want to decommission device "${reg.deviceId}" (${reg.siteCode})? This action cannot be undone.`,
+    const reason = window.prompt(
+      `Decommissioning device "${reg.deviceId}" (${reg.siteCode}) is irreversible.\n\nPlease provide a reason (at least 10 characters):`,
     );
-    if (!confirmed) return;
+    if (reason === null) return; // cancelled
+    if (reason.trim().length < 10) {
+      window.alert('Reason must be at least 10 characters.');
+      return;
+    }
 
     this.decommissioning.set(true);
-    this.agentService.decommissionAgent(reg.deviceId)
+    this.agentService.decommissionAgent(reg.deviceId, reason.trim())
       .pipe(
         catchError(() => {
           this.decommissioning.set(false);
@@ -913,6 +940,31 @@ export class AgentDetailComponent implements OnInit {
         this.decommissioning.set(false);
         this.triggerRefresh();
       });
+  }
+
+  private loadRegistration() {
+    return this.agentService.getAgentById(this.agentId).pipe(
+      catchError(() => of(this.registration())),
+    );
+  }
+
+  private loadTelemetry() {
+    return this.agentService.getAgentTelemetry(this.agentId).pipe(
+      catchError((error: HttpErrorResponse) => {
+        if (error.status === 404) {
+          return of(null);
+        }
+
+        return of(this.telemetry());
+      }),
+    );
+  }
+
+  private loadEvents() {
+    return this.agentService.getAgentEvents(this.agentId, 20).pipe(
+      map((events) => events ?? []),
+      catchError(() => of(this.events())),
+    );
   }
 
   // ── Template helpers ─────────────────────────────────────────────────────

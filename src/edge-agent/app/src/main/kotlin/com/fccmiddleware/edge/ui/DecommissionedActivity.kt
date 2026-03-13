@@ -11,9 +11,11 @@ import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.fccmiddleware.edge.buffer.BufferDatabase
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.security.KeystoreManager
+import com.fccmiddleware.edge.service.EdgeAgentForegroundService
 import org.koin.android.ext.android.inject
 
 /**
@@ -35,6 +37,7 @@ class DecommissionedActivity : AppCompatActivity() {
 
     private val encryptedPrefs: EncryptedPrefsManager by inject()
     private val keystoreManager: KeystoreManager by inject()
+    private val bufferDatabase: BufferDatabase by inject()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,9 +52,22 @@ class DecommissionedActivity : AppCompatActivity() {
     /**
      * Clear all local credentials and navigate to the provisioning screen.
      * Requires a new bootstrap token from the portal to complete re-registration.
+     *
+     * AF-004: Explicitly stop EdgeAgentForegroundService before clearing credentials
+     * to prevent START_STICKY from restarting the service with null/cleared credentials,
+     * which would cause crashes or undefined behavior.
      */
     private fun startReProvisioning() {
         AppLogger.i(TAG, "User initiated re-provisioning from decommissioned state")
+
+        // AF-004: Stop the foreground service BEFORE clearing credentials so a
+        // START_STICKY restart cannot race with credential clearing.
+        stopService(Intent(this, EdgeAgentForegroundService::class.java))
+
+        // AF-013: Clear the Room database BEFORE clearing credentials to prevent
+        // cross-site data contamination when re-provisioning for a different site.
+        bufferDatabase.clearAllData()
+
         keystoreManager.clearAll()
         encryptedPrefs.clearAll()
 

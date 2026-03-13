@@ -5,7 +5,7 @@ namespace FccDesktopAgent.Core.Buffer.Entities;
 
 /// <summary>
 /// EF entity for pre-authorization lifecycle tracking in the local SQLite buffer.
-/// Idempotency key: (OdooOrderId, SiteCode).
+/// Active idempotency key: (OdooOrderId, SiteCode) for non-terminal records only.
 /// </summary>
 public sealed class PreAuthRecord
 {

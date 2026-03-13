@@ -34,10 +34,12 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     private static readonly Guid UnmatchedReconciliationId = Guid.Parse("99000000-0000-0000-0000-000000000062");
     private static readonly Guid ApprovedReconciliationId = Guid.Parse("99000000-0000-0000-0000-000000000063");
     private static readonly Guid CrossTenantReconciliationId = Guid.Parse("99000000-0000-0000-0000-000000000064");
+    private static readonly Guid CorruptedScopedReconciliationId = Guid.Parse("99000000-0000-0000-0000-000000000065");
     private static readonly Guid FlaggedTransactionId = Guid.Parse("99000000-0000-0000-0000-000000000071");
     private static readonly Guid UnmatchedTransactionId = Guid.Parse("99000000-0000-0000-0000-000000000072");
     private static readonly Guid ApprovedTransactionId = Guid.Parse("99000000-0000-0000-0000-000000000073");
     private static readonly Guid CrossTenantTransactionId = Guid.Parse("99000000-0000-0000-0000-000000000074");
+    private static readonly Guid CrossTenantPreAuthId = Guid.Parse("99000000-0000-0000-0000-000000000075");
 
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()
         .WithImage("postgres:16-alpine").Build();
@@ -99,12 +101,22 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
 
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         var items = body.GetProperty("data").EnumerateArray().ToList();
+        var meta = body.GetProperty("meta");
 
         items.Should().HaveCount(2);
         items.Select(x => x.GetProperty("reconciliationId").GetGuid())
             .Should().BeEquivalentTo([FlaggedReconciliationId, UnmatchedReconciliationId]);
         items.Select(x => x.GetProperty("status").GetString())
             .Should().BeEquivalentTo(["VARIANCE_FLAGGED", "UNMATCHED"]);
+        meta.GetProperty("hasMore").GetBoolean().Should().BeFalse();
+        meta.GetProperty("totalCount").ValueKind.Should().Be(System.Text.Json.JsonValueKind.Null);
+
+        var flagged = items.Single(x => x.GetProperty("reconciliationId").GetGuid() == FlaggedReconciliationId);
+        flagged.GetProperty("currencyCode").GetString().Should().Be("GHS");
+        flagged.GetProperty("requestedAmount").GetInt64().Should().Be(10000);
+        flagged.GetProperty("odooOrderId").GetString().Should().Be("POS/2026/1001");
+        flagged.GetProperty("variancePercent").GetDecimal().Should().Be(20.0m);
+        flagged.GetProperty("varianceBps").GetDecimal().Should().Be(2000m);
     }
 
     [Fact]
@@ -134,6 +146,54 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
         items.Should().ContainSingle();
         items[0].GetProperty("reconciliationId").GetGuid().Should().Be(ApprovedReconciliationId);
         items[0].GetProperty("status").GetString().Should().Be("APPROVED");
+    }
+
+    [Fact]
+    public async Task GetExceptions_CorruptedCrossTenantLinks_DoNotLeakEnrichmentData()
+    {
+        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+
+        var response = await _client.GetAsync(
+            $"/api/v1/ops/reconciliation/exceptions?legalEntityId={ScopedLegalEntityId}&siteCode=OPS-SITE-003&status=VARIANCE_FLAGGED");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var item = body.GetProperty("data").EnumerateArray()
+            .Single(x => x.GetProperty("reconciliationId").GetGuid() == CorruptedScopedReconciliationId);
+
+        item.GetProperty("currencyCode").ValueKind.Should().Be(JsonValueKind.Null);
+        item.GetProperty("requestedAmount").ValueKind.Should().Be(JsonValueKind.Null);
+        item.GetProperty("odooOrderId").ValueKind.Should().Be(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task GetById_ReturnsVariancePercentAlongsideLegacyVarianceBps()
+    {
+        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+
+        var response = await _client.GetAsync($"/api/v1/ops/reconciliation/{FlaggedReconciliationId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("variancePercent").GetDecimal().Should().Be(20.0m);
+        body.GetProperty("varianceBps").GetDecimal().Should().Be(2000m);
+    }
+
+    [Fact]
+    public async Task GetById_CorruptedCrossTenantLinks_DoNotLeakEnrichmentData()
+    {
+        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+
+        var response = await _client.GetAsync($"/api/v1/ops/reconciliation/{CorruptedScopedReconciliationId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("currencyCode").ValueKind.Should().Be(JsonValueKind.Null);
+        body.GetProperty("requestedAmount").ValueKind.Should().Be(JsonValueKind.Null);
+        body.GetProperty("odooOrderId").ValueKind.Should().Be(JsonValueKind.Null);
     }
 
     [Fact]
@@ -351,6 +411,20 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
                 SyncedAt = now,
                 CreatedAt = now,
                 UpdatedAt = now
+            },
+            new Site
+            {
+                Id = Guid.Parse("99000000-0000-0000-0000-000000000083"),
+                LegalEntityId = ScopedLegalEntityId,
+                SiteCode = "OPS-SITE-003",
+                SiteName = "Ops Site 3",
+                OperatingModel = SiteOperatingModel.COCO,
+                CompanyTaxPayerId = "TAX-OPS-003",
+                SiteUsesPreAuth = true,
+                IsActive = true,
+                SyncedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now
             });
 
         db.Transactions.AddRange(
@@ -358,6 +432,9 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
             MakeTransaction(UnmatchedTransactionId, ScopedLegalEntityId, "OPS-SITE-001", Guid.Parse("22222222-2222-2222-2222-222222222222"), now.AddMinutes(-20)),
             MakeTransaction(ApprovedTransactionId, ScopedLegalEntityId, "OPS-SITE-001", Guid.Parse("33333333-3333-3333-3333-333333333333"), now.AddMinutes(-10)),
             MakeTransaction(CrossTenantTransactionId, OtherLegalEntityId, "OPS-SITE-002", Guid.Parse("44444444-4444-4444-4444-444444444444"), now.AddMinutes(-5)));
+
+        db.PreAuthRecords.Add(
+            MakePreAuth(CrossTenantPreAuthId, OtherLegalEntityId, "OPS-SITE-002", "POS/2026/9999", now.AddMinutes(-6)));
 
         db.ReconciliationRecords.AddRange(
             new ReconciliationRecord
@@ -445,6 +522,27 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
                 LastMatchAttemptAt = now.AddMinutes(-4),
                 CreatedAt = now.AddMinutes(-5),
                 UpdatedAt = now.AddMinutes(-5)
+            },
+            new ReconciliationRecord
+            {
+                Id = CorruptedScopedReconciliationId,
+                LegalEntityId = ScopedLegalEntityId,
+                SiteCode = "OPS-SITE-003",
+                TransactionId = CrossTenantTransactionId,
+                PreAuthId = CrossTenantPreAuthId,
+                PumpNumber = 5,
+                NozzleNumber = 1,
+                ActualAmountMinorUnits = 9500,
+                VarianceMinorUnits = -500,
+                AbsoluteVarianceMinorUnits = 500,
+                VariancePercent = 5.0m,
+                WithinTolerance = false,
+                MatchMethod = "CORRELATION_ID",
+                Status = ReconciliationStatus.VARIANCE_FLAGGED,
+                AmbiguityFlag = false,
+                LastMatchAttemptAt = now.AddMinutes(-8),
+                CreatedAt = now.AddMinutes(-8),
+                UpdatedAt = now.AddMinutes(-8)
             });
 
         await db.SaveChangesAsync();
@@ -478,4 +576,30 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
             IngestionSource = IngestionSource.FCC_PUSH,
             CorrelationId = correlationId
         };
+
+    private static PreAuthRecord MakePreAuth(
+        Guid id,
+        Guid legalEntityId,
+        string siteCode,
+        string odooOrderId,
+        DateTimeOffset authorizedAt) => new()
+    {
+        Id = id,
+        LegalEntityId = legalEntityId,
+        SiteCode = siteCode,
+        OdooOrderId = odooOrderId,
+        PumpNumber = 1,
+        NozzleNumber = 1,
+        ProductCode = "PMS",
+        CurrencyCode = "NGN",
+        RequestedAmountMinorUnits = 10000,
+        AuthorizedAmountMinorUnits = 10000,
+        Status = PreAuthStatus.AUTHORIZED,
+        RequestedAt = authorizedAt.AddMinutes(-2),
+        AuthorizedAt = authorizedAt,
+        ExpiresAt = authorizedAt.AddMinutes(30),
+        CreatedAt = authorizedAt.AddMinutes(-2),
+        UpdatedAt = authorizedAt,
+        FccCorrelationId = $"CORR-{id:N}"
+    };
 }

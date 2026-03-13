@@ -112,6 +112,13 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             fccConfig.Property(e => e.ClientSecret).HasConversion(converter);
             fccConfig.Property(e => e.WebhookSecret).HasConversion(converter);
             fccConfig.Property(e => e.AdvatecWebhookToken).HasConversion(converter);
+
+            // At-rest encryption for PII fields on PreAuthRecord (PA-S03).
+            // CustomerTaxId and CustomerName are PII subject to tax authority regulations.
+            // Same incremental migration: legacy plaintext values decrypt as-is until re-saved.
+            var preAuth = modelBuilder.Entity<Domain.Entities.PreAuthRecord>();
+            preAuth.Property(e => e.CustomerTaxId).HasConversion(converter);
+            preAuth.Property(e => e.CustomerName).HasConversion(converter);
         }
 
         // -------------------------------------------------------------------------
@@ -167,8 +174,18 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
              && t.AmountMinorUnits == amountMinorUnits
              && t.CompletedAt >= windowStart
              && t.CompletedAt <= windowEnd
-             && t.Status != TransactionStatus.DUPLICATE,
+             && t.Status == TransactionStatus.PENDING,
                 ct);
+
+    async Task IIngestDbContext.SetRawPayloadRefAsync(Guid transactionId, string rawPayloadRef, CancellationToken ct)
+    {
+        await Transactions
+            .IgnoreQueryFilters()
+            .Where(t => t.Id == transactionId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.RawPayloadRef, rawPayloadRef)
+                .SetProperty(t => t.UpdatedAt, DateTimeOffset.UtcNow), ct);
+    }
 
     // -------------------------------------------------------------------------
     // IPollTransactionsDbContext implementation
@@ -531,6 +548,17 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         Set<AuditEvent>().IgnoreQueryFilters()
             .AnyAsync(a => a.CorrelationId == correlationId && a.EventType == eventType, ct);
 
+    async Task<DateTimeOffset?> ITelemetryDbContext.GetLatestAuditEventCreatedAtAsync(
+        Guid deviceId,
+        string eventType,
+        CancellationToken ct) =>
+        await Set<AuditEvent>()
+            .IgnoreQueryFilters()
+            .Where(a => a.EntityId == deviceId && a.EventType == eventType)
+            .OrderByDescending(a => a.CreatedAt)
+            .Select(a => (DateTimeOffset?)a.CreatedAt)
+            .FirstOrDefaultAsync(ct);
+
     void ITelemetryDbContext.AddAuditEvent(AuditEvent auditEvent) =>
         AuditEvents.Add(auditEvent);
 
@@ -624,14 +652,95 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         bool allowAllLegalEntities,
         string? siteCode,
         IReadOnlyCollection<ReconciliationStatus> statuses,
-        DateTimeOffset? since,
+        DateTimeOffset? lowerBound,
+        DateTimeOffset? upperBound,
         DateTimeOffset? cursorCreatedAt,
         Guid? cursorId,
         int take,
         CancellationToken ct)
     {
+        var query = BuildReconciliationExceptionsQuery(
+            legalEntityId,
+            scopedLegalEntityIds,
+            allowAllLegalEntities,
+            siteCode,
+            statuses,
+            lowerBound,
+            upperBound,
+            cursorCreatedAt,
+            cursorId);
+
+        var preAuths = Set<PreAuthRecord>()
+            .IgnoreQueryFilters()
+            .AsNoTracking();
+        var transactions = Set<Transaction>()
+            .IgnoreQueryFilters()
+            .AsNoTracking();
+
+        return await query
+            .GroupJoin(
+                preAuths,
+                reconciliation => new { reconciliation.PreAuthId, reconciliation.LegalEntityId },
+                preAuth => new { PreAuthId = (Guid?)preAuth.Id, preAuth.LegalEntityId },
+                (reconciliation, preAuthGroup) => new { reconciliation, preAuthGroup })
+            .SelectMany(
+                item => item.preAuthGroup.DefaultIfEmpty(),
+                (item, preAuth) => new { item.reconciliation, preAuth })
+            .GroupJoin(
+                transactions,
+                item => new { item.reconciliation.TransactionId, item.reconciliation.LegalEntityId },
+                transaction => new { TransactionId = transaction.Id, transaction.LegalEntityId },
+                (item, transactionGroup) => new { item.reconciliation, item.preAuth, transactionGroup })
+            .SelectMany(
+                item => item.transactionGroup.DefaultIfEmpty(),
+                (item, transaction) => new { item.reconciliation, item.preAuth, transaction })
+            .OrderBy(item => item.reconciliation.CreatedAt)
+            .ThenBy(item => item.reconciliation.Id)
+            .Take(take)
+            .Select(item => new ReconciliationExceptionListItem(
+                item.reconciliation.Id,
+                item.reconciliation.PreAuthId,
+                item.reconciliation.TransactionId,
+                item.reconciliation.Status,
+                item.reconciliation.SiteCode,
+                item.reconciliation.LegalEntityId,
+                item.reconciliation.PumpNumber,
+                item.reconciliation.NozzleNumber,
+                item.reconciliation.OdooOrderId ?? (item.preAuth == null ? null : item.preAuth.OdooOrderId),
+                item.preAuth != null
+                    ? item.preAuth.CurrencyCode
+                    : item.transaction == null ? null : item.transaction.CurrencyCode,
+                item.reconciliation.AuthorizedAmountMinorUnits
+                    ?? (item.preAuth == null ? null : item.preAuth.RequestedAmountMinorUnits),
+                item.reconciliation.AuthorizedAmountMinorUnits,
+                item.reconciliation.ActualAmountMinorUnits,
+                item.reconciliation.VarianceMinorUnits,
+                item.reconciliation.VariancePercent,
+                item.reconciliation.ReviewReason,
+                item.reconciliation.ReviewedByUserId,
+                item.reconciliation.ReviewedAtUtc,
+                item.reconciliation.UpdatedAt,
+                item.reconciliation.MatchMethod,
+                item.reconciliation.AmbiguityFlag,
+                item.reconciliation.CreatedAt,
+                item.reconciliation.LastMatchAttemptAt))
+            .ToListAsync(ct);
+    }
+
+    private IQueryable<ReconciliationRecord> BuildReconciliationExceptionsQuery(
+        Guid? legalEntityId,
+        IReadOnlyCollection<Guid> scopedLegalEntityIds,
+        bool allowAllLegalEntities,
+        string? siteCode,
+        IReadOnlyCollection<ReconciliationStatus> statuses,
+        DateTimeOffset? lowerBound,
+        DateTimeOffset? upperBound,
+        DateTimeOffset? cursorCreatedAt,
+        Guid? cursorId)
+    {
         var query = Set<ReconciliationRecord>()
             .IgnoreQueryFilters()
+            .AsNoTracking()
             .AsQueryable();
 
         if (legalEntityId.HasValue)
@@ -653,9 +762,14 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             query = query.Where(r => statuses.Contains(r.Status));
         }
 
-        if (since.HasValue)
+        if (lowerBound.HasValue)
         {
-            query = query.Where(r => r.CreatedAt >= since.Value);
+            query = query.Where(r => r.CreatedAt >= lowerBound.Value);
+        }
+
+        if (upperBound.HasValue)
+        {
+            query = query.Where(r => r.CreatedAt <= upperBound.Value);
         }
 
         if (cursorCreatedAt.HasValue && cursorId.HasValue)
@@ -668,26 +782,7 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
                 || (r.CreatedAt == createdAt && r.Id.CompareTo(id) > 0));
         }
 
-        return await query
-            .OrderBy(r => r.CreatedAt)
-            .ThenBy(r => r.Id)
-            .Take(take)
-            .Select(r => new ReconciliationExceptionListItem(
-                r.Id,
-                r.Status,
-                r.SiteCode,
-                r.LegalEntityId,
-                r.PumpNumber,
-                r.NozzleNumber,
-                r.AuthorizedAmountMinorUnits,
-                r.ActualAmountMinorUnits,
-                r.VarianceMinorUnits,
-                r.VariancePercent,
-                r.MatchMethod,
-                r.AmbiguityFlag,
-                r.CreatedAt,
-                r.LastMatchAttemptAt))
-            .ToListAsync(ct);
+        return query;
     }
 
     async Task<List<ReconciliationRetryWorkItem>> IReconciliationDbContext.FindDueUnmatchedRetriesAsync(
@@ -816,6 +911,58 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
                 && p.MatchedTransactionId == null)
             .ToListAsync(ct);
 
+    async Task<(List<PreAuthRecord> Correlation, List<PreAuthRecord> Time)>
+        IReconciliationDbContext.FindCorrelationAndTimeCandidatesAsync(
+        Guid legalEntityId,
+        string siteCode,
+        string fccCorrelationId,
+        int pumpNumber,
+        int nozzleNumber,
+        DateTimeOffset windowStart,
+        DateTimeOffset windowEnd,
+        CancellationToken ct)
+    {
+        var all = await Set<PreAuthRecord>()
+            .IgnoreQueryFilters()
+            .Where(p =>
+                p.LegalEntityId == legalEntityId
+                && p.SiteCode == siteCode
+                && (p.Status == PreAuthStatus.AUTHORIZED || p.Status == PreAuthStatus.DISPENSING)
+                && p.MatchedTransactionId == null
+                && (p.FccCorrelationId == fccCorrelationId
+                    || (p.PumpNumber == pumpNumber
+                        && p.NozzleNumber == nozzleNumber
+                        && p.AuthorizedAt.HasValue
+                        && p.AuthorizedAt.Value >= windowStart
+                        && p.AuthorizedAt.Value <= windowEnd)))
+            .ToListAsync(ct);
+
+        var correlation = all.Where(p => p.FccCorrelationId == fccCorrelationId).ToList();
+        var time = all
+            .Where(p =>
+                p.PumpNumber == pumpNumber
+                && p.NozzleNumber == nozzleNumber
+                && p.AuthorizedAt.HasValue
+                && p.AuthorizedAt.Value >= windowStart
+                && p.AuthorizedAt.Value <= windowEnd)
+            .ToList();
+
+        return (correlation, time);
+    }
+
     void IReconciliationDbContext.AddReconciliationRecord(ReconciliationRecord record) =>
         ReconciliationRecords.Add(record);
+
+    async Task<bool> IReconciliationDbContext.TrySaveChangesAsync(CancellationToken ct)
+    {
+        try
+        {
+            await SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return false;
+        }
+    }
 }

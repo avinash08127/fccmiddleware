@@ -259,3 +259,195 @@
 | **Evidence** | `websocket/OdooWebSocketServer.kt` lines 183–187: `val broadcastJob = serviceScope.launch { pumpStatusBroadcastLoop(session) }` — one coroutine per client. Lines 272–289: `pumpStatusBroadcastLoop` calls `adapter.getPumpStatus()` independently per client. |
 | **Impact** | With N connected POS terminals, the FCC adapter receives N × (60/interval) status requests per minute instead of (60/interval). For 5 clients at 3-second intervals: 100 requests/minute instead of 20. On DOMS TCP (shared connection), this increases JPL frame traffic 5×. On Radix HTTP, this creates 5× the HTTP connections to the FCC. |
 | **Recommended Fix** | Replace per-client broadcast loops with a single shared broadcast coroutine. Fetch pump statuses once per interval, then iterate over all connected clients to send the result. Example: `serviceScope.launch { while(isActive) { delay(intervalMs); val statuses = adapter.getPumpStatus(); for (session in clients.keys) { sendStatuses(session, statuses) } } }`. Remove the per-client `broadcastJob`. |
+
+---
+
+## AP-020: TelemetryReporter Queries oldestPendingCreatedAt Twice Per Telemetry Cycle
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-020 |
+| **Title** | Two independent database queries for the same oldest-pending timestamp in a single telemetry payload assembly |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Low |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `TelemetryReporter.buildPayload()` calls `collectBufferStatus()` (line 121) and `collectSyncStatus(cfg)` (line 122) sequentially. Both methods independently query `transactionDao.oldestPendingCreatedAt()`: at line 250 in `collectBufferStatus()` for the `BufferStatusDto.oldestPendingAtUtc` field, and at line 290 in `collectSyncStatus()` for computing `syncLagSeconds`. This results in two identical `SELECT MIN(created_at) FROM buffered_transactions WHERE sync_status = 'PENDING'` queries per telemetry cycle. On a table with 30,000+ records, each query scans the sync_status index and performs a MIN aggregate — typically 1–3ms per query. Additionally, the two queries may return different values if a transaction is inserted between them, creating a minor inconsistency where the buffer section's oldest timestamp doesn't match the sync lag calculation. |
+| **Evidence** | `sync/TelemetryReporter.kt` line 250: `transactionDao.oldestPendingCreatedAt()` in `collectBufferStatus()`. Line 290: `transactionDao.oldestPendingCreatedAt()` in `collectSyncStatus()`. |
+| **Impact** | Minor: 1–3ms extra per telemetry cycle (every ~120s at default tick frequency). Potential data inconsistency between buffer and sync sections of the telemetry payload. |
+| **Recommended Fix** | Query `oldestPendingCreatedAt()` once in `buildPayload()` and pass the result to both `collectBufferStatus(oldestPendingAtUtc)` and `collectSyncStatus(cfg, oldestPendingAtUtc)` as a parameter. |
+
+---
+
+## AP-021: TelemetryReporter.collectDeviceStatus Registers Sticky Broadcast Receiver on Every Call
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-021 |
+| **Title** | Battery status collected via registerReceiver(null, IntentFilter) on every telemetry cycle — unnecessary IPC round-trip |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Low |
+| **Category** | Repeated Processing |
+| **Description** | `TelemetryReporter.collectDeviceStatus()` at line 165 calls `context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))` to get the current battery status. This is the standard sticky broadcast pattern for battery info, but it performs an IPC round-trip to the system server on every invocation. Since telemetry is reported every ~120 seconds (every 4th cadence tick at 30s), this IPC call runs approximately 720 times per day. While each call takes only ~1ms, the pattern could be replaced with a cached approach: register a real `BroadcastReceiver` once during initialization that updates cached battery fields on change, or use `BatteryManager.getIntProperty(BATTERY_PROPERTY_CAPACITY)` which reads from `/sys/class/power_supply/` without IPC. Additionally, `StatFs(Environment.getDataDirectory().path)` at line 176 and `Runtime.getRuntime().freeMemory()` at line 181 are computed on every call but change infrequently (storage changes on writes, memory changes on GC). |
+| **Evidence** | `sync/TelemetryReporter.kt` line 165: `context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))` — IPC per call. Line 176: `StatFs(Environment.getDataDirectory().path)` — filesystem stat per call. |
+| **Impact** | Negligible: ~1ms per telemetry cycle for the IPC call. The sticky broadcast approach is correct and widely used. This finding is informational for optimization if telemetry frequency increases. |
+| **Recommended Fix** | No immediate action required. If telemetry frequency is increased (e.g., to every tick during FCC outages per AF-036), consider caching the battery intent via a persistent `BroadcastReceiver` registered in the foreground service and updated on `ACTION_BATTERY_CHANGED` broadcasts. |
+
+---
+
+## AP-022: Telemetry Payload Assembly Performs 10+ Database Queries Sequentially on Every Report
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-022 |
+| **Title** | buildPayload() executes at least 10 sequential DAO queries per telemetry cycle — no batching or parallelism |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Low |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `TelemetryReporter.buildPayload()` calls `collectBufferStatus()` and `collectSyncStatus()` which together execute at least 10 database queries sequentially: (1) `incrementAndGetTelemetrySequence` — 1 read + 1 write inside @Transaction, (2) `transactionDao.countByStatus()` — 1 GROUP BY query, (3) `transactionDao.oldestPendingCreatedAt()` — 1 MIN query (first call), (4) database file size check — 1 filesystem stat, (5) `syncStateDao.get()` — 1 read, (6) `transactionDao.oldestPendingCreatedAt()` — duplicate (second call, see AP-020). Each query acquires a SQLite connection from the Room connection pool, executes the query, and releases the connection. On the Urovo i9100 with eMMC storage, each query takes 1–5ms. The total telemetry assembly time is 10–50ms. While acceptable at the default frequency (every ~120s), this becomes noticeable if telemetry frequency is increased or if it runs alongside other heavy database operations (e.g., batch upload processing or ingestion). None of these queries depend on each other's results (except the duplicate `oldestPendingCreatedAt`), so they could be parallelized or batched into a single Room `@Transaction` to reduce connection pool contention. |
+| **Evidence** | `sync/TelemetryReporter.kt` lines 80–124: `buildPayload()` calls `collectBufferStatus()` (lines 234–272, 3 queries) and `collectSyncStatus()` (lines 279–313, 3 queries) plus `nextSequenceNumber()` (2 operations). |
+| **Impact** | Low: 10–50ms per telemetry cycle is within the cadence budget. Becomes relevant if telemetry frequency increases or if concurrent database load increases. |
+| **Recommended Fix** | Accept the current design at default telemetry frequency. If optimization is needed, wrap all read queries in a single `@Transaction` method on a custom DAO to reduce connection pool overhead and ensure a consistent snapshot. Eliminate the duplicate `oldestPendingCreatedAt` query (AP-020). |
+
+---
+
+## AP-023: getRecentDiagnosticEntries Performs Full Forward Scan of Log Files Every 5 Seconds
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-023 |
+| **Title** | Diagnostics screen triggers a full sequential scan of today's log file every 5 seconds to find WARN/ERROR entries |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Low |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `StructuredFileLogger.getRecentDiagnosticEntries(30)` is called every 5 seconds by `DiagnosticsActivity.refreshData()`. The method opens the most recent log file (today's `edge-agent-YYYY-MM-DD.jsonl`) and reads ALL lines sequentially from top to bottom, performing 3 `String.contains()` checks per line to filter for WARN/ERROR/FATAL entries. On a device running since midnight with INFO-level logging and 30-second cadence ticks, today's log file can contain 2,880+ entries by end of day (more during error storms). Each refresh reads all 2,880 lines (including the non-matching INFO/DEBUG lines) to find the 30 matching entries. The 3 `contains()` checks per line perform substring scanning on the raw JSON line (e.g., searching for `"lvl":"WARN"` in a 200-character JSON string). With 3,000 lines × 3 contains × 200 chars/line, this is ~1.8 million character comparisons per refresh. At 5-second intervals, this runs 720 times per hour. Additionally, `totalLogSizeBytes()` calls `getLogFiles()` on each refresh, performing a directory listing, filter, sort, and N `File.length()` stat calls. While individually fast, the cumulative I/O overhead adds up on eMMC storage. |
+| **Evidence** | `logging/StructuredFileLogger.kt` lines 130–152: `getRecentDiagnosticEntries()` forward-scans files. `ui/DiagnosticsActivity.kt` line 136: called every 5 seconds. Lines 137, 162–163: `totalLogSizeBytes()` also called per refresh. |
+| **Impact** | Low: on modern ARM processors, the string scanning takes <5ms even for 3,000 lines. On the Urovo i9100 (Qualcomm MSM8909, 1.1 GHz quad-core), this may reach 10–15ms during heavy logging. The cumulative effect is minor file I/O every 5 seconds while the diagnostics screen is open. The impact is bounded by the screen's lifecycle (only runs while visible). |
+| **Recommended Fix** | Maintain an in-memory ring buffer of the last N WARN/ERROR entries in `StructuredFileLogger`, appended during `writeEntry()` when the level is WARN or above. `getRecentDiagnosticEntries()` returns a snapshot of the ring buffer (O(1)) instead of rescanning files. This eliminates all file I/O from the 5-second refresh cycle. For `totalLogSizeBytes()`, cache the value and update it when a new file is created (in `getOrCreateWriter()`). |
+
+---
+
+## AP-024: PumpStatusCache Makes Redundant Sequential Live FCC Calls for Queued Callers
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-024 |
+| **Title** | Serialized callers behind PumpStatusCache mutex each make a separate live FCC call even when the previous caller just refreshed the cache |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Medium |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `PumpStatusCache.get()` uses a `Mutex` to serialize concurrent callers ("single-flight protection"). When 5 POS terminals call `GET /api/v1/pump-status` simultaneously, they queue behind the mutex. The first caller acquires the mutex, makes a live FCC call (up to 1 second timeout), updates `cached` and `cachedAtMs`, and releases the mutex. The second caller then acquires the mutex and makes ANOTHER live FCC call — even though the cache was just updated less than 1 second ago. This pattern repeats for all 5 callers, resulting in 5 sequential live FCC calls within ~5 seconds. For DOMS (persistent TCP), each `getPumpStatus()` sends a JPL request over the shared TCP connection — 5 requests in rapid succession increase the frame traffic. For Radix (HTTP REST), each call creates a new HTTP connection to the FCC device. The `PumpStatusCache` does not check whether the cache was recently refreshed before making a live call. A simple freshness check (`if (System.currentTimeMillis() - cachedAtMs < liveTimeoutMs) return cached`) after acquiring the mutex would allow queued callers to use the result from the first caller's live fetch instead of making redundant calls. |
+| **Evidence** | `api/PumpStatusRoutes.kt` lines 107–122: `mutex.withLock { ... withTimeoutOrNull(liveTimeoutMs) { adapter.getPumpStatus() } ... }` — no cache freshness check after mutex acquisition. Lines 114–116: cache updated only after live fetch. Lines 88–89: `cached` and `cachedAtMs` — no minimum age check. |
+| **Impact** | With N connected POS terminals polling pump status, the FCC adapter receives N sequential status requests per cache miss instead of 1. For 5 clients: 5× the FCC traffic. Combined with AP-016 (per-client WebSocket broadcast also polls independently), the FCC can receive 5+ status requests per 3-second interval from pump-status HTTP clients plus 5 independent polls from WebSocket clients — 10× the intended FCC status query rate. |
+| **Recommended Fix** | Add a cache freshness check inside the mutex, before the live fetch: `if (System.currentTimeMillis() - cachedAtMs < liveTimeoutMs) { return Result(pumps = cached, stale = false, fetchedAtUtc = ..., dataAgeSeconds = 0, capability = ...) }`. This ensures only the first caller triggers a live FCC call; subsequent queued callers reuse the fresh result. The `liveTimeoutMs` (1 second) is a reasonable freshness threshold since pump status changes on a multi-second timescale. |
+
+---
+
+## AP-025: WebSocket Queries Load Full Entity Including rawPayloadJson — Unused Data in Response Path
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-025 |
+| **Title** | getUnsyncedForWs and getAllForWs use SELECT * loading 2–5 KB rawPayloadJson per record — field is not used in the WebSocket DTO |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Medium |
+| **Category** | Large Payload Processing |
+| **Description** | `TransactionBufferDao.getUnsyncedForWs()` (line 289) and `getAllForWs()` (line 309) both use `SELECT * FROM buffered_transactions`, returning the full `BufferedTransaction` entity. Each entity includes `rawPayloadJson` — a nullable TEXT column containing the raw FCC protocol payload (2–5 KB for DOMS JPL frames, 1–3 KB for Radix XML responses, 0.5–2 KB for Advatec webhook payloads). The `BufferedTransaction.toWsDto()` mapping function in `OdooWsModels.kt` does NOT reference `rawPayloadJson` — it only uses `fccTransactionId`, `pumpNumber`, `nozzleNumber`, `productCode`, `volumeMicrolitres`, `amountMinorUnits`, `unitPriceMinorPerLitre`, `startedAt`, `completedAt`, `syncStatus`, `orderUuid`, `odooOrderId`, `addToCart`, `paymentId`, `attendantId`, and `isDiscard`. The `rawPayloadJson` is loaded into memory, carried through the `List<BufferedTransaction>`, and discarded during the `map { it.toWsDto() }` step. For the "all" mode with its 500-record LIMIT, this loads 1–2.5 MB of raw payload data that is immediately discarded. For the "latest" mode with its 200-record LIMIT, this loads 0.4–1 MB. On the Urovo i9100 with limited heap, this unnecessary allocation triggers GC pressure during every WebSocket query. |
+| **Evidence** | `buffer/dao/TransactionBufferDao.kt` lines 289–297: `getUnsyncedForWs()` — `SELECT * FROM buffered_transactions WHERE ...`. Lines 309–313: `getAllForWs()` — `SELECT * FROM buffered_transactions ORDER BY ...`. `websocket/OdooWsModels.kt` lines 112–144: `toWsDto()` — does not reference `rawPayloadJson`. `buffer/entity/BufferedTransaction.kt` line 103: `rawPayloadJson: String?`. |
+| **Impact** | 0.4–2.5 MB of unnecessary memory allocation per WebSocket query. For a forecourt with 5 POS terminals each sending `mode: "latest"` every 5–10 seconds, this is 2–12.5 MB of garbage created per minute. On a device with 512 MB heap, this triggers minor GC pauses (5–15ms each), which may cause WebSocket message delivery jitter. |
+| **Recommended Fix** | Create projection queries that exclude `rawPayloadJson`. For `getUnsyncedForWs`, use a Room `@Query` that explicitly lists the needed columns and a lightweight DTO or a `@MapInfo` projection. Alternatively, define a Room `@Embedded` subset entity: `data class WsBufferedTransaction(...)` containing only the 16 fields used by `toWsDto()`, and use `@Query("SELECT id, fcc_transaction_id, pump_number, ... FROM buffered_transactions WHERE ...")`. This eliminates the `rawPayloadJson` load while keeping the query efficient. |
+
+---
+
+## AP-026: broadcastToAll Serializes Identical Payload Per-Client Instead of Serializing Once
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-026 |
+| **Title** | broadcastToAll constructs the JSON payload before the loop but sendToSession re-serializes per-session error handling |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Low |
+| **Category** | Repeated Processing |
+| **Description** | `OdooWebSocketServer.broadcastToAll()` at lines 299–320 serializes the broadcast payload once (`val payload = wsJson.encodeToString(...)` at line 300) and then sends the same `Frame.Text(payload)` string to each client. This is efficient for the broadcast itself. However, the method is called from `OdooWsMessageHandler` which pre-serializes the DTO to a `JsonElement` using the double-serialization `encodeToJsonElement` (AT-045) before passing it to `broadcastToAll`. The full serialization chain per broadcast is: DTO → String (encodeToString) → JsonElement (parseToJsonElement) → embedded in JsonObject (buildJsonObject) → String (encodeToString in broadcastToAll). This is three serialization steps where one would suffice. For pump status broadcasts (`pumpStatusBroadcastLoop`), each individual pump status is serialized independently per-client per-pump: `wsJson.encodeToString(dto)` at line 281. With 8 pumps × 5 clients × 20 broadcasts/minute = 800 serialize calls/minute. If the statuses were serialized once and the pre-built frame reused across clients, this would be 8 pumps × 20 broadcasts/minute = 160 serialize calls — an 80% reduction. This compounds with AP-016 (per-client broadcast duplicating FCC queries). |
+| **Evidence** | `websocket/OdooWebSocketServer.kt` lines 279–283: per-pump `wsJson.encodeToString(dto)` inside per-client loop. `websocket/OdooWsMessageHandler.kt` lines 350–353: double-serialization via `encodeToJsonElement`. Lines 122, 153, 171: handler calls that chain through `broadcastToAll`. |
+| **Impact** | Low: each serialization takes <0.5ms. Total overhead is ~400ms/minute for 5 clients with 8 pumps. The bigger impact is from AP-016 (per-client FCC queries) which this finding compounds. |
+| **Recommended Fix** | For pump status broadcasts: serialize each `FuelPumpStatusWsDto` once outside the client loop, then reuse the `Frame.Text(payload)` for all clients. This is a natural improvement if AP-016 is addressed (single shared broadcast coroutine). For handler broadcasts: fix AT-045 (remove double-serialization) and the broadcast chain simplifies to two serialization steps (DTO → JsonElement → String), which is the minimum for embedding in a response object. |
+
+---
+
+## AP-027: Audit Log DAO Insert Held Under ConnectivityManager Mutex — Blocks Concurrent Probe Processing on Disk I/O
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-027 |
+| **Title** | ConnectivityManager holds the probe mutex across a Room DAO insert during state transitions — blocks the other probe loop for the duration of disk I/O |
+| **Module** | Connectivity |
+| **Severity** | Medium |
+| **Category** | Blocking Calls on Main Thread |
+| **Description** | `ConnectivityManager.processProbeResult()` acquires the mutex at line 141 and, when a state change occurs, calls `deriveAndEmitStateUnlocked()` at line 179. Inside this method, `auditLogDao.insert(AuditLog(...))` (line 204) performs a Room `@Insert` operation — a suspend function that dispatches to the Room query executor and performs SQLite disk I/O. The mutex is held for the entire insert duration. Both the internet and FCC probe loops call `processProbeResult` and contend on the same mutex. When one loop triggers a state transition, the other loop is blocked from processing its result until the audit log insert completes. On the Urovo i9100 (eMMC flash), Room insert latency is typically 5–50ms under normal load, but can spike to 200ms during SQLite WAL checkpoint or when other DAO operations (transaction buffer inserts, sync state updates) contend for the same database file. During this window, the other probe's result is queued. With 30s probe intervals and random jitter (0–3s), the probability of both probes completing within a 200ms overlap window is ~0.7% per cycle (~20 occurrences per day). Each occurrence delays one probe's result processing by the insert latency (5–200ms). |
+| **Evidence** | `connectivity/ConnectivityManager.kt` line 141: `mutex.withLock { ... }`. Line 179: `deriveAndEmitStateUnlocked()` called inside the lock. Line 204: `auditLogDao.insert(AuditLog(...))` — Room suspend function performing SQLite disk I/O while mutex is held. |
+| **Impact** | ~20 times per day, one probe loop's result processing is delayed by 5–200ms. Individually negligible, but the architectural pattern (holding a coroutine mutex across disk I/O) sets a bad precedent. If the probe interval is ever reduced (e.g., for faster connectivity detection) or additional I/O is added inside the lock, the contention window grows linearly. |
+| **Recommended Fix** | Move the audit log write outside the mutex. Capture the transition (`prevState`, `newState`) inside the lock, release the lock, then perform the DAO insert and listener notification. Pattern: `val transition = mutex.withLock { /* derive state, return (prev, new) or null */ }; if (transition != null) { auditLogDao.insert(...); listener?.onTransition(...) }`. This reduces the mutex hold time to pure in-memory state derivation (<1ms). |
+
+---
+
+## AP-028: Internet Probe Uses Blocking OkHttp execute() Inside withTimeoutOrNull — Thread Occupied Beyond Coroutine Timeout
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-028 |
+| **Title** | Internet probe blocks a Dispatchers.IO thread for up to 8s even when the 5s coroutine timeout fires — wasted thread occupancy |
+| **Module** | Connectivity |
+| **Severity** | Low |
+| **Category** | Blocking Calls on Main Thread |
+| **Description** | The internet probe lambda in `AppModule.kt` (lines 186–194) calls `probeHttpClient.newCall(request).execute()` — a synchronous OkHttp call that blocks the calling thread until the HTTP response arrives or the OkHttp client-level timeouts fire. The `probeHttpClient` is configured with `connectTimeout(4s)` and `readTimeout(4s)` (lines 176–177), so the maximum blocking duration is 8s (4s connect + 4s read). `ConnectivityManager.runProbeWithTimeout()` wraps the probe call in `withTimeoutOrNull(config.probeTimeoutMs)` (line 271), where `probeTimeoutMs` defaults to 5s. When the probe takes longer than 5s (e.g., TCP connect hangs for 4s, then server responds slowly), `withTimeoutOrNull` cancels the coroutine at 5s and returns null. However, `OkHttpClient.execute()` is a blocking I/O call — it does not respond to coroutine cancellation. The underlying TCP connection continues occupying a `Dispatchers.IO` thread until OkHttp's own 8s timeout fires. During this 3s window (5s coroutine timeout to 8s OkHttp timeout), one IO dispatcher thread is occupied doing work whose result is already discarded. `Dispatchers.IO` has a pool of 64 threads by default. One occupied thread is 1.6% of the pool. With probes every 30s, the occupancy is ~10% of the time in the worst case (3s occupied per 30s cycle). |
+| **Evidence** | `di/AppModule.kt` lines 186–191: `probeHttpClient.newCall(request).execute().use { it.isSuccessful }` — blocking call. Lines 176–177: `connectTimeout(4, SECONDS).readTimeout(4, SECONDS)` — 8s max blocking time. `connectivity/ConnectivityManager.kt` line 271: `withTimeoutOrNull(config.probeTimeoutMs)` — 5s coroutine timeout. |
+| **Impact** | In the worst case, one Dispatchers.IO thread is occupied for 3s per 30s cycle (~10% thread-time waste). On the Urovo i9100 with limited CPU, this thread cannot serve other suspend functions (Room queries, Ktor API server, WebSocket handling) during this window. Low severity because the 64-thread pool has ample headroom and the 3s overlap only occurs when the cloud health endpoint is unresponsive. |
+| **Recommended Fix** | Replace `execute()` (blocking) with `enqueue()` (async callback) wrapped in `suspendCancellableCoroutine`. When the coroutine is cancelled, call `okhttp3.Call.cancel()` to abort the underlying TCP connection immediately. Pattern: `suspendCancellableCoroutine<Boolean> { cont -> val call = probeHttpClient.newCall(request); cont.invokeOnCancellation { call.cancel() }; call.enqueue(object : Callback { ... }) }`. This ensures the OkHttp call is cancelled when `withTimeoutOrNull` fires, freeing the thread immediately. Alternatively, align the OkHttp timeouts with the coroutine timeout (both 5s) so the OkHttp call finishes before or at the same time as the coroutine timeout. |
+
+---
+
+## AP-029: Duplicate BoundSocketFactory and Separate Connection Pool for Internet Probe — Two TCP Connections to Same Cloud Host
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-029 |
+| **Title** | Internet probe uses a separate OkHttpClient with its own connection pool — maintains a redundant TCP connection to the cloud host |
+| **Module** | Connectivity |
+| **Severity** | Low |
+| **Category** | Repeated Network Calls |
+| **Description** | `AppModule.kt` creates two independent HTTP clients that connect to the same cloud host: (1) `probeHttpClient` (line 174) — a raw `OkHttpClient` with default connection pool (5 idle connections, 5-min keep-alive). (2) `HttpCloudApiClient` (line 125) — a Ktor `HttpClient` wrapping OkHttp, also with its own connection pool. Both target the same cloud base URL (e.g., `https://cloud.fccmiddleware.com`). Each client maintains its own TCP connection to the cloud host. The `probeHttpClient` hits `GET /health` every 30s, keeping one connection alive in its pool. The `HttpCloudApiClient` hits various `/api/v1/...` endpoints during cloud upload, telemetry, and config poll cycles. On a mobile data connection, each TCP connection consumes: ~2 KB memory for TLS session state, one socket file descriptor (Android per-app limit: ~1024), and one connection slot in the cellular modem's connection table. Two connections where one would suffice doubles these resources. Additionally, two separate `BoundSocketFactory` instances are created with identical lambdas (`{ networkBinder.cloudNetwork.value }`) at lines 129 and 175. These are lightweight objects (~48 bytes each), but the duplication indicates a missed opportunity for a shared singleton. |
+| **Evidence** | `di/AppModule.kt` line 174: `val probeHttpClient = OkHttpClient.Builder()...build()` — separate OkHttp instance. Line 125: `HttpCloudApiClient.create(... socketFactory = BoundSocketFactory { ... })` — creates Ktor OkHttp engine with its own connection pool. Line 129: `BoundSocketFactory { networkBinder.cloudNetwork.value }`. Line 175: `BoundSocketFactory { networkBinderInstance.cloudNetwork.value }` — duplicate instance with same lambda. |
+| **Impact** | One extra persistent TCP connection to the cloud host, consuming ~2 KB memory and one socket descriptor. On mobile data with limited connection table capacity, this wastes a connection slot. Negligible on its own, but contributes to overall resource pressure on constrained devices. |
+| **Recommended Fix** | Extract a single `BoundSocketFactory` instance: `val cloudSocketFactory = BoundSocketFactory { networkBinder.cloudNetwork.value }`. Use it for both the `probeHttpClient` and `HttpCloudApiClient`. To eliminate the duplicate connection pool, consider using the `HttpCloudApiClient` for the internet probe as well (add a `healthCheck()` method that calls `GET /health`) — this shares the connection pool and benefits from certificate pinning (fixing AS-029). |
+
+---
+
+## AP-030: EncryptedPrefsManager Individual Setters Create Separate Editor Per Write — No Batching in Hot Paths
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-030 |
+| **Title** | Each EncryptedPrefsManager property setter creates a new SharedPreferences.Editor and triggers a separate AES encryption + disk write cycle |
+| **Module** | Security |
+| **Severity** | Low |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `EncryptedPrefsManager` exposes 8 identity properties (lines 67–93) where each setter creates a fresh `prefs.edit().put...().apply()` chain. Each `apply()` on `EncryptedSharedPreferences` triggers: (1) AES-256-SIV key encryption for the key name, (2) AES-256-GCM value encryption for the value, (3) async disk write of the encrypted XML file. In `EdgeAgentForegroundService.applyRuntimeConfig()` (lines 207, 259–260), three sequential setter calls are made: `encryptedPrefs.cloudBaseUrl = ...`, `encryptedPrefs.fccHost = ...`, `encryptedPrefs.fccPort = ...`. Each creates a separate `Editor`, encrypts independently, and triggers a separate `apply()`. The same file is rewritten three times in rapid succession. Similarly, `ProvisioningViewModel.handleRegistrationSuccess()` at lines 166–167 sets `fccHost` and `fccPort` individually after the atomic `saveRegistration()` call, creating two additional write cycles. The `saveRegistration()` method at lines 163–172 demonstrates the correct pattern: batch all writes in a single `prefs.edit()...commit()` chain. The individual setters bypass this pattern, creating unnecessary I/O overhead. On `EncryptedSharedPreferences`, each `apply()` rewrites the entire encrypted XML file (not just the changed key). With 13 stored keys, each write cycle encrypts and serializes all 13 entries. Three sequential `apply()` calls mean 39 AES encryptions instead of 13. |
+| **Evidence** | `security/EncryptedPrefsManager.kt` lines 69, 73, 77, 81, 85, 89, 93, 112: each setter uses `prefs.edit().put...().apply()`. `service/EdgeAgentForegroundService.kt` lines 207, 259–260: three sequential setter calls on config update. `ui/ProvisioningViewModel.kt` lines 166–167: two sequential setter calls after registration. Compare with lines 163–172: `saveRegistration()` batches 8 fields in one `commit()`. |
+| **Impact** | On each config update from cloud: 3 × (13 AES encryptions + XML serialization + async file write) instead of 1 × (13 encryptions + 1 write). On the Urovo i9100 with slow eMMC, each `apply()` takes 5–20ms for the encryption step (EncryptedSharedPreferences is notably slower than standard SharedPreferences). Three sequential writes add 15–60ms to the config-apply hot path. This blocks the coroutine that applies runtime config, delaying subsequent config processing. |
+| **Recommended Fix** | Add batched update methods for common multi-field writes. For config updates: `fun updateFccConfig(host: String?, port: Int) { prefs.edit().putString(KEY_FCC_HOST, host).putInt(KEY_FCC_PORT, port).apply() }`. For service updates: `fun updateCloudUrl(url: String) { prefs.edit().putString(KEY_CLOUD_BASE_URL, url).apply() }`. This reduces three write cycles to two (or one if FCC and cloud URL are batched). The individual setters can remain for simple/infrequent operations, but hot-path callers should use the batched methods.
+
+---
+
+## AP-031: Duplicate MasterKey Construction on Startup — Redundant Keystore Lookup for Identical Key Alias
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-031 |
+| **Title** | EncryptedPrefsManager and LocalOverrideManager each construct a MasterKey instance, performing two Keystore lookups for the same alias |
+| **Module** | Security |
+| **Severity** | Low |
+| **Category** | Repeated Processing |
+| **Description** | Both `EncryptedPrefsManager` (line 53) and `LocalOverrideManager` (line 58) call `MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()` during Koin singleton initialization. Both use the default `_androidx_security_master_key_` alias. The `MasterKey.Builder.build()` method internally: (1) calls `KeyStore.getInstance("AndroidKeyStore").load(null)`, (2) checks `keyStore.containsAlias("_androidx_security_master_key_")`, (3) if the key exists, returns a `MasterKey` wrapper (no key generation). Since both singletons are created during app startup (Koin module initialization in `FccEdgeApplication.onCreate()`), the second `MasterKey.Builder.build()` call is redundant — the key already exists from the first call. Each `KeyStore.getInstance().load()` and `containsAlias()` call involves a Binder IPC to the Android Keystore daemon (`keystored`). On the Urovo i9100, each IPC round-trip takes 5–25ms. The redundant construction adds 10–50ms to app startup. After startup, no further `MasterKey` construction occurs (Koin singletons). |
+| **Evidence** | `security/EncryptedPrefsManager.kt` lines 53–55: `MasterKey.Builder(context).setKeyScheme(AES256_GCM).build()`. `config/LocalOverrideManager.kt` lines 58–60: identical `MasterKey.Builder(context).setKeyScheme(AES256_GCM).build()`. `di/AppModule.kt` lines 90, 92: `single { EncryptedPrefsManager(androidContext()) }` and `single { LocalOverrideManager(androidContext()) }` — both initialized during Koin startup. |
+| **Impact** | 10–50ms additional startup latency due to redundant Keystore IPC. On cold boot of the Urovo i9100, app startup (from `Application.onCreate()` to `EdgeAgentForegroundService.onStartCommand()`) is already ~2 seconds. The 10–50ms represents 0.5–2.5% of total startup time. Minor, but every millisecond matters for a service-oriented agent that needs to start monitoring fuel pumps quickly. |
+| **Recommended Fix** | Create the `MasterKey` once in the Koin module and share it: `single { MasterKey.Builder(androidContext()).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build() }`. Modify `EncryptedPrefsManager` and `LocalOverrideManager` to accept the `MasterKey` as a constructor parameter: `class EncryptedPrefsManager(context: Context, masterKey: MasterKey)`. This eliminates the redundant Keystore IPC and provides a single point of configuration for the key scheme.

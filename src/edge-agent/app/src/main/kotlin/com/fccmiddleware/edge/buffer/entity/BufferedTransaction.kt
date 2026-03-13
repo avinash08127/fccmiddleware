@@ -142,6 +142,10 @@ data class BufferedTransaction(
     @ColumnInfo(name = "fiscal_status", defaultValue = "'NONE'")
     val fiscalStatus: String = "NONE",
 
+    /** AF-022: ISO 8601 UTC; null until acknowledged by POS via POST /api/v1/transactions/acknowledge. */
+    @ColumnInfo(name = "acknowledged_at")
+    val acknowledgedAt: String? = null,
+
     @ColumnInfo(name = "schema_version")
     val schemaVersion: Int = 1,
 

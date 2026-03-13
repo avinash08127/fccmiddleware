@@ -100,17 +100,17 @@ class DiagnosticsActivity : AppCompatActivity() {
         refreshJob?.cancel()
         refreshJob = lifecycleScope.launch {
             while (isActive) {
-                delay(REFRESH_INTERVAL_MS)
                 refreshData()
+                delay(REFRESH_INTERVAL_MS)
             }
         }
     }
 
     private data class DiagnosticsSnapshot(
         val bufferDepth: Int,
-        val syncState: com.fccmiddleware.edge.buffer.dao.SyncStateEntity?,
-        val recentLogs: List<com.fccmiddleware.edge.buffer.dao.AuditLogEntry>,
-        val siteInfo: com.fccmiddleware.edge.buffer.dao.SiteInfoEntity?,
+        val syncState: com.fccmiddleware.edge.buffer.entity.SyncState?,
+        val recentLogs: List<com.fccmiddleware.edge.buffer.entity.AuditLog>,
+        val siteInfo: com.fccmiddleware.edge.buffer.entity.SiteInfo?,
         val productCount: Int,
         val pumpCount: Int,
         val nozzleCount: Int,

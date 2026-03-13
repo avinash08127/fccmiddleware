@@ -11,6 +11,7 @@
 - **Description**: The `printQr()` method injects `token.siteCode` and `token.tokenId` directly into an HTML string via template literals, then writes it to a new window via `document.write()`. If the `siteCode` or `tokenId` contains HTML/script content (e.g., a crafted siteCode like `<img onerror=alert(1) src=x>`), it would execute in the new window's context. While siteCode and tokenId are typically server-generated, they are user-controllable inputs (admin creates sites with custom codes).
 - **Impact**: Stored XSS if a malicious site code is created and an admin generates a bootstrap token for it.
 - **Fix**: HTML-encode all interpolated values before `document.write()`, or use DOM APIs to create elements.
+- **Status**: ✅ **FIXED** — The `printQr()` method now uses DOM APIs (`createElement`, `textContent`, `createTextNode`) exclusively. No `document.write()` or `innerHTML` is used. All user-controlled values (`siteCode`, `tokenId`, `expiresAt`) are set via `textContent`, which auto-escapes HTML.
 
 ### FM-S02: Registration endpoint is AllowAnonymous — rate limiting is the only protection
 - **Severity**: Medium
@@ -19,6 +20,7 @@
 - **Description**: The registration endpoint is publicly accessible (AllowAnonymous) and authenticated only by the bootstrap token in the body/header. While rate limiting (`"registration"` policy) is applied, a sustained brute-force attack against bootstrap tokens is possible. Bootstrap tokens are 32-byte random values (256-bit entropy), making brute force computationally infeasible, but the endpoint still accepts unauthenticated traffic without IP-based blocking beyond the rate limiter.
 - **Impact**: Low practical risk due to token entropy, but the endpoint is a potential target for enumeration or resource exhaustion attacks.
 - **Recommendation**: Consider adding IP-based blocking after N failed attempts, or requiring a lightweight proof-of-work.
+- **Status**: ✅ **FIXED** — Added Redis-backed IP-based brute-force protection (`RedisRegistrationThrottleService`). After 5 failed token-auth attempts (INVALID/EXPIRED/REVOKED/ALREADY_USED), the IP is blocked for 15 minutes. Counter resets on successful registration. Fails open if Redis is unavailable to avoid blocking legitimate traffic. This supplements the existing per-IP rate limiter (10 req/min).
 
 ### FM-S03: Token refresh endpoint is AllowAnonymous — no device JWT required
 - **Severity**: Medium
@@ -27,6 +29,7 @@
 - **Description**: The token refresh endpoint accepts only the opaque refresh token in the request body — no device JWT is required. This means a leaked refresh token alone is sufficient to obtain a new valid device JWT. The refresh token reuse detection (FM-T: line 43 in RefreshDeviceTokenHandler) mitigates the impact by revoking all tokens if a used refresh token is replayed, but the initial theft of a single refresh token grants immediate access.
 - **Impact**: A stolen refresh token alone grants full device-level API access until the next legitimate refresh triggers reuse detection.
 - **Recommendation**: Consider requiring the current (even expired) device JWT alongside the refresh token to bind the refresh operation to the original device identity.
+- **Status**: ✅ **FIXED** — The refresh endpoint now requires the current (even expired) device JWT in the request body (`deviceToken` field). The JWT signature is validated (ignoring expiry) via `IDeviceTokenService.ExtractDeviceIdFromExpiredToken()`, and the extracted device ID is verified against the refresh token's bound device ID. Missing/invalid/mismatched JWT returns 401. Updated across all layers: cloud API (`RefreshTokenRequest`, `RefreshDeviceTokenCommand`, `RefreshDeviceTokenHandler`), Android edge agent (`TokenRefreshRequest`, `CloudApiClient`, `KeystoreDeviceTokenProvider`), and integration tests.
 
 ### FM-S04: Decommission endpoint does not confirm action or require re-authentication
 - **Severity**: Low
@@ -34,6 +37,7 @@
 - **Trace**: Portal → `POST /api/v1/admin/agent/{deviceId}/decommission`
 - **Description**: Decommissioning a device is an irreversible destructive action (revokes all tokens, deactivates registration). The endpoint requires `PortalAdminWrite` policy but does not require step-up authentication, confirmation, or a reason/comment. Any admin can decommission any device with a single POST.
 - **Impact**: Accidental or malicious decommission with no additional safeguard. Combined with FM-F05 (no `decommissionedBy` audit), tracing responsibility is harder.
+- **Status**: ✅ **FIXED** — The decommission endpoint now requires a `DecommissionRequest` body with a mandatory `reason` field (10-500 characters, validated server-side). The reason is recorded in the audit event payload for traceability. The portal frontend uses `window.prompt()` to collect the reason (replacing the simple `window.confirm()`), with client-side length validation. Empty or short reasons return 400 `REASON_REQUIRED`.
 
 ### FM-S05: Diagnostic log entries are rendered as raw text with `<pre>` tag — potential stored XSS
 - **Severity**: Medium
@@ -41,6 +45,7 @@
 - **Trace**: Portal → `diagnosticLogs()` → `batch.logEntries.join('\n')` → `<pre>` element
 - **Description**: Diagnostic log entries from edge devices are rendered inside a `<pre>` tag using Angular's text interpolation (`{{ batch.logEntries.join('\n') }}`). Angular's default interpolation (`{{ }}`) HTML-escapes values, so this is **safe** in the default configuration. However, if this were ever changed to `[innerHTML]`, it would become an XSS vector since log entries come from untrusted edge devices.
 - **Impact**: Currently safe due to Angular's built-in escaping. Flagged as a defense-in-depth concern.
+- **Status**: ✅ **FIXED** — Added defense-in-depth HTML tag stripping via `sanitizeLogEntry()` in `agent-detail.component.ts`. All log entries from untrusted edge devices are stripped of HTML tags (`/<[^>]*>/g`) when received from the API, before being stored in the signal. This ensures safety even if the template is later changed to use `[innerHTML]`.
 
 ### FM-S06: QR code contains the raw bootstrap token and cloud API URL in plaintext
 - **Severity**: Medium
@@ -49,6 +54,7 @@
 - **Description**: The QR code payload contains the raw provisioning token and the cloud API base URL in a JSON object. Anyone who can photograph or scan the QR code (e.g., from a screen, printout, or screenshot) can extract the token and use it to register a rogue device.
 - **Impact**: Physical security risk. A printed QR code left unattended or a screenshot shared via chat/email could be used to register an unauthorized device.
 - **Recommendation**: Document that QR codes should be treated as sensitive credentials. Consider adding a time-limited additional verification step.
+- **Status**: ✅ **FIXED** — Multiple mitigations applied: (1) QR code auto-clears from the UI after 5 minutes with a visible countdown timer, limiting the on-screen exposure window. (2) QR code is also cleared when the token is copied to clipboard (alongside the existing raw token memory scrub). (3) Security warnings strengthened in the UI to explicitly state "SENSITIVE CREDENTIAL" and warn against screenshots, chat/email sharing. (4) Printed QR page now includes a prominent red-bordered security warning: "Treat this QR code as a password. Destroy this printout after use." (5) QR timers are properly cleaned up on legal entity change, token revocation, and new token generation.
 
 ### FM-S07: `PortalAccessResolver` returns `IsValid=true` with `AllowAllLegalEntities=true` for SystemAdmin even with no legal_entities claim
 - **Severity**: Low
@@ -56,6 +62,7 @@
 - **Trace**: All portal endpoints → `_accessResolver.Resolve(User)` → `CanAccess()`
 - **Description**: If a user has the `SystemAdmin` role and either has no `legal_entities` claims or has a wildcard `*`, they get `AllowAllLegalEntities=true`. This is by design for super-admins, but it means a compromised SystemAdmin account can access all tenants' fleet data without restriction.
 - **Impact**: Blast radius of a compromised admin account is all tenants. No tenant-level scoping for admins.
+- **Status**: ✅ **FIXED** — Added audit logging to `PortalAccessResolver.Resolve()`. When a SystemAdmin is granted `AllowAllLegalEntities=true`, a `LogWarning` is emitted with the user's identity (`UserId`) and whether they had `legal_entities` claims. This creates a traceable audit trail for cross-tenant admin access patterns, enabling detection of compromised admin sessions through log monitoring/alerting. The `PortalAccessResolver` now accepts `ILogger<PortalAccessResolver>` via constructor injection.
 
 ---
 
@@ -70,6 +77,7 @@
 - **Description**: The Radix XML ingest endpoint is publicly accessible (`AllowAnonymous`). Authentication relies on the `X-Usn-Code` header (an integer from 1-999999) mapped to a site configuration, followed by SHA-1 signature validation against the site's shared secret. While rate limiting (`anonymous-ingress` policy) is applied and the SharedSecret check gates actual ingestion, the USN code lookup itself succeeds or fails before signature validation. An attacker can enumerate all active USN codes by observing response differences: `USN_NOT_FOUND` (404) vs `SITE_NOT_CONFIGURED` (401) vs signature validation (200/400). The 404 vs 401 distinction reveals which USN codes have active sites and which have missing SharedSecrets.
 - **Impact**: USN code enumeration reveals active site deployments. Combined with knowledge of the Radix protocol, this could enable targeted attacks against specific sites.
 - **Fix**: Return the same error response for both USN-not-found and missing-secret cases. Consider requiring a static pre-shared API key header before USN lookup.
+- **Status**: ✅ **FIXED** — Both USN-not-found and missing-SharedSecret cases now return the same response: `401 Unauthorized` with error code `AUTH_FAILED`. The previous `404 USN_NOT_FOUND` vs `401 SITE_NOT_CONFIGURED` distinction has been eliminated, preventing USN code enumeration. The `ProducesResponseType(404)` attribute has been removed from the endpoint. Detailed logging is retained server-side to distinguish the two cases for operational debugging.
 
 ### TX-S02: Radix signature validation uses SHA-1 — cryptographically weak hash
 - **Severity**: Medium
@@ -78,6 +86,7 @@
 - **Description**: The Radix signature verification uses SHA-1 to hash the TABLE element concatenated with the shared secret. SHA-1 has known collision vulnerabilities (SHAttered, 2017). While this is a keyed construction (not a plain hash), the use of SHA-1 in any security-critical context is increasingly discouraged. The Radix protocol specification likely mandates SHA-1, limiting options.
 - **Impact**: Theoretical forgery risk. An attacker with significant computational resources could craft a TABLE element with the same SHA-1 hash as a legitimate one. Practical risk is low given the keyed construction and 30-byte+ shared secrets.
 - **Recommendation**: Document the SHA-1 dependency as a known protocol limitation. If the Radix protocol supports SHA-256, migrate.
+- **Status**: ⚠️ **ACCEPTED (Protocol Limitation)** — SHA-1 usage is mandated by the Radix FDC protocol specification and cannot be changed without vendor coordination. The implementation already applies best-practice mitigations: constant-time signature comparison via `CryptographicOperations.FixedTimeEquals()` to prevent timing side-channel attacks, and the keyed construction (content + 30-byte+ shared secret) makes collision attacks impractical. Code comments in `RadixSignatureHelper.cs` document the protocol dependency. Will be revisited if/when Radix protocol adds SHA-256 support.
 
 ### TX-S03: OpsTransactionsController.GetTransactionById leaks transaction existence across tenants
 - **Severity**: Medium
@@ -86,6 +95,7 @@
 - **Description**: The controller first fetches the transaction by ID (bypassing query filters via `IgnoreQueryFilters()`), then checks if the authenticated user can access the transaction's legal entity. If the transaction exists but belongs to another tenant, the response is `Forbid()` (403). If the transaction doesn't exist at all, the response is `NotFound()` (404). This response difference allows an authenticated portal user to probe whether a transaction GUID exists in any tenant by observing 403 vs 404.
 - **Impact**: Cross-tenant transaction existence oracle. While transaction IDs are random GUIDs (hard to guess), a user who obtains a GUID from another source (e.g., logs, shared reports) can confirm its existence.
 - **Fix**: Return 404 for both not-found and forbidden cases: `if (transaction is null || !access.CanAccess(transaction.LegalEntityId)) return NotFound(...)`.
+- **Status**: ✅ **FIXED** — `GetTransactionById` now queries with `.ForPortal(access)` which applies tenant-scoped query filters, instead of using `IgnoreQueryFilters()` with a separate access check. Transactions belonging to other tenants are excluded from the query result entirely, so both non-existent and cross-tenant transactions return the same `404 NOT_FOUND.TRANSACTION` response. No information leakage is possible.
 
 ### TX-S04: S3 raw payload archiver uses unsanitized fccTransactionId in object key
 - **Severity**: Medium
@@ -94,6 +104,7 @@
 - **Description**: The S3 object key is constructed as `raw-payloads/{legalEntityId}/{siteCode}/{year}/{month}/{fccTransactionId}.json`. The `fccTransactionId` comes from vendor-specific normalization and could contain path-like characters (`/`, `..`, `\0`). While the AWS S3 SDK URL-encodes keys and S3 treats keys as opaque strings (no directory hierarchy), a crafted `fccTransactionId` like `../../other-tenant/data` would create an object at `raw-payloads/{lei}/{site}/{year}/../../other-tenant/data.json` which S3 normalizes to `raw-payloads/{lei}/other-tenant/data.json`, potentially colliding with or overwriting another tenant's archive.
 - **Impact**: Cross-tenant archive collision or overwrite if a vendor adapter produces `fccTransactionId` values containing path traversal sequences.
 - **Fix**: Sanitize `fccTransactionId` by replacing `/`, `\`, `..`, and null bytes with safe characters, or use a UUID-based key instead.
+- **Status**: ✅ **FIXED** — Added `SanitizeKeySegment()` method in `S3RawPayloadArchiver.cs` that replaces `/`, `\`, null bytes, and `..` sequences with underscores before constructing the S3 object key. Leading/trailing dots are trimmed. Empty/whitespace inputs default to `_empty_`. The sanitized value is used for both S3 and local filesystem paths. Unit tests added covering path traversal (`../../other-tenant/data`), slashes, backslashes, null bytes, and normal IDs.
 
 ### TX-S05: Petronite and Advatec webhook endpoints return error details in 200 responses
 - **Severity**: Low
@@ -102,6 +113,7 @@
 - **Description**: When ingestion fails for webhook payloads, the endpoints return HTTP 200 with the internal error code (e.g., `VALIDATION.MISSING_REQUIRED_FIELD`, `ADAPTER_NOT_REGISTERED`, `NORMALIZATION_ERROR`). These error codes reveal internal processing details to external webhook callers. Returning 200 is intentional (to prevent vendor retries), but the error code content leaks implementation details.
 - **Impact**: Information disclosure to external vendors — internal error codes reveal adapter structure and validation pipeline internals.
 - **Fix**: Return a generic error code (e.g., `PROCESSING_ERROR`) to external callers while logging the detailed code internally.
+- **Status**: ✅ **FIXED** — Both the Petronite and Advatec webhook endpoints now return a generic `errorCode: "PROCESSING_ERROR"` in the 200 response body instead of the internal error code (e.g., `VALIDATION.MISSING_REQUIRED_FIELD`). The detailed error code and message are still logged server-side via `_logger.LogWarning()` and `_metrics.RecordIngestionFailure()` for operational debugging.
 
 ### TX-S06: ILike search patterns in OpsTransactionsController are not escaped for LIKE wildcards
 - **Severity**: Low
@@ -110,6 +122,7 @@
 - **Description**: The `fccTransactionId` and `odooOrderId` filters use `EF.Functions.ILike()` with a prefix pattern (`$"{value.Trim()}%"`). While the values are parameterized (no SQL injection), the LIKE pattern wildcards `%` and `_` within user input are not escaped. A user can pass `%` as the search term to match all transactions, or `_____` to match any 5-character ID.
 - **Impact**: No security breach, but the search behavior may surprise users. A search for literal `%` or `_` characters in transaction IDs would not work as expected.
 - **Fix**: Escape `%` and `_` in the user input before building the LIKE pattern (e.g., `value.Replace("%", "\\%").Replace("_", "\\_")`).
+- **Status**: ✅ **FIXED** — Added `EscapeILikePattern()` helper method in `OpsTransactionsController.cs` that escapes `\`, `%`, and `_` characters with a backslash. Both `fccTransactionId` and `odooOrderId` filters now call `EscapeILikePattern()` before constructing the LIKE pattern, and pass `"\\"` as the escape character to `EF.Functions.ILike()`. Searches for literal `%` or `_` now work correctly.
 
 ---
 
@@ -124,6 +137,7 @@
 - **Description**: The `GetById` endpoint first fetches the reconciliation record by GUID with `IgnoreQueryFilters()` (bypassing tenant scoping), then checks `access.CanAccess(record.LegalEntityId)`. If the record exists but belongs to another tenant, the response is `Forbid()` (403). If it doesn't exist at all, the response is `NotFound()` (404). This difference allows an authenticated portal user to probe whether a specific reconciliation GUID exists in any tenant. Same pattern as TX-S03.
 - **Impact**: Cross-tenant record existence oracle. While reconciliation IDs are server-generated GUIDs (hard to guess), a user with a GUID from logs or shared reports can confirm its existence.
 - **Fix**: Return 404 for both not-found and forbidden: `if (record is null || !access.CanAccess(record.LegalEntityId)) return NotFound(...)`.
+- **Status**: ✅ **FIXED** — `GetById` now combines the null check and access check into a single condition: `if (record is null || !access.CanAccess(record.LegalEntityId)) return NotFound(...)`. Both non-existent and cross-tenant reconciliation records return the same `404 NOT_FOUND.RECONCILIATION` response, eliminating the information leakage.
 
 ### RC-S02: No concurrent review protection — contradictory audit events can be published
 - **Severity**: Medium
@@ -132,6 +146,7 @@
 - **Description**: Without optimistic concurrency (see RC-T02), two simultaneous approve/reject requests both pass the `Status == VARIANCE_FLAGGED` check and publish their respective domain events (`ReconciliationApproved` + `ReconciliationRejected`). Both events enter the outbox and are published to downstream consumers. The final DB state reflects only the last save. This creates a contradictory audit trail where both an approval and rejection event exist for the same record, but the record shows only one outcome.
 - **Impact**: Compliance and audit integrity risk. Downstream systems consuming these events (e.g., financial reporting, Odoo sync) may process conflicting actions. The audit trail becomes unreliable for dispute resolution.
 - **Fix**: Add optimistic concurrency (see RC-T02). On concurrency conflict, retry or return 409.
+- **Status**: ✅ **FIXED** — Optimistic concurrency is fully implemented via three mechanisms: (1) PostgreSQL `xmin` row version configured as a concurrency token in `ReconciliationRecordConfiguration.cs`, (2) `TrySaveChangesAsync()` catches `DbUpdateConcurrencyException` and returns false, causing the handler to return `CONFLICT.RACE_CONDITION`, (3) the controller maps this to HTTP 409 Conflict. Events use the outbox pattern (`OutboxEventPublisher` stages events in the same DbContext), ensuring atomicity — if the save fails due to concurrency, neither the entity change nor the outbox event is committed. No contradictory events can be published.
 
 ### RC-S03: Review endpoint does not enforce reason length bounds — truncation or DB error possible
 - **Severity**: Low
@@ -140,6 +155,7 @@
 - **Description**: The handler validates that the reason is non-empty after trimming, but enforces no minimum length (frontend requires 10 chars, backend does not) and no maximum length (DB column is 1000 chars). A direct API caller can submit a 1-character reason. Submitting >1000 characters causes a PostgreSQL error (unhandled, returns 500). The 500 response exposes the global exception handler's error format, which may include stack trace details in non-production environments.
 - **Impact**: Low — the 1-char minimum bypass weakens audit quality; the >1000 char case produces an unfriendly error.
 - **Fix**: Add length validation: `reason.Length < 10 || reason.Length > 1000` → return validation error.
+- **Status**: ✅ **FIXED** — Both minimum and maximum length validation are enforced at two layers: (1) The controller validates `reason.Length < MinimumReasonLength` (10) and `reason.Length > MaximumReasonLength` (1000) before dispatching to the handler, returning 400 with `VALIDATION.REASON_TOO_SHORT` or `VALIDATION.REASON_TOO_LONG`. (2) The handler repeats both checks as defense-in-depth. Constants `MinimumReasonLength = 10` and `MaximumReasonLength = 1000` are defined on `ReviewReconciliationCommand` and used consistently across both layers. The >1000 char case now returns a clean validation error instead of a PostgreSQL exception.
 
 ### RC-S04: GetExceptions does not validate `legalEntityId` query parameter format before DB lookup
 - **Severity**: Low
@@ -147,6 +163,7 @@
 - **Trace**: Portal → `GET /api/v1/ops/reconciliation/exceptions?legalEntityId=X` → `Guid?` binding
 - **Description**: The `legalEntityId` parameter is bound as `Guid?`. If a non-GUID value is passed, ASP.NET Core model binding silently sets it to `null` (since it's nullable). With `legalEntityId=null`, the `ForPortal` extension applies the user's full legal entity scope instead of the requested single entity. A user who typos the legal entity ID would silently see data across all their legal entities instead of getting a validation error.
 - **Impact**: User confusion — requesting a specific entity with a malformed ID returns unscoped results. No data leakage since tenant scoping still applies.
+- **Status**: ✅ **FIXED** — Added explicit validation in `OpsReconciliationController.GetExceptions` that checks `Request.Query.ContainsKey("legalEntityId")` when the model-bound `Guid?` value is null. If the query parameter was provided but failed to bind (malformed GUID), the endpoint now returns 400 with error code `VALIDATION.INVALID_LEGAL_ENTITY_ID` instead of silently falling through to unscoped results.
 
 ## Module: PreAuthorization (Odoo POS → Edge Agent → FCC Device → Cloud)
 
@@ -159,6 +176,7 @@
 - **Description**: The expiry worker queries pre-auth records with `.IgnoreQueryFilters()`, which bypasses the global tenant isolation query filter applied by `TenantScopeMiddleware`. This means the worker processes pre-auth records across ALL legal entities in a single batch of up to 500 records. While the worker is a trusted backend process and the operation (expire + deauth) is correct regardless of tenant, this violates the principle of tenant isolation. A bug in the expiry logic, an incorrect state transition, or a failed deauth call would affect records across all tenants simultaneously. Additionally, the deauthorization calls in `TryDeauthorizePumpAsync` (line 114) use `ISiteFccConfigProvider.GetBySiteCodeAsync` which may also be tenant-scoped, creating a potential mismatch.
 - **Impact**: A single bug in the expiry worker could corrupt pre-auth records across all tenants. Failed deauth for one tenant's FCC could cascade delays to other tenants' records in the same batch.
 - **Recommendation**: Either process records per-tenant (query with tenant context) or add explicit tenant ID logging to each expired record for audit traceability.
+- **Status**: ✅ **FIXED** — `ExpireBatchAsync` now processes records per-tenant with full failure isolation. Step 1: a read-only cross-tenant query identifies distinct `LegalEntityId` values with expired records. Step 2: each tenant is processed in its own `IServiceScope` (and therefore its own `DbContext` / transaction) via the new `ExpireTenantBatchAsync` method, filtered by `LegalEntityId`. A failure in one tenant's batch (save or deauth) is caught and logged without affecting other tenants. All log messages in `ExpireTenantBatchAsync` and `TryDeauthorizePumpAsync` now include `LegalEntityId` for audit traceability.
 
 ### PA-S02: UpdatePreAuthStatusRequest and PreAuthForwardRequest lack max-length validation — oversized strings cause raw DB errors
 - **Severity**: Medium
@@ -167,6 +185,7 @@
 - **Description**: `UpdatePreAuthStatusRequest` has no `[StringLength]` or `[MaxLength]` attributes on any of its string fields: `FccCorrelationId`, `FccAuthorizationCode`, `FailureReason`, `MatchedFccTransactionId`. The database columns have strict max lengths (200, 200, 500, 256 respectively per `PreAuthRecordConfiguration.cs:39-55`). `PreAuthForwardRequest` has `[StringLength]` only on `CustomerTaxId` (100) and `CustomerBusinessName` (200) but not on `SiteCode` (DB: 50), `OdooOrderId` (DB: 200), `ProductCode` (DB: 50), `Currency` (DB: 3), `VehicleNumber` (DB: 50), or `AttendantId` (DB: 100). An edge agent sending oversized strings would bypass model validation and cause a raw PostgreSQL error (`22001: value too long for type character varying`) surfaced as a 500 response.
 - **Impact**: Unvalidated strings cause unhandled database exceptions, returning raw 500 errors instead of clean 400 validation responses.
 - **Recommendation**: Add `[MaxLength]` attributes matching the database column lengths to all string properties on both request DTOs.
+- **Status**: ✅ **FIXED** — Added `[MaxLength]` attributes to all unvalidated string properties on both DTOs, matching the database column lengths from `PreAuthRecordConfiguration.cs`. `UpdatePreAuthStatusRequest`: `FccCorrelationId` (200), `FccAuthorizationCode` (200), `FailureReason` (500), `MatchedFccTransactionId` (256). `PreAuthForwardRequest`: `SiteCode` (50), `OdooOrderId` (200), `ProductCode` (50), `Currency` (3), `VehicleNumber` (50), `AttendantId` (100), `FccCorrelationId` (200), `FccAuthorizationCode` (200), `CustomerName` (200). Existing `[StringLength]` attributes on `CustomerTaxId` and `CustomerBusinessName` were retained as-is.
 
 ### PA-S03: CustomerTaxId stored in plaintext in PostgreSQL and edge SQLite databases — no field-level encryption
 - **Severity**: Medium
@@ -175,6 +194,7 @@
 - **Description**: The `CustomerTaxId` field is marked with `[Sensitive]` attribute in the domain entity (`PreAuthRecord.cs:52`) and the contract DTO (`PreAuthForwardRequest.cs:30`), and the code comments warn "PII — never log." However, no actual encryption is applied at the storage layer. The field is stored as plaintext `VARCHAR(100)` in PostgreSQL and plaintext `TEXT` in both Android Room and Desktop SQLite. In contrast, the site FCC configuration module uses `AesGcmFieldEncryptor` with an EF `EncryptedFieldConverter` for sensitive FCC connection credentials, demonstrating that the infrastructure for field-level encryption exists but is not applied to PII fields.
 - **Impact**: Customer Tax Identification Numbers (TINs) are stored in plaintext across three database systems. A database breach or backup leak would expose PII subject to tax authority regulations.
 - **Recommendation**: Apply the existing `AesGcmFieldEncryptor` / `EncryptedFieldConverter` pattern to `CustomerTaxId` (and optionally `CustomerName`) in the cloud PostgreSQL database. On edge agents, consider Android Keystore-backed encryption and SQLCipher or EF encrypted columns respectively.
+- **Status**: ✅ **FIXED** — Applied the existing `AesGcmFieldEncryptor` / `EncryptedFieldConverter` pattern to both `CustomerTaxId` and `CustomerName` on `PreAuthRecord` in `FccMiddlewareDbContext.OnModelCreating()`. Both fields are now transparently encrypted at rest (AES-256-GCM) in PostgreSQL, using the same key and converter already configured for FccConfig secrets. Legacy plaintext values are returned as-is until re-saved (incremental migration). Edge agent encryption (Android Keystore, Desktop SQLCipher) remains a future consideration — the cloud database was the primary risk surface.
 
 ### PA-S04: FCC internal error details and Java exception class names exposed in pre-auth API responses
 - **Severity**: Medium
@@ -183,6 +203,7 @@
 - **Description**: Android `PreAuthHandler.kt` constructs error messages that include Java exception class names and FCC internal details: `"FCC_NETWORK_ERROR: ${e.javaClass.simpleName}"` (line 222), `"FCC_INTERNAL_ERROR: ${e.javaClass.simpleName}"` (line 227). These messages propagate through `PreAuthResult.message` to the API response returned to Odoo POS. Desktop `PreAuthHandler.cs:254` stores `fccResult.ErrorCode ?? "FCC_DECLINED"` as the failure reason and line 262 logs `record.FccAuthorizationCode`. While the callers are trusted (Odoo POS on LAN), the error messages reveal internal implementation details (Java class names, timeout values, connection states) that could aid reconnaissance if intercepted.
 - **Impact**: Internal technology stack details (Java class names, adapter timeout values, connectivity state enums) are exposed to LAN callers.
 - **Recommendation**: Return generic error codes to callers (e.g., `FCC_NETWORK_ERROR`, `FCC_TIMEOUT`) without implementation details. Log the detailed exception information server-side only.
+- **Status**: ✅ **FIXED** — Android: `PreAuthResult.message` now returns only generic error codes (`FCC_TIMEOUT`, `FCC_NETWORK_ERROR`, `FCC_INTERNAL_ERROR`, `FCC_CONNECTION_REFUSED`) without appending `e.javaClass.simpleName` or timeout values. The detailed exception class names and messages are still logged server-side via `AppLogger`. Desktop: `PreAuthHandlerResult.Fail()` now returns the generic `fccResult.ErrorCode` (or `"FCC_DECLINED"`) instead of the raw `fccResult.ErrorMessage`. The detailed FCC error message is logged server-side via `_logger.LogWarning()` before returning the sanitized response.
 
 ### PA-S05: Cloud ExpiryWorker FCC deauthorization uses cloud-side adapter to call FCC devices — expands attack surface
 - **Severity**: Low
@@ -191,6 +212,7 @@
 - **Description**: The cloud-side expiry worker attempts FCC pump deauthorization by resolving a site config and creating an FCC adapter from the cloud. The cloud adapters (`DomsCloudAdapter`, `RadixCloudAdapter`, etc.) are designed as inbound webhook receivers, not outbound callers. If `IFccPumpDeauthorizationAdapter` is implemented as an outbound call from cloud to FCC devices, this introduces a new network path (cloud → FCC device LAN) that doesn't exist elsewhere in the architecture. The FCC vendor credentials stored in `fcc_configs` would be used for outbound calls from the cloud, potentially exposing them to different network segments.
 - **Impact**: A new outbound call path from cloud to FCC devices may bypass existing network segmentation and firewall rules designed for the inbound-only cloud adapter pattern.
 - **Recommendation**: Verify whether `IFccPumpDeauthorizationAdapter` makes outbound calls to FCC devices. If so, consider delegating deauthorization to the edge agent via a command queue rather than calling FCC directly from the cloud.
+- **Status**: ✅ **FIXED** — Removed the direct cloud → FCC deauthorization call (`TryDeauthorizePumpAsync`) from `PreAuthExpiryWorker`. The cloud no longer resolves `IFccAdapterFactory` or `ISiteFccConfigProvider` for outbound FCC calls, eliminating the cloud → FCC device LAN network path. FCC pump deauthorization is now delegated to the edge agent's local expiry mechanism (`PreAuthHandler.runExpiryCheck`), which already handles deauth with up to 5 retries over LAN. The `PreAuthExpired` domain event published via the outbox signals the state change. The `MaxConcurrentDeauth` configuration option has been removed. Integration tests updated to verify DISPENSING records expire without direct FCC calls.
 
 ---
 
@@ -200,32 +222,39 @@
 
 ### OB-S01: Desktop agent does not purge device/refresh tokens from credential store on decommission
 - **Severity**: Medium
+- **Status**: **FIXED**
 - **Location**: `RegistrationManager.cs:116-123` (`MarkDecommissionedAsync`)
 - **Trace**: Cloud returns 403 DEVICE_DECOMMISSIONED → `DeviceTokenProvider.RefreshTokenAsync()` throws `DeviceDecommissionedException` → caller invokes `RegistrationManager.MarkDecommissionedAsync()` → sets `IsDecommissioned = true` → saves registration.json
 - **Description**: When the desktop agent is decommissioned, `MarkDecommissionedAsync` sets the `IsDecommissioned` flag and saves the state file, but does NOT call `ICredentialStore.DeleteSecretAsync()` for the device token (`device:token`) or refresh token (`device:refresh_token`). The server-side revocation makes the tokens unusable, but the plaintext/encrypted token values remain in the platform credential store (DPAPI on Windows, Keychain on macOS, libsecret/encrypted file on Linux). In contrast, the Android agent's `DecommissionedActivity.startReProvisioning()` explicitly calls `keystoreManager.clearAll()` to purge all Keystore entries, and `encryptedPrefs.clearAll()` to wipe identity data. The desktop's `MarkReprovisioningRequiredAsync` has the same gap.
 - **Impact**: Revoked device JWTs and refresh tokens persist in the desktop credential store after decommission. If the credential store is later compromised (backup theft, forensic analysis, malware), the attacker obtains tokens that, while revoked, reveal the device ID, site code, and legal entity ID embedded in the JWT claims (JWTs are signed, not encrypted). Additionally, a revoked refresh token presented to the server triggers the reuse detection path (BUG-010), creating noise in audit logs.
 - **Fix**: Add credential purging to `MarkDecommissionedAsync` and `MarkReprovisioningRequiredAsync`: call `ICredentialStore.DeleteSecretAsync(CredentialKeys.DeviceToken)` and `ICredentialStore.DeleteSecretAsync(CredentialKeys.RefreshToken)` before saving the state file.
+- **Resolution**: Added `ICredentialStore` dependency to `RegistrationManager`. Both `MarkDecommissionedAsync` and `MarkReprovisioningRequiredAsync` now call `PurgeTokensFromCredentialStoreAsync()` which deletes `device:token` and `device:refresh_token` from the platform credential store before saving the state file. Purge is best-effort — failures are logged but do not block the decommission/re-provisioning flow. Unit tests added for both paths.
 
 ### OB-S02: Desktop Linux PlatformCredentialStore AES fallback derives encryption key from world-readable machine-id
 - **Severity**: Medium
+- **Status**: **FIXED**
 - **Location**: `PlatformCredentialStore.cs` — Linux `EncryptedFileCredentialStore` inner class
 - **Trace**: Linux desktop agent → `PlatformCredentialStore` → libsecret unavailable → falls back to `EncryptedFileCredentialStore` → `DeriveKey()` → `PBKDF2(machine-id, fixedSalt, 100_000, 32)`
 - **Description**: When `secret-tool` (libsecret) is not available on Linux (e.g., headless servers, minimal desktop environments, Docker containers), the `PlatformCredentialStore` falls back to an AES-256 encrypted file stored at `{AgentDataDirectory}/secrets/credentials.dat`. The encryption key is derived via PBKDF2 with `/etc/machine-id` as the password and a fixed salt embedded in the source code. On most Linux distributions, `/etc/machine-id` is world-readable (permissions 0444). Any local user — or any process running on the same machine — can read the machine-id, derive the identical encryption key, and decrypt the credential file to extract the device JWT, refresh token, and FCC API keys in plaintext.
 - **Impact**: On Linux systems using the fallback credential store, all stored secrets (device JWT, refresh token, FCC credentials, LAN API key) are accessible to any local user. This defeats the purpose of credential encryption for multi-user systems or systems where other untrusted services run.
 - **Recommendation**: Use a machine-specific secret combined with a per-installation random salt (generated on first run and stored alongside the encrypted file) to make key derivation non-deterministic. Alternatively, require libsecret as a mandatory dependency on Linux and fail with a clear error message rather than falling back to weak encryption.
+- **Resolution**: Replaced the fixed salt with a per-installation 32-byte random salt generated via `RandomNumberGenerator.GetBytes(32)` on first run and stored at `{AgentDataDirectory}/secrets/installation.salt`. The salt file is created in the owner-only permissions secrets directory. `DeriveLinuxMachineKey()` now calls `GetOrCreateInstallationSalt()` to load or generate the salt, making key derivation non-deterministic — knowing `machine-id` alone is no longer sufficient to derive the encryption key. Note: existing encrypted credentials will need to be re-created after this change (the agent will treat them as corrupted and log a warning).
 
 ### OB-S03: Registration endpoint accepts provisioning token from both request body and HTTP header — header-channel tokens at higher logging risk
 - **Severity**: Low
+- **Status**: **FIXED**
 - **Location**: `AgentController.cs:177-183`
 - **Trace**: Edge Agent → `POST /api/v1/agent/register` → body `provisioningToken` or `X-Provisioning-Token` header → controller extracts token
 - **Description**: The registration endpoint accepts the provisioning token from the JSON body (`request.ProvisioningToken`, line 178), falling back to the `X-Provisioning-Token` HTTP header (line 180) if the body field is empty. HTTP headers are routinely logged by reverse proxies (nginx, AWS ALB, CloudFront), CDNs, API gateways, and application-level request logging middleware. Request bodies are less commonly logged. The `[Sensitive]` attribute on the DTO's `ProvisioningToken` property prevents the application's own logging from recording the value, but cannot control upstream infrastructure logging of HTTP headers. If an edge agent sends the token via header instead of body, the raw bootstrap token may appear in access logs, proxy logs, or WAF logs.
 - **Impact**: Bootstrap tokens transmitted via HTTP header are at higher risk of appearing in infrastructure logs. A leaked token allows a rogue device to register at the target site within the token's 72-hour window.
 - **Recommendation**: Deprecate the `X-Provisioning-Token` header path. Both the Android and desktop agents send the token in the request body. If the header fallback exists for legacy compatibility, document it as deprecated and add a log warning when the header path is used.
+- **Resolution**: Added a deprecation warning log (`LogWarning`) when the `X-Provisioning-Token` header path is used, including the client IP for traceability. Updated the error message for missing tokens to reference only the request body. The header fallback is preserved for backward compatibility but is now explicitly deprecated via the warning log. Full removal can follow once all agents are confirmed to use the body path exclusively.
 
-### OB-S04: Decommission endpoint leaks device existence across tenants via 403 vs 404 response difference
+### OB-S04: Decommission endpoint leaks device existence across tenants via 403 vs 404 response difference ✅ FIXED
 - **Severity**: Low
 - **Location**: `AgentController.cs:325-336`
 - **Trace**: Portal → `POST /api/v1/admin/agent/{deviceId}/decommission` → fetch with `IgnoreQueryFilters()` → access check → `Forbid()` (403) vs `NotFound()` (404)
 - **Description**: The decommission endpoint fetches the device by GUID with `IgnoreQueryFilters()` (bypassing tenant scoping), then checks `access.CanAccess(device.LegalEntityId)`. If the device exists but belongs to another tenant, the response is `Forbid()` (403). If the device doesn't exist, the response is `NotFound()` (404). This is the same cross-tenant existence oracle pattern identified in TX-S03 and RC-S01. While the endpoint requires `PortalAdminWrite` authorization (limiting the attacker pool to admin users), and device IDs are random GUIDs (hard to guess), the response difference still reveals cross-tenant information.
 - **Impact**: An authenticated admin user can probe whether a specific device GUID exists in any tenant by observing 403 vs 404. Combined with a GUID obtained from shared logs, support tickets, or screenshots, this confirms the existence of devices in other tenants.
 - **Fix**: Return 404 for both not-found and forbidden: `if (device is null || !access.CanAccess(device.LegalEntityId)) return NotFound(...)`.
+- **Resolution**: Collapsed the two-branch check (`device is null` → 404, `!CanAccess` → 403) into a single guard: `if (device is null || !access.CanAccess(device.LegalEntityId)) return NotFound(...)`. Both not-found and cross-tenant cases now return an identical 404 response, eliminating the existence oracle.

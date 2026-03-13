@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace FccMiddleware.Api.Controllers;
 
@@ -26,6 +27,7 @@ public sealed class AdminSettingsController : PortalControllerBase
     }
 
     [HttpGet]
+    [Authorize(Policy = "PortalUser")]
     [ProducesResponseType(typeof(SystemSettingsDto), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetSettings(CancellationToken cancellationToken = default)
     {
@@ -51,10 +53,30 @@ public sealed class AdminSettingsController : PortalControllerBase
             return Unauthorized();
         }
 
+        // F16-04: Numeric range validation
+        if (request.Tolerance.AmountTolerancePercent is { } pct && (pct < 0 || pct > 100))
+            return BadRequest(BuildError("VALIDATION.RANGE", "AmountTolerancePercent must be between 0 and 100."));
+        if (request.Tolerance.AmountToleranceAbsoluteMinorUnits is { } abs && abs < 0)
+            return BadRequest(BuildError("VALIDATION.RANGE", "AmountToleranceAbsoluteMinorUnits must be >= 0."));
+        if (request.Tolerance.TimeWindowMinutes is { } twm && (twm < 1 || twm > 60))
+            return BadRequest(BuildError("VALIDATION.RANGE", "TimeWindowMinutes must be between 1 and 60."));
+        if (request.Tolerance.StalePendingThresholdDays is { } spd && (spd < 1 || spd > 90))
+            return BadRequest(BuildError("VALIDATION.RANGE", "StalePendingThresholdDays must be between 1 and 90."));
+        if (request.Retention.ArchiveRetentionMonths is { } arm && (arm < 1 || arm > 120))
+            return BadRequest(BuildError("VALIDATION.RANGE", "ArchiveRetentionMonths must be between 1 and 120."));
+        if (request.Retention.OutboxCleanupDays is { } ocd && (ocd < 1 || ocd > 90))
+            return BadRequest(BuildError("VALIDATION.RANGE", "OutboxCleanupDays must be between 1 and 90."));
+        if (request.Retention.RawPayloadRetentionDays is { } rprd && (rprd < 1 || rprd > 365))
+            return BadRequest(BuildError("VALIDATION.RANGE", "RawPayloadRetentionDays must be between 1 and 365."));
+        if (request.Retention.AuditEventRetentionDays is { } aerd && (aerd < 30 || aerd > 2555))
+            return BadRequest(BuildError("VALIDATION.RANGE", "AuditEventRetentionDays must be between 30 and 2555."));
+        if (request.Retention.DeadLetterRetentionDays is { } dlrd && (dlrd < 1 || dlrd > 365))
+            return BadRequest(BuildError("VALIDATION.RANGE", "DeadLetterRetentionDays must be between 1 and 365."));
+
         var settings = await EnsureSettingsAsync(cancellationToken);
         var current = JsonSerializer.Deserialize<GlobalDefaultsDto>(settings.GlobalDefaultsJson, PortalJson.SerializerOptions)!;
 
-        settings.GlobalDefaultsJson = JsonSerializer.Serialize(new GlobalDefaultsDto
+        var newDefaults = new GlobalDefaultsDto
         {
             Tolerance = new ToleranceDefaultsDto
             {
@@ -71,10 +93,17 @@ public sealed class AdminSettingsController : PortalControllerBase
                 AuditEventRetentionDays = request.Retention.AuditEventRetentionDays ?? current.Retention.AuditEventRetentionDays,
                 DeadLetterRetentionDays = request.Retention.DeadLetterRetentionDays ?? current.Retention.DeadLetterRetentionDays
             }
-        }, PortalJson.SerializerOptions);
+        };
 
-        UpdateAuditFields(settings);
-        await _db.SaveChangesAsync(cancellationToken);
+        // F16-10: Skip write when nothing changed
+        var newJson = JsonSerializer.Serialize(newDefaults, PortalJson.SerializerOptions);
+        var currentJson = JsonSerializer.Serialize(current, PortalJson.SerializerOptions);
+        if (!string.Equals(currentJson, newJson, StringComparison.Ordinal))
+        {
+            settings.GlobalDefaultsJson = newJson;
+            UpdateAuditFields(settings);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         return Ok(await BuildResponseAsync(settings, access, cancellationToken));
     }
@@ -96,6 +125,16 @@ public sealed class AdminSettingsController : PortalControllerBase
         {
             return BadRequest(BuildError("VALIDATION.LEGAL_ENTITY_MISMATCH", "Path legalEntityId must match request body."));
         }
+
+        // F16-04: Numeric range validation
+        if (request.AmountTolerancePercent is { } pct && (pct < 0 || pct > 100))
+            return BadRequest(BuildError("VALIDATION.RANGE", "AmountTolerancePercent must be between 0 and 100."));
+        if (request.AmountToleranceAbsoluteMinorUnits is { } abs && abs < 0)
+            return BadRequest(BuildError("VALIDATION.RANGE", "AmountToleranceAbsoluteMinorUnits must be >= 0."));
+        if (request.TimeWindowMinutes is { } twm && (twm < 1 || twm > 60))
+            return BadRequest(BuildError("VALIDATION.RANGE", "TimeWindowMinutes must be between 1 and 60."));
+        if (request.StalePendingThresholdDays is { } spd && (spd < 1 || spd > 90))
+            return BadRequest(BuildError("VALIDATION.RANGE", "StalePendingThresholdDays must be between 1 and 90."));
 
         if (!access.CanAccess(legalEntityId))
         {
@@ -158,16 +197,18 @@ public sealed class AdminSettingsController : PortalControllerBase
             .IgnoreQueryFilters()
             .FirstOrDefaultAsync(item => item.LegalEntityId == legalEntityId, cancellationToken);
 
+        // F16-07: Only update audit trail when something was actually deleted
         if (overrideRow is not null)
         {
             _db.LegalEntitySettingsOverrides.Remove(overrideRow);
+            var settings = await EnsureSettingsAsync(cancellationToken);
+            UpdateAuditFields(settings);
+            await _db.SaveChangesAsync(cancellationToken);
+            return Ok(await BuildResponseAsync(settings, access, cancellationToken));
         }
 
-        var settings = await EnsureSettingsAsync(cancellationToken);
-        UpdateAuditFields(settings);
-        await _db.SaveChangesAsync(cancellationToken);
-
-        return Ok(await BuildResponseAsync(settings, access, cancellationToken));
+        var currentSettings = await EnsureSettingsAsync(cancellationToken);
+        return Ok(await BuildResponseAsync(currentSettings, access, cancellationToken));
     }
 
     [HttpPut("alerts")]
@@ -182,11 +223,24 @@ public sealed class AdminSettingsController : PortalControllerBase
             return Unauthorized();
         }
 
+        // F16-03: Server-side email validation
+        var invalidHigh = request.EmailRecipientsHigh.FirstOrDefault(e => !EmailPattern.IsMatch(e));
+        if (invalidHigh is not null)
+            return BadRequest(BuildError("VALIDATION.EMAIL", $"'{invalidHigh}' is not a valid email address in EmailRecipientsHigh."));
+        var invalidCritical = request.EmailRecipientsCritical.FirstOrDefault(e => !EmailPattern.IsMatch(e));
+        if (invalidCritical is not null)
+            return BadRequest(BuildError("VALIDATION.EMAIL", $"'{invalidCritical}' is not a valid email address in EmailRecipientsCritical."));
+
+        // F16-04: Alert threshold range validation
+        var invalidThreshold = request.Thresholds.FirstOrDefault(t => t.Threshold < 0 || t.EvaluationWindowMinutes < 1);
+        if (invalidThreshold is not null)
+            return BadRequest(BuildError("VALIDATION.RANGE", $"Alert '{invalidThreshold.AlertKey}': Threshold must be >= 0 and EvaluationWindowMinutes must be >= 1."));
+
         var settings = await EnsureSettingsAsync(cancellationToken);
         var current = JsonSerializer.Deserialize<AlertConfigurationDto>(settings.AlertConfigurationJson, PortalJson.SerializerOptions)!;
         var existingByKey = current.Thresholds.ToDictionary(item => item.AlertKey, StringComparer.OrdinalIgnoreCase);
 
-        settings.AlertConfigurationJson = JsonSerializer.Serialize(new AlertConfigurationDto
+        var newAlerts = new AlertConfigurationDto
         {
             Thresholds = request.Thresholds.Select(item =>
             {
@@ -204,10 +258,17 @@ public sealed class AdminSettingsController : PortalControllerBase
             EmailRecipientsCritical = request.EmailRecipientsCritical,
             RenotifyIntervalHours = request.RenotifyIntervalHours,
             AutoResolveHealthyCount = request.AutoResolveHealthyCount
-        }, PortalJson.SerializerOptions);
+        };
 
-        UpdateAuditFields(settings);
-        await _db.SaveChangesAsync(cancellationToken);
+        // F16-10: Skip write when nothing changed
+        var newJson = JsonSerializer.Serialize(newAlerts, PortalJson.SerializerOptions);
+        var currentJson = JsonSerializer.Serialize(current, PortalJson.SerializerOptions);
+        if (!string.Equals(currentJson, newJson, StringComparison.Ordinal))
+        {
+            settings.AlertConfigurationJson = newJson;
+            UpdateAuditFields(settings);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         return Ok(await BuildResponseAsync(settings, access, cancellationToken));
     }
@@ -238,7 +299,18 @@ public sealed class AdminSettingsController : PortalControllerBase
         };
 
         _db.PortalSettings.Add(settings);
-        await _db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // F16-06: Another concurrent request inserted the singleton row first; detach and read it.
+            _db.Entry(settings).State = EntityState.Detached;
+            settings = await _db.PortalSettings
+                .IgnoreQueryFilters()
+                .FirstAsync(item => item.Id == PortalSettingsConfiguration.SingletonId, cancellationToken);
+        }
         return settings;
     }
 
@@ -284,6 +356,9 @@ public sealed class AdminSettingsController : PortalControllerBase
             UpdatedBy = settings.UpdatedBy
         };
     }
+
+    private static readonly Regex EmailPattern =
+        new(@"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", RegexOptions.Compiled);
 
     private void UpdateAuditFields(PortalSettings settings)
     {

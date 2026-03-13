@@ -1,8 +1,6 @@
-using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Interfaces;
-using FccMiddleware.Domain.Models.Adapter;
 using FccMiddleware.Infrastructure.Events;
 using FccMiddleware.Infrastructure.Persistence;
 using FccMiddleware.Infrastructure.Workers;
@@ -18,7 +16,7 @@ public sealed class PreAuthExpiryWorkerTests
     [Fact]
     public async Task ExpireBatchAsync_ExpiresActiveRecords_AndWritesOutboxEvents()
     {
-        var services = BuildServices(new NoOpFccAdapterFactory(), new StaticSiteFccConfigProvider());
+        var services = BuildServices();
 
         using var scope = services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
@@ -60,12 +58,11 @@ public sealed class PreAuthExpiryWorkerTests
     }
 
     [Fact]
-    public async Task ExpireBatchAsync_DispensingRecord_AttemptsPumpDeauthorizationWhenAdapterSupportsIt()
+    public async Task ExpireBatchAsync_DispensingRecord_ExpiresWithoutDirectFccDeauth()
     {
-        var deauthAdapter = new FakePumpDeauthAdapter();
-        var services = BuildServices(
-            new SingleAdapterFactory(deauthAdapter),
-            new StaticSiteFccConfigProvider());
+        // PA-S05: Cloud no longer calls FCC directly for deauthorization.
+        // Deauth is delegated to the edge agent's local expiry mechanism.
+        var services = BuildServices();
 
         using var scope = services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
@@ -82,14 +79,15 @@ public sealed class PreAuthExpiryWorkerTests
         var expired = await worker.ExpireBatchAsync(CancellationToken.None);
 
         expired.Should().Be(1);
-        deauthAdapter.CallCount.Should().Be(1);
-        deauthAdapter.LastPumpNumber.Should().Be(record.PumpNumber);
-        deauthAdapter.LastNozzleNumber.Should().Be(record.NozzleNumber);
+
+        await db.Entry(record).ReloadAsync();
+        record.Status.Should().Be(PreAuthStatus.EXPIRED);
+
+        var outboxCount = await db.OutboxMessages.CountAsync(m => m.EventType == "PreAuthExpired");
+        outboxCount.Should().Be(1);
     }
 
-    private static ServiceProvider BuildServices(
-        IFccAdapterFactory adapterFactory,
-        ISiteFccConfigProvider siteFccConfigProvider)
+    private static ServiceProvider BuildServices()
     {
         var services = new ServiceCollection();
         var databaseName = Guid.NewGuid().ToString();
@@ -98,8 +96,6 @@ public sealed class PreAuthExpiryWorkerTests
         services.AddDbContext<FccMiddlewareDbContext>(opts =>
             opts.UseInMemoryDatabase(databaseName));
         services.AddScoped<IEventPublisher, OutboxEventPublisher>();
-        services.AddSingleton<IFccAdapterFactory>(adapterFactory);
-        services.AddSingleton<ISiteFccConfigProvider>(siteFccConfigProvider);
         services.AddLogging();
 
         return services.BuildServiceProvider();
@@ -133,82 +129,4 @@ public sealed class PreAuthExpiryWorkerTests
         public Guid? CurrentLegalEntityId => null;
     }
 
-    private sealed class StaticSiteFccConfigProvider : ISiteFccConfigProvider
-    {
-        public Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetBySiteCodeAsync(string siteCode, CancellationToken ct = default)
-        {
-            var legalEntityId = Guid.Parse("10000000-0000-0000-0000-000000000001");
-            return Task.FromResult<(SiteFccConfig Config, Guid LegalEntityId)?>((
-                new SiteFccConfig
-                {
-                    SiteCode = siteCode,
-                    FccVendor = FccVendor.DOMS,
-                    ConnectionProtocol = ConnectionProtocol.REST,
-                    HostAddress = "127.0.0.1",
-                    Port = 8080,
-                    ApiKey = string.Empty,
-                    IngestionMethod = IngestionMethod.PUSH,
-                    CurrencyCode = "GHS",
-                    Timezone = "Africa/Accra"
-                },
-                legalEntityId));
-        }
-
-        public Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByUsnCodeAsync(int usnCode, CancellationToken ct = default)
-            => Task.FromResult<(SiteFccConfig Config, Guid LegalEntityId)?>(null);
-
-        public Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByWebhookSecretAsync(string webhookSecret, CancellationToken ct = default)
-            => Task.FromResult<(SiteFccConfig Config, Guid LegalEntityId)?>(null);
-
-        public Task<(SiteFccConfig Config, Guid LegalEntityId)?> GetByAdvatecWebhookTokenAsync(string webhookToken, CancellationToken ct = default)
-            => Task.FromResult<(SiteFccConfig Config, Guid LegalEntityId)?>(null);
-    }
-
-    private sealed class NoOpFccAdapterFactory : IFccAdapterFactory
-    {
-        public IFccAdapter Resolve(FccVendor vendor, SiteFccConfig config) => new NoOpAdapter();
-    }
-
-    private sealed class SingleAdapterFactory : IFccAdapterFactory
-    {
-        private readonly IFccAdapter _adapter;
-
-        public SingleAdapterFactory(IFccAdapter adapter)
-        {
-            _adapter = adapter;
-        }
-
-        public IFccAdapter Resolve(FccVendor vendor, SiteFccConfig config) => _adapter;
-    }
-
-    private class NoOpAdapter : IFccAdapter
-    {
-        public CanonicalTransaction NormalizeTransaction(RawPayloadEnvelope rawPayload) => throw new NotSupportedException();
-        public ValidationResult ValidatePayload(RawPayloadEnvelope rawPayload) => ValidationResult.Ok();
-        public Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public AdapterInfo GetAdapterMetadata() => new()
-        {
-            Vendor = FccVendor.DOMS,
-            AdapterVersion = "test",
-            SupportedIngestionMethods = [IngestionMethod.PUSH],
-            SupportsPreAuth = false,
-            SupportsPumpStatus = false,
-            Protocol = "REST"
-        };
-    }
-
-    private sealed class FakePumpDeauthAdapter : NoOpAdapter, IFccPumpDeauthorizationAdapter
-    {
-        public int CallCount { get; private set; }
-        public int? LastPumpNumber { get; private set; }
-        public int? LastNozzleNumber { get; private set; }
-
-        public Task DeauthorizePumpAsync(int pumpNumber, int? nozzleNumber, CancellationToken cancellationToken = default)
-        {
-            CallCount++;
-            LastPumpNumber = pumpNumber;
-            LastNozzleNumber = nozzleNumber;
-            return Task.CompletedTask;
-        }
-    }
 }

@@ -47,4 +47,44 @@ internal static class PortalCursor
             return false;
         }
     }
+
+    public static string EncodeKeyset(string sortValue, Guid id)
+    {
+        var raw = $"{sortValue}|{id}";
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(raw))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+    }
+
+    public static bool TryDecodeKeyset(string? cursor, out string sortValue, out Guid id)
+    {
+        sortValue = string.Empty;
+        id = default;
+
+        if (string.IsNullOrWhiteSpace(cursor))
+        {
+            return false;
+        }
+
+        try
+        {
+            var padded = cursor.Replace('-', '+').Replace('_', '/');
+            padded += (padded.Length % 4) switch { 2 => "==", 3 => "=", _ => string.Empty };
+
+            var raw = Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+            var separatorIndex = raw.LastIndexOf('|');
+            if (separatorIndex < 0)
+            {
+                return false;
+            }
+
+            sortValue = raw[..separatorIndex];
+            return Guid.TryParse(raw[(separatorIndex + 1)..], out id);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

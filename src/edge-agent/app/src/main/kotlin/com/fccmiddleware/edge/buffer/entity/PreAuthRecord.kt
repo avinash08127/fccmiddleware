@@ -4,6 +4,7 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 
 /**
  * Pre-authorization record stored locally on the Edge Agent.
@@ -65,7 +66,7 @@ data class PreAuthRecord(
 
     /** PreAuthStatus: PENDING | AUTHORIZED | DISPENSING | COMPLETED | EXPIRED | CANCELLED | FAILED */
     @ColumnInfo(name = "status")
-    val status: String = "PENDING",
+    val status: PreAuthStatus = PreAuthStatus.PENDING,
 
     @ColumnInfo(name = "fcc_correlation_id")
     val fccCorrelationId: String?,

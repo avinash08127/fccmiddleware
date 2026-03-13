@@ -49,8 +49,10 @@ export interface ReconciliationRecord {
   actualAmount: number | null;
   /** Variance in minor units (actualAmount − requestedAmount). Null when unmatched. */
   amountVariance: number | null;
-  /** Variance in basis points. Null when unmatched. */
+  /** Legacy compatibility field in basis points. Prefer variancePercent for display. */
   varianceBps: number | null;
+  /** Variance as a percentage value (e.g. 2.5 means 2.5%). */
+  variancePercent: number | null;
   /** Which matching step resolved this record. */
   matchMethod: string | null;
   /** True when multiple candidates were found and a tie-break was applied. */
@@ -86,8 +88,10 @@ export interface ReconciliationException {
   requestedAmount: number | null;
   actualAmount: number | null;
   amountVariance: number | null;
-  /** Variance in basis points (1 bps = 0.01%). */
+  /** Legacy compatibility field in basis points (1 bps = 0.01%). Prefer variancePercent for display. */
   varianceBps: number | null;
+  /** Variance as a percentage value (e.g. 2.5 means 2.5%). */
+  variancePercent: number | null;
   /** Which matching step resolved this record (e.g. EXACT_CORRELATION_ID). */
   matchMethod: string | null;
   /** True when multiple candidates were found and a tie-break was applied. */

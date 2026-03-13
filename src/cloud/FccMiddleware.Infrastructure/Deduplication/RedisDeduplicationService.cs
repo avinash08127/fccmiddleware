@@ -71,8 +71,25 @@ public sealed class RedisDeduplicationService : IDeduplicationService
         }
         catch (Exception ex)
         {
-            // Non-fatal: DB is the source of truth
-            _logger.LogWarning(ex, "Failed to set dedup cache for {FccTransactionId}", fccTransactionId);
+            // Retry once to narrow the window where a transient Redis blip
+            // leaves the cache un-populated (callers fall back to the slower DB path).
+            _logger.LogWarning(ex, "Failed to set dedup cache for {FccTransactionId}; retrying once", fccTransactionId);
+            try
+            {
+                var db = _redis.GetDatabase();
+                var cacheKey = BuildCacheKey(fccTransactionId, siteCode);
+                await db.StringSetAsync(
+                    cacheKey,
+                    transactionId.ToString(),
+                    TimeSpan.FromDays(dedupWindowDays));
+            }
+            catch (Exception retryEx)
+            {
+                // Non-fatal: DB is the source of truth; cache miss will use DB fallback path
+                _logger.LogWarning(retryEx,
+                    "Retry also failed to set dedup cache for {FccTransactionId}; DB fallback active",
+                    fccTransactionId);
+            }
         }
     }
 

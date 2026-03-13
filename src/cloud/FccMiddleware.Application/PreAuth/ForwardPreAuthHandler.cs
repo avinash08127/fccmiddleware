@@ -45,17 +45,11 @@ public sealed class ForwardPreAuthHandler
         ForwardPreAuthCommand command,
         CancellationToken cancellationToken)
     {
-        // ── Step 1: Dedup lookup on (odooOrderId, siteCode) ────────────────────
-        var existing = await _db.FindByDedupKeyAsync(
-            command.OdooOrderId, command.SiteCode, cancellationToken);
-
-        if (existing is not null && !IsTerminal(existing.Status))
-        {
-            // Existing non-terminal record — attempt status transition
-            return await UpdateExistingAsync(existing, command, cancellationToken);
-        }
-
-        // Terminal record or no record → create new
+        // ── Optimistic path: attempt insert first (PA-P06 optimization). ───────
+        // The common case is a new pre-auth, which completes in a single DB
+        // round-trip. The filtered unique index ix_preauth_idemp causes a
+        // constraint violation when a non-terminal duplicate exists, triggering
+        // the fallback path below.
         return await CreateNewAsync(command, cancellationToken);
     }
 
@@ -192,15 +186,22 @@ public sealed class ForwardPreAuthHandler
         }
         catch (Exception ex) when (IsUniqueConstraintViolation(ex))
         {
-            // Race condition: concurrent request inserted the same (odooOrderId, siteCode).
+            // Constraint violation: an existing non-terminal record exists.
+            // Fall back to lookup + update (PA-P06: this is the rare path).
             _db.ClearTracked();
 
             _logger.LogInformation(
-                "Unique constraint race on pre-auth {OdooOrderId}/{SiteCode}; falling back to lookup.",
+                "Unique constraint on pre-auth {OdooOrderId}/{SiteCode}; falling back to lookup + update.",
                 command.OdooOrderId, command.SiteCode);
 
             var raceExisting = await _db.FindByDedupKeyAsync(
                 command.OdooOrderId, command.SiteCode, cancellationToken);
+
+            if (raceExisting is not null && !IsTerminal(raceExisting.Status))
+            {
+                // Existing non-terminal record — attempt status transition
+                return await UpdateExistingAsync(raceExisting, command, cancellationToken);
+            }
 
             if (raceExisting is not null)
             {

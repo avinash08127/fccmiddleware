@@ -50,26 +50,21 @@ public sealed class PreAuthHandler : IPreAuthHandler
         var now = DateTimeOffset.UtcNow;
         var config = _config.Value;
 
-        // ── Step 1: Local dedup check ─────────────────────────────────────────
-        // Fetch tracked (not AsNoTracking) so we can update in-place for terminal re-requests.
-        var existing = await _db.PreAuths
-            .FirstOrDefaultAsync(
-                p => p.OdooOrderId == request.OdooOrderId && p.SiteCode == request.SiteCode,
-                ct);
+        // ── Step 1: Local dedup check (AsNoTracking — common path is read-only) ──
+        var existingRecords = await _db.PreAuths
+            .AsNoTracking()
+            .Where(p => p.OdooOrderId == request.OdooOrderId && p.SiteCode == request.SiteCode)
+            .OrderByDescending(p => p.CreatedAt)
+            .ToListAsync(ct);
 
-        if (existing is not null)
+        var existingActive = existingRecords.FirstOrDefault(p => PreAuthStateMachine.IsActive(p.Status));
+
+        if (existingActive is not null)
         {
-            bool isNonTerminal = existing.Status is
-                PreAuthStatus.Pending or PreAuthStatus.Authorized or PreAuthStatus.Dispensing;
-
-            if (isNonTerminal)
-            {
-                _logger.LogInformation(
-                    "Pre-auth dedup hit: returning existing record {Id} (status={Status}) for order {OrderId}",
-                    existing.Id, existing.Status, request.OdooOrderId);
-                return PreAuthHandlerResult.Ok(existing);
-            }
-            // Terminal status (Completed/Cancelled/Expired/Failed) — fall through to re-process
+            _logger.LogInformation(
+                "Pre-auth dedup hit: returning existing record {Id} (status={Status}) for order {OrderId}",
+                existingActive.Id, existingActive.Status, request.OdooOrderId);
+            return PreAuthHandlerResult.Ok(existingActive);
         }
 
         // ── Step 2: Nozzle mapping lookup ─────────────────────────────────────
@@ -122,19 +117,9 @@ public sealed class PreAuthHandler : IPreAuthHandler
         }
 
         // ── Step 4: Create new record with Pending status ────────────────────
-        // When a terminal record exists for the same order, delete it first so the unique
-        // index (OdooOrderId, SiteCode) allows the new insert. The terminal record's data
-        // has already been forwarded to cloud (or queued for sync), preserving the audit trail.
+        // Terminal history is preserved. The partial unique index only blocks coexistence
+        // of multiple active records for the same (OdooOrderId, SiteCode).
         // Persist BEFORE the FCC call so the record is never lost even if the process crashes mid-call.
-        if (existing is not null)
-        {
-            _logger.LogInformation(
-                "Removing terminal pre-auth {Id} (status={OldStatus}) before re-request on order {OrderId}",
-                existing.Id, existing.Status, request.OdooOrderId);
-            _db.PreAuths.Remove(existing);
-            await _db.SaveChangesAsync(ct);
-        }
-
         var record = new PreAuthEntity { Id = Guid.NewGuid().ToString() };
         _db.PreAuths.Add(record);
 
@@ -249,9 +234,19 @@ public sealed class PreAuthHandler : IPreAuthHandler
             "Pre-auth {Id} for order {OrderId}: status={Status} authCode={Code}",
             preAuthId, request.OdooOrderId, record.Status, record.FccAuthorizationCode);
 
-        return fccResult.Accepted
-            ? PreAuthHandlerResult.Ok(record)
-            : PreAuthHandlerResult.Fail(PreAuthHandlerError.FccDeclined, fccResult.ErrorMessage);
+        if (fccResult.Accepted)
+            return PreAuthHandlerResult.Ok(record);
+
+        // PA-S04: Log the detailed FCC error message server-side; return only the
+        // generic error code to the caller to avoid leaking FCC implementation details.
+        if (!string.IsNullOrWhiteSpace(fccResult.ErrorMessage))
+            _logger.LogWarning(
+                "Pre-auth {Id} FCC declined detail: {Detail}",
+                preAuthId, fccResult.ErrorMessage);
+
+        return PreAuthHandlerResult.Fail(
+            PreAuthHandlerError.FccDeclined,
+            fccResult.ErrorCode ?? "FCC_DECLINED");
     }
 
     // ── CancelAsync ───────────────────────────────────────────────────────────
@@ -260,10 +255,13 @@ public sealed class PreAuthHandler : IPreAuthHandler
     public async Task<PreAuthHandlerResult> CancelAsync(
         string odooOrderId, string siteCode, CancellationToken ct)
     {
-        var record = await _db.PreAuths
-            .FirstOrDefaultAsync(
-                p => p.OdooOrderId == odooOrderId && p.SiteCode == siteCode,
-                ct);
+        var records = await _db.PreAuths
+            .Where(p => p.OdooOrderId == odooOrderId && p.SiteCode == siteCode)
+            .OrderByDescending(p => p.CreatedAt)
+            .ToListAsync(ct);
+
+        var record = records.FirstOrDefault(r => PreAuthStateMachine.IsActive(r.Status))
+            ?? records.FirstOrDefault();
 
         if (record is null)
         {
@@ -285,7 +283,7 @@ public sealed class PreAuthHandler : IPreAuthHandler
                 "Cannot cancel a pre-auth while the pump is actively dispensing");
         }
 
-        if (record.Status is not (PreAuthStatus.Pending or PreAuthStatus.Authorized))
+        if (PreAuthStateMachine.IsTerminal(record.Status))
         {
             // Already in a terminal state — idempotent return
             _logger.LogInformation(
@@ -313,13 +311,15 @@ public sealed class PreAuthHandler : IPreAuthHandler
     public async Task<int> RunExpiryCheckAsync(CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
+        var activeStatuses = PreAuthStateMachine.ActiveStatuses;
 
+        var batchSize = _config.Value.PreAuthExpiryBatchSize;
         var expired = await _db.PreAuths
             .Where(p =>
-                (p.Status == PreAuthStatus.Pending
-                 || p.Status == PreAuthStatus.Authorized
-                 || p.Status == PreAuthStatus.Dispensing)
+                activeStatuses.Contains(p.Status)
                 && p.ExpiresAt < now)
+            .OrderBy(p => p.ExpiresAt)
+            .Take(batchSize)
             .ToListAsync(ct);
 
         if (expired.Count == 0)

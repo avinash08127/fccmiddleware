@@ -4,6 +4,11 @@ import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Runtime configuration for [PreAuthCloudForwardWorker].
@@ -17,6 +22,13 @@ data class PreAuthCloudForwardWorkerConfig(
 
     /** Maximum backoff delay in milliseconds (60 seconds). */
     val maxBackoffMs: Long = 60_000L,
+
+    /**
+     * PA-P04: Maximum number of concurrent HTTP forward calls within one cycle.
+     * Bounded parallelism reduces drain time for large backlogs without
+     * overwhelming the cloud endpoint. Default 3.
+     */
+    val maxConcurrency: Int = 3,
 )
 
 /**
@@ -75,11 +87,13 @@ class PreAuthCloudForwardWorker(
     // -------------------------------------------------------------------------
 
     /**
-     * Forward unsynced pre-auth records to cloud in chronological order.
+     * Forward unsynced pre-auth records to cloud with bounded concurrency.
      *
-     * Each record is forwarded individually (not batched) because the cloud
-     * endpoint accepts a single pre-auth per call. On any transport failure,
-     * the worker stops processing the remaining batch and applies backoff.
+     * PA-P04: Records are forwarded in parallel (up to [PreAuthCloudForwardWorkerConfig.maxConcurrency]
+     * concurrent HTTP calls) to reduce drain time for large backlogs after connectivity restoration.
+     * Each record is still forwarded individually because the cloud endpoint accepts a single
+     * pre-auth per call. On any transport failure all remaining unstarted work is skipped and
+     * backoff is applied.
      */
     suspend fun forwardUnsyncedPreAuths() {
         val dao = preAuthDao ?: run {
@@ -122,59 +136,72 @@ class PreAuthCloudForwardWorker(
             return
         }
 
-        for (record in unsynced) {
-            if (record.unitPrice == null) {
-                // M-20: Legacy records with null unitPrice can never be forwarded.
-                // Mark as cloud-synced so they don't stay in the unsynced queue forever.
-                val attemptNow = Instant.now().toString()
-                dao.markCloudSynced(record.id, attemptNow)
-                AppLogger.w(
-                    TAG,
-                    "Pre-auth ${record.odooOrderId} marked as synced (incomplete): unitPrice is missing " +
-                        "for a legacy local record — record will not be forwarded to cloud.",
-                )
-                continue
-            }
+        val semaphore = Semaphore(config.maxConcurrency)
+        // PA-P04: shared stop flag — set by the first failure to skip remaining unstarted records.
+        val shouldStop = AtomicBoolean(false)
 
-            val result = doForward(client, provider, record, token)
-            when (result) {
-                is ForwardAttemptResult.Success -> {
+        coroutineScope {
+            for (record in unsynced) {
+                if (shouldStop.get()) break
+
+                if (record.unitPrice == null) {
+                    // M-20: Legacy records with null unitPrice can never be forwarded.
+                    // Mark as cloud-synced so they don't stay in the unsynced queue forever.
                     val attemptNow = Instant.now().toString()
                     dao.markCloudSynced(record.id, attemptNow)
-                    circuitBreaker.recordSuccess()
-                    AppLogger.i(TAG, "Pre-auth ${record.odooOrderId} forwarded to cloud")
-                }
-
-                is ForwardAttemptResult.RateLimited -> {
-                    val retryAfter = result.retryAfterSeconds
-                    if (retryAfter != null) {
-                        circuitBreaker.setBackoffSeconds(retryAfter)
-                        AppLogger.w(TAG, "Pre-auth forward rate limited (429); backing off for ${retryAfter}s")
-                    } else {
-                        val backoffMs = circuitBreaker.recordFailure()
-                        AppLogger.w(TAG, "Pre-auth forward rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
-                    }
-                    return
-                }
-
-                is ForwardAttemptResult.Decommissioned -> {
-                    AppLogger.e(TAG, "DEVICE DECOMMISSIONED during pre-auth forward. All sync stopped.")
-                    provider.markDecommissioned()
-                    return
-                }
-
-                is ForwardAttemptResult.TransportFailure -> {
-                    val attemptNow = Instant.now().toString()
-                    dao.recordCloudSyncFailure(record.id, attemptNow)
-                    val backoffMs = circuitBreaker.recordFailure()
                     AppLogger.w(
                         TAG,
-                        "Pre-auth forward failed (failure #${circuitBreaker.consecutiveFailureCount}, " +
-                            "state=${circuitBreaker.state}); next retry after ${backoffMs}ms. " +
-                            "Error: ${result.message}",
+                        "Pre-auth ${record.odooOrderId} marked as synced (incomplete): unitPrice is missing " +
+                            "for a legacy local record — record will not be forwarded to cloud.",
                     )
-                    // Stop processing remaining records — retry on next cycle
-                    return
+                    continue
+                }
+
+                launch {
+                    semaphore.withPermit {
+                        if (shouldStop.get()) return@withPermit
+
+                        val result = doForward(client, provider, record, token)
+                        when (result) {
+                            is ForwardAttemptResult.Success -> {
+                                val attemptNow = Instant.now().toString()
+                                dao.markCloudSynced(record.id, attemptNow)
+                                circuitBreaker.recordSuccess()
+                                AppLogger.i(TAG, "Pre-auth ${record.odooOrderId} forwarded to cloud")
+                            }
+
+                            is ForwardAttemptResult.RateLimited -> {
+                                val retryAfter = result.retryAfterSeconds
+                                if (retryAfter != null) {
+                                    circuitBreaker.setBackoffSeconds(retryAfter)
+                                    AppLogger.w(TAG, "Pre-auth forward rate limited (429); backing off for ${retryAfter}s")
+                                } else {
+                                    val backoffMs = circuitBreaker.recordFailure()
+                                    AppLogger.w(TAG, "Pre-auth forward rate limited (429); no Retry-After, using backoff ${backoffMs}ms")
+                                }
+                                shouldStop.set(true)
+                            }
+
+                            is ForwardAttemptResult.Decommissioned -> {
+                                AppLogger.e(TAG, "DEVICE DECOMMISSIONED during pre-auth forward. All sync stopped.")
+                                provider.markDecommissioned()
+                                shouldStop.set(true)
+                            }
+
+                            is ForwardAttemptResult.TransportFailure -> {
+                                val attemptNow = Instant.now().toString()
+                                dao.recordCloudSyncFailure(record.id, attemptNow)
+                                val backoffMs = circuitBreaker.recordFailure()
+                                AppLogger.w(
+                                    TAG,
+                                    "Pre-auth forward failed (failure #${circuitBreaker.consecutiveFailureCount}, " +
+                                        "state=${circuitBreaker.state}); next retry after ${backoffMs}ms. " +
+                                        "Error: ${result.message}",
+                                )
+                                shouldStop.set(true)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -267,7 +294,7 @@ class PreAuthCloudForwardWorker(
             requestedAmount = requestedAmountMinorUnits,
             unitPrice = requireNotNull(unitPrice),
             currency = currencyCode,
-            status = status,
+            status = status.name,
             requestedAt = requestedAt,
             expiresAt = expiresAt,
             fccCorrelationId = fccCorrelationId,

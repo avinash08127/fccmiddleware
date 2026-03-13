@@ -44,11 +44,11 @@ public sealed class ReviewReconciliationHandler
                 $"reason must be at least {ReviewReconciliationCommand.MinimumReasonLength} characters.");
         }
 
-        if (reason.Length > 1000)
+        if (reason.Length > ReviewReconciliationCommand.MaximumReasonLength)
         {
             return Result<ReviewReconciliationResult>.Failure(
                 "VALIDATION.REASON_TOO_LONG",
-                "Reason must not exceed 1000 characters.");
+                $"reason must not exceed {ReviewReconciliationCommand.MaximumReasonLength} characters.");
         }
 
         var record = await _db.FindByIdAsync(request.ReconciliationId, cancellationToken);
@@ -116,7 +116,13 @@ public sealed class ReviewReconciliationHandler
             });
         }
 
-        await _db.SaveChangesAsync(cancellationToken);
+        var saved = await _db.TrySaveChangesAsync(cancellationToken);
+        if (!saved)
+        {
+            return Result<ReviewReconciliationResult>.Failure(
+                "CONFLICT.RACE_CONDITION",
+                "The reconciliation record was already reviewed by another user. Refresh and try again.");
+        }
 
         return Result<ReviewReconciliationResult>.Success(new ReviewReconciliationResult(
             record.Id,

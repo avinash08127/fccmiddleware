@@ -58,6 +58,7 @@ public sealed class DecommissionDeviceHandler
                 DeviceId = device.Id,
                 SiteCode = device.SiteCode,
                 DecommissionedBy = request.DecommissionedBy,
+                Reason = request.Reason, // FM-S04: Audit reason for traceability
                 RevokedTokenCount = tokens.Count,
                 DeactivatedAt = now,
             })

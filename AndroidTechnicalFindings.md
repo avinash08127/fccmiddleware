@@ -403,3 +403,323 @@
 | **Evidence** | `buffer/TransactionBufferManager.kt` lines 216–223: `SyncStatus.entries.firstOrNull { ... } ?: SyncStatus.PENDING`. |
 | **Impact** | Minor: telemetry PENDING count may be inflated if unknown status strings exist. Operators may see false upload backlog warnings. |
 | **Recommended Fix** | Log a warning when the fallback to PENDING is triggered: `AppLogger.w(TAG, "Unknown sync_status '${row.syncStatus}' mapped to PENDING")`. Consider using a dedicated `UNKNOWN` status or excluding unrecognized statuses from the count. |
+
+---
+
+## AT-034: HttpCloudApiClient Catches All Exception Including CancellationException — Breaks Structured Concurrency
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-034 |
+| **Title** | Every CloudApiClient method swallows CancellationException — prevents proper coroutine cancellation during service shutdown |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Medium |
+| **Category** | Weak Error Handling |
+| **Description** | All 9 suspend methods in `HttpCloudApiClient` (`uploadBatch`, `getSyncedStatus`, `getConfig`, `submitTelemetry`, `forwardPreAuth`, `registerDevice`, `refreshToken`, `checkVersion`, `submitDiagnosticLogs`) wrap their HTTP calls in `try { ... } catch (e: Exception) { ... TransportError(e.message) }`. In Kotlin, `CancellationException` is a subclass of `IllegalStateException` which extends `Exception`, so this catch block intercepts coroutine cancellation. When `EdgeAgentForegroundService` stops and cancels `serviceScope`, all in-flight HTTP calls are cancelled by Ktor's coroutine scope. The `CancellationException` is caught, wrapped in a `TransportError` result, and returned to the caller. The caller (`CloudUploadWorker`, `ConfigPollWorker`, etc.) processes this as a normal transport failure — recording circuit breaker failures, incrementing backoff counters, and potentially updating telemetry error counts — instead of propagating the cancellation. This is the same pattern identified in AT-024 for `IngestionOrchestrator.doPoll()`, but affects ALL cloud communication paths. No `CancellationException` handling exists anywhere in the `sync/` package — a grep for `CancellationException` in the sync directory returns zero results. |
+| **Evidence** | `sync/CloudApiClient.kt` lines 292, 351, 428, 464, 509, 539, 568, 596: `catch (e: Exception)` in every method. Grep for `CancellationException` in `sync/`: 0 results. Compare with `ingestion/IngestionOrchestrator.kt` line 454: correct `CancellationException` handling. |
+| **Impact** | During service shutdown: (a) circuit breaker failure counts are incremented by phantom "failures" that are actually cancellations; (b) false error logs ("Upload failed", "Telemetry submission failed") appear in diagnostics; (c) `SyncState` may be written after the service lifecycle ends (the cancelled coroutine completes its error-handling path including DB writes); (d) telemetry error counters are inflated by cancellation events. |
+| **Recommended Fix** | Add `CancellationException` re-throw before the general `Exception` catch in each method: `catch (e: CancellationException) { throw e } catch (e: Exception) { ... TransportError(...) }`. Alternatively, create a shared inline function: `private inline fun <T> safeApiCall(block: () -> T, onError: (Exception) -> T): T = try { block() } catch (e: CancellationException) { throw e } catch (e: Exception) { onError(e) }`. |
+
+---
+
+## AT-035: CloudUploadWorker SyncState Updates Use Read-Modify-Write Without @Transaction — Concurrent Field Clobber Risk
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-035 |
+| **Title** | updateLastUploadAt and updateLastStatusPollAt read-modify-write the full SyncState row without Room @Transaction — concurrent workers may lose field updates |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Medium |
+| **Category** | Weak Error Handling |
+| **Description** | `CloudUploadWorker.updateLastUploadAt()` (lines 879–899) and `updateLastStatusPollAt()` (lines 545–564) both follow the pattern: `val current = dao.get(); val updated = current?.copy(field = value); dao.upsert(updated)`. This read-modify-write is NOT wrapped in a Room `@Transaction`. Between the `get()` and `upsert()`, another coroutine can modify `SyncState`: (a) `TelemetryReporter.nextSequenceNumber()` increments `telemetrySequence` inside a `@Transaction` — but the upload worker's subsequent `upsert()` writes the stale `telemetrySequence` value from its earlier `get()`, rolling back the increment. (b) `ConfigPollWorker.updateSyncState()` (same pattern, reported in AT-033) can update `lastConfigVersion` and `lastConfigPullAt` — if it runs between the upload worker's `get()` and `upsert()`, the config worker's changes are overwritten. (c) `IngestionOrchestrator.advanceCursor()` can update `lastFccCursor` (reported in AF-003). All three workers run on the shared Koin `CoroutineScope(Dispatchers.IO)` and are triggered from `CadenceController.runTick()` — while they execute sequentially within a single tick, connectivity recovery (`onTransition → FULLY_ONLINE`) triggers multiple workers concurrently at lines 350–355. |
+| **Evidence** | `sync/CloudUploadWorker.kt` lines 879–899: `updateLastUploadAt()` — no `@Transaction`. Lines 545–564: `updateLastStatusPollAt()` — no `@Transaction`. `sync/TelemetryReporter.kt` lines 347–354: `nextSequenceNumber()` — uses `@Transaction` on `SyncStateDao`. `runtime/CadenceController.kt` lines 341–356: `onTransition(FULLY_ONLINE)` triggers upload, forward, status poll, and telemetry concurrently in a single `scope.launch`. |
+| **Impact** | On connectivity recovery (the highest-risk window): `telemetrySequence` may be rolled back, causing duplicate sequence numbers in telemetry — the cloud dedup on `(deviceId, sequenceNumber)` will discard the duplicate, losing telemetry data. `lastConfigVersion` may be rolled back, causing the next config poll to re-fetch an already-applied config version. |
+| **Recommended Fix** | Replace read-modify-write with atomic column-level UPDATE queries in `SyncStateDao`: `@Query("UPDATE sync_state SET last_upload_at = :now, updated_at = :now WHERE id = 1") suspend fun updateUploadAt(now: String)` and `@Query("UPDATE sync_state SET last_status_poll_at = :now, updated_at = :now WHERE id = 1") suspend fun updateStatusPollAt(now: String)`. Use `INSERT OR IGNORE` to create the initial row if needed. This eliminates the read step entirely and prevents field clobbering. |
+
+---
+
+## AT-036: TelemetryReporter Queries oldestPendingCreatedAt Twice Per Telemetry Cycle
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-036 |
+| **Title** | collectBufferStatus and collectSyncStatus both independently query transactionDao.oldestPendingCreatedAt() — redundant database round-trip |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Low |
+| **Category** | Duplicated Logic |
+| **Description** | `TelemetryReporter.buildPayload()` calls `collectBufferStatus()` (line 121) and `collectSyncStatus(cfg)` (line 122) sequentially. Both methods independently query `transactionDao.oldestPendingCreatedAt()`: `collectBufferStatus()` at line 250 stores the result in `oldestPendingAtUtc` for the `BufferStatusDto.oldestPendingAtUtc` field. `collectSyncStatus()` at line 290 queries the same value again to compute `syncLagSeconds` (lines 294–303). The two queries may return different values if a new PENDING record is inserted between them (unlikely but possible), creating an inconsistency where the buffer's `oldestPendingAtUtc` does not match the sync lag calculation. More importantly, this is an unnecessary database round-trip that adds latency to the telemetry payload assembly. |
+| **Evidence** | `sync/TelemetryReporter.kt` line 250: `transactionDao.oldestPendingCreatedAt()` in `collectBufferStatus()`. Line 290: `transactionDao.oldestPendingCreatedAt()` in `collectSyncStatus()`. |
+| **Impact** | Minor: one extra SQLite query per telemetry cycle (~1ms). Potential data inconsistency between buffer and sync sections of the telemetry payload. |
+| **Recommended Fix** | Query `oldestPendingCreatedAt()` once in `buildPayload()` and pass the result to both `collectBufferStatus()` and `collectSyncStatus()` as a parameter. |
+
+---
+
+## AT-037: BufferStatusDto Telemetry Omits DEAD_LETTER and ARCHIVED Breakdown — Cloud Cannot Detect Permanent Data Loss
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-037 |
+| **Title** | Telemetry buffer stats only track PENDING, UPLOADED, SYNCED_TO_ODOO, and FAILED — DEAD_LETTER and ARCHIVED counts are invisible |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Medium |
+| **Category** | Weak Error Handling |
+| **Description** | `TelemetryReporter.collectBufferStatus()` queries `transactionDao.countByStatus()` which returns counts grouped by all sync_status values (including DEAD_LETTER and ARCHIVED). However, the method only extracts four specific statuses: `PENDING` (line 243), `UPLOADED` (line 244), `SYNCED_TO_ODOO` (line 245), and `FAILED` (line 246). The `totalRecords` sum (line 247) includes all statuses, so DEAD_LETTER and ARCHIVED records ARE counted in the total but are NOT broken out individually. The `BufferStatusDto` schema has `fiscalPendingCount` and `fiscalDeadLetterCount` fields for fiscal-specific statuses, but no `deadLetterCount` or `archivedCount` field for upload dead letters. DEAD_LETTER records represent transactions permanently lost from the sync pipeline (after 20 failed upload attempts, per GAP-1). The cloud has no way to detect this data loss through telemetry — the total records count includes dead letters, but they appear as part of the aggregate, indistinguishable from legitimate records. If 500 out of 1000 total records are DEAD_LETTER, the cloud sees `totalRecords=1000, pendingUploadCount=500` and assumes a large upload backlog, when in reality half the records are permanently unrecoverable. Additionally, the `FAILED` status (line 246) does not appear to be used by any DAO query or state machine — the actual failed-upload status is `DEAD_LETTER`, making `failedCount` always 0. |
+| **Evidence** | `sync/TelemetryReporter.kt` lines 242–247: only PENDING, UPLOADED, SYNCED_TO_ODOO, FAILED extracted. `sync/CloudApiModels.kt` lines 238–249: `BufferStatusDto` — no `deadLetterCount` or `archivedCount` field. `buffer/dao/TransactionBufferDao.kt` lines 163–168: `countByStatus()` returns all statuses including DEAD_LETTER. |
+| **Impact** | Cloud monitoring cannot detect permanent transaction data loss. DEAD_LETTER accumulation (indicating a systemic upload issue) is invisible in telemetry. Operators cannot distinguish between a healthy backlog and a failing pipeline. |
+| **Recommended Fix** | Add `deadLetterCount` and `archivedCount` fields to `BufferStatusDto`. Extract them from the `countMap`: `deadLetterCount = countMap["DEAD_LETTER"] ?: 0, archivedCount = countMap["ARCHIVED"] ?: 0`. Remove or rename `failedCount` if it is not used by any status. Add a cloud-side alert rule: if `deadLetterCount > 0`, trigger an operator notification. |
+
+---
+
+## AT-038: CleanupWorker Not Wired to CadenceController Despite Class KDoc Claiming It Is
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-038 |
+| **Title** | CleanupWorker class documentation says "Invoked by CadenceController" but no wiring exists — code-doc divergence |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Medium |
+| **Category** | Architecture Violations |
+| **Description** | `CleanupWorker`'s class-level KDoc at `buffer/CleanupWorker.kt` lines 14–17 states: "Invoked by [com.fccmiddleware.edge.runtime.CadenceController] on a configurable interval (default: 24 h, from `buffer.cleanupIntervalHours` in site config)." This documentation is incorrect — `CadenceController` does not import, inject, or reference `CleanupWorker` anywhere. The class has a complete, well-tested implementation with retention-based cleanup, quota enforcement, disk space monitoring, and stale-UPLOADED reversion. The test file `CleanupWorkerTest.kt` exercises all code paths. But the runtime wiring that would connect this implementation to the cadence loop was never added. This is a code-documentation divergence that goes beyond a stale comment — it indicates a missing integration step in the development process. The `CadenceController` constructor accepts 11 nullable parameters for various workers (lines 49–68) but `CleanupWorker` is not among them. The `CadenceConfig` data class defines tick frequencies for sync, telemetry, and config poll, but not for cleanup. This suggests CleanupWorker integration was planned but not completed. |
+| **Evidence** | `buffer/CleanupWorker.kt` lines 14–17: "Invoked by CadenceController on a configurable interval." `runtime/CadenceController.kt`: no `CleanupWorker` import or constructor parameter. `runtime/CadenceController.kt` lines 71–87: `CadenceConfig` — no `cleanupTickFrequency`. Functional impact reported separately as AF-034. |
+| **Impact** | Developers reading the CleanupWorker documentation may assume cleanup is operational when it is not. The missing wiring means all data hygiene features are dead code. |
+| **Recommended Fix** | Add `cleanupWorker: CleanupWorker? = null` to the `CadenceController` constructor and `cleanupTickFrequency: Int = 2880` (24h at 30s ticks) to `CadenceConfig`. Wire it in `AppModule.kt`. In `runTick()`, invoke cleanup on the appropriate tick modulus. Update the `computeTickModulus()` LCM calculation to include the cleanup frequency. |
+
+---
+
+## AT-039: DiagnosticsActivity.refreshData Launches Untracked Coroutines — Overlapping Refreshes Possible
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-039 |
+| **Title** | Auto-refresh loop fires refreshData() which launches a new untracked lifecycleScope coroutine each time — no cancellation of previous refresh |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Low |
+| **Category** | Improper Flow/LiveData Usage |
+| **Description** | `DiagnosticsActivity.startAutoRefresh()` launches a single coroutine that calls `delay(5000)` then `refreshData()` in a loop. However, `refreshData()` itself calls `lifecycleScope.launch { ... }` (line 122), spawning a NEW coroutine for each refresh. The auto-refresh loop does not wait for the previous `refreshData()` coroutine to complete — it just fires and forgets. If the IO-bound work inside `refreshData()` (9 DAO queries + file logger reads, per AP-001) takes longer than 5 seconds (possible under heavy disk I/O on Urovo i9100 or during SQLite lock contention), the next tick spawns a second concurrent refresh. Two or more refresh coroutines can then update the UI interleaved: coroutine A reads buffer=100 at t=0, coroutine B reads buffer=50 at t=5, coroutine B updates UI to "50", coroutine A finishes its IO and updates UI back to "100" (stale data). The `isFinishing || isDestroyed` guard (line 142) prevents writes to a dead Activity but does not prevent overlapping writes to a live one. |
+| **Evidence** | `ui/DiagnosticsActivity.kt` line 101–106: `while (isActive) { delay(REFRESH_INTERVAL_MS); refreshData() }` — no await. Line 122: `lifecycleScope.launch { ... }` — new untracked coroutine per call. |
+| **Impact** | Low: the IO block typically completes in <50ms, so overlap is rare. Under extreme disk contention (SQLite WAL checkpoint + integrity check + upload batch), concurrent refreshes could cause the UI to flicker between stale and current values. |
+| **Recommended Fix** | Make `refreshData()` a `suspend fun` and call it directly from the auto-refresh loop instead of launching a new coroutine: `while (isActive) { delay(REFRESH_INTERVAL_MS); refreshData() }` where `refreshData()` uses `withContext(Dispatchers.IO)` internally and updates the UI on the caller's dispatcher. This ensures sequential execution. Alternatively, store the refresh `Job` and cancel it before launching a new one. |
+
+---
+
+## AT-040: StructuredFileLogger.getOrCreateWriter Force-Unwraps currentWriter — NPE When File Creation Fails
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-040 |
+| **Title** | getOrCreateWriter() returns currentWriter!! which throws NPE if the initial file creation fails |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Low |
+| **Category** | Weak Error Handling |
+| **Description** | `StructuredFileLogger.getOrCreateWriter()` at line 229 returns `currentWriter!!`. On the first invocation, `currentDate` is null, so the day-rollover branch executes: close old writer (null, no-op), create a new `BufferedWriter(FileWriter(file, true))`, assign to `currentWriter`. If the `FileWriter` constructor throws (e.g., disk full returns `IOException`, permissions error), `currentWriter` remains null (it was never assigned). The `currentWriter!!` then throws `NullPointerException`. This NPE is caught by the caller's `catch (e: Exception)` in `writeEntry()` (line 210), so it doesn't crash — but the NPE masks the real error (disk full). The catch block logs to Logcat: `"Failed to write log entry"` with the NPE, not the original IOException. Subsequent calls retry (`today != currentDate` is still true), but each retry throws the same masked NPE until disk space is freed. The `crash()` method at line 112 also calls `getOrCreateWriter()` — if the first-ever crash log hits a disk-full device, the NPE is caught by the outer try-catch (line 116) and the crash entry is silently lost. |
+| **Evidence** | `logging/StructuredFileLogger.kt` line 229: `return currentWriter!!`. Lines 218–228: day-rollover branch where `BufferedWriter(FileWriter(file, true))` can throw before `currentWriter` is assigned. Lines 210–215: `catch (e: Exception)` catches the resulting NPE. Lines 111–118: `crash()` catch block silently swallows the NPE. |
+| **Impact** | Low: disk-full conditions on the Urovo i9100 eMMC would cause all log writes to fail with a misleading NPE stack trace. The actual root cause (disk full) is not surfaced. Crash logs on a disk-full device are silently lost. |
+| **Recommended Fix** | Replace the force-unwrap with a null-safe return and explicit error handling: `return currentWriter ?: throw IOException("Failed to create log writer for $today")`. This surfaces the real error. Alternatively, assign `currentWriter = null` explicitly before the `BufferedWriter` constructor and check for null: `val writer = currentWriter; if (writer == null) { Log.e(..., "No writer available"); return }`. |
+
+---
+
+## AT-041: PumpStatusCache.get() Catches All Exception Including CancellationException — Breaks Structured Concurrency
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-041 |
+| **Title** | PumpStatusCache live FCC fetch swallows CancellationException — same structured concurrency violation as AT-024 and AT-034 |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Medium |
+| **Category** | Weak Error Handling |
+| **Description** | `PumpStatusCache.get()` wraps the live FCC adapter call in `try { withTimeoutOrNull(liveTimeoutMs) { adapter.getPumpStatus() } } catch (_: Exception) { null }` (lines 108–112). The `catch (_: Exception)` intercepts `CancellationException` in addition to adapter errors. When `EdgeAgentForegroundService.onDestroy()` cancels `serviceScope`, any in-flight `getPumpStatus()` call receives a `CancellationException`. Instead of propagating the cancellation, the cache catches it, returns a stale fallback result, and the Ktor route handler sends an HTTP 200 response to the POS — even though the service is shutting down. This is the third instance of the CancellationException-swallowing pattern (after AT-024 in `IngestionOrchestrator.doPoll()` and AT-034 in `HttpCloudApiClient` methods). The `withTimeoutOrNull` correctly handles internal timeouts (returns null), but external cancellation should propagate. |
+| **Evidence** | `api/PumpStatusRoutes.kt` lines 108–112: `catch (_: Exception) { null }` in `PumpStatusCache.get()`. Same pattern as `sync/CloudApiClient.kt` line 292 (AT-034) and `ingestion/IngestionOrchestrator.kt` line 339 (AT-024). |
+| **Impact** | During service shutdown, the pump-status route handler completes instead of being cancelled, potentially writing a response to a closing Ktor server socket. Low practical impact since Ktor handles socket lifecycle independently, but the swallowed cancellation delays clean shutdown and may log false "stale fallback" messages. |
+| **Recommended Fix** | Add `CancellationException` re-throw before the general `Exception` catch: `catch (e: CancellationException) { throw e } catch (_: Exception) { null }`. This is consistent with the fix applied to `IngestionOrchestrator.retryPendingFiscalization()` (lines 454–456) which already handles this correctly. Consider a codebase-wide audit for `catch (e: Exception)` in suspend functions — the AT-024/AT-034/AT-041 pattern appears to be systemic. |
+
+---
+
+## AT-042: IntegrityChecker KDoc Claims Startup Execution — Second Instance of "Built But Never Wired" Pattern
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-042 |
+| **Title** | IntegrityChecker follows the same dead-code wiring pattern as CleanupWorker (AT-038) — architectural gap in DI registration vs. runtime invocation |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Medium |
+| **Category** | Architecture Violations |
+| **Description** | `IntegrityChecker` exhibits the identical "registered-but-not-invoked" pattern as `CleanupWorker` (AT-038): (1) class is implemented with full functionality, (2) class KDoc documents when/how it should be called ("Runs `PRAGMA integrity_check` on startup"), (3) Koin DI registration exists (`AppModule.kt` line 149), (4) a test suite validates all code paths (`IntegrityCheckerTest.kt`), (5) but the runtime wiring that actually calls the class is missing. The `EdgeAgentForegroundService` does not inject or reference `IntegrityChecker`. Neither does `FccEdgeApplication`, `CadenceController`, or any other production class. This is the second confirmed instance of this pattern in the codebase. Combined with AT-038, it suggests a systematic gap: the development workflow includes implementation, testing, and DI registration, but does not verify that the registered component is actually invoked from the appropriate lifecycle entry point. There is no integration test or startup assertion that validates `runCheck()` was called. |
+| **Evidence** | `buffer/IntegrityChecker.kt` lines 12–17: KDoc "Runs `PRAGMA integrity_check` on startup." `di/AppModule.kt` line 149: `single { IntegrityChecker(get(), get(), androidContext()) }`. `service/EdgeAgentForegroundService.kt`: 0 references. Grep for `IntegrityChecker` in production code (excluding `di/AppModule.kt` and the class itself): 0 results. Compare with AT-038: same pattern for `CleanupWorker`. |
+| **Impact** | The codebase has a recurring architectural gap where critical infrastructure components are dead code. Developers and auditors reading the KDoc assume these components are active. The integrity check failure (AF-038) and cleanup failure (AF-034) compound: without cleanup, the database grows unbounded; without integrity checks, corruption in that growing database goes undetected. |
+| **Recommended Fix** | Add a startup verification step to `EdgeAgentForegroundService.onStartCommand()` that explicitly calls all critical-path workers registered in DI. Consider adding a `@StartupRequired` annotation or an `ApplicationStartupVerifier` that asserts all startup-documented components were invoked within the first 30 seconds after service start. At minimum, add a checklist to the development workflow: "If a component's KDoc says 'called on startup' or 'invoked by X', verify the call site exists." |
+
+---
+
+## AT-043: OdooWsMessageHandler Bypasses TransactionBufferManager — Direct DAO Mutation Without Business Layer
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-043 |
+| **Title** | WebSocket message handler directly injects and mutates TransactionBufferDao, bypassing the TransactionBufferManager business layer |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Medium |
+| **Category** | Architecture Violations |
+| **Description** | `OdooWsMessageHandler` receives `TransactionBufferDao` directly (line 33) and calls `updateOdooFields()`, `updateAddToCart()`, `markDiscarded()`, `getByFccTransactionId()`, `getUnsyncedForWs()`, and `getAllForWs()` without going through `TransactionBufferManager`. All other modules that access the transaction buffer — `IngestionOrchestrator`, `CloudUploadWorker`, `TelemetryReporter` — use `TransactionBufferManager` as the single point of access. This manager provides cross-adapter dedup, audit logging hooks, buffer statistics tracking, and a consistent API surface. The WebSocket handler bypasses all of these. Consequences: (1) When `markDiscarded()` is called via `manager_manual_update`, no audit log entry is written — all other state transitions that affect financial records are audited (e.g., `PreAuthHandler` writes audit entries for every pre-auth event). (2) When `updateOdooFields()` sets `odooOrderId`, `TransactionBufferManager` has no visibility into this change — its `getBufferStats()` method cannot distinguish between transactions with and without Odoo order references. (3) Future business rules added to the manager (e.g., validation that `odooOrderId` format matches a regex, or that `addToCart` cannot be set on DEAD_LETTER records) are automatically bypassed by the WebSocket path. |
+| **Evidence** | `websocket/OdooWsMessageHandler.kt` line 33: `private val transactionDao: TransactionBufferDao` — direct DAO injection. `di/AppModule.kt` lines 308–311: `OdooWebSocketServer(transactionDao = get(), ...)` — DAO passed directly. `websocket/OdooWsMessageHandler.kt` lines 99, 110, 119, 150, 159, 168, 304: direct DAO calls. Compare with `ingestion/IngestionOrchestrator.kt`: uses `TransactionBufferManager.bufferTransaction()`. |
+| **Impact** | Audit trail gaps for WebSocket-initiated state changes. Future business rules added to `TransactionBufferManager` are silently bypassed. Inconsistent data access patterns make the codebase harder to reason about. |
+| **Recommended Fix** | Add WebSocket-specific methods to `TransactionBufferManager`: `updateOdooFields()`, `markDiscarded()`, `getForWs()`. These methods should delegate to the DAO but also perform audit logging and any applicable validation. Update `OdooWsMessageHandler` to accept `TransactionBufferManager` instead of `TransactionBufferDao`. |
+
+---
+
+## AT-044: pumpStatusBroadcastLoop Checks serviceScope.isActive Instead of Coroutine's Own Active State
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-044 |
+| **Title** | Broadcast loop condition checks parent scope activity, not the launched coroutine's cancellation — misleading control flow |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Low |
+| **Category** | Improper Flow/LiveData Usage |
+| **Description** | `pumpStatusBroadcastLoop()` at line 274 uses `while (serviceScope.isActive)` as its loop condition. This coroutine is launched per-client via `serviceScope.launch { pumpStatusBroadcastLoop(session) }` (line 184). When a client disconnects, `onClientDisconnected()` at line 205 calls `broadcastJob.cancel()`, which cancels the specific coroutine job — NOT the `serviceScope`. After cancellation, `serviceScope.isActive` remains `true` because the parent scope has other active children. The loop condition is always `true` from this coroutine's perspective. The actual termination happens through a different mechanism: `delay(intervalMs)` at line 275 throws `CancellationException`, which is caught by `catch (e: Exception)` at line 284, causing a `break`. This works correctly but relies on catching `CancellationException` as a general `Exception` — the same anti-pattern identified in AT-024, AT-034, and AT-041. The `break` terminates the loop, and the coroutine returns normally. The parent scope never sees the cancellation because the exception is swallowed. If the code between `while (serviceScope.isActive)` and `delay(intervalMs)` ever becomes non-trivial (e.g., adding a cache check that doesn't suspend), a cancelled coroutine could execute that code one extra time before the next `delay` throws. |
+| **Evidence** | `websocket/OdooWebSocketServer.kt` line 274: `while (serviceScope.isActive)` — checks parent, not self. Line 184: `serviceScope.launch { pumpStatusBroadcastLoop(session) }` — per-client launch. Line 205: `broadcastJob.cancel()` — cancels child job, not parent scope. Lines 284–286: `catch (e: Exception) { ... break }` — CancellationException swallowed. |
+| **Impact** | Low: the current behavior is functionally correct but the code reads misleadingly. A future maintainer may assume the `while` condition handles cancellation, when in reality it's the exception catch that does. |
+| **Recommended Fix** | Replace `while (serviceScope.isActive)` with `while (true)` to make the termination mechanism explicit, or use `while (coroutineContext.isActive)` which checks the coroutine's own Job. Add a `CancellationException` re-throw before the general `Exception` catch to follow structured concurrency: `catch (e: CancellationException) { throw e } catch (e: Exception) { AppLogger.d(...); break }`. |
+
+---
+
+## AT-045: encodeToJsonElement Double-Serializes via String Round-Trip Instead of Using Standard Library
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-045 |
+| **Title** | Custom Json.encodeToJsonElement() extension serializes to String then re-parses, shadowing the efficient standard library function |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Low |
+| **Category** | Duplicated Logic |
+| **Description** | `OdooWsMessageHandler` defines a private extension function at lines 350–353: `private inline fun <reified T> Json.encodeToJsonElement(value: T): JsonElement { val jsonString = encodeToString(value); return parseToJsonElement(jsonString) }`. This performs a double-serialization: object → JSON String (allocation + UTF-8 encoding) → JsonElement (re-parsing the string). The kotlinx.serialization standard library provides `kotlinx.serialization.json.Json.encodeToJsonElement<T>(value)` which goes directly from object → JsonElement without the intermediate String step. The custom extension SHADOWS the standard library function by using the same name, making it indistinguishable at the call site. Every outbound message that embeds a DTO inside a response object goes through this double path: `handleLatest` (line 65), `handleManagerUpdate` (line 122), `handleAttendantUpdate` (lines 153, 171), and `handleFuelPumpStatus` (line 194 via `encodeToString`). The redundant string allocation and re-parsing adds memory pressure and CPU overhead proportional to message frequency. |
+| **Evidence** | `websocket/OdooWsMessageHandler.kt` lines 350–353: custom `Json.encodeToJsonElement()` that calls `encodeToString()` then `parseToJsonElement()`. Compare with `kotlinx.serialization.json.Json.encodeToJsonElement()` from the standard library — same signature, different (efficient) implementation. |
+| **Impact** | Every WebSocket response message incurs one unnecessary String allocation and one unnecessary JSON parse. For a forecourt with 5 terminals receiving pump status broadcasts every 3 seconds for 8 pumps, this is ~800 redundant serialization round-trips per minute. Individual overhead is <1ms each, total ~0.8s/minute of unnecessary CPU work. |
+| **Recommended Fix** | Delete the custom extension function (lines 350–353). The standard `kotlinx.serialization.json.Json.encodeToJsonElement()` import from the library is already available and has the same signature. All call sites will transparently use the efficient standard implementation. Verify with a unit test that the output is identical. |
+
+---
+
+## AT-046: OdooWebSocketServer and OdooWsMessageHandler Lack Unit Tests for Message Handling Logic
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-046 |
+| **Title** | Only DTO serialization is tested — no unit tests exist for message routing, rate limiting, authentication, broadcast, or handler business logic |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Medium |
+| **Category** | Architecture Violations |
+| **Description** | The POS Integration module has a single test file: `OdooWsModelsTest.kt` with 11 tests covering DTO serialization round-trips and field name compatibility. No tests exist for: (1) `OdooWebSocketServer` — connection authentication, rate limiting, max connections enforcement, reconfiguration, start/stop lifecycle. (2) `OdooWsMessageHandler` — message routing, `handleManagerUpdate` double-update logic, `handleAttendantUpdate` conditional broadcast, `handleFpUnblock` adapter interaction, error handling for invalid JSON. (3) `broadcastToAll` — dead session cleanup, concurrent modification during broadcast. (4) `toWsDto()` — monetary conversion correctness (the bug identified in AF-041 would have been caught by a test with a zero-decimal currency). The handler contains multiple complex behaviors: conditional broadcast logic in `handleAttendantUpdate`, rate limiting with sliding windows, and FCC adapter calls in `handleFpUnblock`. All are untested. Contrast with the pre-auth module (`PreAuthHandlerTest`, `PreAuthEdgeCaseTest` — 50+ test methods) and the adapter module (6 test classes totaling 100+ methods). The WebSocket module handles direct financial data mutations (setting `odooOrderId`, marking discards) with zero test coverage on the business logic. |
+| **Evidence** | `websocket/OdooWsModelsTest.kt`: 11 tests, all DTO serialization. No `OdooWebSocketServerTest.kt` or `OdooWsMessageHandlerTest.kt` exists. Compare with `preauth/PreAuthHandlerTest.kt`: 30+ test methods. Compare with `adapter/radix/RadixAdapterTests.kt`: 25+ test methods. |
+| **Impact** | Bugs in message routing, rate limiting, broadcast logic, and handler business logic (including AF-041, AF-042, AF-044, AF-045, AF-046, AF-047) were not caught during development. Future changes to the WebSocket protocol have no regression safety net. |
+| **Recommended Fix** | Add `OdooWsMessageHandlerTest.kt` covering: (a) `handleManagerUpdate` — verify DAO calls and broadcast; (b) `handleAttendantUpdate` — verify single broadcast when both fields present (AF-042 regression); (c) `toWsDto()` — test with TZS (zero-decimal) currency to catch AF-041; (d) `handleFpUnblock` — verify adapter interaction and error response; (e) `handleAddTransaction` — verify response sent (AF-043). Add `OdooWebSocketServerTest.kt` covering: (a) authentication rejection without shared secret; (b) rate limiting enforcement; (c) max connections rejection. |
+
+---
+
+## AT-047: ConnectivityTransitionListener Interface Declared But Never Used — Dead Code
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-047 |
+| **Title** | ConnectivityTransitionListener fun interface is declared and wired into constructor but no consumer implements or registers it |
+| **Module** | Connectivity |
+| **Severity** | Low |
+| **Category** | Duplicated Logic |
+| **Description** | `ConnectivityManager.kt` declares a `fun interface ConnectivityTransitionListener` at lines 289–291 with a single method `onTransition(from, to)`. The `ConnectivityManager` constructor accepts an optional `listener` parameter (line 48) and calls `listener?.onTransition(prevState, newState)` inside `deriveAndEmitStateUnlocked` (line 216). However, the DI module passes `listener = null` (line 206 of `AppModule.kt`), and no other code path sets or provides a listener. `CadenceController` (the only consumer that reacts to connectivity transitions) explicitly documents at line 47 that it uses `StateFlow` observation only: "M-10: Observes [ConnectivityManager.state] StateFlow only — does NOT implement [ConnectivityTransitionListener]. The listener callback was redundant with the StateFlow collection and caused double-trigger on recovery transitions." The interface, the constructor parameter, and the conditional call are dead code. The listener call also executes inside the mutex (via `deriveAndEmitStateUnlocked` called from `processProbeResult` which holds `mutex.withLock`), which would be a deadlock risk if a listener implementation ever tried to call back into ConnectivityManager — but since the listener is always null, this is a latent rather than active risk. |
+| **Evidence** | `connectivity/ConnectivityManager.kt` lines 289–291: `fun interface ConnectivityTransitionListener { fun onTransition(...) }`. Line 48: `private val listener: ConnectivityTransitionListener? = null`. Line 216: `listener?.onTransition(prevState, newState)`. `di/AppModule.kt` line 206: `listener = null`. `runtime/CadenceController.kt` line 47: "does NOT implement ConnectivityTransitionListener". |
+| **Impact** | Dead code increases maintenance burden and misleads developers into thinking a listener-based notification pattern is active. The latent deadlock risk (listener called inside mutex) is a trap for future developers who might try to use the listener pattern without realizing it executes under lock. |
+| **Recommended Fix** | Remove the `ConnectivityTransitionListener` interface, the `listener` constructor parameter, and the `listener?.onTransition()` call. All transition observation is correctly handled via `StateFlow` collection in `CadenceController.observeConnectivityTransitions()`. If a callback pattern is ever needed again, it should be invoked OUTSIDE the mutex to prevent deadlock. |
+
+---
+
+## AT-048: deriveAndEmitStateUnlocked Holds Mutex Across Suspend DAO Call — Blocks Concurrent Probe
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-048 |
+| **Title** | Connectivity state derivation holds the probe mutex while performing a Room DAO insert — concurrent probe result processing is blocked on disk I/O |
+| **Module** | Connectivity |
+| **Severity** | Medium |
+| **Category** | Weak Error Handling |
+| **Description** | `processProbeResult` acquires the mutex at line 141 (`mutex.withLock { ... }`) and, when a state change occurs, calls `deriveAndEmitStateUnlocked()` at line 179. Inside `deriveAndEmitStateUnlocked`, line 204 calls `auditLogDao.insert(AuditLog(...))` — a Room `@Insert` suspend function that performs disk I/O. The mutex is held for the entire duration of the DAO insert. Since both the internet and FCC probe loops call `processProbeResult` after each probe, the losing probe loop is blocked on the mutex while the winning loop's audit log insert completes. On the Urovo i9100 device with eMMC flash (typical write latency 5–50ms under load, spikes to 200ms during WAL checkpoint), the mutex hold time extends from <1ms (pure state derivation) to 5–200ms (including disk I/O). If both probes complete within a 200ms window (probability ~0.7% per cycle at 30s intervals), the second probe's result processing is delayed by the full insert duration. The method name `deriveAndEmitStateUnlocked` is also misleading — the "Unlocked" suffix conventionally means "call WITHOUT holding the lock", but the method is actually called WITH the lock held (the KDoc comment says "call with mutex held"). This naming inversion could mislead future developers. |
+| **Evidence** | `connectivity/ConnectivityManager.kt` line 141: `mutex.withLock { ... }`. Line 179: `deriveAndEmitStateUnlocked()` called inside the lock. Line 204: `auditLogDao.insert(AuditLog(...))` — Room suspend function performing disk I/O while mutex is held. |
+| **Impact** | When a connectivity state transition coincides with the other probe completing, the second probe's result processing is delayed by 5–200ms (disk I/O duration). Functional impact is minimal (probe results are not time-critical at 30s intervals), but the architectural pattern of holding a coroutine mutex across I/O is an anti-pattern that could become problematic if probe intervals are reduced or additional I/O is added inside the lock. |
+| **Recommended Fix** | Move the audit log write and listener callback outside the mutex. Capture the `prevState` and `newState` inside the lock, release the lock, then perform the DAO insert and listener notification: `val (prev, new) = mutex.withLock { /* derive state, return pair */ }; if (new != null) { auditLogDao.insert(...); listener?.onTransition(prev, new) }`. Rename `deriveAndEmitStateUnlocked` to `deriveNewStateLocked` to reflect its actual calling convention. |
+
+---
+
+## AT-049: ConnectivityManager.stop() Does Not Reset State — Stale State Persists Across Restart Cycles
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-049 |
+| **Title** | stop() cancels probe jobs but does not reset state flows or counters — subsequent start() inherits stale state |
+| **Module** | Connectivity |
+| **Severity** | Low |
+| **Category** | Weak Error Handling |
+| **Description** | `ConnectivityManager.stop()` at lines 102–105 only cancels `probeJobs` and logs a message. It does NOT reset: `_state` (remains at whatever the last derived state was), `internetUp` / `fccUp` (remain true/false from the last probe), `internetConsecFailures` / `fccConsecFailures` / `internetConsecSuccesses` / `fccConsecSuccesses` (retain their last values), `lastInternetProbeMs` / `lastFccProbeMs` / `lastFccSuccessMs` (retain last timestamps). When `start()` is called again (which `EdgeAgentForegroundService` does on each `onStartCommand` via `CadenceController.start()` → connectivity start), the state machine resumes from the previous state rather than re-initializing to `FULLY_OFFLINE`. `ConnectivityManager` is a Koin `single` — it persists for the lifetime of the process. The `EdgeAgentForegroundService` uses `START_STICKY`, so Android may restart the service within the same process without recreating Koin singletons. In this scenario: (1) service runs, connectivity reaches `FULLY_ONLINE`; (2) `onDestroy()` calls `connectivityManager.stop()`; (3) network changes while probes are stopped; (4) `onStartCommand()` calls `connectivityManager.start()` — state is still `FULLY_ONLINE` from step 1 even though actual connectivity may have changed. The CadenceController would act on the stale state (e.g., attempting cloud uploads when internet is actually down) until the first probe completes and updates the state. |
+| **Evidence** | `connectivity/ConnectivityManager.kt` lines 102–105: `fun stop() { probeJobs?.cancel() }` — no state reset. Line 64: `_state` is a `MutableStateFlow` that retains its last value. `di/AppModule.kt` line 167: `single { ConnectivityManager(...) }` — singleton survives service restart within same process. |
+| **Impact** | After a service stop/start cycle within the same process, the connectivity state may be stale for up to 30s (until the first probe completes). During this window, `CadenceController` may attempt operations (cloud upload, FCC poll) against a network that is no longer available, wasting resources and generating error logs. Low severity because the probe self-corrects within one cycle. |
+| **Recommended Fix** | Add state reset to `stop()`: `_state.value = ConnectivityState.FULLY_OFFLINE; internetUp = false; fccUp = false; internetConsecFailures = 0; fccConsecFailures = 0; internetConsecSuccesses = 0; fccConsecSuccesses = 0`. Alternatively, reset in `start()` before launching probe loops. This ensures every start begins with a clean `FULLY_OFFLINE` state per the spec: "Initialize in FULLY_OFFLINE on app start." |
+
+---
+
+## AT-050: NetworkBinder.started Flag Is Not Thread-Safe — Plain var Without Synchronization
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-050 |
+| **Title** | NetworkBinder.started guard uses a plain Boolean var — concurrent start/stop calls can bypass the duplicate-call protection |
+| **Module** | Connectivity |
+| **Severity** | Low |
+| **Category** | Weak Error Handling |
+| **Description** | `NetworkBinder.started` at line 45 is a plain `var started = false`. The `start()` method checks `if (started) return` (line 80) and sets `started = true` (line 96). The `stop()` method checks `if (!started) return` (line 108) and sets `started = false` (line 125). These reads and writes are not atomic — there is no `@Volatile` annotation, no `AtomicBoolean`, and no synchronization. If `start()` is called concurrently from two threads, both may read `started == false`, both proceed past the guard, and both register network callbacks — resulting in duplicate callback registrations. The `ConnectivityManager.registerNetworkCallback` documentation states that registering the same callback twice throws `IllegalArgumentException`, which would crash the service. In the current codebase, `start()` is called from `EdgeAgentForegroundService.onStartCommand()` which runs on the main thread, so concurrent calls are unlikely. However, `NetworkBinder` is a public class and its `start()`/`stop()` methods are public — future callers may invoke them from different threads. Compare with `EdgeAgentForegroundService.serviceStarted` which uses `AtomicBoolean` for the same duplicate-call guard pattern. |
+| **Evidence** | `connectivity/NetworkBinder.kt` line 45: `private var started = false` — plain var. Line 80: `if (started) { ... return }` — non-atomic read. Line 96: `started = true` — non-atomic write. Compare with `service/EdgeAgentForegroundService.kt` line 71: `private val serviceStarted = AtomicBoolean(false)` — atomic guard for same pattern. |
+| **Impact** | If `start()` is ever called concurrently (e.g., from a test or future refactor), duplicate `registerNetworkCallback` calls throw `IllegalArgumentException`, crashing the foreground service. Low severity because the current call site is main-thread-only. |
+| **Recommended Fix** | Replace `private var started = false` with `private val started = AtomicBoolean(false)`. In `start()`: `if (!started.compareAndSet(false, true)) return`. In `stop()`: `if (!started.compareAndSet(true, false)) return`. This matches the pattern used by `EdgeAgentForegroundService.serviceStarted` and is safe for concurrent access. |
+
+---
+
+## AT-051: KeystoreManager.rotateKey() Is Implemented But Never Called — Key Rotation Is Dead Code
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-051 |
+| **Title** | KeystoreManager.rotateKey() exists with a complete implementation and test coverage but is never invoked from production code |
+| **Module** | Security |
+| **Severity** | Medium |
+| **Category** | Architecture Violations |
+| **Description** | `KeystoreManager.rotateKey()` at lines 131–143 implements a full key rotation lifecycle: decrypt the current secret with the existing key, delete the old key, generate a new key, and re-encrypt the plaintext under the new key. The method has clear error handling (lines 133–135: decrypt failure, line 140: general exception). However, a search for `rotateKey` across all production Kotlin files returns only the definition itself — zero call sites. No periodic key rotation is scheduled in `CadenceController`, no config option triggers it, and no cloud-initiated key rotation command exists. The security spec for hardware-backed Keystore keys (§5.1) likely specifies periodic rotation to limit the exposure window if a key is compromised. Without rotation, the same AES-256-GCM keys (`fcc-middleware-device-jwt`, `fcc-middleware-refresh-token`, `fcc-middleware-fcc-cred`, `fcc-middleware-lan-key`, `fcc-middleware-config-integrity`) are used for the entire lifetime of the device registration — potentially months or years. This is the FOURTH instance of the "built, tested, but never invoked" pattern in the codebase, following CleanupWorker (AF-034/AT-038), IntegrityChecker (AF-038/AT-042), and SensitiveFieldFilter (AS-030). |
+| **Evidence** | `security/KeystoreManager.kt` lines 131–143: `fun rotateKey(alias: String, currentEncrypted: ByteArray): ByteArray?` — complete implementation. Grep for `rotateKey` in production code (excluding `KeystoreManager.kt`): 0 results. `runtime/CadenceController.kt`: no reference to `KeystoreManager` or key rotation. `config/EdgeAgentConfigDto.kt`: no key rotation interval field. |
+| **Impact** | Keystore AES-256-GCM keys are never rotated. If a key is compromised (e.g., through a side-channel attack on software-backed Keystore, or a vulnerability in the TEE firmware), all secrets encrypted under that key remain exposed until the device is re-provisioned. The implemented rotation mechanism — which correctly handles the decrypt-delete-reencrypt lifecycle — is wasted. |
+| **Recommended Fix** | Add a key rotation tick to `CadenceController`: inject `KeystoreManager` and `EncryptedPrefsManager`, and on a configurable interval (e.g., every 30 days, checked once per 24h cleanup tick), rotate each alias. Add a `lastKeyRotationAt` field to `EncryptedPrefsManager` (or `SyncState`) to track when rotation was last performed. The rotation should be resilient: if any alias rotation fails, log the error and continue with the remaining aliases. Alternatively, add a cloud-initiated rotation command (via config update or telemetry response) that triggers on-demand rotation when the cloud detects a security event. |
+
+---
+
+## AT-052: SensitiveFieldFilter Claims "Reflection Results Are Cached Per Class" — No Cache Exists
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-052 |
+| **Title** | SensitiveFieldFilter class doc says "Reflection results are cached per class" but the implementation performs full reflection on every call |
+| **Module** | Security |
+| **Severity** | Low |
+| **Category** | Duplicated Logic |
+| **Description** | `SensitiveFieldFilter` at line 17 documents "Thread-safe. Reflection results are cached per class." However, the `redact()` method at lines 35–69 performs full Kotlin reflection on every invocation: `klass.memberProperties` iterates all properties (line 49), `prop.javaField?.isAnnotationPresent(Sensitive::class.java)` checks annotations (line 51), `klass.primaryConstructor?.parameters` inspects constructor params (lines 42–47), and `prop.isAccessible = true` sets accessibility (line 56). No `ConcurrentHashMap`, lazy property, or companion-level cache exists. Each `redact()` call independently resolves the class's sensitive properties via reflection. Since `SensitiveFieldFilter` is not currently used in production (see AS-030), this has no runtime impact. However, if the filter is wired into the logging pipeline as recommended, every log call for a `@Sensitive`-annotated object would incur the full reflection overhead: `klass.memberProperties` alone takes 0.5–2ms per call on ARM devices due to Kotlin reflection's metadata loading. For a hot path like `CloudUploadWorker.uploadPendingBatch()` (called every 30s), this would add measurable latency. |
+| **Evidence** | `security/SensitiveFieldFilter.kt` line 17: "Reflection results are cached per class." Lines 35–69: no caching — full reflection on every `redact()` call. No `ConcurrentHashMap` or `by lazy` anywhere in the class. |
+| **Impact** | Doc-code divergence. If the filter is ever wired into production logging, the uncached reflection would add 0.5–2ms per log call, creating a performance regression for high-frequency log paths. |
+| **Recommended Fix** | Add a reflection cache: `private val sensitivePropsCache = ConcurrentHashMap<KClass<*>, Set<String>>()`. In `redact()`, compute and cache the set of sensitive property names per class on first access. Subsequent calls for the same class use the cached set, reducing reflection overhead to a hash lookup. Update the doc to accurately describe the caching behavior. |
+
+---
+
+## AT-053: EncryptedPrefsManager and LocalOverrideManager Duplicate MasterKey Construction — Identical Boilerplate in Two Locations
+
+| Field | Value |
+|-------|-------|
+| **ID** | AT-053 |
+| **Title** | Two security classes independently construct MasterKey with identical parameters — duplicated cryptographic initialization code |
+| **Module** | Security / Site Configuration |
+| **Severity** | Low |
+| **Category** | Duplicated Logic |
+| **Description** | Both `EncryptedPrefsManager` (lines 52–63) and `LocalOverrideManager` (lines 57–68) contain identical `MasterKey` construction code: `MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()` followed by `EncryptedSharedPreferences.create(context, PREFS_FILE, masterKey, PrefKeyEncryptionScheme.AES256_SIV, PrefValueEncryptionScheme.AES256_GCM)`. Both use the same key scheme, the same encryption schemes, and the same MasterKey alias (`_androidx_security_master_key_` — the AndroidX default). The `MasterKey.Builder.build()` method performs a Keystore lookup on each invocation (checking if the key already exists before generating). Since both classes are Koin singletons initialized during app startup, the two `MasterKey.Builder.build()` calls result in two sequential Keystore I/O operations for the same key alias. On the Urovo i9100, each Keystore lookup takes 10–50ms, adding 20–100ms of redundant startup latency. Additionally, if the MasterKey construction logic ever needs updating (e.g., migrating to `AES256_GCM` key scheme with `setRequestStrongBoxBacked(true)`), the change must be applied in both locations. |
+| **Evidence** | `security/EncryptedPrefsManager.kt` lines 52–63: MasterKey + EncryptedSharedPreferences construction. `config/LocalOverrideManager.kt` lines 57–68: identical pattern. Both use `AES256_GCM` key scheme, `AES256_SIV` key encryption, `AES256_GCM` value encryption. |
+| **Impact** | Redundant Keystore lookup on startup (10–50ms). Maintenance risk: cryptographic configuration changes must be applied to two locations. |
+| **Recommended Fix** | Extract a shared `SecurePrefsFactory` utility in the `security/` package: `object SecurePrefsFactory { fun create(context: Context, fileName: String): SharedPreferences { val masterKey = MasterKey.Builder(context)...; return EncryptedSharedPreferences.create(context, fileName, masterKey, ...) } }`. Both `EncryptedPrefsManager` and `LocalOverrideManager` delegate to this factory. The `MasterKey` can be cached as a lazy property: `private val masterKey by lazy { MasterKey.Builder(...).build() }` — ensuring the Keystore lookup happens only once.

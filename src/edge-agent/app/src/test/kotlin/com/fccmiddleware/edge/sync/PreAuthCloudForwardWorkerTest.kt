@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.sync
 
+import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import io.mockk.Runs
@@ -349,7 +350,7 @@ class PreAuthCloudForwardWorkerTest {
         worker.forwardUnsyncedPreAuths()
 
         coVerify(exactly = 0) { cloudApiClient.forwardPreAuth(any(), any()) }
-        coVerify { preAuthDao.recordCloudSyncFailure(record.id, any()) }
+        coVerify { preAuthDao.markCloudSynced(record.id, any()) }
     }
 
     @Test
@@ -366,6 +367,35 @@ class PreAuthCloudForwardWorkerTest {
 
         assertEquals(0, worker.consecutiveFailureCount)
         assertEquals(Instant.EPOCH, worker.nextRetryAt)
+    }
+
+    // -------------------------------------------------------------------------
+    // PA-P04: Bounded concurrency
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `transport error stops remaining records via shouldStop flag (PA-P04)`() = runTest {
+        // With concurrency=1 the stop-on-failure is strictly serial (easiest to assert)
+        val serialWorker = PreAuthCloudForwardWorker(
+            preAuthDao = preAuthDao,
+            cloudApiClient = cloudApiClient,
+            tokenProvider = tokenProvider,
+            config = PreAuthCloudForwardWorkerConfig(batchSize = 10, maxConcurrency = 1),
+        )
+        val r1 = makePreAuth()
+        val r2 = makePreAuth()
+        val r3 = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(r1, r2, r3)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.TransportError("timeout")
+
+        serialWorker.forwardUnsyncedPreAuths()
+
+        // Only r1 should be attempted; r2 and r3 see shouldStop=true and exit early
+        coVerify(exactly = 1) { cloudApiClient.forwardPreAuth(any(), any()) }
+        coVerify { preAuthDao.recordCloudSyncFailure(r1.id, any()) }
+        coVerify(exactly = 0) { preAuthDao.recordCloudSyncFailure(r2.id, any()) }
+        coVerify(exactly = 0) { preAuthDao.recordCloudSyncFailure(r3.id, any()) }
     }
 
     // -------------------------------------------------------------------------
@@ -420,7 +450,7 @@ class PreAuthCloudForwardWorkerTest {
         requestedAmountMinorUnits = requestedAmount,
         unitPrice = unitPrice,
         authorizedAmountMinorUnits = null,
-        status = status,
+        status = PreAuthStatus.valueOf(status),
         fccCorrelationId = fccCorrelationId,
         fccAuthorizationCode = fccAuthorizationCode,
         failureReason = null,
@@ -441,7 +471,7 @@ class PreAuthCloudForwardWorkerTest {
     private fun makeForwardResponse(record: PreAuthRecord): PreAuthForwardResponse =
         PreAuthForwardResponse(
             id = UUID.randomUUID().toString(),
-            status = record.status,
+            status = record.status.name,
             siteCode = record.siteCode,
             odooOrderId = record.odooOrderId,
         )

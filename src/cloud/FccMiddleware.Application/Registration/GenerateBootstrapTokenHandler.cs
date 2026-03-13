@@ -98,27 +98,32 @@ public sealed class GenerateBootstrapTokenHandler
 
         // H-02: Re-check active count after save to detect TOCTOU race.
         // Two concurrent requests can both pass the initial count check; this secondary
-        // check detects when the limit was exceeded and rolls back the excess token.
-        var postSaveCount = await _db.CountActiveBootstrapTokensForSiteAsync(
-            request.SiteCode, request.LegalEntityId, cancellationToken);
-        if (postSaveCount > MaxActiveTokensPerSite)
+        // check is only necessary when the pre-save count was at the limit boundary
+        // (MaxActiveTokensPerSite - 1), since that is the only case where a concurrent
+        // insertion could push the count over the limit.
+        if (activeCount >= MaxActiveTokensPerSite - 1)
         {
-            _logger.LogWarning(
-                "Bootstrap token limit exceeded due to concurrent insertion for site {SiteCode} " +
-                "(count={Count}, limit={Limit}). Revoking the newly created token.",
-                request.SiteCode, postSaveCount, MaxActiveTokensPerSite);
-
-            // Revoke the just-created token to enforce the limit
-            var createdToken = await _db.FindBootstrapTokenByIdAsync(token.Id, cancellationToken);
-            if (createdToken is not null)
+            var postSaveCount = await _db.CountActiveBootstrapTokensForSiteAsync(
+                request.SiteCode, request.LegalEntityId, cancellationToken);
+            if (postSaveCount > MaxActiveTokensPerSite)
             {
-                createdToken.Status = ProvisioningTokenStatus.REVOKED;
-                await _db.SaveChangesAsync(cancellationToken);
-            }
+                _logger.LogWarning(
+                    "Bootstrap token limit exceeded due to concurrent insertion for site {SiteCode} " +
+                    "(count={Count}, limit={Limit}). Revoking the newly created token.",
+                    request.SiteCode, postSaveCount, MaxActiveTokensPerSite);
 
-            return Result<GenerateBootstrapTokenResult>.Failure("ACTIVE_TOKEN_LIMIT_REACHED",
-                $"Site '{request.SiteCode}' exceeded the bootstrap token limit ({MaxActiveTokensPerSite}) " +
-                "due to concurrent requests. The token was revoked. Please retry.");
+                // Revoke the just-created token to enforce the limit
+                var createdToken = await _db.FindBootstrapTokenByIdAsync(token.Id, cancellationToken);
+                if (createdToken is not null)
+                {
+                    createdToken.Status = ProvisioningTokenStatus.REVOKED;
+                    await _db.SaveChangesAsync(cancellationToken);
+                }
+
+                return Result<GenerateBootstrapTokenResult>.Failure("ACTIVE_TOKEN_LIMIT_REACHED",
+                    $"Site '{request.SiteCode}' exceeded the bootstrap token limit ({MaxActiveTokensPerSite}) " +
+                    "due to concurrent requests. The token was revoked. Please retry.");
+            }
         }
 
         _logger.LogInformation("Bootstrap token generated for site {SiteCode}, expires at {ExpiresAt}",

@@ -4,12 +4,15 @@ using System.Text.Json.Serialization;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Events;
+using FccMiddleware.Domain.Models;
 using MediatR;
 
 namespace FccMiddleware.Application.Telemetry;
 
 public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryCommand, Result<SubmitTelemetryResult>>
 {
+    private static readonly TimeSpan TelemetryAuditInterval = TimeSpan.FromMinutes(5);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -46,6 +49,18 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
                 "Device is not registered under the claimed legal entity.");
         }
 
+        var snapshot = await _db.FindTelemetrySnapshotByDeviceIdAsync(request.DeviceId, cancellationToken);
+        if (snapshot is not null
+            && TelemetrySnapshotPayload.TryReadSequenceNumber(snapshot.PayloadJson, JsonOptions, out var persistedSequenceNumber)
+            && request.Payload.SequenceNumber <= persistedSequenceNumber)
+        {
+            return Result<SubmitTelemetryResult>.Success(new SubmitTelemetryResult
+            {
+                CorrelationId = CreateDeterministicCorrelationId(request.DeviceId, request.Payload.SequenceNumber),
+                IsDuplicate = true
+            });
+        }
+
         var correlationId = CreateDeterministicCorrelationId(request.DeviceId, request.Payload.SequenceNumber);
         if (await _db.HasAuditEventAsync(correlationId, "AgentHealthReported", cancellationToken))
         {
@@ -69,37 +84,9 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
             BatteryPercent = request.Payload.Device.BatteryPercent
         };
 
-        var envelope = new
-        {
-            eventId = Guid.NewGuid(),
-            eventType = domainEvent.EventType,
-            occurredAt = now,
-            correlationId,
-            legalEntityId = request.LegalEntityId,
-            siteCode = request.SiteCode,
-            source = "edge-agent",
-            data = new
-            {
-                telemetry = request.Payload,
-                summary = domainEvent
-            }
-        };
-
-        _db.AddAuditEvent(new AuditEvent
-        {
-            Id = Guid.NewGuid(),
-            CreatedAt = now,
-            LegalEntityId = request.LegalEntityId,
-            EventType = domainEvent.EventType,
-            EntityId = request.DeviceId,
-            CorrelationId = correlationId,
-            SiteCode = request.SiteCode,
-            Source = "edge-agent",
-            Payload = JsonSerializer.Serialize(envelope, JsonOptions)
-        });
-
-        var payloadJson = JsonSerializer.Serialize(request.Payload, JsonOptions);
-        var snapshot = await _db.FindTelemetrySnapshotByDeviceIdAsync(request.DeviceId, cancellationToken);
+        var payloadJson = JsonSerializer.Serialize(
+            TelemetrySnapshotPayload.FromTelemetry(request.Payload),
+            JsonOptions);
         var isNewSnapshot = snapshot is null;
         if (isNewSnapshot)
         {
@@ -109,6 +96,48 @@ public sealed class SubmitTelemetryHandler : IRequestHandler<SubmitTelemetryComm
                 CreatedAt = now
             };
             _db.AddTelemetrySnapshot(snapshot);
+        }
+
+        var latestHealthAuditAt = await _db.GetLatestAuditEventCreatedAtAsync(
+            request.DeviceId,
+            domainEvent.EventType,
+            cancellationToken);
+        var shouldEmitHealthAudit = isNewSnapshot
+            || latestHealthAuditAt is null
+            || now - latestHealthAuditAt.Value >= TelemetryAuditInterval;
+
+        if (shouldEmitHealthAudit)
+        {
+            var envelope = new
+            {
+                eventId = Guid.NewGuid(),
+                eventType = domainEvent.EventType,
+                occurredAt = now,
+                correlationId,
+                legalEntityId = request.LegalEntityId,
+                siteCode = request.SiteCode,
+                source = "edge-agent",
+                data = new
+                {
+                    sequenceNumber = request.Payload.SequenceNumber,
+                    reportedAtUtc = request.Payload.ReportedAtUtc,
+                    connectivityState = request.Payload.ConnectivityState,
+                    summary = domainEvent
+                }
+            };
+
+            _db.AddAuditEvent(new AuditEvent
+            {
+                Id = Guid.NewGuid(),
+                CreatedAt = now,
+                LegalEntityId = request.LegalEntityId,
+                EventType = domainEvent.EventType,
+                EntityId = request.DeviceId,
+                CorrelationId = correlationId,
+                SiteCode = request.SiteCode,
+                Source = "edge-agent",
+                Payload = JsonSerializer.Serialize(envelope, JsonOptions)
+            });
         }
 
         // Detect connectivity state change and emit audit event (skip for first telemetry)

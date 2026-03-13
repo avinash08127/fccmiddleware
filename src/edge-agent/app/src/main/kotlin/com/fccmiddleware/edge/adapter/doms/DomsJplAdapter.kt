@@ -10,7 +10,9 @@ import com.fccmiddleware.edge.adapter.doms.protocol.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.serialization.json.Json
+import java.io.Closeable
 
 /**
  * DomsJplAdapter — Full DOMS TCP/JPL adapter implementation.
@@ -31,7 +33,7 @@ class DomsJplAdapter(
     /** Optional callback invoked on the raw TCP socket before connect().
      *  Used to bind FCC traffic to WiFi via Android Network.bindSocket(). */
     private val socketBinder: ((java.net.Socket) -> Unit)? = null,
-) : IFccAdapter, IFccConnectionLifecycle {
+) : IFccAdapter, IFccConnectionLifecycle, Closeable {
 
     override val pumpStatusCapability = PumpStatusCapability.LIVE
 
@@ -108,6 +110,11 @@ class DomsJplAdapter(
         heartbeatManager.stop()
         logonComplete = false
         tcpClient.disconnect()
+        adapterScope.cancel()
+    }
+
+    override fun close() {
+        adapterScope.cancel()
     }
 
     override val isConnected: Boolean
@@ -260,8 +267,9 @@ class DomsJplAdapter(
                 }
             }
 
-            // Step 4: Clear the buffer
-            val clearRequest = DomsTransactionParser.buildClearRequest(count = domsTxns.size)
+            // AF-016: Only clear the number of successfully normalized transactions so that
+            // failed normalizations remain in the FCC buffer for re-fetch, not silently lost.
+            val clearRequest = DomsTransactionParser.buildClearRequest(count = canonicalTxns.size)
             val clearResponse = tcpClient.sendAndReceive(
                 clearRequest,
                 DomsTransactionParser.CLEAR_RESPONSE,

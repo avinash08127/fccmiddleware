@@ -34,17 +34,20 @@ public sealed class TransactionsController : ControllerBase
     private readonly ISiteFccConfigProvider _siteFccConfigProvider;
     private readonly ILogger<TransactionsController> _logger;
     private readonly IObservabilityMetrics _metrics;
+    private readonly IServiceScopeFactory _serviceScopeFactory;
 
     public TransactionsController(
         IMediator mediator,
         ISiteFccConfigProvider siteFccConfigProvider,
         ILogger<TransactionsController> logger,
-        IObservabilityMetrics metrics)
+        IObservabilityMetrics metrics,
+        IServiceScopeFactory serviceScopeFactory)
     {
         _mediator = mediator;
         _siteFccConfigProvider = siteFccConfigProvider;
         _logger = logger;
         _metrics = metrics;
+        _serviceScopeFactory = serviceScopeFactory;
     }
 
     /// <summary>
@@ -139,7 +142,6 @@ public sealed class TransactionsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> IngestRadixXml(CancellationToken cancellationToken)
     {
         // ── Read USN-Code header ──────────────────────────────────────────────
@@ -155,25 +157,24 @@ public sealed class TransactionsController : ControllerBase
         }
 
         // ── Lookup site by USN code ───────────────────────────────────────────
+        // TX-S01: Return the same error response for USN-not-found and missing-secret
+        // to prevent USN code enumeration via response differences.
         var siteResult = await _siteFccConfigProvider.GetByUsnCodeAsync(usnCode, cancellationToken);
         if (siteResult is null)
         {
-            // M-12: Log failed lookups to help detect USN enumeration attempts.
             _logger.LogWarning(
                 "Radix ingest: USN code {UsnCode} not found (IP: {RemoteIp})",
                 usnCode, HttpContext.Connection.RemoteIpAddress);
             return new ContentResult
             {
-                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>USN_NOT_FOUND</ERROR_CODE></RESP>",
+                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>AUTH_FAILED</ERROR_CODE></RESP>",
                 ContentType = "text/xml",
-                StatusCode = StatusCodes.Status404NotFound
+                StatusCode = StatusCodes.Status401Unauthorized
             };
         }
 
         var (siteConfig, _) = siteResult.Value;
 
-        // M-12: Reject if SharedSecret is not configured — without it the endpoint
-        // is effectively unauthenticated since USN codes are small integers (1-999999).
         if (string.IsNullOrEmpty(siteConfig.SharedSecret))
         {
             _logger.LogWarning(
@@ -181,7 +182,7 @@ public sealed class TransactionsController : ControllerBase
                 siteConfig.SiteCode, usnCode);
             return new ContentResult
             {
-                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>SITE_NOT_CONFIGURED</ERROR_CODE></RESP>",
+                Content = "<RESP><STATUS>ERROR</STATUS><ERROR_CODE>AUTH_FAILED</ERROR_CODE></RESP>",
                 ContentType = "text/xml",
                 StatusCode = StatusCodes.Status401Unauthorized
             };
@@ -319,8 +320,9 @@ public sealed class TransactionsController : ControllerBase
                 "Petronite webhook ingestion failed for site {SiteCode}: {ErrorCode} — {Message}",
                 siteConfig.SiteCode, result.Error.Code, result.Error.Message);
 
-            // Return 200 anyway — webhook best practice: don't trigger retries for validation errors
-            return Ok(new { status = "REJECTED", errorCode = result.Error.Code });
+            // Return 200 anyway — webhook best practice: don't trigger retries for validation errors.
+            // TX-S05: Return generic error code to external callers; detailed code is logged above.
+            return Ok(new { status = "REJECTED", errorCode = "PROCESSING_ERROR" });
         }
 
         if (result.Value!.IsDuplicate)
@@ -416,8 +418,9 @@ public sealed class TransactionsController : ControllerBase
                 "Advatec webhook ingestion failed for site {SiteCode}: {ErrorCode} — {Message}",
                 siteConfig.SiteCode, result.Error.Code, result.Error.Message);
 
-            // Return 200 anyway — webhook best practice: don't trigger retries for validation errors
-            return Ok(new { status = "REJECTED", errorCode = result.Error.Code });
+            // Return 200 anyway — webhook best practice: don't trigger retries for validation errors.
+            // TX-S05: Return generic error code to external callers; detailed code is logged above.
+            return Ok(new { status = "REJECTED", errorCode = "PROCESSING_ERROR" });
         }
 
         if (result.Value!.IsDuplicate)
@@ -442,55 +445,67 @@ public sealed class TransactionsController : ControllerBase
         Guid correlationId,
         CancellationToken cancellationToken)
     {
-        var results = new List<IngestBatchRecordResult>(transactionItems.Count);
+        var results = new IngestBatchRecordResult[transactionItems.Count];
         var acceptedCount = 0;
         var rejectedCount = 0;
 
-        for (var index = 0; index < transactionItems.Count; index++)
-        {
-            var item = transactionItems[index];
-            if (item.ValueKind != JsonValueKind.Object)
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, transactionItems.Count),
+            new ParallelOptions
             {
-                rejectedCount++;
-                results.Add(new IngestBatchRecordResult
+                MaxDegreeOfParallelism = 10,
+                CancellationToken = cancellationToken
+            },
+            async (index, ct) =>
+            {
+                var item = transactionItems[index];
+                if (item.ValueKind != JsonValueKind.Object)
                 {
-                    RecordIndex = index,
-                    Outcome = "REJECTED",
-                    ErrorCode = "VALIDATION.INVALID_PAYLOAD",
-                    ErrorMessage = "Each item in rawPayload.transactions must be a JSON object."
-                });
-                continue;
-            }
-
-            var itemPayload = item.GetRawText();
-            var result = await SendIngestCommandAsync(
-                vendor,
-                siteCode,
-                capturedAt,
-                itemPayload,
-                correlationId,
-                cancellationToken);
-
-            if (result.IsSuccess && !result.Value!.IsDuplicate)
-            {
-                acceptedCount++;
-            }
-            else if (result.IsFailure)
-            {
-                rejectedCount++;
-
-                if (!result.Error!.Code.StartsWith("VALIDATION.", StringComparison.Ordinal))
-                {
-                    _metrics.RecordIngestionFailure(
-                        "fcc-push",
-                        result.Error.Code,
-                        siteCode,
-                        vendor.ToString());
+                    Interlocked.Increment(ref rejectedCount);
+                    results[index] = new IngestBatchRecordResult
+                    {
+                        RecordIndex = index,
+                        Outcome = "REJECTED",
+                        ErrorCode = "VALIDATION.INVALID_PAYLOAD",
+                        ErrorMessage = "Each item in rawPayload.transactions must be a JSON object."
+                    };
+                    return;
                 }
-            }
 
-            results.Add(MapBatchResult(index, item, result));
-        }
+                var itemPayload = item.GetRawText();
+
+                await using var scope = _serviceScopeFactory.CreateAsyncScope();
+                var scopedMediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+
+                var result = await SendIngestCommandAsync(
+                    vendor,
+                    siteCode,
+                    capturedAt,
+                    itemPayload,
+                    correlationId,
+                    ct,
+                    mediator: scopedMediator);
+
+                if (result.IsSuccess && !result.Value!.IsDuplicate)
+                {
+                    Interlocked.Increment(ref acceptedCount);
+                }
+                else if (result.IsFailure)
+                {
+                    Interlocked.Increment(ref rejectedCount);
+
+                    if (!result.Error!.Code.StartsWith("VALIDATION.", StringComparison.Ordinal))
+                    {
+                        _metrics.RecordIngestionFailure(
+                            "fcc-push",
+                            result.Error.Code,
+                            siteCode,
+                            vendor.ToString());
+                    }
+                }
+
+                results[index] = MapBatchResult(index, item, result);
+            });
 
         if (acceptedCount > 0)
         {
@@ -499,7 +514,7 @@ public sealed class TransactionsController : ControllerBase
 
         return new IngestBatchResponse
         {
-            Results = results,
+            Results = results.ToList(),
             AcceptedCount = acceptedCount,
             DuplicateCount = results.Count(r => r.Outcome == "DUPLICATE"),
             RejectedCount = rejectedCount
@@ -513,11 +528,16 @@ public sealed class TransactionsController : ControllerBase
         string rawPayload,
         Guid correlationId,
         CancellationToken cancellationToken,
-        IngestionSource ingestionSource = IngestionSource.FCC_PUSH)
+        IngestionSource ingestionSource = IngestionSource.FCC_PUSH,
+        IMediator? mediator = null)
     {
-        // Detect content type: if the payload looks like XML, route as text/xml
-        // so the adapter can apply vendor-specific XML validation (e.g., Radix signature).
-        var contentType = rawPayload.TrimStart().StartsWith('<')
+        // Detect content type: strip any UTF-8 BOM then check the first non-whitespace
+        // character. '<' → XML, anything else → JSON (all known vendor payloads are
+        // well-formed XML or JSON).
+        var trimmed = rawPayload.AsSpan().TrimStart();
+        if (trimmed.Length > 0 && trimmed[0] == '\uFEFF')
+            trimmed = trimmed.Slice(1).TrimStart();
+        var contentType = trimmed.Length > 0 && trimmed[0] == '<'
             ? "text/xml"
             : "application/json";
 
@@ -532,7 +552,7 @@ public sealed class TransactionsController : ControllerBase
             IngestionSource = ingestionSource
         };
 
-        return await _mediator.Send(command, cancellationToken);
+        return await (mediator ?? _mediator).Send(command, cancellationToken);
     }
 
     private IActionResult BuildSingleIngestResponse(

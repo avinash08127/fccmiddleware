@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FccMiddleware.Domain.Entities;
@@ -554,6 +555,7 @@ public sealed class VendorPushIngressTests : IAsyncLifetime
             IngestionMethod = IngestionMethod.PUSH,
             IngestionMode = IngestionMode.CLOUD_DIRECT,
             WebhookSecret = PetroniteWebhookSecret,
+            WebhookSecretHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(PetroniteWebhookSecret))).ToLowerInvariant(),
             ClientId = "test-client-id",
             ClientSecret = "test-client-secret",
             OAuthTokenEndpoint = "http://localhost/oauth/token",
@@ -591,6 +593,7 @@ public sealed class VendorPushIngressTests : IAsyncLifetime
             IngestionMethod = IngestionMethod.PUSH,
             IngestionMode = IngestionMode.CLOUD_DIRECT,
             AdvatecWebhookToken = AdvatecWebhookToken,
+            AdvatecWebhookTokenHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(AdvatecWebhookToken))).ToLowerInvariant(),
             AdvatecDevicePort = 5560,
             AdvatecEfdSerialNumber = "10TZ100625",
             AdvatecCustIdType = 1,

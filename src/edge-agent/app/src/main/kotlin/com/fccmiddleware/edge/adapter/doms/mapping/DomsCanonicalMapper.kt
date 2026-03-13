@@ -12,8 +12,8 @@ import java.util.UUID
  *
  * Conversion rules (NO floating-point):
  *   Volume : centilitres × 10,000 = microlitres (1 cL = 10,000 µL)
- *   Amount : DOMS x10 value × 10  = minor currency units (e.g., cents)
- *   Unit price: DOMS x10 value × 10 = minor currency units per litre
+ *   Amount : DOMS x10 value / 10  = minor currency units (e.g., cents)
+ *   Unit price: DOMS x10 value / 10 = minor currency units per litre
  *   Timestamp: "yyyyMMddHHmmss" in site local time → UTC ISO 8601
  *   Pump number: fpId + pumpNumberOffset
  *   Product code: raw code → canonical via productCodeMapping (fallback: raw)
@@ -96,28 +96,15 @@ object DomsCanonicalMapper {
 
     /**
      * Convert DOMS x10 amount to minor currency units.
-     * DOMS stores amounts as value × 10 of the minor unit.
-     * e.g., 1234 in DOMS = 12340 minor units? No — DOMS x10 means the value
-     * is 10× the actual minor unit value, so we divide? Actually per the plan:
-     * "Amount: x10 factor" and "x10 x 10 = minor units" — so multiply by 10.
      *
-     * DOMS amount 1234 (x10) → 1234 × 10 = 12340? That seems wrong.
-     * Re-reading: "Amount: x10 x 10 = minor units" — this means the DOMS value
-     * already has a x10 factor baked in, so to get minor units we multiply by
-     * an additional factor. But "x10 factor" for amount means the raw value IS
-     * the amount in (minor_units / 10). So rawValue * 10 = minor units.
+     * DOMS FcSupParam stores amounts as (minor_currency_units × 10).
+     * The "x10" suffix means the wire value is 10× the actual minor unit value.
+     * To recover minor units: divide by 10.
      *
-     * Example: If actual amount is $12.34 (1234 cents), DOMS stores 123 (x10).
-     * 123 * 10 = 1230? That's wrong too.
-     *
-     * Most likely interpretation: DOMS amount is already in minor units (cents),
-     * with the "x10" meaning the value includes a 1/10 precision factor.
-     * So raw DOMS value of 12340 / 10 = 1234 cents.
-     *
-     * However, the plan states "x10 x 10 = minor units" suggesting multiplication.
-     * Following the plan literally: domsValue * 10 = minor units.
+     * Example: $12.34 = 1234 cents. DOMS stores 12340 (= 1234 × 10).
+     *          12340 / 10 = 1234 cents.
      */
-    fun domsAmountToMinorUnits(domsX10Value: Long): Long = domsX10Value * 10L
+    fun domsAmountToMinorUnits(domsX10Value: Long): Long = domsX10Value / 10L
 
     /**
      * Parse DOMS local timestamp and convert to UTC ISO 8601 string.

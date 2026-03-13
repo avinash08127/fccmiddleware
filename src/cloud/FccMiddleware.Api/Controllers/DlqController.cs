@@ -238,6 +238,16 @@ public sealed class DlqController : PortalControllerBase
             return Forbid();
         }
 
+        if (item.Status is DeadLetterStatus.RESOLVED or DeadLetterStatus.DISCARDED)
+        {
+            return BadRequest(BuildError("DLQ.INVALID_STATE", $"Cannot discard item in {item.Status} state."));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length < 10)
+        {
+            return BadRequest(BuildError("VALIDATION.INVALID_REASON", "Discard reason must be at least 10 characters."));
+        }
+
         var now = DateTimeOffset.UtcNow;
         var userId = _accessResolver.ResolveUserId(User);
 
@@ -278,6 +288,11 @@ public sealed class DlqController : PortalControllerBase
         [FromBody] RetryBatchRequestDto request,
         CancellationToken cancellationToken = default)
     {
+        if (request.Ids.Count is 0 or > 50)
+        {
+            return BadRequest(BuildError("VALIDATION.INVALID_BATCH_SIZE", "Batch size must be between 1 and 50."));
+        }
+
         var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
         {
@@ -349,11 +364,16 @@ public sealed class DlqController : PortalControllerBase
 
     [HttpPost("discard-batch")]
     [Authorize(Policy = "PortalAdminWrite")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(BatchDiscardResultDto), StatusCodes.Status200OK)]
     public async Task<IActionResult> DiscardBatch(
         [FromBody] DiscardBatchRequestDto request,
         CancellationToken cancellationToken = default)
     {
+        if (request.Items.Count is 0 or > 50)
+        {
+            return BadRequest(BuildError("VALIDATION.INVALID_BATCH_SIZE", "Batch size must be between 1 and 50."));
+        }
+
         var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
         {
@@ -367,12 +387,33 @@ public sealed class DlqController : PortalControllerBase
 
         var now = DateTimeOffset.UtcNow;
         var userId = _accessResolver.ResolveUserId(User);
+        var succeeded = new List<Guid>();
+        var failed = new List<BatchDiscardFailureDto>();
 
         foreach (var batchItem in request.Items)
         {
             var row = rows.FirstOrDefault(item => item.Id == batchItem.Id);
-            if (row is null || !access.CanAccess(row.LegalEntityId))
+            if (row is null)
             {
+                failed.Add(new BatchDiscardFailureDto { Id = batchItem.Id, Error = "Not found." });
+                continue;
+            }
+
+            if (!access.CanAccess(row.LegalEntityId))
+            {
+                failed.Add(new BatchDiscardFailureDto { Id = batchItem.Id, Error = "Forbidden." });
+                continue;
+            }
+
+            if (row.Status is DeadLetterStatus.RESOLVED or DeadLetterStatus.DISCARDED)
+            {
+                failed.Add(new BatchDiscardFailureDto { Id = batchItem.Id, Error = $"Cannot discard item in {row.Status} state." });
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(batchItem.Reason) || batchItem.Reason.Trim().Length < 10)
+            {
+                failed.Add(new BatchDiscardFailureDto { Id = batchItem.Id, Error = "Reason must be at least 10 characters." });
                 continue;
             }
 
@@ -400,10 +441,17 @@ public sealed class DlqController : PortalControllerBase
                 }),
                 EntityId = row.Id
             });
+
+            succeeded.Add(row.Id);
         }
 
         await _db.SaveChangesAsync(cancellationToken);
-        return Ok();
+
+        return Ok(new BatchDiscardResultDto
+        {
+            Succeeded = succeeded,
+            Failed = failed
+        });
     }
 
     private static List<RetryHistoryEntryDto> DeserializeHistory(DeadLetterItem item) =>

@@ -40,8 +40,12 @@ object AppLogger {
         else Log.e(tag, msg)
     }
 
-    /** Correlation ID for the current operation context. */
+    /** Correlation ID for the current operation context (thread-local, AF-002). */
     var correlationId: String?
         get() = delegate?.correlationId
         set(value) { delegate?.correlationId = value }
+
+    /** Exposes the ThreadLocal for use with [CorrelationIdElement]. */
+    val correlationIdLocal: ThreadLocal<String?>?
+        get() = delegate?.correlationIdLocal
 }

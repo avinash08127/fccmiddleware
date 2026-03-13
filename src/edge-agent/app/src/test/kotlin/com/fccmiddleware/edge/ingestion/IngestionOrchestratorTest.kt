@@ -647,11 +647,9 @@ class IngestionOrchestratorTest {
         adapter: IFccAdapter?,
         config: AgentFccConfig?,
     ) = IngestionOrchestrator(
-        adapter = adapter,
         bufferManager = bufferManager,
         syncStateDao = syncStateDao,
-        config = config,
-    )
+    ).also { it.wireRuntime(adapter, config) }
 
     private fun makeConfig(mode: IngestionMode) = AgentFccConfig(
         fccVendor = FccVendor.DOMS,

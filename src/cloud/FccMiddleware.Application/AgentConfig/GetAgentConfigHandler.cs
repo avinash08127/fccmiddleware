@@ -3,6 +3,7 @@ using FccMiddleware.Contracts.Config;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using MediatR;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 
 namespace FccMiddleware.Application.AgentConfig;
@@ -15,13 +16,17 @@ namespace FccMiddleware.Application.AgentConfig;
 public sealed class GetAgentConfigHandler
     : IRequestHandler<GetAgentConfigQuery, Result<GetAgentConfigResult>>
 {
+    private static readonly TimeSpan CacheDuration = TimeSpan.FromSeconds(60);
+
     private readonly IAgentConfigDbContext _db;
     private readonly IConfiguration _configuration;
+    private readonly IMemoryCache _cache;
 
-    public GetAgentConfigHandler(IAgentConfigDbContext db, IConfiguration configuration)
+    public GetAgentConfigHandler(IAgentConfigDbContext db, IConfiguration configuration, IMemoryCache cache)
     {
         _db = db;
         _configuration = configuration;
+        _cache = cache;
     }
 
     public async Task<Result<GetAgentConfigResult>> Handle(
@@ -49,84 +54,100 @@ public sealed class GetAgentConfigHandler
                 "Device is not registered under the claimed legal entity.");
         }
 
-        // Load FccConfig with all related site data
-        var fccConfig = await _db.GetFccConfigWithSiteDataAsync(
-            request.SiteCode, request.LegalEntityId, cancellationToken);
+        // ── OB-P01: Cache assembled SiteConfigResponse per (siteCode, legalEntityId).
+        // All devices at the same site receive identical config (except DeviceId),
+        // so a single DB load can serve all concurrent requests during fleet restarts.
+        var cacheKey = $"agent-config:{request.SiteCode}:{request.LegalEntityId}";
 
-        if (fccConfig is null)
+        if (!_cache.TryGetValue(cacheKey, out (int ConfigVersion, SiteConfigResponse Config) cached))
         {
-            return Result<GetAgentConfigResult>.Failure("CONFIG_NOT_FOUND",
-                "No active FCC configuration found for this site.");
+            // Cache miss — load full entity graph from DB
+            var fccConfig = await _db.GetFccConfigWithSiteDataAsync(
+                request.SiteCode, request.LegalEntityId, cancellationToken);
+
+            if (fccConfig is null)
+            {
+                return Result<GetAgentConfigResult>.Failure("CONFIG_NOT_FOUND",
+                    "No active FCC configuration found for this site.");
+            }
+
+            var site = fccConfig.Site;
+            var legalEntity = fccConfig.LegalEntity;
+            var issuedAt = fccConfig.UpdatedAt;
+
+            var config = new SiteConfigResponse
+            {
+                SchemaVersion = "1.0",
+                ConfigVersion = fccConfig.ConfigVersion,
+                ConfigId = fccConfig.Id,
+                IssuedAtUtc = issuedAt,
+                EffectiveAtUtc = issuedAt,
+                SourceRevision = new SourceRevisionDto
+                {
+                    DatabricksSyncAtUtc = site.SyncedAt,
+                    SiteMasterRevision = site.UpdatedAt.ToString("O"),
+                    FccConfigRevision = fccConfig.UpdatedAt.ToString("O"),
+                    PortalChangeId = null
+                },
+                Identity = new IdentityDto
+                {
+                    LegalEntityId = legalEntity.Id,
+                    LegalEntityCode = legalEntity.CountryCode,
+                    SiteId = site.Id,
+                    SiteCode = site.SiteCode,
+                    SiteName = site.SiteName,
+                    Timezone = legalEntity.DefaultTimezone,
+                    CurrencyCode = legalEntity.CurrencyCode,
+                    DeviceId = string.Empty, // placeholder — overridden per-device below
+                    IsPrimaryAgent = true
+                },
+                Site = new SiteDto
+                {
+                    IsActive = site.IsActive,
+                    OperatingModel = site.OperatingModel.ToString(),
+                    SiteUsesPreAuth = site.SiteUsesPreAuth,
+                    ConnectivityMode = site.ConnectivityMode,
+                    OdooSiteId = site.OdooSiteId ?? string.Empty,
+                    CompanyTaxPayerId = site.CompanyTaxPayerId,
+                    OperatorName = site.OperatorName,
+                    OperatorTaxPayerId = site.OperatorTaxPayerId
+                },
+                Fcc = BuildFccDto(fccConfig),
+                Sync = BuildSyncDto(),
+                Buffer = BuildBufferDto(),
+                LocalApi = BuildLocalApiDto(),
+                Telemetry = BuildTelemetryDto(),
+                Fiscalization = BuildFiscalizationDto(site),
+                Mappings = BuildMappingsDto(site),
+                Rollout = BuildRolloutDto()
+            };
+
+            cached = (fccConfig.ConfigVersion, config);
+            _cache.Set(cacheKey, cached, CacheDuration);
         }
 
         // ETag comparison: return 304 if client already has the current version
         if (request.ClientConfigVersion.HasValue
-            && request.ClientConfigVersion.Value == fccConfig.ConfigVersion)
+            && request.ClientConfigVersion.Value == cached.ConfigVersion)
         {
             return Result<GetAgentConfigResult>.Success(new GetAgentConfigResult
             {
                 NotModified = true,
-                ConfigVersion = fccConfig.ConfigVersion
+                ConfigVersion = cached.ConfigVersion
             });
         }
 
-        // Build the full SiteConfig
-        var site = fccConfig.Site;
-        var legalEntity = fccConfig.LegalEntity;
-        var issuedAt = fccConfig.UpdatedAt;
-
-        var config = new SiteConfigResponse
+        // Stamp per-device Identity (records are immutable; `with` creates a shallow copy)
+        var deviceConfig = cached.Config with
         {
-            SchemaVersion = "1.0",
-            ConfigVersion = fccConfig.ConfigVersion,
-            ConfigId = fccConfig.Id,
-            IssuedAtUtc = issuedAt,
-            EffectiveAtUtc = issuedAt,
-            SourceRevision = new SourceRevisionDto
-            {
-                DatabricksSyncAtUtc = site.SyncedAt,
-                SiteMasterRevision = site.UpdatedAt.ToString("O"),
-                FccConfigRevision = fccConfig.UpdatedAt.ToString("O"),
-                PortalChangeId = null
-            },
-            Identity = new IdentityDto
-            {
-                LegalEntityId = legalEntity.Id,
-                LegalEntityCode = legalEntity.CountryCode,
-                SiteId = site.Id,
-                SiteCode = site.SiteCode,
-                SiteName = site.SiteName,
-                Timezone = legalEntity.DefaultTimezone,
-                CurrencyCode = legalEntity.CurrencyCode,
-                DeviceId = request.DeviceId.ToString(),
-                IsPrimaryAgent = true
-            },
-            Site = new SiteDto
-            {
-                IsActive = site.IsActive,
-                OperatingModel = site.OperatingModel.ToString(),
-                SiteUsesPreAuth = site.SiteUsesPreAuth,
-                ConnectivityMode = site.ConnectivityMode,
-                OdooSiteId = site.OdooSiteId ?? string.Empty,
-                CompanyTaxPayerId = site.CompanyTaxPayerId,
-                OperatorName = site.OperatorName,
-                OperatorTaxPayerId = site.OperatorTaxPayerId
-            },
-            Fcc = BuildFccDto(fccConfig),
-            Sync = BuildSyncDto(),
-            Buffer = BuildBufferDto(),
-            LocalApi = BuildLocalApiDto(),
-            Telemetry = BuildTelemetryDto(),
-            Fiscalization = BuildFiscalizationDto(site),
-            Mappings = BuildMappingsDto(site),
-            Rollout = BuildRolloutDto()
+            Identity = cached.Config.Identity with { DeviceId = request.DeviceId.ToString() }
         };
 
         return Result<GetAgentConfigResult>.Success(new GetAgentConfigResult
         {
             NotModified = false,
-            ConfigVersion = fccConfig.ConfigVersion,
-            Config = config
+            ConfigVersion = cached.ConfigVersion,
+            Config = deviceConfig
         });
     }
 

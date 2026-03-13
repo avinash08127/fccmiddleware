@@ -33,6 +33,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import com.fccmiddleware.edge.security.EncryptedPrefsManager
+import org.koin.android.ext.android.inject
 import org.koin.androidx.viewmodel.ext.android.viewModel as koinViewModel
 
 /**
@@ -53,6 +55,7 @@ import org.koin.androidx.viewmodel.ext.android.viewModel as koinViewModel
 class ProvisioningActivity : AppCompatActivity() {
 
     private val provisioningViewModel: ProvisioningViewModel by koinViewModel()
+    private val encryptedPrefs: EncryptedPrefsManager by inject()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -88,14 +91,40 @@ class ProvisioningActivity : AppCompatActivity() {
         private const val CAMERA_PERMISSION_REQUEST = 100
         private const val STATE_CLOUD_URL = "state_cloud_url"
         private const val STATE_SITE_CODE = "state_site_code"
-        private const val STATE_TOKEN = "state_token"
         private const val STATE_ENV_INDEX = "state_env_index"
         private const val STATE_MANUAL_VISIBLE = "state_manual_visible"
+
+        /** AF-014: Intent extra key indicating why re-provisioning was triggered. */
+        const val EXTRA_REASON = "extra_reprovisioning_reason"
+        const val REASON_TOKEN_EXPIRED = "token_expired"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // AF-011: If the device is already registered (e.g., activity recreated after a
+        // config change during the Success → finish() window), skip straight to diagnostics.
+        if (encryptedPrefs.isRegistered) {
+            AppLogger.i(TAG, "Device already registered — redirecting to DiagnosticsActivity")
+            try {
+                val serviceIntent = Intent(this, EdgeAgentForegroundService::class.java)
+                startForegroundService(serviceIntent)
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to start foreground service on redirect", e)
+            }
+            val intent = Intent(this, DiagnosticsActivity::class.java)
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            startActivity(intent)
+            finish()
+            return
+        }
+
         setContentView(buildLayout())
+
+        // AF-014: Show contextual banner when re-provisioning is triggered by token expiry
+        if (intent?.getStringExtra(EXTRA_REASON) == REASON_TOKEN_EXPIRED) {
+            showError("Your device's authentication has expired. Please scan a new provisioning QR code from the admin portal.")
+        }
 
         scanButton.setOnClickListener { startQrScan() }
         manualEntryButton.setOnClickListener { showManualEntryScreen() }
@@ -109,7 +138,7 @@ class ProvisioningActivity : AppCompatActivity() {
                 environmentSpinner.setSelection(state.getInt(STATE_ENV_INDEX, 0))
                 cloudUrlInput.setText(state.getString(STATE_CLOUD_URL, ""))
                 siteCodeInput.setText(state.getString(STATE_SITE_CODE, ""))
-                tokenInput.setText(state.getString(STATE_TOKEN, ""))
+                // AF-001: Token is intentionally NOT restored — user must re-enter after process death.
             }
         }
 
@@ -146,7 +175,6 @@ class ProvisioningActivity : AppCompatActivity() {
                         manualBackButton.isEnabled = true
                     }
                     is ProvisioningViewModel.RegistrationState.Success -> {
-                        provisioningViewModel.onNavigationComplete()
                         showProgress("Starting Edge Agent service...")
                         try {
                             val serviceIntent = Intent(
@@ -161,6 +189,9 @@ class ProvisioningActivity : AppCompatActivity() {
                         intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
                         startActivity(intent)
                         finish()
+                        // AF-011: Reset state AFTER finish() so a config-change recreation
+                        // still sees Success (and the isRegistered guard above handles it).
+                        provisioningViewModel.onNavigationComplete()
                     }
                 }
             }
@@ -173,7 +204,9 @@ class ProvisioningActivity : AppCompatActivity() {
         outState.putInt(STATE_ENV_INDEX, environmentSpinner.selectedItemPosition)
         outState.putString(STATE_CLOUD_URL, cloudUrlInput.text.toString())
         outState.putString(STATE_SITE_CODE, siteCodeInput.text.toString())
-        outState.putString(STATE_TOKEN, tokenInput.text.toString())
+        // AF-001: Do NOT persist the provisioning token in the Bundle. Bundles are
+        // serialized to the Binder transaction buffer and can survive process death
+        // in plaintext. The user must re-enter the token after process death.
     }
 
     // ── Screen navigation ────────────────────────────────────────────────────

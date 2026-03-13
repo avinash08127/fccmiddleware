@@ -275,3 +275,195 @@
 | **Evidence** | `buffer/entity/BufferedTransaction.kt` line 103: `@ColumnInfo(name = "raw_payload_json") val rawPayloadJson: String?`. `buffer/TransactionBufferManager.kt` line 287: `rawPayloadJson = rawPayloadJson` — stored without encryption. |
 | **Impact** | Low: operational FCC metadata exposed in the database file. No PII or credentials. Useful only for targeted FCC hardware attacks, which require physical LAN access anyway. |
 | **Recommended Fix** | Accept the current risk level given that `allowBackup="false"` is set and the data is not PII. If defense-in-depth is required, encrypt `rawPayloadJson` using `KeystoreManager` before storage, or purge it after successful cloud upload (it is redundant once the canonical fields are persisted). |
+
+---
+
+## AS-021: BUNDLED_PINS Fallback Is Empty — S-006 APK-Level Certificate Pinning Safety Net Non-Functional
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-021 |
+| **Title** | HttpCloudApiClient.BUNDLED_PINS is an empty list despite S-006 requiring APK-bundled fallback pins |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Medium |
+| **Category** | Missing API Auth Headers |
+| **Description** | `HttpCloudApiClient.BUNDLED_PINS` at line 627 is `emptyList()` with a TODO comment: "Replace the empty list below with real pins once TLS certificates are provisioned for the production and staging endpoints." The `buildKtorClient()` method at line 678 uses `BUNDLED_PINS` as the fallback when the `certificatePins` parameter is empty: `val effectivePins = if (certificatePins.isNotEmpty()) certificatePins else BUNDLED_PINS`. In the production DI module (`AppModule.kt` lines 110–123), bootstrap pins ARE hardcoded and passed to `create()`, so the production HTTP client does have pinning. However, `BUNDLED_PINS` serves as the compiled-in safety net per S-006: "APK-bundled fallback certificate pins ensure certificate pinning is active during device registration before SiteConfig delivers runtime pins." Because `BUNDLED_PINS` is empty: (a) Any code path that calls `HttpCloudApiClient.create(baseUrl)` without explicitly passing `certificatePins` (e.g., test helpers, future refactors, or the `updateBaseUrl()` rebuild at line 312 which passes `certificatePins` from the instance) gets zero pinning with no warning. (b) The S-006 safety net is a no-op — if the `AppModule.kt` bootstrap pin hardcoding is accidentally removed or commented out, there is no secondary defense. (c) The discrepancy between the documented security posture ("APK-bundled fallback pins") and the actual implementation (empty list) may mislead security auditors. The bootstrap pins in `AppModule.kt` (lines 110–113) should be duplicated into `BUNDLED_PINS` to provide defense-in-depth. |
+| **Evidence** | `sync/CloudApiClient.kt` line 627: `val BUNDLED_PINS: List<String> = emptyList()`. Line 678: `val effectivePins = if (certificatePins.isNotEmpty()) certificatePins else BUNDLED_PINS` — fallback resolves to empty. Lines 626–627: TODO comment acknowledging pins are not set. `di/AppModule.kt` lines 110–113: bootstrap pins are hardcoded separately, not referencing `BUNDLED_PINS`. |
+| **Impact** | The S-006 specification requirement for APK-level fallback pinning is not met. In the current production flow, pinning works because `AppModule.kt` passes explicit pins. The risk is in maintenance: if the `AppModule` pin list is removed or the factory is called without pins from a new code path, the connection proceeds completely unpinned with no warning. |
+| **Recommended Fix** | Populate `BUNDLED_PINS` with the same SHA-256 pin hashes used in `AppModule.kt`: `val BUNDLED_PINS: List<String> = listOf("sha256/YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=", "sha256/Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=")`. Update `AppModule.kt` to reference `HttpCloudApiClient.BUNDLED_PINS` instead of duplicating the values: `val bootstrapPins = HttpCloudApiClient.BUNDLED_PINS`. This creates a single source of truth for pin values. |
+
+---
+
+## AS-022: Telemetry Payload Includes FCC Host Address and Port — Potential Reconnaissance Value
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-022 |
+| **Title** | TelemetryPayload transmits FCC controller LAN IP and port to cloud — internal network topology exposed |
+| **Module** | Cloud Sync & Telemetry |
+| **Severity** | Low |
+| **Category** | Sensitive Data Logged |
+| **Description** | `TelemetryReporter.collectFccHealth()` at lines 223–225 includes `fccHost = cfg.fcc.hostAddress` and `fccPort = cfg.fcc.port` in the `FccHealthStatusDto`. These values are the FCC controller's LAN IP address (e.g., `192.168.1.100`) and TCP port (e.g., `5001`). The telemetry payload is transmitted over HTTPS to the cloud API. While the channel is encrypted in transit, the cloud stores these values in its telemetry database. If the cloud database is compromised (or the telemetry data is accessible to a wider audience than intended), the internal LAN topology of every site is exposed: FCC controller IP addresses and ports across all deployed sites. Combined with the `fccVendor` field (line 223), this provides a reconnaissance catalog — an attacker knows exactly which FCC devices are at which sites, their vendor type, and their LAN addresses. The `siteCode` and `deviceId` fields in the same payload further enrich the catalog. For comparison, the `@Sensitive` annotation and `SensitiveFieldFilter` are used for PII fields like `customerTaxId`, but infrastructure fields like FCC host/port have no such protection. |
+| **Evidence** | `sync/TelemetryReporter.kt` lines 223–225: `fccHost = cfg.fcc.hostAddress ?: "UNCONFIGURED"`, `fccPort = cfg.fcc.port ?: 0`. `sync/CloudApiModels.kt` lines 233–234: `fccHost: String` and `fccPort: Int` in the serialized DTO. |
+| **Impact** | Low: the cloud channel is HTTPS with certificate pinning, and the FCC LAN addresses are only useful from within the site's LAN. However, in a cloud breach scenario, the aggregated topology data (FCC IPs, ports, vendors, per-site) provides high-value reconnaissance for targeted attacks against fuel controller hardware. |
+| **Recommended Fix** | Assess whether the cloud monitoring dashboard actually needs the exact FCC IP and port for operational purposes. If not, omit these fields from telemetry. If needed for troubleshooting, transmit only a hash or truncated value (e.g., last octet of the IP). At minimum, flag these fields as infrastructure-sensitive in the cloud-side data classification policy. |
+
+---
+
+## AS-023: shareLogs() Shares All Log Files Without Content Redaction — Operational Data Exposed via Share Intent
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-023 |
+| **Title** | DiagnosticsActivity "Share Logs" zips and shares all JSONL log files without sanitizing sensitive content |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Medium |
+| **Category** | Sensitive Data Logged |
+| **Description** | `DiagnosticsActivity.shareLogs()` at lines 446–492 collects all log files via `fileLogger.getLogFiles()`, zips them into `edge-agent-logs.zip`, and opens an Android Share Intent (`ACTION_SEND`) allowing the technician to send the zip via email, WhatsApp, cloud drive, or any installed sharing target. The structured log files contain: (1) FCC host address and port — logged at INFO level when config changes (e.g., `"Applied config v2 from config-update with FCC runtime vendor=DOMS host=192.168.1.100:5001"` at `EdgeAgentForegroundService.kt` line 263–267). (2) Device identity — `deviceId` and `siteCode` logged at registration success (AS-010). (3) Cloud base URL — logged when `CloudApiClient.updateBaseUrl()` is called. (4) Full exception stack traces — logged at ERROR level with class names, method names, and line numbers revealing internal architecture. (5) FCC access code may appear if `JplMessage` is serialized during error handling (AS-015). (6) Connectivity state transitions with timestamps — reveals operational uptime patterns. The `SensitiveFieldFilter` and `@Sensitive` annotation system is designed for API response filtering, NOT for log file sanitization. The `StructuredFileLogger` writes `msg` and `extra` values as-is with no filtering pass. There is no redaction step in `shareLogs()` or `getLogFiles()` before the zip is created. |
+| **Evidence** | `ui/DiagnosticsActivity.kt` lines 452–468: `fileLogger.getLogFiles()` → zip → share. `service/EdgeAgentForegroundService.kt` lines 263–267: FCC host/port logged at INFO. `ui/ProvisioningViewModel.kt` line 127: deviceId/siteCode logged (AS-010). `logging/StructuredFileLogger.kt` lines 84–93: `e()` method includes full stack traces. No redaction or filtering in the shareLogs pipeline. |
+| **Impact** | Technicians sharing logs for troubleshooting inadvertently expose infrastructure details (FCC IPs, cloud URLs), device identity, and code architecture to third parties. In a support workflow where logs are shared via email or messaging, these details transit and are stored on systems outside the organization's control. A malicious actor receiving these logs gains a reconnaissance advantage: FCC vendor, LAN topology, cloud endpoints, and code structure for targeted attacks. |
+| **Recommended Fix** | Add a sanitization pass before zipping: filter log lines through the `SensitiveFieldFilter` or a dedicated log redaction function that replaces FCC host addresses with `[REDACTED]`, truncates deviceId, and strips stack trace details beyond the exception class and message. Alternatively, apply the redaction at write time in `StructuredFileLogger` by running the `msg` and `extra` fields through a filter before serialization. At minimum, display a warning dialog before sharing: "These logs contain device identity and network configuration. Only share with authorized support personnel." |
+
+---
+
+## AS-024: Structured Log Files Persist Full Stack Traces With Internal Code Structure
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-024 |
+| **Title** | StructuredFileLogger stores complete stack traces in persistent JSONL files — internal architecture exposed on device compromise |
+| **Module** | Diagnostics & Monitoring |
+| **Severity** | Low |
+| **Category** | Sensitive Data Logged |
+| **Description** | `StructuredFileLogger.e()` at lines 84–93 captures the full exception stack trace via `throwable.stackTraceToString().take(MAX_MESSAGE_LENGTH)` (4000 characters) and stores it in the `extra.stackTrace` field of the JSONL log entry. These log entries are persisted to `context.filesDir/logs/` as daily rolling files with up to `maxFiles=5` files (5 days of logs). The stack traces contain: fully qualified class names (`com.fccmiddleware.edge.sync.CloudUploadWorker`), method names (`uploadPendingBatch`), line numbers, and the call chain through the application. This information maps the internal architecture — package structure, class hierarchy, method signatures, and error handling paths. On a rooted or compromised device, `context.filesDir` is readable. The `shareLogs()` function (AS-023) also makes these files available off-device. While `android:allowBackup="false"` prevents ADB backup extraction, root access bypasses this. The `crash()` method at line 97 additionally logs `FATAL` level entries with full crash stack traces, which persist even after the process restarts. The 4000-character limit (`MAX_MESSAGE_LENGTH`) is generous — most stack traces are well under this limit. |
+| **Evidence** | `logging/StructuredFileLogger.kt` lines 89–90: `"stackTrace" to it.stackTraceToString().take(MAX_MESSAGE_LENGTH)`. Lines 106–107: same in `crash()`. Line 50: `MAX_MESSAGE_LENGTH = 4000`. `logDir` at line 53: `context.filesDir/logs/` — app-private but root-accessible. |
+| **Impact** | Low: stack traces in log files are standard practice, and the data requires device-level access (root or log sharing) to exploit. However, for a financial application controlling fuel pumps, the exposed architecture aids targeted exploit development. The risk increases when logs are shared externally (AS-023). |
+| **Recommended Fix** | Accept the current risk for on-device logs — stack traces are essential for field debugging. For the `shareLogs()` path (AS-023), truncate stack traces to the exception class name and message only, stripping the call chain. Alternatively, apply R8/ProGuard obfuscation to production builds so stack traces contain obfuscated class/method names. Ensure the ProGuard mapping file is not included in the APK. |
+
+---
+
+## AS-025: WebSocket maxFrameSize Set to Long.MAX_VALUE — Unbounded Memory Allocation from Malicious Frames
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-025 |
+| **Title** | Ktor WebSocket server accepts frames up to 2^63 bytes — no practical upper bound on inbound frame size |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Medium |
+| **Category** | Insecure Network Configuration |
+| **Description** | `OdooWebSocketServer.start()` at line 134 configures the Ktor WebSocket plugin with `maxFrameSize = Long.MAX_VALUE`. This allows the server to accept a single WebSocket frame of any size, up to 9.2 exabytes (2^63 − 1 bytes). When a malicious client on the LAN sends a frame with a large length header (e.g., 1 GB), the Ktor CIO engine attempts to allocate a buffer of that size, causing `OutOfMemoryError` and crashing the entire edge agent process. The per-connection rate limiter (S-005(b)) counts messages (complete frames), not bytes — it does not protect against a single oversized frame. The `maxConnections` limit (default 10) bounds concurrent connections but not frame size. A single malicious connection can crash the server with one frame. The Ktor default `maxFrameSize` is `Long.MAX_VALUE` (per Ktor source), so this is the Ktor default being left unchanged — but the default is inappropriate for a LAN-exposed server on a memory-constrained Android device (Urovo i9100 has 2 GB RAM, ~512 MB available to apps). |
+| **Evidence** | `websocket/OdooWebSocketServer.kt` line 134: `maxFrameSize = Long.MAX_VALUE`. `config/EdgeAgentConfigDto.kt` line 171: `maxConnections: Int = 10` — bounds connections, not frame size. No frame-size config parameter exists in `WebSocketDto`. |
+| **Impact** | A single LAN device can crash the edge agent by sending a WebSocket frame with a large length header. On a production forecourt, this could disrupt transaction processing, FCC polling, and cloud sync until the agent restarts via START_STICKY. Repeated attacks could cause a denial-of-service loop. |
+| **Recommended Fix** | Set a reasonable `maxFrameSize` limit: `maxFrameSize = 64 * 1024` (64 KB). The largest legitimate WebSocket message is a `mode: "all"` response (which the SERVER sends, not receives) or an `attendant_pump_count_update` command from the POS (typically <4 KB). A 64 KB limit provides generous headroom for legitimate messages while preventing memory exhaustion. Add a `maxFrameSizeKb` parameter to `WebSocketDto` to make it configurable. |
+
+---
+
+## AS-026: Default WebSocket Configuration Has No Authentication — Unauthenticated Pump Control via LAN
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-026 |
+| **Title** | WebSocket server defaults to no authentication and binds to all interfaces — any LAN device can query transactions and unblock pumps |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | High |
+| **Category** | Missing API Auth Headers |
+| **Description** | `WebSocketDto` defaults to `sharedSecret: String? = null` (line 181), `requireApiKeyForLan: Boolean = false` (line 175), and `bindAddress: String = "0.0.0.0"` (line 169). The authentication check in `OdooWebSocketServer.start()` at lines 143–151 is: `if (!secret.isNullOrBlank()) { ... }`. When `sharedSecret` is null (the default), the `if` block is skipped entirely — ALL connections are accepted without authentication. Combined with binding to `0.0.0.0`, the WebSocket server is accessible from any network interface (WiFi, mobile data, USB tethering) without credentials. An unauthenticated attacker on the LAN can: (a) `mode: "latest"` / `mode: "all"` — extract all transaction data including amounts, pump numbers, attendant IDs, and product codes. (b) `mode: "manager_update"` — modify Odoo order references on transactions, potentially redirecting payments. (c) `mode: "fp_unblock"` — send pump release commands to the FCC, unblocking pumps that were intentionally restricted. (d) `mode: "manager_manual_update"` — mark transactions as discarded, removing them from the POS workflow. The `requireApiKeyForLan` field exists in the DTO but is NEVER checked in the server code — a search for `requireApiKeyForLan` in `OdooWebSocketServer.kt` returns zero results. This field is dead configuration. |
+| **Evidence** | `config/EdgeAgentConfigDto.kt` line 181: `val sharedSecret: String? = null`. Line 175: `val requireApiKeyForLan: Boolean = false` — dead field. Line 169: `val bindAddress: String = "0.0.0.0"`. `websocket/OdooWebSocketServer.kt` lines 143–151: `if (!secret.isNullOrBlank()) { ... }` — skipped when null. Grep for `requireApiKeyForLan` in `websocket/`: 0 results. |
+| **Impact** | Any device on the same network as the edge agent can connect to the WebSocket server and issue financial commands without authentication. Transaction data (including amounts and attendant IDs) is exposed. Pump release commands can be sent to the FCC. This is a direct path to financial fraud and physical asset control (fuel pumps) from an unauthenticated network position. |
+| **Recommended Fix** | Change the default to require authentication: `sharedSecret` should not default to null in production builds. Add a startup warning when `sharedSecret` is null: `AppLogger.w(TAG, "SECURITY: WebSocket server running WITHOUT authentication")`. Implement the `requireApiKeyForLan` check in the server — it is documented in the DTO but never enforced. Consider binding to `127.0.0.1` by default (localhost only) and requiring explicit configuration to bind to `0.0.0.0`. At minimum, restrict sensitive commands (`fp_unblock`, `manager_update`, `manager_manual_update`) to authenticated connections even if `latest` and `all` are open. |
+
+---
+
+## AS-027: fp_unblock Error Response Exposes Internal Exception Messages to WebSocket Clients
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-027 |
+| **Title** | Pump unblock error handler sends raw exception message to POS client — leaks internal adapter details |
+| **Module** | POS Integration (Odoo) |
+| **Severity** | Low |
+| **Category** | Sensitive Data Logged |
+| **Description** | `OdooWsMessageHandler.handleFpUnblock()` at line 252 sends `e.message ?: "Unknown error"` directly in the WebSocket error response: `put("message", JsonPrimitive(e.message ?: "Unknown error"))`. Exception messages from FCC adapters contain internal details: for DOMS, `JplTcpClient` exceptions include the TCP host/port and frame parsing errors. For Radix, HTTP client exceptions include the FCC URL, HTTP status codes, and response body fragments. For Advatec, `HttpURLConnection` exceptions include the connection URL and timeout values. These details reveal FCC adapter type, protocol, LAN topology (FCC IP/port), and internal class names to the WebSocket client. In a scenario where the WebSocket server has no authentication (AS-026), any LAN device can trigger `fp_unblock` with an invalid pump number and harvest adapter-specific error messages to fingerprint the FCC deployment. |
+| **Evidence** | `websocket/OdooWsMessageHandler.kt` line 252: `put("message", JsonPrimitive(e.message ?: "Unknown error"))`. Compare with `handleFuelPumpStatus` at line 198: logs the error but does NOT send `e.message` to the client. |
+| **Impact** | Low: the information is primarily useful for reconnaissance (FCC vendor, LAN topology) which requires LAN access to exploit further. The adapter error messages may contain FCC host/port (also reported in AS-022 for telemetry), protocol-specific error codes, and internal class names. |
+| **Recommended Fix** | Replace the raw exception message with a generic error: `put("message", JsonPrimitive("Failed to unblock pump $fpId"))`. Log the full exception with `AppLogger.w()` (which is already done at line 247). This follows the pattern used by `handleFuelPumpStatus` where the error is logged but not sent to the client. |
+
+---
+
+## AS-028: BoundSocketFactory Silently Falls Back to Unbound Default Routing — Cloud Traffic May Traverse Untrusted Networks
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-028 |
+| **Title** | BoundSocketFactory silently falls back to OS-default network routing when no bound network is available — no audit trail for cloud traffic routing |
+| **Module** | Connectivity |
+| **Severity** | Medium |
+| **Category** | Insecure Token Storage |
+| **Description** | `BoundSocketFactory.bindIfAvailable()` at lines 70–78 checks `if (network != null)` and silently skips binding when the network is null. When both mobile and WiFi networks are unavailable (or during the ~1–2s gap when `NetworkBinder.onLost` fires before `onAvailable` for a replacement network), `networkProvider()` returns null. In this state, all cloud-bound sockets — including those carrying bearer tokens in Authorization headers, transaction upload payloads with financial data, and telemetry reports — are created without network binding and use whatever route the Android OS selects. On a device with multiple network interfaces (WiFi, mobile, USB tethering, WiFi Direct), the OS may route unbound sockets over an unexpected interface. In a fuel station environment, this could mean cloud traffic (with bearer tokens) routes over the station's customer WiFi if it's the only available network, potentially exposing it to MITM if the customer WiFi is open or compromised. The certificate pinning on `HttpCloudApiClient` mitigates MITM for cloud API calls (server identity is verified), but the `probeHttpClient` used for internet probes (AppModule line 174) does NOT have certificate pinning — it accepts any valid TLS certificate. A probe HTTP GET to `/health` over an attacker-controlled network could be intercepted to inject a `200 OK` response, making `ConnectivityManager` report `FULLY_ONLINE` when the actual cloud endpoint is unreachable. No log entry is emitted when `bindIfAvailable` skips binding. The only indication is the debug-level `logProbeNetwork` in `ConnectivityManager`, which shows "no bound network" but is easily lost in log volume. |
+| **Evidence** | `connectivity/BoundSocketFactory.kt` lines 70–78: `private fun bindIfAvailable(socket: Socket) { val network = networkProvider(); if (network != null) { network.bindSocket(socket) } }` — no logging when network is null. `di/AppModule.kt` lines 174–178: `probeHttpClient` has no certificate pinning. Lines 129: `BoundSocketFactory { networkBinder.cloudNetwork.value }` — cloud API client uses same factory. |
+| **Impact** | When both mobile and WiFi networks are transiently unavailable (e.g., during roaming, airplane mode toggle, or NetworkBinder race condition from AF-049), cloud traffic temporarily routes over OS-default routing. If the device has access to an untrusted network, bearer tokens and financial data may traverse it. The pinned cloud API client is protected against MITM, but the unpinned probe client is vulnerable to response injection. |
+| **Recommended Fix** | Add a WARN-level log when `bindIfAvailable` skips binding: `AppLogger.w(TAG, "No bound network available — socket using default OS routing")`. Add certificate pinning to the `probeHttpClient` in AppModule (use the same bootstrap pins as the cloud API client). Consider failing the probe when no bound network is available (return false) rather than probing over an uncontrolled route — this ensures `ConnectivityState` accurately reflects reachability over the correct network. |
+
+---
+
+## AS-029: Internet Probe OkHttpClient Lacks Certificate Pinning — Probe Result Can Be Spoofed via MITM
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-029 |
+| **Title** | The internet connectivity probe uses a separate OkHttpClient without certificate pinning — attacker on the network path can inject a 200 OK to spoof connectivity |
+| **Module** | Connectivity |
+| **Severity** | Medium |
+| **Category** | Missing API Auth Headers |
+| **Description** | `AppModule.kt` creates a `probeHttpClient` at lines 174–178 for the internet connectivity probe. This client uses `BoundSocketFactory` for network binding but does NOT configure a `CertificatePinner`. It makes an HTTP GET to `${cloudBaseUrl}/health` and checks `it.isSuccessful` (line 191). In contrast, the `HttpCloudApiClient` (created at lines 103–131) uses `CertificatePinner` with bootstrap or runtime pins (lines 110–123) — all cloud API traffic is pinned. A network-level attacker (e.g., rogue AP, ARP spoofing on station LAN, compromised upstream router) who can intercept the probe's TCP connection can: (1) present their own TLS certificate (accepted by the probe because there's no pinning — only standard CA validation), and (2) return `200 OK` to the `/health` request. This makes `ConnectivityManager` transition to `internetUp = true` and eventually `FULLY_ONLINE`. The `CadenceController` then triggers cloud upload, config poll, and telemetry — all of which go through the PINNED `HttpCloudApiClient` and fail with a certificate pinning violation. The practical effect is: the agent spends resources attempting uploads that fail, generates error logs, and increments error counters. The probed "FULLY_ONLINE" state is incorrect because the actual cloud endpoint is not reachable (only the MITM is). The CadenceController cannot distinguish "internet up but cloud pinning failed" from "cloud server has a misconfigured certificate" — both produce the same symptoms. |
+| **Evidence** | `di/AppModule.kt` lines 174–178: `OkHttpClient.Builder().socketFactory(...).connectTimeout(4, ...).readTimeout(4, ...).build()` — no `certificatePinner()`. Compare lines 682–699 of `sync/CloudApiClient.kt`: `CertificatePinner.Builder()` with pin hashes. Line 191: `probeHttpClient.newCall(request).execute().use { it.isSuccessful }` — accepts any valid TLS response. |
+| **Impact** | An attacker with network interception capability can make the agent believe cloud connectivity is available when it is not, causing wasted upload attempts, misleading telemetry (reports FULLY_ONLINE to cloud), and incorrect connectivity state on the DiagnosticsActivity screen. The pinned CloudApiClient prevents actual data exfiltration. |
+| **Recommended Fix** | Add the same certificate pinner to `probeHttpClient` that `HttpCloudApiClient` uses. Extract the `CertificatePinner` construction into a shared utility function and apply it to both clients. This ensures the probe result is only positive when the genuine cloud endpoint (with the expected certificate chain) is reachable. |
+
+---
+
+## AS-030: SensitiveFieldFilter Not Wired Into Production Logging — @Sensitive Annotations Have No Runtime Effect
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-030 |
+| **Title** | SensitiveFieldFilter is built and tested but never called from production code — 10 @Sensitive-annotated fields have no runtime log redaction |
+| **Module** | Security |
+| **Severity** | High |
+| **Category** | Sensitive Data Logged |
+| **Description** | The Security module provides a complete PII/credential redaction system: (1) `@Sensitive` annotation (`Sensitive.kt`) with `RUNTIME` retention, (2) `SensitiveFieldFilter` reflection-based redactor (`SensitiveFieldFilter.kt`) that replaces `@Sensitive` field values with `[REDACTED]` or `...last8chars` for JWTs, (3) 13 test methods in `SecurityHardeningTest.kt` validating redaction behavior. The `@Sensitive` annotation is applied to 10 fields across two production model files: `CloudApiModels.kt` (`provisioningToken`, `deviceToken`, `refreshToken` on 4 DTOs) and `AdapterTypes.kt` (`customerTaxId`, `authCredential`, `sharedSecret`, `fcAccessCode`, `clientId`, `clientSecret`, `webhookSecret`, `advatecWebhookToken`). However, a search for `SensitiveFieldFilter.redact` or `SensitiveFieldFilter.redactToString` in ALL production Kotlin files (`src/main/kotlin/`) returns ZERO results. The filter is only used in test code (`SecurityHardeningTest.kt`). The production logging pipeline — `AppLogger.i()`, `AppLogger.w()`, `AppLogger.e()` backed by `StructuredFileLogger` — performs no sensitive field filtering. All log messages use raw string interpolation (e.g., `AppLogger.i(TAG, "Registration successful: deviceId=${response.deviceId}")` at `ProvisioningViewModel.kt` line 127). If any production code path ever logs a `@Sensitive`-annotated object using `toString()` (standard Kotlin data class toString includes all fields), the sensitive value appears in plaintext in the persistent structured log files and is shareable via `DiagnosticsActivity.shareLogs()` (AS-023). `SecurityHardeningTest` line 621 explicitly PROVES this risk: `"Raw toString() leaks sensitive data — use SensitiveFieldFilter.redactToString() instead"`. This is the FOURTH instance of the "built, tested, but never wired" pattern in the codebase, following CleanupWorker (AF-034), IntegrityChecker (AF-038), and KeystoreManager.rotateKey (AT-051). |
+| **Evidence** | `security/SensitiveFieldFilter.kt`: complete implementation. `security/Sensitive.kt`: `@Retention(RUNTIME)` annotation. Grep for `SensitiveFieldFilter` in `src/main/kotlin/`: only `SensitiveFieldFilter.kt` itself (definition) and `Sensitive.kt` (doc reference). Grep for `SensitiveFieldFilter` in `src/test/kotlin/`: `SecurityHardeningTest.kt` — 13 test methods. `sync/CloudApiModels.kt`: `@Sensitive val provisioningToken`, `@Sensitive val deviceToken`, `@Sensitive val refreshToken` (4 DTOs). `adapter/common/AdapterTypes.kt`: `@Sensitive val customerTaxId`, `@Sensitive val authCredential`, etc. (8 fields). `security/SecurityHardeningTest.kt` line 621: test proving `toString()` leaks sensitive data. |
+| **Impact** | The `@Sensitive` annotation gives developers and security auditors a false sense of security — fields appear to be protected for log redaction, but the redaction mechanism is never invoked. If any current or future code path logs a `TokenRefreshRequest`, `DeviceRegistrationResponse`, `AgentFccConfig`, or `PreAuthCommand` object (directly or via exception serialization), sensitive credentials and PII appear in plaintext in persistent JSONL log files. These log files can be shared externally via the diagnostics screen (AS-023). The provisioning token, refresh token, FCC access codes, customer tax IDs, and OAuth client secrets are all at risk. |
+| **Recommended Fix** | Wire `SensitiveFieldFilter` into the `StructuredFileLogger` write path. Add a `sanitize()` step in `StructuredFileLogger.writeEntry()` that runs the `msg` and `extra` fields through a pattern-based sanitizer (checking for known sensitive field names like "token", "secret", "credential", "taxId"). For structured logging of objects, add an `AppLogger.redacted(tag, obj)` method that calls `SensitiveFieldFilter.redactToString(obj)` and passes the result to `writeEntry()`. Additionally, override `toString()` on all `@Sensitive`-annotated data classes to use `SensitiveFieldFilter.redactToString(this)` — this ensures that even accidental `toString()` calls in log interpolation are redacted. |
+
+---
+
+## AS-031: Token Blob Writes Use apply() Instead of commit() — Tokens Lost on Process Death During Refresh
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-031 |
+| **Title** | storeDeviceTokenBlob and storeRefreshTokenBlob use async apply() — token state not crash-safe during refresh |
+| **Module** | Security |
+| **Severity** | Medium |
+| **Category** | Insecure Token Storage |
+| **Description** | `EncryptedPrefsManager.storeDeviceTokenBlob()` (line 135) and `storeRefreshTokenBlob()` (line 143) both use `prefs.edit().putString(...).apply()`. The `apply()` method writes to the in-memory SharedPreferences map synchronously but defers disk persistence to a background thread. The same class uses `commit()` (synchronous disk write) for `isDecommissioned` (line 102), `isReprovisioningRequired` (line 117), `setReprovisioningAndUnregister` (line 129), and `saveRegistration` (line 163-172), with explicit comments explaining crash-safety requirements. During token refresh (`KeystoreDeviceTokenProvider.refreshAccessToken()` line 113), the cloud issues a new device token and new refresh token. The old refresh token is single-use and is now invalidated server-side. `storeTokens()` writes the new tokens via `storeDeviceTokenBlob()` and `storeRefreshTokenBlob()` — both using `apply()`. If the process is killed between the `apply()` call and the background disk flush (a window of 100–500ms on slow storage): (a) the old token blobs survive on disk, (b) on restart, `getAccessToken()` returns the old device token (expired), (c) `refreshAccessToken()` uses the old refresh token, which the cloud rejects (already consumed), (d) the device enters re-provisioning state. This failure mode is identical to AF-012 (`clearAll()` using `apply()` instead of `commit()`). The inconsistency is notable: the class explicitly documents crash-safety for boolean flags but uses the crash-unsafe `apply()` for the security-critical token blobs. |
+| **Evidence** | `security/EncryptedPrefsManager.kt` line 135: `prefs.edit().putString(KEY_DEVICE_TOKEN_ENCRYPTED, encoded).apply()`. Line 143: `prefs.edit().putString(KEY_REFRESH_TOKEN_ENCRYPTED, encoded).apply()`. Compare with line 102: `prefs.edit().putBoolean(KEY_IS_DECOMMISSIONED, value).commit()` — explicit crash-safety comment. Lines 163–172: `saveRegistration()` uses `.commit()`. |
+| **Impact** | On process death during token refresh (which occurs every 24 hours under normal operation), the device loses the new tokens. The old refresh token is rejected by the cloud (single-use, already consumed). The device enters unnecessary re-provisioning, requiring a new bootstrap token from the portal — a manual IT process. With 100 deployed devices refreshing daily, even a 0.1% process death rate during the 100–500ms apply window causes 3–4 unnecessary re-provisioning events per month across the fleet. |
+| **Recommended Fix** | Change both methods to use `commit()`: `fun storeDeviceTokenBlob(encoded: String) { prefs.edit().putString(KEY_DEVICE_TOKEN_ENCRYPTED, encoded).commit() }` and `fun storeRefreshTokenBlob(encoded: String) { prefs.edit().putString(KEY_REFRESH_TOKEN_ENCRYPTED, encoded).commit() }`. Better yet, batch both writes in a single commit: add a `storeTokenBlobs(deviceBlob: String, refreshBlob: String)` method that writes both in one `prefs.edit()...commit()`, matching the atomic pattern of `saveRegistration()`. |
+
+---
+
+## AS-032: KeystoreManager Does Not Verify Hardware-Backed Key Storage — No TEE Confirmation or Warning
+
+| Field | Value |
+|-------|-------|
+| **ID** | AS-032 |
+| **Title** | KeystoreManager creates keys without verifying hardware backing and does not log a warning when keys are software-backed |
+| **Module** | Security |
+| **Severity** | Low |
+| **Category** | Insecure Token Storage |
+| **Description** | `KeystoreManager.getOrCreateKey()` at lines 159–176 creates AES-256-GCM keys with `setUserAuthenticationRequired(false)` but does not call `setIsStrongBoxBacked(true)` (API 28+) or verify that the generated key is hardware-backed. After key generation, `android.security.keystore.KeyInfo.isInsideSecureHardware()` is never checked. The class doc (line 16) states "hardware TEE where available (Urovo i9100)" — implying hardware backing is expected but not enforced. On devices without hardware-backed Keystore (emulators used for testing, some budget Android devices that may be substituted in field deployments, devices where the TEE is in a degraded state), keys are stored in a software-backed Keystore. Software-backed keys can be extracted by a root user by reading the `/data/misc/keystore/` directory, defeating the security guarantees that the rest of the codebase assumes. The `SecurityHardeningTest` validates key alias names and annotation placements but does not test for hardware backing — there is no integration test that calls `KeyInfo.isInsideSecureHardware()` on the generated key. |
+| **Evidence** | `security/KeystoreManager.kt` lines 163–171: `KeyGenParameterSpec.Builder(...)` — no `.setIsStrongBoxBacked(true)`. Line 16: "hardware TEE where available (Urovo i9100)." No call to `SecretKeyFactory.getInstance("AES", "AndroidKeyStore").getKeySpec(key, KeyInfo::class.java).isInsideSecureHardware` anywhere in the class. |
+| **Impact** | On devices without hardware-backed Keystore, all secrets (device JWT, refresh token, FCC credentials, LAN API key, config integrity key) are stored in software-backed encryption. A root user can extract the Keystore blobs and decrypt them. Low severity because: (1) the target device (Urovo i9100) supports hardware-backed Keystore, (2) rooting a production device requires physical access. |
+| **Recommended Fix** | After key generation in `getOrCreateKey()`, check hardware backing: `val keyInfo = SecretKeyFactory.getInstance("AES", "AndroidKeyStore").getKeySpec(key, KeyInfo::class.java) as KeyInfo; if (!keyInfo.isInsideSecureHardware) { AppLogger.w(TAG, "SECURITY: Key alias=$alias is SOFTWARE-backed — not protected by hardware TEE") }`. This provides an audit trail when keys are not hardware-backed. Optionally, add a telemetry field `keystoreHardwareBacked: Boolean` to the `DeviceStatusDto` so the cloud monitoring dashboard can detect devices with degraded key protection.

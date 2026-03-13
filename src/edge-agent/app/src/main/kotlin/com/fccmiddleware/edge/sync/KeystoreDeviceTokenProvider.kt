@@ -101,7 +101,14 @@ class KeystoreDeviceTokenProvider(
             return@withLock false
         }
 
-        when (val result = client.refreshToken(currentRefreshToken)) {
+        // FM-S03: Include the current (even expired) device JWT so the cloud can
+        // verify identity binding between the refresh token and the device.
+        val currentDeviceToken = getAccessTokenRaw() ?: run {
+            AppLogger.w(TAG, "No device token available — cannot refresh (FM-S03 requires JWT)")
+            return@withLock false
+        }
+
+        when (val result = client.refreshToken(currentRefreshToken, currentDeviceToken)) {
             is CloudTokenRefreshResult.Success -> {
                 val stored = storeTokens(result.response.deviceToken, result.response.refreshToken)
                 if (!stored) {
@@ -189,6 +196,23 @@ class KeystoreDeviceTokenProvider(
         }
 
         return true
+    }
+
+    /**
+     * FM-S03: Retrieves the current device JWT (may be expired) for identity
+     * binding during token refresh. Unlike [getAccessToken], this does NOT
+     * return null when the device is decommissioned — the token is needed
+     * for the refresh request even if it will be rejected.
+     */
+    private fun getAccessTokenRaw(): String? {
+        val blob = encryptedPrefs.getDeviceTokenBlob() ?: return null
+        return try {
+            val encrypted = Base64.decode(blob, Base64.NO_WRAP)
+            keystoreManager.retrieveSecret(KeystoreManager.ALIAS_DEVICE_JWT, encrypted)
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to retrieve device token for refresh identity binding", e)
+            null
+        }
     }
 
     private fun getRefreshToken(): String? {

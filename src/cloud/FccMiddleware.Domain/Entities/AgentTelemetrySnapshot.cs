@@ -5,7 +5,7 @@ namespace FccMiddleware.Domain.Entities;
 
 /// <summary>
 /// Latest telemetry snapshot reported by an Edge Agent device.
-/// Stores the full payload as JSON plus indexed summary fields for portal dashboards.
+/// Stores a compact detail payload plus indexed summary fields for portal dashboards.
 /// </summary>
 public class AgentTelemetrySnapshot : ITenantScoped
 {

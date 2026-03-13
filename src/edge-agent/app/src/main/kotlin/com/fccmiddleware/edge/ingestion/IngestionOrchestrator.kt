@@ -33,6 +33,11 @@ data class PollResult(
     val fetchCycles: Int,
     /** True if the FCC cursor was advanced at least once during this cycle. */
     val cursorAdvanced: Boolean,
+    /**
+     * AF-006: Number of newly buffered transactions matching the requested pump number.
+     * Null when no pump filter was requested (scheduled polls, or manual pull without pumpNumber).
+     */
+    val pumpMatchCount: Int? = null,
 )
 
 /**
@@ -58,22 +63,20 @@ data class PollResult(
  *   - null — first boot; full catch-up required
  */
 class IngestionOrchestrator(
-    adapter: IFccAdapter? = null,
     /** Nullable until TransactionBufferManager is wired. Polls are no-ops until set. */
     private val bufferManager: TransactionBufferManager? = null,
     /** Nullable until Room DB is available. Polls are no-ops until set. */
     private val syncStateDao: SyncStateDao? = null,
     /** Nullable until Room DB is available. Used for fiscal receipt updates (ADV-7.3). */
     private val transactionDao: TransactionBufferDao? = null,
-    config: AgentFccConfig? = null,
 ) {
-    /** Late-bound: wired when FCC config becomes available after startup. */
+    /** Late-bound via [wireRuntime]: wired when FCC config becomes available after startup. */
     @Volatile
-    internal var adapter: IFccAdapter? = adapter
+    private var adapter: IFccAdapter? = null
 
-    /** Late-bound: wired when FCC config becomes available after startup. */
+    /** Late-bound via [wireRuntime]: wired when FCC config becomes available after startup. */
     @Volatile
-    internal var config: AgentFccConfig? = config
+    private var config: AgentFccConfig? = null
 
     // ── Fiscalization (ADV-7.3) ───────────────────────────────────────────────
     // Late-bound: wired when site config indicates fiscalizationMode = FCC_DIRECT + vendor = ADVATEC.
@@ -254,6 +257,7 @@ class IngestionOrchestrator(
         var fetchCycles = 0
         var newCount = 0
         var skippedCount = 0
+        var pumpMatchCount = 0
         var lastBatchHasMore = false
         var cursorAdvanced = false
 
@@ -280,6 +284,10 @@ class IngestionOrchestrator(
                     val inserted = bm.bufferTransaction(tx)
                     if (inserted) {
                         newCount++
+                        // AF-006: Count newly buffered transactions matching the requested pump
+                        if (pumpNumber != null && tx.pumpNumber == pumpNumber) {
+                            pumpMatchCount++
+                        }
                         // ADV-7.3: Queue for fiscalization if no fiscal receipt yet.
                         if (txsToFiscalize != null && tx.fiscalReceiptNumber.isNullOrEmpty()) {
                             txsToFiscalize.add(tx)
@@ -297,7 +305,7 @@ class IngestionOrchestrator(
                 }
                 if (newCursorValue != null) {
                     try {
-                        advanceCursor(dao, initialSyncState, newCursorValue)
+                        advanceCursor(dao, newCursorValue)
                         cursorAdvanced = true
 
                         // Build next cursor for continuation fetch within this poll cycle.
@@ -355,7 +363,13 @@ class IngestionOrchestrator(
             retryPendingFiscalization()
         }
 
-        return PollResult(newCount, skippedCount, fetchCycles, cursorAdvanced)
+        return PollResult(
+            newCount = newCount,
+            skippedCount = skippedCount,
+            fetchCycles = fetchCycles,
+            cursorAdvanced = cursorAdvanced,
+            pumpMatchCount = if (pumpNumber != null) pumpMatchCount else null,
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -498,15 +512,17 @@ class IngestionOrchestrator(
     /**
      * Persist the advanced cursor to [SyncState] (id = 1).
      *
-     * Preserves all other [SyncState] fields and only updates
-     * [SyncState.lastFccCursor] and [SyncState.updatedAt].
+     * AF-003: Re-reads the current SyncState from the DAO instead of using a
+     * stale snapshot. This prevents other fields (e.g., lastUploadAt set by
+     * CloudUploadWorker) from being silently rolled back during multi-batch
+     * poll cycles.
      */
     private suspend fun advanceCursor(
         dao: SyncStateDao,
-        current: SyncState?,
         newCursorValue: String,
     ) {
         val now = Instant.now().toString()
+        val current = dao.get()
         val updated = current?.copy(
             lastFccCursor = newCursorValue,
             updatedAt = now,

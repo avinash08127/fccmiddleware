@@ -249,7 +249,10 @@ class SecurityHardeningTest {
 
         @Test
         fun `real model — TokenRefreshRequest redacts refreshToken fully`() {
-            val request = TokenRefreshRequest(refreshToken = "opaque-refresh-token-with-many-characters")
+            val request = TokenRefreshRequest(
+                refreshToken = "opaque-refresh-token-with-many-characters",
+                deviceToken = "eyJhbGciOiJSUzI1NiJ9.payload.signature",
+            )
             val redacted = SensitiveFieldFilter.redact(request)
 
             // Per spec: refresh tokens are fully redacted (not last-8-chars like device JWT)
@@ -617,7 +620,10 @@ class SecurityHardeningTest {
         fun `data class toString includes sensitive values — proving SensitiveFieldFilter is needed`() {
             // This test proves that Kotlin data class toString() DOES leak sensitive data,
             // confirming that SensitiveFieldFilter must always be used for logging.
-            val request = TokenRefreshRequest(refreshToken = "opaque-secret-refresh-token")
+            val request = TokenRefreshRequest(
+                refreshToken = "opaque-secret-refresh-token",
+                deviceToken = "eyJhbGciOiJSUzI1NiJ9.payload.signature",
+            )
             val rawToString = request.toString()
 
             assertTrue(

@@ -45,6 +45,7 @@ public sealed class AgentController : ControllerBase
     private readonly IObservabilityMetrics _metrics;
     private readonly FccMiddlewareDbContext _dbContext;
     private readonly PortalAccessResolver _accessResolver;
+    private readonly IRegistrationThrottleService _registrationThrottle;
 
     public AgentController(
         IMediator mediator,
@@ -52,7 +53,8 @@ public sealed class AgentController : ControllerBase
         IConfiguration configuration,
         IObservabilityMetrics metrics,
         FccMiddlewareDbContext dbContext,
-        PortalAccessResolver accessResolver)
+        PortalAccessResolver accessResolver,
+        IRegistrationThrottleService registrationThrottle)
     {
         _mediator = mediator;
         _logger = logger;
@@ -60,6 +62,7 @@ public sealed class AgentController : ControllerBase
         _metrics = metrics;
         _dbContext = dbContext;
         _accessResolver = accessResolver;
+        _registrationThrottle = registrationThrottle;
     }
 
     /// <summary>
@@ -176,18 +179,35 @@ public sealed class AgentController : ControllerBase
         [FromBody] DeviceRegistrationApiRequest request,
         CancellationToken cancellationToken)
     {
-        // Extract bootstrap token from JSON body; fall back to X-Provisioning-Token header
+        // FM-S02: Block IPs with too many failed registration attempts
+        var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        if (await _registrationThrottle.IsBlockedAsync(clientIp, cancellationToken))
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests,
+                BuildError("REGISTRATION_BLOCKED",
+                    "Too many failed registration attempts. Please try again later."));
+        }
+
+        // Extract bootstrap token from JSON body; fall back to X-Provisioning-Token header (deprecated)
         var provisioningToken = request.ProvisioningToken;
         if (string.IsNullOrWhiteSpace(provisioningToken)
             && Request.Headers.TryGetValue("X-Provisioning-Token", out var tokenHeader))
         {
             provisioningToken = tokenHeader.ToString();
+
+            // OB-S03: Header-channel tokens are at higher risk of appearing in infrastructure logs
+            // (reverse proxies, CDNs, API gateways). Both Android and desktop agents send the token
+            // in the request body. Log a deprecation warning when the header path is used.
+            _logger.LogWarning(
+                "Registration used deprecated X-Provisioning-Token header instead of request body. " +
+                "ClientIp={ClientIp}. Migrate to sending provisioningToken in the JSON body.",
+                clientIp);
         }
 
         if (string.IsNullOrWhiteSpace(provisioningToken))
         {
             return Unauthorized(BuildError("BOOTSTRAP_TOKEN_MISSING",
-                "Provisioning token is required (in request body or X-Provisioning-Token header)."));
+                "Provisioning token is required in the request body."));
         }
 
         var command = new RegisterDeviceCommand
@@ -211,6 +231,15 @@ public sealed class AgentController : ControllerBase
 
         if (result.IsFailure)
         {
+            // FM-S02: Track failed attempts for token-auth failures (brute-force indicator)
+            if (result.Error!.Code is "BOOTSTRAP_TOKEN_INVALID"
+                or "BOOTSTRAP_TOKEN_EXPIRED"
+                or "BOOTSTRAP_TOKEN_REVOKED"
+                or "BOOTSTRAP_TOKEN_ALREADY_USED")
+            {
+                await _registrationThrottle.RecordFailedAttemptAsync(clientIp, cancellationToken);
+            }
+
             return result.Error!.Code switch
             {
                 "BOOTSTRAP_TOKEN_INVALID" or "BOOTSTRAP_TOKEN_EXPIRED" or "BOOTSTRAP_TOKEN_REVOKED" =>
@@ -255,6 +284,9 @@ public sealed class AgentController : ControllerBase
         // Both registration and config assembly succeeded — commit the transaction.
         await transaction.CommitAsync(cancellationToken);
 
+        // FM-S02: Clear failed-attempt counter on successful registration
+        await _registrationThrottle.ResetAsync(clientIp, cancellationToken);
+
         return StatusCode(StatusCodes.Status201Created, new DeviceRegistrationApiResponse
         {
             DeviceId = value.DeviceId,
@@ -270,9 +302,11 @@ public sealed class AgentController : ControllerBase
 
     /// <summary>
     /// Refreshes a device JWT using the opaque refresh token. Implements token rotation.
+    /// FM-S03: Requires the current (even expired) device JWT to bind the refresh
+    /// to the original device identity.
     /// </summary>
     [HttpPost("api/v1/agent/token/refresh")]
-    [AllowAnonymous] // Authenticated via refresh token in body, not JWT
+    [AllowAnonymous] // Authenticated via refresh token + expired JWT in body
     [RequestSizeLimit(16_384)] // S-3: 16 KB max for token refresh payloads
     [EnableRateLimiting("token-refresh")]
     [ProducesResponseType(typeof(RefreshTokenResponse), StatusCodes.Status200OK)]
@@ -280,11 +314,27 @@ public sealed class AgentController : ControllerBase
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> RefreshToken(
         [FromBody] RefreshTokenRequest request,
+        [FromServices] IDeviceTokenService tokenService,
         CancellationToken cancellationToken)
     {
+        // FM-S03: Validate the expired device JWT (signature only) and extract device identity
+        if (string.IsNullOrWhiteSpace(request.DeviceToken))
+        {
+            return Unauthorized(BuildError("DEVICE_TOKEN_REQUIRED",
+                "The current device JWT must be provided alongside the refresh token."));
+        }
+
+        var deviceId = tokenService.ExtractDeviceIdFromExpiredToken(request.DeviceToken);
+        if (deviceId is null)
+        {
+            return Unauthorized(BuildError("DEVICE_TOKEN_INVALID",
+                "The provided device JWT has an invalid signature or is malformed."));
+        }
+
         var command = new RefreshDeviceTokenCommand
         {
-            RefreshToken = request.RefreshToken
+            RefreshToken = request.RefreshToken,
+            ExpectedDeviceId = deviceId.Value
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -310,16 +360,26 @@ public sealed class AgentController : ControllerBase
 
     /// <summary>
     /// Decommissions a device — sets status to DECOMMISSIONED and revokes all refresh tokens.
+    /// FM-S04: Requires a reason for audit traceability.
     /// </summary>
     [HttpPost("api/v1/admin/agent/{deviceId}/decommission")]
     [Authorize(Policy = "PortalAdminWrite")]
     [ProducesResponseType(typeof(DecommissionResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Decommission(
         Guid deviceId,
+        [FromBody] DecommissionRequest request,
         CancellationToken cancellationToken)
     {
+        // FM-S04: Validate reason is provided for this irreversible action
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length < 10)
+        {
+            return BadRequest(BuildError("REASON_REQUIRED",
+                "A reason (at least 10 characters) is required for decommissioning a device."));
+        }
+
         var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
             return Unauthorized();
@@ -331,16 +391,15 @@ public sealed class AgentController : ControllerBase
             .Select(a => new { a.LegalEntityId })
             .FirstOrDefaultAsync(cancellationToken);
 
-        if (device is null)
+        // OB-S04: Return 404 for both not-found and cross-tenant to avoid leaking device existence
+        if (device is null || !access.CanAccess(device.LegalEntityId))
             return NotFound(BuildError("DEVICE_NOT_FOUND", $"Device '{deviceId}' not found."));
-
-        if (!access.CanAccess(device.LegalEntityId))
-            return Forbid();
 
         var command = new DecommissionDeviceCommand
         {
             DeviceId = deviceId,
-            DecommissionedBy = _accessResolver.ResolveUserId(User) ?? "system"
+            DecommissionedBy = _accessResolver.ResolveUserId(User) ?? "system",
+            Reason = request.Reason.Trim()
         };
 
         var result = await _mediator.Send(command, cancellationToken);

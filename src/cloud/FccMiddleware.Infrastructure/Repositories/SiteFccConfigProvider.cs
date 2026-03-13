@@ -72,48 +72,31 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
         string webhookSecret,
         CancellationToken ct = default)
     {
-        // Load all active Petronite configs that have a webhook secret set.
-        // We use constant-time comparison in memory to avoid timing attacks.
-        var candidates = await _dbContext.FccConfigs
-            .IgnoreQueryFilters()
-            .Where(cfg => cfg.IsActive
+        // TX-P05: Query by SHA-256 hash of the webhook secret using indexed column,
+        // instead of loading all Petronite configs into memory (O(N) scan).
+        var secretHash = ComputeSha256Hex(webhookSecret);
+
+        var row = await ProjectFccConfigRow(
+            q => q.Where(cfg => cfg.IsActive
                 && cfg.FccVendor == FccVendor.PETRONITE
-                && cfg.WebhookSecret != null)
-            .Select(cfg => new FccConfigProjection
-            {
-                SiteCode = cfg.Site.SiteCode,
-                FccVendor = cfg.FccVendor,
-                ConnectionProtocol = cfg.ConnectionProtocol,
-                HostAddress = cfg.HostAddress,
-                Port = cfg.Port,
-                IngestionMethod = cfg.IngestionMethod,
-                PullIntervalSeconds = cfg.PullIntervalSeconds,
-                LegalEntityId = cfg.Site.LegalEntityId,
-                CurrencyCode = cfg.LegalEntity.CurrencyCode,
-                DefaultTimezone = cfg.LegalEntity.DefaultTimezone,
-                SharedSecret = cfg.SharedSecret,
-                UsnCode = cfg.UsnCode,
-                AuthPort = cfg.AuthPort,
-                ClientId = cfg.ClientId,
-                ClientSecret = cfg.ClientSecret,
-                WebhookSecret = cfg.WebhookSecret,
-                OAuthTokenEndpoint = cfg.OAuthTokenEndpoint,
-            })
-            .ToListAsync(ct);
+                && cfg.WebhookSecretHash == secretHash),
+            ct);
 
-        // M-11: Use HMAC-based comparison so the check is constant-time regardless
-        // of input length. FixedTimeEquals short-circuits on different-length spans,
-        // leaking the valid secret's length via timing analysis.
-        var match = candidates.FirstOrDefault(c =>
-            ConstantTimeSecretEquals(c.WebhookSecret!, webhookSecret));
-
-        if (match is null)
+        if (row is null)
         {
             _logger.LogWarning("No active Petronite FccConfig matched the provided webhook secret");
             return null;
         }
 
-        return (BuildSiteFccConfig(match), match.LegalEntityId);
+        // Constant-time comparison against the actual stored secret to confirm match
+        // (hash collision guard + M-11 timing-attack mitigation)
+        if (row.WebhookSecret is null || !ConstantTimeSecretEquals(row.WebhookSecret, webhookSecret))
+        {
+            _logger.LogWarning("Petronite webhook secret hash matched but constant-time comparison failed");
+            return null;
+        }
+
+        return (BuildSiteFccConfig(row), row.LegalEntityId);
     }
 
     /// <inheritdoc />

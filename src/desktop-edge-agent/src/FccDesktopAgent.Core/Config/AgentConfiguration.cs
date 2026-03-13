@@ -72,6 +72,12 @@ public sealed class AgentConfiguration
     public int PreAuthTimeoutSeconds { get; set; } = 30;
 
     /// <summary>
+    /// PA-P03: Maximum pre-auth records processed per expiry check cycle (default 50).
+    /// Bounds memory use and loop duration when a large backlog accumulates during an FCC outage.
+    /// </summary>
+    public int PreAuthExpiryBatchSize { get; set; } = 50;
+
+    /// <summary>
     /// Duration in minutes before an authorized pre-auth expires if not completed (default 5 min).
     /// Overridden by the FCC-provided ExpiresAt when the adapter returns one.
     /// </summary>

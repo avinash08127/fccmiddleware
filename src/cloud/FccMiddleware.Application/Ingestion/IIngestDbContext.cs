@@ -52,4 +52,10 @@ public interface IIngestDbContext
         DateTimeOffset windowStart,
         DateTimeOffset windowEnd,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// TX-P06: Updates the RawPayloadRef on a saved transaction after background S3 archival.
+    /// Bypasses tenant filter so it can be called from a background scope without tenant context.
+    /// </summary>
+    Task SetRawPayloadRefAsync(Guid transactionId, string rawPayloadRef, CancellationToken cancellationToken = default);
 }

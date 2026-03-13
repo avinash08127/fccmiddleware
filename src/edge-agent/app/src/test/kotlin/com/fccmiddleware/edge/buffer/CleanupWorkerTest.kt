@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.buffer
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 import com.fccmiddleware.edge.buffer.entity.AuditLog
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
@@ -353,7 +354,7 @@ class CleanupWorkerTest {
         currencyCode = "MWK",
         requestedAmountMinorUnits = 50_000L,
         authorizedAmountMinorUnits = null,
-        status = status,
+        status = PreAuthStatus.valueOf(status),
         fccCorrelationId = null,
         fccAuthorizationCode = null,
         failureReason = null,

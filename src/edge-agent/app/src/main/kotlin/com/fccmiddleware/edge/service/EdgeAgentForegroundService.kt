@@ -93,6 +93,8 @@ class EdgeAgentForegroundService : Service() {
         const val CHANNEL_ID = "fcc_edge_agent_channel"
         const val NOTIFICATION_ID = 1
         private const val TAG = "EdgeAgentFgService"
+        /** AF-015: Max consecutive failures before a lifecycle monitor gives up. */
+        private const val MAX_CONSECUTIVE_MONITOR_FAILURES = 10
     }
 
     override fun onCreate() {
@@ -278,51 +280,74 @@ class EdgeAgentForegroundService : Service() {
     }
 
     /**
-     * Periodically checks if the device requires re-provisioning (refresh token expired).
-     * When detected, stops all background work and navigates to ProvisioningActivity
-     * so the user can re-provision with a new bootstrap token.
+     * AF-015: Periodically checks if the device requires re-provisioning (refresh token expired).
+     * Wrapped in try/catch so transient exceptions (e.g., Keystore corruption) do not
+     * permanently kill the monitor. Stops after MAX_CONSECUTIVE_MONITOR_FAILURES consecutive
+     * failures to prevent infinite crash loops.
      */
     private suspend fun monitorReprovisioningState() {
+        var consecutiveFailures = 0
         while (true) {
             delay(10_000L) // Check every 10 seconds
-            if (tokenProvider.isReprovisioningRequired()) {
-                AppLogger.w(TAG, "Re-provisioning required — stopping service and navigating to provisioning")
-                cadenceController.stop()
-                localApiServer.stop()
-                navigateToProvisioning()
-                stopSelf()
-                return
+            try {
+                if (tokenProvider.isReprovisioningRequired()) {
+                    AppLogger.w(TAG, "Re-provisioning required — stopping service and navigating to provisioning")
+                    cadenceController.stop()
+                    localApiServer.stop()
+                    navigateToProvisioning()
+                    stopSelf()
+                    return
+                }
+                consecutiveFailures = 0
+            } catch (e: Exception) {
+                consecutiveFailures++
+                AppLogger.e(TAG, "monitorReprovisioningState error ($consecutiveFailures/$MAX_CONSECUTIVE_MONITOR_FAILURES): ${e.message}", e)
+                if (consecutiveFailures >= MAX_CONSECUTIVE_MONITOR_FAILURES) {
+                    AppLogger.e(TAG, "monitorReprovisioningState exceeded $MAX_CONSECUTIVE_MONITOR_FAILURES consecutive failures — stopping monitor")
+                    return
+                }
             }
         }
     }
 
     /**
-     * H-03: Periodically checks if the device has been decommissioned.
-     * When detected, stops all background work and navigates to DecommissionedActivity
-     * so the user sees the decommission screen immediately, without needing a full app relaunch.
+     * AF-015 / H-03: Periodically checks if the device has been decommissioned.
+     * Same resilience pattern as monitorReprovisioningState.
      */
     private suspend fun monitorDecommissionedState() {
+        var consecutiveFailures = 0
         while (true) {
             delay(10_000L) // Check every 10 seconds
-            if (tokenProvider.isDecommissioned()) {
-                AppLogger.w(TAG, "Device decommissioned — stopping service and navigating to decommissioned screen")
-                cadenceController.stop()
-                connectivityManager.stop()
-                localApiServer.stop()
-                navigateToDecommissioned()
-                stopSelf()
-                return
+            try {
+                if (tokenProvider.isDecommissioned()) {
+                    AppLogger.w(TAG, "Device decommissioned — stopping service and navigating to decommissioned screen")
+                    cadenceController.stop()
+                    connectivityManager.stop()
+                    localApiServer.stop()
+                    navigateToDecommissioned()
+                    stopSelf()
+                    return
+                }
+                consecutiveFailures = 0
+            } catch (e: Exception) {
+                consecutiveFailures++
+                AppLogger.e(TAG, "monitorDecommissionedState error ($consecutiveFailures/$MAX_CONSECUTIVE_MONITOR_FAILURES): ${e.message}", e)
+                if (consecutiveFailures >= MAX_CONSECUTIVE_MONITOR_FAILURES) {
+                    AppLogger.e(TAG, "monitorDecommissionedState exceeded $MAX_CONSECUTIVE_MONITOR_FAILURES consecutive failures — stopping monitor")
+                    return
+                }
             }
         }
     }
 
     /**
-     * Navigates to ProvisioningActivity with CLEAR_TASK so the provisioning
-     * wizard becomes the only activity in the task stack.
+     * AF-014: Navigates to ProvisioningActivity with CLEAR_TASK and an extra
+     * indicating why re-provisioning is needed, so the UI can show context.
      */
     private fun navigateToProvisioning() {
         val intent = Intent(this, ProvisioningActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            putExtra(ProvisioningActivity.EXTRA_REASON, ProvisioningActivity.REASON_TOKEN_EXPIRED)
         }
         startActivity(intent)
     }

@@ -1,7 +1,5 @@
-using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.PreAuth;
 using FccMiddleware.Domain.Enums;
-using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -69,15 +67,65 @@ public sealed class PreAuthExpiryWorker : BackgroundService
 
     internal async Task<int> ExpireBatchAsync(CancellationToken ct)
     {
+        var now = DateTimeOffset.UtcNow;
+
+        // Step 1: Identify distinct tenants with expired records (read-only, cross-tenant).
+        List<Guid> affectedTenants;
+        using (var readScope = _scopeFactory.CreateScope())
+        {
+            var readDb = readScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            affectedTenants = await readDb.PreAuthRecords
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(p =>
+                    (p.Status == PreAuthStatus.PENDING
+                  || p.Status == PreAuthStatus.AUTHORIZED
+                  || p.Status == PreAuthStatus.DISPENSING)
+                 && p.ExpiresAt <= now)
+                .Select(p => p.LegalEntityId)
+                .Distinct()
+                .ToListAsync(ct);
+        }
+
+        if (affectedTenants.Count == 0)
+            return 0;
+
+        // Step 2: Process each tenant in an isolated scope so a failure in one
+        //         tenant's batch (save or deauth) does not affect other tenants.
+        var totalExpired = 0;
+        foreach (var legalEntityId in affectedTenants)
+        {
+            try
+            {
+                var expired = await ExpireTenantBatchAsync(legalEntityId, now, ct);
+                totalExpired += expired;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "PreAuthExpiryWorker error processing expired pre-auths for LegalEntityId={LegalEntityId}",
+                    legalEntityId);
+            }
+        }
+
+        return totalExpired;
+    }
+
+    private async Task<int> ExpireTenantBatchAsync(Guid legalEntityId, DateTimeOffset now, CancellationToken ct)
+    {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
         var eventPublisher = scope.ServiceProvider.GetRequiredService<IEventPublisher>();
 
-        var now = DateTimeOffset.UtcNow;
         var expiredRecords = await db.PreAuthRecords
             .IgnoreQueryFilters()
             .Where(p =>
-                (p.Status == PreAuthStatus.PENDING
+                p.LegalEntityId == legalEntityId
+             && (p.Status == PreAuthStatus.PENDING
               || p.Status == PreAuthStatus.AUTHORIZED
               || p.Status == PreAuthStatus.DISPENSING)
              && p.ExpiresAt <= now)
@@ -89,87 +137,47 @@ public sealed class PreAuthExpiryWorker : BackgroundService
         if (expiredRecords.Count == 0)
             return 0;
 
-        var dispensingExpired = new List<(Domain.Entities.PreAuthRecord Record, Guid CorrelationId)>();
+        var dispensingCount = 0;
 
         foreach (var record in expiredRecords)
         {
-            var previousStatus = record.Status;
-            var correlationId = Guid.NewGuid();
+            if (record.Status == PreAuthStatus.DISPENSING)
+                dispensingCount++;
 
             record.Transition(PreAuthStatus.EXPIRED);
             record.ExpiredAt ??= now;
 
             eventPublisher.Publish(PreAuthEventFactory.CreateForStatus(
                 record,
-                correlationId,
+                Guid.NewGuid(),
                 source: "cloud-preauth"));
-
-            if (previousStatus == PreAuthStatus.DISPENSING)
-                dispensingExpired.Add((record, correlationId));
         }
 
         await db.SaveChangesAsync(ct);
 
-        foreach (var item in dispensingExpired)
-            await TryDeauthorizePumpAsync(scope.ServiceProvider, item.Record, item.CorrelationId, ct);
+        // PA-S05: FCC pump deauthorization is NOT performed from the cloud.
+        // Calling FCC devices directly from the cloud would create an outbound network path
+        // (cloud → FCC device LAN) that bypasses network segmentation designed for the
+        // inbound-only cloud adapter pattern. Instead, the edge agent handles deauthorization
+        // locally via its own expiry check (PreAuthHandler.runExpiryCheck) with retry logic.
+        // The PreAuthExpired domain event published above signals the state change.
+        if (dispensingCount > 0)
+        {
+            _logger.LogInformation(
+                "PreAuthExpiryWorker: {Count} DISPENSING records expired for LegalEntityId={LegalEntityId}. " +
+                "FCC pump deauthorization is delegated to the edge agent's local expiry mechanism",
+                dispensingCount,
+                legalEntityId);
+        }
 
         _logger.LogInformation(
-            "PreAuthExpiryWorker expired {Count} pre-auth records",
-            expiredRecords.Count);
+            "PreAuthExpiryWorker expired {Count} pre-auth records for LegalEntityId={LegalEntityId}",
+            expiredRecords.Count,
+            legalEntityId);
 
         return expiredRecords.Count;
     }
 
-    private async Task TryDeauthorizePumpAsync(
-        IServiceProvider serviceProvider,
-        Domain.Entities.PreAuthRecord record,
-        Guid correlationId,
-        CancellationToken ct)
-    {
-        var siteConfigProvider = serviceProvider.GetRequiredService<ISiteFccConfigProvider>();
-        var adapterFactory = serviceProvider.GetRequiredService<IFccAdapterFactory>();
-
-        try
-        {
-            var siteConfig = await siteConfigProvider.GetBySiteCodeAsync(record.SiteCode, ct);
-            if (siteConfig is null)
-            {
-                _logger.LogWarning(
-                    "Pre-auth {PreAuthId} expired from DISPENSING but FCC deauthorization was skipped because no active site config was found. CorrelationId={CorrelationId}",
-                    record.Id,
-                    correlationId);
-                return;
-            }
-
-            var adapter = adapterFactory.Resolve(siteConfig.Value.Config.FccVendor, siteConfig.Value.Config);
-            if (adapter is not IFccPumpDeauthorizationAdapter deauthAdapter)
-            {
-                _logger.LogInformation(
-                    "Pre-auth {PreAuthId} expired from DISPENSING but FCC deauthorization is unavailable for vendor {Vendor}. CorrelationId={CorrelationId}",
-                    record.Id,
-                    siteConfig.Value.Config.FccVendor,
-                    correlationId);
-                return;
-            }
-
-            await deauthAdapter.DeauthorizePumpAsync(record.PumpNumber, record.NozzleNumber, ct);
-
-            _logger.LogInformation(
-                "Pre-auth {PreAuthId} expired from DISPENSING and FCC pump deauthorization was attempted for pump {PumpNumber} nozzle {NozzleNumber}. CorrelationId={CorrelationId}",
-                record.Id,
-                record.PumpNumber,
-                record.NozzleNumber,
-                correlationId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                ex,
-                "Pre-auth {PreAuthId} expired from DISPENSING but FCC deauthorization failed. CorrelationId={CorrelationId}",
-                record.Id,
-                correlationId);
-        }
-    }
 }
 
 public sealed class PreAuthExpiryWorkerOptions

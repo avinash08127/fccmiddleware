@@ -34,6 +34,7 @@ public sealed record ReconciliationRecordDto
     public long? ActualAmount { get; init; }
     public long? AmountVariance { get; init; }
     public decimal? VarianceBps { get; init; }
+    public decimal? VariancePercent { get; init; }
     public string? MatchMethod { get; init; }
     public required bool AmbiguityFlag { get; init; }
     public string? PreAuthStatus { get; init; }

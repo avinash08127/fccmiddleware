@@ -1,4 +1,4 @@
-import { Component, DestroyRef, inject, signal, OnInit } from '@angular/core';
+import { Component, DestroyRef, inject, signal, computed, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -163,7 +163,7 @@ import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
                   />
                 </div>
                 <p-table
-                  [value]="overrides"
+                  [value]="overrides()"
                   styleClass="p-datatable-sm p-datatable-striped"
                   [tableStyle]="{ 'min-width': '800px' }"
                 >
@@ -635,18 +635,18 @@ export class SettingsComponent implements OnInit {
   };
 
   // ── Overrides (Tab 1) ──────────────────────────────────────────────────────
-  overrides: LegalEntityOverride[] = [];
+  readonly overrides = signal<LegalEntityOverride[]>([]);
   private legalEntities = signal<LegalEntity[]>([]);
   overrideDialogVisible = false;
   editingOverride: LegalEntityOverride | null = null;
   overrideForm = this.emptyOverrideForm();
 
-  readonly availableLegalEntities = () => {
-    const usedIds = new Set(this.overrides.map((o) => o.legalEntityId));
+  readonly availableLegalEntities = computed(() => {
+    const usedIds = new Set(this.overrides().map((o) => o.legalEntityId));
     return this.legalEntities()
       .filter((e) => !usedIds.has(e.id))
       .map((e) => ({ label: `${e.name} (${e.code})`, value: e.id }));
-  };
+  });
 
   // ── Alert Configuration (Tab 2) ────────────────────────────────────────────
   alertThresholds: AlertThreshold[] = [];
@@ -768,6 +768,8 @@ export class SettingsComponent implements OnInit {
   }
 
   deleteOverride(legalEntityId: string): void {
+    const confirmed = window.confirm('Remove this legal-entity override? This cannot be undone.');
+    if (!confirmed) return;
     this.saving.set(true);
     this.settingsService
       .deleteLegalEntityOverride(legalEntityId)
@@ -796,6 +798,10 @@ export class SettingsComponent implements OnInit {
       this.setFeedback('error', `"${email}" is not a valid email address.`);
       return;
     }
+    if (this.emailRecipientsCritical.includes(email)) {
+      this.setFeedback('error', `"${email}" is already in the Critical recipients list.`);
+      return;
+    }
     if (!this.emailRecipientsHigh.includes(email)) {
       this.emailRecipientsHigh = [...this.emailRecipientsHigh, email];
     }
@@ -814,6 +820,10 @@ export class SettingsComponent implements OnInit {
     }
     if (!this.isValidEmail(email)) {
       this.setFeedback('error', `"${email}" is not a valid email address.`);
+      return;
+    }
+    if (this.emailRecipientsHigh.includes(email)) {
+      this.setFeedback('error', `"${email}" is already in the High recipients list.`);
       return;
     }
     if (!this.emailRecipientsCritical.includes(email)) {
@@ -853,7 +863,7 @@ export class SettingsComponent implements OnInit {
     this.retention = { ...s.globalDefaults.retention };
 
     // Overrides
-    this.overrides = [...s.legalEntityOverrides];
+    this.overrides.set([...s.legalEntityOverrides]);
 
     // Alerts
     this.alertThresholds = s.alerts.thresholds.map((t) => ({ ...t }));

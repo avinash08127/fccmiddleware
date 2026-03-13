@@ -73,6 +73,7 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
         builder.Property(e => e.ClientId).HasColumnName("client_id").HasMaxLength(500);
         builder.Property(e => e.ClientSecret).HasColumnName("client_secret").HasMaxLength(500);
         builder.Property(e => e.WebhookSecret).HasColumnName("webhook_secret").HasMaxLength(500);
+        builder.Property(e => e.WebhookSecretHash).HasColumnName("webhook_secret_hash").HasMaxLength(64);
         builder.Property(e => e.OAuthTokenEndpoint).HasColumnName("oauth_token_endpoint").HasMaxLength(500);
 
         // ── Advatec EFD fields ──────────────────────────────────────────────
@@ -97,6 +98,11 @@ internal sealed class FccConfigConfiguration : IEntityTypeConfiguration<FccConfi
         builder.HasIndex(e => e.AdvatecWebhookTokenHash)
             .HasDatabaseName("ix_fcc_configs_advatec_webhook_token_hash")
             .HasFilter("advatec_webhook_token_hash IS NOT NULL");
+
+        // TX-P05: Index on Petronite webhook secret hash for O(1) lookup instead of full table scan
+        builder.HasIndex(e => e.WebhookSecretHash)
+            .HasDatabaseName("ix_fcc_configs_webhook_secret_hash")
+            .HasFilter("webhook_secret_hash IS NOT NULL");
 
         builder.ToTable(t =>
         {

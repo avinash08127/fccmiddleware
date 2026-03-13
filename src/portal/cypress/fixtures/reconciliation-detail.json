@@ -9,6 +9,7 @@
   "actualAmount": 130500,
   "amountVariance": 5500,
   "varianceBps": 440,
+  "variancePercent": 4.4,
   "currencyCode": "MWK",
   "reconciliationStatus": "VARIANCE_FLAGGED",
   "preAuthStatus": "DISPENSING_COMPLETED",

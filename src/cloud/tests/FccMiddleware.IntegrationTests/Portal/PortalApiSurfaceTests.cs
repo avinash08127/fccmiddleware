@@ -104,6 +104,9 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
         var telemetry = await _client.GetFromJsonAsync<AgentTelemetryDto>($"/api/v1/agents/{AgentId}/telemetry");
         telemetry.Should().NotBeNull();
         telemetry!.ConnectivityState.Should().Be(ConnectivityState.FULLY_ONLINE.ToString());
+        telemetry.SequenceNumber.Should().Be(42);
+        telemetry.Device.DeviceModel.Should().Be("Honeywell CT45");
+        telemetry.Buffer.PendingUploadCount.Should().Be(2);
 
         var agentEvents = await _client.GetFromJsonAsync<List<AgentAuditEventDto>>($"/api/v1/agents/{AgentId}/events?limit=10");
         agentEvents.Should().NotBeNull();
@@ -569,7 +572,7 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
             SiteCode = "SITE-001",
             ReportedAtUtc = now,
             ConnectivityState = ConnectivityState.FULLY_ONLINE,
-            PayloadJson = JsonSerializer.Serialize(telemetryPayload, JsonOptions),
+            PayloadJson = JsonSerializer.Serialize(TelemetrySnapshotPayload.FromTelemetry(telemetryPayload), JsonOptions),
             BatteryPercent = 82,
             IsCharging = true,
             PendingUploadCount = 2,

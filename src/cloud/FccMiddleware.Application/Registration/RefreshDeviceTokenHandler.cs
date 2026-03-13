@@ -84,6 +84,16 @@ public sealed class RefreshDeviceTokenHandler
             return Result<RefreshDeviceTokenResult>.Failure("REFRESH_TOKEN_EXPIRED",
                 "Refresh token has expired or been revoked.");
 
+        // FM-S03: Verify the refresh token belongs to the device identity from the expired JWT
+        if (existingToken.DeviceId != request.ExpectedDeviceId)
+        {
+            _logger.LogWarning(
+                "Refresh token device mismatch: token belongs to {TokenDeviceId} but JWT claims {ExpectedDeviceId}",
+                existingToken.DeviceId, request.ExpectedDeviceId);
+            return Result<RefreshDeviceTokenResult>.Failure("REFRESH_TOKEN_DEVICE_MISMATCH",
+                "Refresh token does not belong to the device identified by the provided JWT.");
+        }
+
         // 2. Verify device is still active
         var device = await _db.FindAgentByIdAsync(existingToken.DeviceId, cancellationToken);
         if (device is null || !device.IsActive)

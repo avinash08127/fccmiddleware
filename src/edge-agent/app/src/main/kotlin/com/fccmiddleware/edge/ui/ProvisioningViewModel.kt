@@ -6,6 +6,7 @@ import android.provider.Settings
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.fccmiddleware.edge.buffer.BufferDatabase
 import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
 import com.fccmiddleware.edge.buffer.entity.AgentConfig
 import com.fccmiddleware.edge.config.EdgeAgentConfigJson
@@ -47,6 +48,7 @@ class ProvisioningViewModel(
     private val agentConfigDao: AgentConfigDao,
     private val tokenProvider: DeviceTokenProvider,
     private val siteDataManager: SiteDataManager,
+    private val bufferDatabase: BufferDatabase,
 ) : AndroidViewModel(application) {
 
     sealed interface RegistrationState {
@@ -129,6 +131,10 @@ class ProvisioningViewModel(
 
         try {
             withContext(Dispatchers.IO) {
+                // AF-013: Clear the Room database before credentials to prevent cross-site
+                // data contamination when re-provisioning for a different site.
+                bufferDatabase.clearAllData()
+
                 // Clear stale Keystore keys and EncryptedPrefs from any previous registration.
                 keystoreManager.clearAll()
                 encryptedPrefs.clearAll()

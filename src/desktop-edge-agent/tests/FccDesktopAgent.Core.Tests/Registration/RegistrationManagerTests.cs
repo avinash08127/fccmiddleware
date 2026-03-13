@@ -1,8 +1,10 @@
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
+using FccDesktopAgent.Core.Security;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 using Xunit;
 
 namespace FccDesktopAgent.Core.Tests.Registration;
@@ -14,6 +16,7 @@ namespace FccDesktopAgent.Core.Tests.Registration;
 public sealed class RegistrationManagerTests : IDisposable
 {
     private readonly string _tempDir;
+    private readonly ICredentialStore _credentialStore;
     private readonly RegistrationManager _manager;
 
     public RegistrationManagerTests()
@@ -21,7 +24,8 @@ public sealed class RegistrationManagerTests : IDisposable
         _tempDir = Path.Combine(Path.GetTempPath(), $"fcc-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);
 
-        _manager = new RegistrationManager(NullLogger<RegistrationManager>.Instance, _tempDir);
+        _credentialStore = Substitute.For<ICredentialStore>();
+        _manager = new RegistrationManager(NullLogger<RegistrationManager>.Instance, _tempDir, _credentialStore);
     }
 
     public void Dispose()
@@ -87,6 +91,34 @@ public sealed class RegistrationManagerTests : IDisposable
         var loaded = _manager.LoadState();
         loaded.IsDecommissioned.Should().BeTrue();
         loaded.IsRegistered.Should().BeTrue(); // still registered, just decommissioned
+    }
+
+    [Fact]
+    public async Task MarkDecommissioned_PurgesTokensFromCredentialStore()
+    {
+        var state = new RegistrationState { IsRegistered = true, DeviceId = "dev-1", SiteCode = "S1" };
+        await _manager.SaveStateAsync(state);
+
+        await _manager.MarkDecommissionedAsync();
+
+        await _credentialStore.Received(1).DeleteSecretAsync(CredentialKeys.DeviceToken, Arg.Any<CancellationToken>());
+        await _credentialStore.Received(1).DeleteSecretAsync(CredentialKeys.RefreshToken, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task MarkReprovisioningRequired_PurgesTokensFromCredentialStore()
+    {
+        var state = new RegistrationState { IsRegistered = true, DeviceId = "dev-2", SiteCode = "S2" };
+        await _manager.SaveStateAsync(state);
+
+        await _manager.MarkReprovisioningRequiredAsync();
+
+        await _credentialStore.Received(1).DeleteSecretAsync(CredentialKeys.DeviceToken, Arg.Any<CancellationToken>());
+        await _credentialStore.Received(1).DeleteSecretAsync(CredentialKeys.RefreshToken, Arg.Any<CancellationToken>());
+
+        var loaded = _manager.LoadState();
+        loaded.IsRegistered.Should().BeFalse();
+        loaded.IsDecommissioned.Should().BeFalse();
     }
 
     [Fact]

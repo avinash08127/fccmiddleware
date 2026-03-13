@@ -144,13 +144,12 @@ class ConfigManager(
                 return ConfigApplyResult.Rejected("REPROVISION_REQUIRED")
             }
 
-            // 5. Detect restart-required field changes
-            val restartFields = detectRestartRequiredChanges(current, newConfig)
-            if (restartFields.isNotEmpty()) {
-                AppLogger.w(
+            // 5. Log significant field changes (all are hot-reloaded by the service)
+            val significantFields = detectSignificantFieldChanges(current, newConfig)
+            if (significantFields.isNotEmpty()) {
+                AppLogger.i(
                     TAG,
-                    "Restart-required fields changed: $restartFields. " +
-                        "Config stored; service restart needed to apply these changes.",
+                    "Significant config fields changed (hot-applied): $significantFields",
                 )
             }
         }
@@ -494,10 +493,11 @@ class ConfigManager(
     }
 
     /**
-     * Detect restart-required field changes between current and incoming config.
-     * Returns list of changed field paths (empty = all changes are hot-reloadable).
+     * Detect significant field changes between current and incoming config.
+     * These fields affect core runtime behavior (FCC adapter, cloud URL, etc.)
+     * and are logged for operator visibility. All are hot-applied by the service.
      */
-    private fun detectRestartRequiredChanges(
+    private fun detectSignificantFieldChanges(
         current: EdgeAgentConfigDto,
         incoming: EdgeAgentConfigDto,
     ): List<String> {

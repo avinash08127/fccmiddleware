@@ -84,22 +84,33 @@ public sealed class ReconciliationMatchingService
         ReconciliationRecord record,
         CancellationToken cancellationToken)
     {
-        if (record.TransactionId != transaction.Id)
+        var shortCircuitResult = GetRetryShortCircuitResult(transaction, record);
+        if (shortCircuitResult is not null)
         {
-            throw new InvalidOperationException(
-                $"Reconciliation record {record.Id} does not belong to transaction {transaction.Id}.");
-        }
-
-        if (record.Status != ReconciliationStatus.UNMATCHED)
-        {
-            return Task.FromResult(new ReconciliationMatchResult(
-                Skipped: false,
-                CreatedOrUpdated: false,
-                Status: record.Status,
-                ReconciliationId: record.Id));
+            return Task.FromResult(shortCircuitResult);
         }
 
         return MatchRetryAsync(transaction, record, DateTimeOffset.UtcNow, cancellationToken);
+    }
+
+    public Task<ReconciliationMatchResult> RetryUnmatchedAsync(
+        Transaction transaction,
+        ReconciliationRecord record,
+        IDictionary<(Guid LegalEntityId, string SiteCode), ReconciliationSiteContext?> siteContextCache,
+        CancellationToken cancellationToken)
+    {
+        var shortCircuitResult = GetRetryShortCircuitResult(transaction, record);
+        if (shortCircuitResult is not null)
+        {
+            return Task.FromResult(shortCircuitResult);
+        }
+
+        return MatchRetryWithCachedSiteContextAsync(
+            transaction,
+            record,
+            DateTimeOffset.UtcNow,
+            siteContextCache,
+            cancellationToken);
     }
 
     public ReconciliationMatchResult EscalateUnmatched(
@@ -155,6 +166,37 @@ public sealed class ReconciliationMatchingService
             _options,
             cancellationToken);
 
+        return await MatchRetryAsync(transaction, record, siteContext, attemptAt, cancellationToken);
+    }
+
+    private async Task<ReconciliationMatchResult> MatchRetryWithCachedSiteContextAsync(
+        Transaction transaction,
+        ReconciliationRecord record,
+        DateTimeOffset attemptAt,
+        IDictionary<(Guid LegalEntityId, string SiteCode), ReconciliationSiteContext?> siteContextCache,
+        CancellationToken cancellationToken)
+    {
+        var cacheKey = (transaction.LegalEntityId, transaction.SiteCode);
+        if (!siteContextCache.TryGetValue(cacheKey, out var siteContext))
+        {
+            siteContext = await _db.FindSiteContextAsync(
+                transaction.LegalEntityId,
+                transaction.SiteCode,
+                _options,
+                cancellationToken);
+            siteContextCache[cacheKey] = siteContext;
+        }
+
+        return await MatchRetryAsync(transaction, record, siteContext, attemptAt, cancellationToken);
+    }
+
+    private async Task<ReconciliationMatchResult> MatchRetryAsync(
+        Transaction transaction,
+        ReconciliationRecord record,
+        ReconciliationSiteContext? siteContext,
+        DateTimeOffset attemptAt,
+        CancellationToken cancellationToken)
+    {
         if (siteContext is null || !siteContext.Settings.SiteUsesPreAuth)
         {
             var retrySkipReason = siteContext is null ? "SITE_NOT_FOUND" : "PRE_AUTH_DISABLED";
@@ -175,6 +217,28 @@ public sealed class ReconciliationMatchingService
         }
 
         return await MatchCoreAsync(transaction, record, siteContext, attemptAt, cancellationToken);
+    }
+
+    private static ReconciliationMatchResult? GetRetryShortCircuitResult(
+        Transaction transaction,
+        ReconciliationRecord record)
+    {
+        if (record.TransactionId != transaction.Id)
+        {
+            throw new InvalidOperationException(
+                $"Reconciliation record {record.Id} does not belong to transaction {transaction.Id}.");
+        }
+
+        if (record.Status != ReconciliationStatus.UNMATCHED)
+        {
+            return new ReconciliationMatchResult(
+                Skipped: false,
+                CreatedOrUpdated: false,
+                Status: record.Status,
+                ReconciliationId: record.Id);
+        }
+
+        return null;
     }
 
     private async Task<ReconciliationMatchResult> MatchCoreAsync(
@@ -285,43 +349,77 @@ public sealed class ReconciliationMatchingService
         ReconciliationSiteContext siteContext,
         CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(transaction.FccCorrelationId))
+        var hasCorrelation = !string.IsNullOrWhiteSpace(transaction.FccCorrelationId);
+        var hasTime = transaction.CompletedAt != default;
+
+        // RC-P04: When both strategies are applicable, fetch candidates in a single DB round-trip
+        // using a combined OR predicate, then evaluate by priority (correlation > time) in memory.
+        if (hasCorrelation && hasTime)
         {
-            var correlationCandidates = await _db.FindCorrelationCandidatesAsync(
+            var completedAt = transaction.CompletedAt;
+            var window = siteContext.Settings.TimeWindowMinutes;
+            var (correlationCandidates, timeCandidates) = await _db.FindCorrelationAndTimeCandidatesAsync(
                 transaction.LegalEntityId,
                 transaction.SiteCode,
-                transaction.FccCorrelationId,
+                transaction.FccCorrelationId!,
+                transaction.PumpNumber,
+                transaction.NozzleNumber,
+                completedAt.AddMinutes(-window),
+                completedAt.AddMinutes(window),
                 cancellationToken);
 
-            var selected = SelectByAuthorizedAt(
+            var correlationSelected = SelectByAuthorizedAt(
                 correlationCandidates,
                 MatchMethodCorrelationId,
                 "MULTIPLE_CORRELATION_ID_CANDIDATES");
+            if (correlationSelected is not null)
+                return correlationSelected;
 
-            if (selected is not null)
-            {
-                return selected;
-            }
+            var timeSelected = SelectByTimeDelta(
+                timeCandidates,
+                completedAt,
+                "MULTIPLE_PUMP_NOZZLE_TIME_CANDIDATES");
+            if (timeSelected is not null)
+                return timeSelected;
         }
-
-        var window = siteContext.Settings.TimeWindowMinutes;
-        var timeCandidates = await _db.FindPumpNozzleTimeCandidatesAsync(
-            transaction.LegalEntityId,
-            transaction.SiteCode,
-            transaction.PumpNumber,
-            transaction.NozzleNumber,
-            transaction.CompletedAt.AddMinutes(-window),
-            transaction.CompletedAt.AddMinutes(window),
-            cancellationToken);
-
-        var timeSelected = SelectByTimeDelta(
-            timeCandidates,
-            transaction.CompletedAt,
-            "MULTIPLE_PUMP_NOZZLE_TIME_CANDIDATES");
-
-        if (timeSelected is not null)
+        else
         {
-            return timeSelected;
+            if (hasCorrelation)
+            {
+                var correlationCandidates = await _db.FindCorrelationCandidatesAsync(
+                    transaction.LegalEntityId,
+                    transaction.SiteCode,
+                    transaction.FccCorrelationId!,
+                    cancellationToken);
+
+                var selected = SelectByAuthorizedAt(
+                    correlationCandidates,
+                    MatchMethodCorrelationId,
+                    "MULTIPLE_CORRELATION_ID_CANDIDATES");
+                if (selected is not null)
+                    return selected;
+            }
+
+            if (hasTime)
+            {
+                var completedAt = transaction.CompletedAt;
+                var window = siteContext.Settings.TimeWindowMinutes;
+                var timeCandidates = await _db.FindPumpNozzleTimeCandidatesAsync(
+                    transaction.LegalEntityId,
+                    transaction.SiteCode,
+                    transaction.PumpNumber,
+                    transaction.NozzleNumber,
+                    completedAt.AddMinutes(-window),
+                    completedAt.AddMinutes(window),
+                    cancellationToken);
+
+                var timeSelected = SelectByTimeDelta(
+                    timeCandidates,
+                    completedAt,
+                    "MULTIPLE_PUMP_NOZZLE_TIME_CANDIDATES");
+                if (timeSelected is not null)
+                    return timeSelected;
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(transaction.OdooOrderId))

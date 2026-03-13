@@ -188,12 +188,13 @@ interface CloudApiClient {
     /**
      * Refresh the device access token.
      *
-     * Calls `POST /api/v1/agent/token/refresh` with the current refresh token.
-     * On success, returns new access + refresh tokens (rotation).
+     * Calls `POST /api/v1/agent/token/refresh` with the current refresh token
+     * and the current (even expired) device JWT.
      *
      * @param refreshToken Current opaque refresh token.
+     * @param deviceToken Current (possibly expired) device JWT for identity binding (FM-S03).
      */
-    suspend fun refreshToken(refreshToken: String): CloudTokenRefreshResult
+    suspend fun refreshToken(refreshToken: String, deviceToken: String): CloudTokenRefreshResult
 
     /**
      * Check agent version compatibility with the cloud.
@@ -541,11 +542,11 @@ class HttpCloudApiClient(
         }
     }
 
-    override suspend fun refreshToken(refreshToken: String): CloudTokenRefreshResult {
+    override suspend fun refreshToken(refreshToken: String, deviceToken: String): CloudTokenRefreshResult {
         return try {
             val response = httpClient.post("$cloudBaseUrl/api/v1/agent/token/refresh") {
                 contentType(ContentType.Application.Json)
-                setBody(TokenRefreshRequest(refreshToken))
+                setBody(TokenRefreshRequest(refreshToken, deviceToken))
             }
             when (response.status) {
                 HttpStatusCode.OK -> CloudTokenRefreshResult.Success(response.body())

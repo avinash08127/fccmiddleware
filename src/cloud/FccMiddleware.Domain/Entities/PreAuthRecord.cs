@@ -2,6 +2,7 @@ using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Exceptions;
 using FccMiddleware.Domain.Common;
 using FccMiddleware.Domain.Interfaces;
+using FccMiddleware.Domain.StateMachines;
 
 namespace FccMiddleware.Domain.Entities;
 
@@ -92,25 +93,7 @@ public class PreAuthRecord : ITenantScoped
     /// </summary>
     public void Transition(PreAuthStatus newStatus)
     {
-        var allowed = (Status, newStatus) switch
-        {
-            (PreAuthStatus.PENDING,    PreAuthStatus.AUTHORIZED)  => true,
-            (PreAuthStatus.PENDING,    PreAuthStatus.CANCELLED)   => true,
-            (PreAuthStatus.PENDING,    PreAuthStatus.EXPIRED)     => true,
-            (PreAuthStatus.PENDING,    PreAuthStatus.FAILED)      => true,
-            (PreAuthStatus.AUTHORIZED, PreAuthStatus.DISPENSING)  => true,
-            (PreAuthStatus.AUTHORIZED, PreAuthStatus.COMPLETED)   => true,
-            (PreAuthStatus.AUTHORIZED, PreAuthStatus.CANCELLED)   => true,
-            (PreAuthStatus.AUTHORIZED, PreAuthStatus.EXPIRED)     => true,
-            (PreAuthStatus.AUTHORIZED, PreAuthStatus.FAILED)      => true,
-            (PreAuthStatus.DISPENSING, PreAuthStatus.COMPLETED)   => true,
-            (PreAuthStatus.DISPENSING, PreAuthStatus.CANCELLED)   => true,
-            (PreAuthStatus.DISPENSING, PreAuthStatus.EXPIRED)     => true,
-            (PreAuthStatus.DISPENSING, PreAuthStatus.FAILED)      => true,
-            _ => false
-        };
-
-        if (!allowed)
+        if (!PreAuthStateMachine.CanTransition(Status, newStatus))
             throw new InvalidPreAuthTransitionException(Status, newStatus);
 
         Status = newStatus;

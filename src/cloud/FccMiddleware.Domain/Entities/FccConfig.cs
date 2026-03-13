@@ -51,6 +51,14 @@ public class FccConfig
     public string? ClientId { get; set; }
     public string? ClientSecret { get; set; }
     public string? WebhookSecret { get; set; }
+
+    /// <summary>
+    /// SHA-256 hash of <see cref="WebhookSecret"/> for indexed DB lookup.
+    /// Avoids loading all Petronite configs into memory for secret matching (TX-P05).
+    /// Populated by the application layer when the secret is set/updated.
+    /// </summary>
+    public string? WebhookSecretHash { get; set; }
+
     public string? OAuthTokenEndpoint { get; set; }
 
     // ── Advatec EFD fields ──────────────────────────────────────────────────

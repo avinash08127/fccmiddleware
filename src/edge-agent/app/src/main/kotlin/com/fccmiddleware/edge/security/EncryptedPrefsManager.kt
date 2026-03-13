@@ -198,7 +198,10 @@ class EncryptedPrefsManager(context: Context) {
      * Clear all registration data. Used during re-provisioning.
      */
     fun clearAll() {
-        prefs.edit().clear().apply()
+        // Use commit() (synchronous) for consistency with other state-critical writes
+        // (isDecommissioned, isReprovisioningRequired, saveRegistration). An async apply()
+        // could leave stale flags on disk if the process is killed before the flush completes.
+        prefs.edit().clear().commit()
         AppLogger.i(TAG, "All encrypted prefs cleared")
     }
 }

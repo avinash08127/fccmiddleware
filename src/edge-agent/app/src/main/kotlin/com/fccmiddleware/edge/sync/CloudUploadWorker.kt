@@ -163,6 +163,19 @@ class CloudUploadWorker(
             return
         }
 
+        // AF-008: Skip upload when legalEntityId is unavailable to prevent
+        // needless REJECTED responses that increment uploadAttempts and eventually
+        // dead-letter all records.
+        val legalEntityId = provider.getLegalEntityId()
+        if (legalEntityId.isNullOrEmpty()) {
+            AppLogger.w(
+                TAG,
+                "uploadPendingBatch() skipped — legalEntityId is unavailable (JWT not decoded or lei claim missing). " +
+                    "${batch.size} record(s) remain PENDING without incrementing upload attempts.",
+            )
+            return
+        }
+
         val result = doUpload(client, provider, batch, token)
         handleUploadResult(bm, batch, result, batchWasFull)
     }
@@ -683,10 +696,12 @@ class CloudUploadWorker(
 
             is UploadAttemptResult.PayloadTooLarge -> {
                 // M-15: Halve the effective batch size (floor: 1) and retry on next tick.
-                val newSize = (effectiveBatchSize / 2).coerceAtLeast(1)
+                val originalSize = effectiveBatchSize
+                val newSize = (originalSize / 2).coerceAtLeast(1)
                 AppLogger.w(
                     TAG,
-                    "Payload too large (413); reducing batch size from $effectiveBatchSize to $newSize",
+                    "Payload too large (413); reducing batch size from $originalSize to $newSize " +
+                        "(config max=${config.uploadBatchSize}, batch records=${batch.size})",
                 )
                 effectiveBatchSize = newSize
                 // No circuit breaker penalty — this is a configuration issue, not a transport fault.
@@ -829,8 +844,8 @@ class CloudUploadWorker(
      * Build the [CloudUploadRequest] from the local batch.
      *
      * [legalEntityId] comes from the device JWT's `lei` claim via [DeviceTokenProvider].
-     * If not available (not yet provisioned), uses an empty string — the cloud will
-     * reject such a request with a validation error, which increments upload_attempts.
+     * AF-008: Callers must ensure legalEntityId is non-null/non-empty before calling
+     * this method (validated in uploadPendingBatch).
      *
      * Transactions are already ordered oldest-first from [TransactionBufferManager.getPendingBatch].
      */
@@ -838,6 +853,8 @@ class CloudUploadWorker(
         batch: List<BufferedTransaction>,
         provider: DeviceTokenProvider,
     ): CloudUploadRequest {
+        // AF-008: legalEntityId is validated by uploadPendingBatch() before reaching here.
+        // The fallback to empty string is retained only as a defensive measure.
         val legalEntityId = provider.getLegalEntityId() ?: ""
         val batchId = java.util.UUID.randomUUID().toString()
         AppLogger.i(TAG, "Upload batch: batchId=$batchId records=${batch.size}")

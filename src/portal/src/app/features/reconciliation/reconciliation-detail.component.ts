@@ -46,6 +46,17 @@ function statusSeverity(status: ReconciliationStatus | null): PrimeSeverity {
   }
 }
 
+function resolveVariancePercent(
+  variancePercent: number | null | undefined,
+  varianceBps: number | null | undefined,
+): number | null {
+  if (variancePercent != null) {
+    return variancePercent;
+  }
+
+  return varianceBps == null ? null : varianceBps / 100;
+}
+
 @Component({
   selector: 'app-reconciliation-detail',
   standalone: true,
@@ -657,9 +668,10 @@ export class ReconciliationDetailComponent implements OnInit {
 
   formatVariancePct(): string {
     const rec = this.record();
-    if (!rec || rec.varianceBps == null) return '—';
-    const sign = rec.varianceBps >= 0 ? '+' : '';
-    return `${sign}${(rec.varianceBps / 100).toFixed(2)}%`;
+    const variancePercent = resolveVariancePercent(rec?.variancePercent, rec?.varianceBps);
+    if (variancePercent == null) return '—';
+    const sign = variancePercent >= 0 ? '+' : '';
+    return `${sign}${variancePercent.toFixed(2)}%`;
   }
 
   varianceClass(): string {

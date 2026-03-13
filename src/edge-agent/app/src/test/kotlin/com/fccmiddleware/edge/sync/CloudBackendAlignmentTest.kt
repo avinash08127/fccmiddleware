@@ -591,13 +591,16 @@ class CloudBackendAlignmentTest {
 
         every { encryptedPrefs.isDecommissioned } returns false
         every { encryptedPrefs.getRefreshTokenBlob() } returns "encoded-refresh-blob"
+        every { encryptedPrefs.getDeviceTokenBlob() } returns "encoded-device-blob"
 
         val decrypted = "refresh-token-plaintext"
+        val decryptedJwt = "device-jwt-plaintext"
         every { keystoreManager.retrieveSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, any()) } returns decrypted
+        every { keystoreManager.retrieveSecret(KeystoreManager.ALIAS_DEVICE_JWT, any()) } returns decryptedJwt
 
         // Cloud returns success on refresh — but simulate a delay so concurrency matters
         var refreshCallCount = 0
-        coEvery { cloudApiClient.refreshToken(decrypted) } coAnswers {
+        coEvery { cloudApiClient.refreshToken(decrypted, decryptedJwt) } coAnswers {
             refreshCallCount++
             delay(100)
             CloudTokenRefreshResult.Success(
@@ -949,6 +952,7 @@ class CloudBackendAlignmentTest {
     private data class WorkerTestFixture(
         val worker: CloudUploadWorker,
         val bufferManager: TransactionBufferManager,
+        val syncStateDao: SyncStateDao,
         val cloudApiClient: CloudApiClient,
         val tokenProvider: DeviceTokenProvider,
         val telemetryReporter: TelemetryReporter,
@@ -981,7 +985,7 @@ class CloudBackendAlignmentTest {
             telemetryReporter = realReporter,
         )
 
-        return WorkerTestFixture(worker, bufferManager, cloudApiClient, tokenProvider, realReporter)
+        return WorkerTestFixture(worker, bufferManager, syncStateDao, cloudApiClient, tokenProvider, realReporter)
     }
 
     private fun makeTransaction(

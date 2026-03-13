@@ -137,11 +137,9 @@ class ConcurrencyRaceConditionTest {
         )
 
         val orchestrator = IngestionOrchestrator(
-            adapter = adapter,
             bufferManager = bufferManager,
             syncStateDao = syncStateDao,
-            config = fccConfig,
-        )
+        ).also { it.wireRuntime(adapter, fccConfig) }
 
         // Fire poll and pollNow concurrently — mutex should serialize them
         val d1 = async { orchestrator.poll() }
@@ -201,7 +199,7 @@ class ConcurrencyRaceConditionTest {
             currencyCode = "ZAR",
             requestedAmountMinorUnits = 10000,
             authorizedAmountMinorUnits = null,
-            status = PreAuthStatus.PENDING.name,
+            status = PreAuthStatus.PENDING,
             fccCorrelationId = null,
             fccAuthorizationCode = null,
             failureReason = null,

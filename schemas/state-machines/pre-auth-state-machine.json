@@ -1,0 +1,47 @@
+{
+  "states": [
+    "PENDING",
+    "AUTHORIZED",
+    "DISPENSING",
+    "COMPLETED",
+    "CANCELLED",
+    "EXPIRED",
+    "FAILED"
+  ],
+  "activeStates": [
+    "PENDING",
+    "AUTHORIZED",
+    "DISPENSING"
+  ],
+  "terminalStates": [
+    "COMPLETED",
+    "CANCELLED",
+    "EXPIRED",
+    "FAILED"
+  ],
+  "transitions": {
+    "PENDING": [
+      "AUTHORIZED",
+      "CANCELLED",
+      "EXPIRED",
+      "FAILED"
+    ],
+    "AUTHORIZED": [
+      "DISPENSING",
+      "COMPLETED",
+      "CANCELLED",
+      "EXPIRED",
+      "FAILED"
+    ],
+    "DISPENSING": [
+      "COMPLETED",
+      "CANCELLED",
+      "EXPIRED",
+      "FAILED"
+    ],
+    "COMPLETED": [],
+    "CANCELLED": [],
+    "EXPIRED": [],
+    "FAILED": []
+  }
+}

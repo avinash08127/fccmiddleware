@@ -314,10 +314,12 @@ public sealed class PlatformCredentialStore : ICredentialStore
     }
 
     /// <summary>
-    /// Derives a 256-bit AES key from the Linux machine-id.
-    /// Used as fallback when secret-tool (libsecret) is unavailable.
+    /// OB-S02: Derives a 256-bit AES key from the Linux machine-id combined with
+    /// a per-installation random salt. The random salt is generated on first run
+    /// and stored alongside the credentials file, making key derivation
+    /// non-deterministic even if machine-id is world-readable.
     /// </summary>
-    private static byte[] DeriveLinuxMachineKey()
+    private byte[] DeriveLinuxMachineKey()
     {
         var machineId = "fcc-desktop-agent-fallback";
         try
@@ -332,13 +334,54 @@ public sealed class PlatformCredentialStore : ICredentialStore
             machineId = Environment.MachineName;
         }
 
-        var salt = Encoding.UTF8.GetBytes("FccDesktopAgent.CredentialStore.v1");
+        var installationSalt = GetOrCreateInstallationSalt();
         return Rfc2898DeriveBytes.Pbkdf2(
             Encoding.UTF8.GetBytes(machineId),
-            salt,
+            installationSalt,
             iterations: 100_000,
             HashAlgorithmName.SHA256,
             outputLength: 32);
+    }
+
+    /// <summary>
+    /// OB-S02: Loads or generates a 32-byte random per-installation salt.
+    /// Stored at {AgentDataDirectory}/secrets/installation.salt.
+    /// </summary>
+    private byte[] GetOrCreateInstallationSalt()
+    {
+        var dir = Path.Combine(AgentDataDirectory.Resolve(), "secrets");
+        Directory.CreateDirectory(dir);
+        AgentDataDirectory.SetRestrictivePermissions(dir);
+        var saltPath = Path.Combine(dir, "installation.salt");
+
+        if (File.Exists(saltPath))
+        {
+            try
+            {
+                var existing = File.ReadAllBytes(saltPath);
+                if (existing.Length == 32)
+                    return existing;
+
+                _logger.LogWarning("Installation salt file has unexpected length ({Length}), regenerating", existing.Length);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read installation salt, regenerating");
+            }
+        }
+
+        var salt = RandomNumberGenerator.GetBytes(32);
+        try
+        {
+            File.WriteAllBytes(saltPath, salt);
+            _logger.LogInformation("Generated new per-installation salt for credential encryption");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist installation salt — key derivation will use a transient salt");
+        }
+
+        return salt;
     }
 
     private async Task<bool> HasSecretToolAsync(CancellationToken ct)

@@ -35,7 +35,7 @@ import java.util.concurrent.ConcurrentHashMap
  *   - normalize: product code mapping
  *   - normalize: failure paths (bad dataType, null data, missing TransactionId, empty Items, bad JSON)
  *   - pre-auth correlation: CustomerId match (removes entry from map)
- *   - pre-auth correlation: FIFO fallback when no CustomerId
+ *   - pre-auth correlation: no FIFO fallback — unmatched receipt is Normal Order (AF-020)
  *   - pre-auth correlation: no match when map is empty
  *   - preAuthMatcher interface contract methods
  *   - cancelPreAuth: null correlationId → false
@@ -350,17 +350,38 @@ class AdvatecAdapterTest {
     }
 
     @Test
-    fun `normalize correlates receipt to pre-auth via FIFO when no CustomerId`() = runTest {
+    fun `AF-020 normalize does NOT FIFO-match when receipt has no CustomerId`() = runTest {
         val adapter = AdvatecAdapter(createConfig())
         injectPreAuth(adapter, pumpNumber = 3, correlationId = "ADV-3-FIFO",
             odooOrderId = "ORDER-FIFO", customerId = null)
 
-        // Receipt has no CustomerId — FIFO fallback matches oldest entry
+        // Receipt has no CustomerId — AF-020: no FIFO fallback, treated as Normal Order
         val result = adapter.normalize(rawEnvelope(validReceiptJson()))
 
         val tx = (result as NormalizationResult.Success).transaction
-        assertEquals("ADV-3-FIFO", tx.correlationId)
-        assertEquals("ORDER-FIFO", tx.odooOrderId)
+        // Should NOT match the pre-auth — correlationId is a random UUID, not ADV-3-FIFO
+        assertTrue(tx.correlationId != "ADV-3-FIFO")
+        assertNull(tx.odooOrderId)
+        // Pre-auth should still be in the map (not consumed)
+        assertEquals(1, adapter.activePreAuthCount)
+    }
+
+    @Test
+    fun `AF-020 normalize does not cross-pump match pre-auths`() = runTest {
+        val adapter = AdvatecAdapter(createConfig())
+        // Pre-auth on pump 1
+        injectPreAuth(adapter, pumpNumber = 1, correlationId = "ADV-1-PUMP1",
+            odooOrderId = "ORDER-PUMP1", customerId = "CUST-A")
+        // Pre-auth on pump 2
+        injectPreAuth(adapter, pumpNumber = 2, correlationId = "ADV-2-PUMP2",
+            odooOrderId = "ORDER-PUMP2", customerId = "CUST-B")
+
+        // Receipt with no CustomerId should NOT steal either pre-auth
+        val result = adapter.normalize(rawEnvelope(validReceiptJson()))
+
+        val tx = (result as NormalizationResult.Success).transaction
+        assertNull(tx.odooOrderId)
+        assertEquals(2, adapter.activePreAuthCount)
     }
 
     @Test

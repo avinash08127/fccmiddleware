@@ -176,7 +176,7 @@ class RegistrationApiTest {
             }
 
             val client = createClient(engine)
-            val result = client.refreshToken("old-refresh-token")
+            val result = client.refreshToken("old-refresh-token", "expired-device-jwt")
 
             assertTrue(result is CloudTokenRefreshResult.Success)
             val success = result as CloudTokenRefreshResult.Success
@@ -194,7 +194,7 @@ class RegistrationApiTest {
             }
 
             val client = createClient(engine)
-            val result = client.refreshToken("expired-refresh-token")
+            val result = client.refreshToken("expired-refresh-token", "expired-device-jwt")
 
             assertTrue(result is CloudTokenRefreshResult.Unauthorized)
         }
@@ -212,7 +212,7 @@ class RegistrationApiTest {
             }
 
             val client = createClient(engine)
-            val result = client.refreshToken("some-refresh-token")
+            val result = client.refreshToken("some-refresh-token", "expired-device-jwt")
 
             assertTrue(result is CloudTokenRefreshResult.Forbidden)
             assertEquals("DEVICE_DECOMMISSIONED", (result as CloudTokenRefreshResult.Forbidden).errorCode)
@@ -225,7 +225,7 @@ class RegistrationApiTest {
             }
 
             val client = createClient(engine)
-            val result = client.refreshToken("refresh-token")
+            val result = client.refreshToken("refresh-token", "expired-device-jwt")
 
             assertTrue(result is CloudTokenRefreshResult.TransportError)
         }

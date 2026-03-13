@@ -78,7 +78,16 @@ fun Routing.transactionRoutes(
                 dao.getForLocalApi(limit, offset)
         }
 
-        val total = dao.countForLocalApi()
+        val total = when {
+            pumpNumber != null && sinceParam != null ->
+                dao.countForLocalApiByPumpSince(pumpNumber, sinceParam)
+            pumpNumber != null ->
+                dao.countForLocalApiByPump(pumpNumber)
+            sinceParam != null ->
+                dao.countForLocalApiSince(sinceParam)
+            else ->
+                dao.countForLocalApi()
+        }
 
         call.respond(
             HttpStatusCode.OK,
@@ -157,8 +166,11 @@ fun Routing.transactionRoutes(
             return@post
         }
 
-        val found = request.transactionIds.count { id -> dao.getById(id) != null }
-        call.respond(HttpStatusCode.OK, BatchAcknowledgeResponse(acknowledged = found))
+        // AF-022: Actually mark transactions as acknowledged so they are excluded from
+        // subsequent GET /api/v1/transactions calls, preventing POS double-consumption.
+        val now = Instant.now().toString()
+        val acknowledged = dao.markAcknowledged(request.transactionIds, now)
+        call.respond(HttpStatusCode.OK, BatchAcknowledgeResponse(acknowledged = acknowledged))
     }
 
     /**
@@ -232,6 +244,7 @@ fun Routing.transactionRoutes(
                 fetchCycles = result?.fetchCycles ?: 0,
                 cursorAdvanced = result?.cursorAdvanced ?: false,
                 triggeredAtUtc = triggeredAt,
+                pumpMatchCount = result?.pumpMatchCount,
             )
         )
     }

@@ -49,8 +49,8 @@ export class AgentService {
     });
   }
 
-  decommissionAgent(deviceId: string): Observable<DecommissionResponse> {
-    return this.http.post<DecommissionResponse>(`/api/v1/admin/agent/${deviceId}/decommission`, {});
+  decommissionAgent(deviceId: string, reason: string): Observable<DecommissionResponse> {
+    return this.http.post<DecommissionResponse>(`/api/v1/admin/agent/${deviceId}/decommission`, { reason });
   }
 }
 

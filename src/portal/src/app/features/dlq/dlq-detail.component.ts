@@ -20,10 +20,14 @@ function statusSeverity(status: DeadLetterStatus): PrimeSeverity {
   switch (status) {
     case DeadLetterStatus.PENDING:
       return 'warn';
+    case DeadLetterStatus.REPLAY_QUEUED:
+      return 'info';
     case DeadLetterStatus.RETRYING:
       return 'info';
     case DeadLetterStatus.RESOLVED:
       return 'success';
+    case DeadLetterStatus.REPLAY_FAILED:
+      return 'danger';
     case DeadLetterStatus.DISCARDED:
       return 'secondary';
     default:

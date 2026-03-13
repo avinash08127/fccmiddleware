@@ -14,6 +14,8 @@ import { InputTextModule } from 'primeng/inputtext';
 import { DialogModule } from 'primeng/dialog';
 import { TooltipModule } from 'primeng/tooltip';
 
+import { MsalService } from '@azure/msal-angular';
+import { getCurrentAccount, hasAnyRequiredRole } from '../../core/auth/auth-state';
 import { DlqService } from '../../core/services/dlq.service';
 import { MasterDataService } from '../../core/services/master-data.service';
 import {
@@ -39,10 +41,14 @@ function statusSeverity(status: DeadLetterStatus): PrimeSeverity {
   switch (status) {
     case DeadLetterStatus.PENDING:
       return 'warn';
+    case DeadLetterStatus.REPLAY_QUEUED:
+      return 'info';
     case DeadLetterStatus.RETRYING:
       return 'info';
     case DeadLetterStatus.RESOLVED:
       return 'success';
+    case DeadLetterStatus.REPLAY_FAILED:
+      return 'danger';
     case DeadLetterStatus.DISCARDED:
       return 'secondary';
     default:
@@ -223,16 +229,18 @@ interface LoadRequest {
             [rowsPerPageOptions]="[20, 50, 100]"
             (onLazyLoad)="onLazyLoad($event)"
             [(selection)]="selectedItems"
-            selectionMode="multiple"
+            [selectionMode]="canBatchAction ? 'multiple' : undefined"
             dataKey="id"
             styleClass="p-datatable-sm p-datatable-striped p-datatable-hoverable-rows"
             [tableStyle]="{ 'min-width': '1100px' }"
           >
             <ng-template pTemplate="header">
               <tr>
-                <th style="width: 3rem">
-                  <p-tableHeaderCheckbox />
-                </th>
+                @if (canBatchAction) {
+                  <th style="width: 3rem">
+                    <p-tableHeaderCheckbox />
+                  </th>
+                }
                 <th style="width: 9rem">Type</th>
                 <th style="width: 13rem">Error Code</th>
                 <th>Error Message</th>
@@ -247,9 +255,11 @@ interface LoadRequest {
 
             <ng-template pTemplate="body" let-item>
               <tr class="clickable-row" tabindex="0" (click)="viewDetail(item.id)" (keydown.enter)="viewDetail(item.id)">
-                <td (click)="$event.stopPropagation()">
-                  <p-tableCheckbox [value]="item" />
-                </td>
+                @if (canBatchAction) {
+                  <td (click)="$event.stopPropagation()">
+                    <p-tableCheckbox [value]="item" />
+                  </td>
+                }
                 <td>
                   <span class="type-badge" [class]="'type-badge--' + (item.type | lowercase)">
                     {{ formatType(item.type) }}
@@ -521,8 +531,14 @@ export class DlqListComponent {
   private readonly masterDataService = inject(MasterDataService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly msalService = inject(MsalService);
 
-  readonly pageSize = 20;
+  readonly canBatchAction = hasAnyRequiredRole(
+    getCurrentAccount(this.msalService.instance),
+    ['SystemAdmin', 'OperationsManager'],
+  );
+
+  pageSize = 20;
 
   // ── Legal entity ──────────────────────────────────────────────────────────
   private readonly legalEntities = signal<LegalEntity[]>([]);
@@ -623,6 +639,7 @@ export class DlqListComponent {
   search(): void {
     const entityId = this.selectedLegalEntityId();
     if (!entityId) return;
+    this.searched.set(false);
     this.listState.set(emptyListState());
     this.selectedItems = [];
     this.triggerLoad(entityId, 0);
@@ -643,10 +660,21 @@ export class DlqListComponent {
   onLazyLoad(event: TableLazyLoadEvent): void {
     const entityId = this.selectedLegalEntityId();
     if (!entityId || !this.searched()) return;
-    const page = Math.floor((event.first ?? 0) / (event.rows ?? this.pageSize));
+    const rows = event.rows ?? this.pageSize;
+
+    // When the user changes page size, cursors from the old page size are invalid.
+    // Reset to page 0 and reload with the new page size.
+    if (rows !== this.pageSize) {
+      this.pageSize = rows;
+      this.listState.update((s) => ({ ...s, currentPage: 0, tableFirst: 0, cursors: [null] }));
+      this.triggerLoad(entityId, 0, rows);
+      return;
+    }
+
+    const page = Math.floor((event.first ?? 0) / rows);
     this.listState.update((s) => ({ ...s, currentPage: page, tableFirst: event.first ?? 0 }));
     const cursor = this.listState().cursors[page] ?? undefined;
-    this.triggerLoad(entityId, page, event.rows ?? this.pageSize, cursor);
+    this.triggerLoad(entityId, page, rows, cursor);
   }
 
   viewDetail(id: string): void {
@@ -696,10 +724,16 @@ export class DlqListComponent {
       .discardBatch(items)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: () => {
+        next: (result) => {
           this.batchActionLoading.set(false);
           this.batchDiscardDialogVisible = false;
-          this.setFeedback('success', `${items.length} item(s) discarded successfully.`);
+          const s = result.succeeded.length;
+          const f = result.failed.length;
+          if (f === 0) {
+            this.setFeedback('success', `${s} item(s) discarded successfully.`);
+          } else {
+            this.setFeedback('error', `${s} discarded, ${f} failed. Review items for details.`);
+          }
           this.selectedItems = [];
           this.refreshCurrentPage();
         },

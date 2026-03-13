@@ -161,15 +161,15 @@ class PreAuthEdgeCaseTest {
             status = PreAuthStatus.AUTHORIZED.name,
             expiresAt = "2020-01-01T00:00:00Z", // well past expired
         )
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(expiredAuth)
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(expiredAuth)
 
         // FCC deauth fails (simulate FCC unreachable)
-        coEvery { fccAdapter.sendPreAuth(any()) } throws java.io.IOException("FCC unreachable")
+        coEvery { fccAdapter.cancelPreAuth(any()) } throws java.io.IOException("FCC unreachable")
 
         handler.runExpiryCheck()
 
         // Record should NOT be marked EXPIRED (deauth failed → stays AUTHORIZED for retry)
-        coVerify(exactly = 0) { preAuthDao.updateStatus(any(), eq(PreAuthStatus.EXPIRED.name), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { preAuthDao.markExpiredAndUnsync(any(), eq(PreAuthStatus.EXPIRED), any(), any()) }
         // Audit log should record the retry-pending state
         coVerify(atLeast = 1) { auditLogDao.insert(match { it.eventType == "PRE_AUTH_DEAUTH_RETRY_PENDING" }) }
     }
@@ -180,17 +180,16 @@ class PreAuthEdgeCaseTest {
             status = PreAuthStatus.AUTHORIZED.name,
             expiresAt = "2020-01-01T00:00:00Z",
         )
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(expiredAuth)
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(expiredAuth)
 
         // FCC deauth succeeds
-        coEvery { fccAdapter.sendPreAuth(any()) } returns PreAuthResult(
-            status = PreAuthResultStatus.AUTHORIZED, // deauth "acknowledged"
-        )
+        coEvery { fccAdapter.cancelPreAuth(any()) } returns true
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
 
         handler.runExpiryCheck()
 
         // Record should be marked EXPIRED after successful deauth
-        coVerify { preAuthDao.updateStatus(any(), eq(PreAuthStatus.EXPIRED.name), any(), any(), any(), any(), any()) }
+        coVerify { preAuthDao.markExpiredAndUnsync(any(), eq(PreAuthStatus.EXPIRED), any(), any()) }
     }
 
     @Test
@@ -199,22 +198,23 @@ class PreAuthEdgeCaseTest {
             status = PreAuthStatus.PENDING.name,
             expiresAt = "2020-01-01T00:00:00Z",
         )
-        coEvery { preAuthDao.getExpiring(any()) } returns listOf(expiredPending)
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns listOf(expiredPending)
+        coEvery { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) } returns Unit
 
         handler.runExpiryCheck()
 
         // PENDING doesn't need FCC deauth
-        coVerify(exactly = 0) { fccAdapter.sendPreAuth(any()) }
-        coVerify { preAuthDao.updateStatus(any(), eq(PreAuthStatus.EXPIRED.name), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { fccAdapter.cancelPreAuth(any()) }
+        coVerify { preAuthDao.markExpiredAndUnsync(any(), eq(PreAuthStatus.EXPIRED), any(), any()) }
     }
 
     @Test
     fun `expiry check with empty result returns immediately`() = runTest {
-        coEvery { preAuthDao.getExpiring(any()) } returns emptyList()
+        coEvery { preAuthDao.getExpiring(any<String>(), any<Int>()) } returns emptyList()
 
         handler.runExpiryCheck()
 
-        coVerify(exactly = 0) { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { preAuthDao.markExpiredAndUnsync(any(), any(), any(), any()) }
     }
 
     // -------------------------------------------------------------------------
@@ -298,19 +298,17 @@ class PreAuthEdgeCaseTest {
             status = PreAuthStatus.AUTHORIZED.name,
         )
         coEvery { preAuthDao.getByOdooOrderId("ORD-AUTH-CANCEL", "SITE-A") } returns record
+        coEvery { preAuthDao.markCancelledAndUnsync(any(), any(), any(), any()) } returns Unit
 
         val result = handler.cancel("ORD-AUTH-CANCEL", "SITE-A")
 
         assertEquals(true, result.success)
         coVerify {
-            preAuthDao.updateStatus(
+            preAuthDao.markCancelledAndUnsync(
                 id = record.id,
-                status = PreAuthStatus.CANCELLED.name,
-                fccCorrelationId = any(),
-                fccAuthorizationCode = any(),
+                status = PreAuthStatus.CANCELLED,
+                cancelledAt = any(),
                 failureReason = any(),
-                authorizedAt = any(),
-                completedAt = any(),
             )
         }
     }
@@ -457,7 +455,7 @@ class PreAuthEdgeCaseTest {
         currencyCode = "ZAR",
         requestedAmountMinorUnits = 10_000L,
         authorizedAmountMinorUnits = null,
-        status = status,
+        status = PreAuthStatus.valueOf(status),
         fccCorrelationId = null,
         fccAuthorizationCode = fccAuthorizationCode,
         failureReason = null,

@@ -18,6 +18,7 @@ using FccMiddleware.Infrastructure.Adapters;
 using FccMiddleware.Application.DeadLetter;
 using FccMiddleware.Infrastructure.DeadLetter;
 using FccMiddleware.Infrastructure.Deduplication;
+using FccMiddleware.Infrastructure.Security;
 using FccMiddleware.Infrastructure.Events;
 using FccMiddleware.Infrastructure.Observability;
 using FccMiddleware.Infrastructure.Persistence;
@@ -366,6 +367,9 @@ try
             sp.GetRequiredService<ILoggerFactory>().CreateLogger<FccMiddleware.Infrastructure.Security.AesGcmFieldEncryptor>());
     });
 
+    // ── Infrastructure: In-memory cache (OB-P01: site config response caching) ─
+    builder.Services.AddMemoryCache();
+
     // ── Infrastructure: PostgreSQL (EF Core) ──────────────────────────────────
     builder.Services.AddDbContext<FccMiddlewareDbContext>((sp, opts) =>
         opts.UseNpgsql(
@@ -411,6 +415,9 @@ try
     // ── Infrastructure: Dead-letter services ─────────────────────────────────
     builder.Services.AddScoped<IDeadLetterService, DeadLetterService>();
     builder.Services.AddScoped<IDlqReplayService, DlqReplayService>();
+
+    // ── Infrastructure: Registration throttle (FM-S02: IP-based brute-force protection) ──
+    builder.Services.AddSingleton<IRegistrationThrottleService, RedisRegistrationThrottleService>();
 
     // ── Infrastructure: Ingestion services ───────────────────────────────────
     builder.Services.AddScoped<IDeduplicationService, RedisDeduplicationService>();

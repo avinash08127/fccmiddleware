@@ -111,7 +111,16 @@ class DeviceTokenProviderTest {
             keystoreManager.retrieveSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, any())
         } returns "old-refresh-token"
 
-        coEvery { cloudApiClient.refreshToken("old-refresh-token") } returns
+        // FM-S03: refreshToken now requires both refresh token and device JWT
+        every { encryptedPrefs.getDeviceTokenBlob() } returns android.util.Base64.encodeToString(
+            byteArrayOf(4, 5, 6),
+            android.util.Base64.NO_WRAP,
+        )
+        every {
+            keystoreManager.retrieveSecret(KeystoreManager.ALIAS_DEVICE_JWT, any())
+        } returns "current-device-jwt"
+
+        coEvery { cloudApiClient.refreshToken("old-refresh-token", "current-device-jwt") } returns
             CloudTokenRefreshResult.Success(
                 TokenRefreshResponse(
                     deviceToken = "new-jwt",
@@ -141,7 +150,16 @@ class DeviceTokenProviderTest {
             keystoreManager.retrieveSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, any())
         } returns "old-refresh"
 
-        coEvery { cloudApiClient.refreshToken("old-refresh") } returns
+        // FM-S03: Need device token blob for the refresh call
+        every { encryptedPrefs.getDeviceTokenBlob() } returns android.util.Base64.encodeToString(
+            byteArrayOf(4, 5, 6),
+            android.util.Base64.NO_WRAP,
+        )
+        every {
+            keystoreManager.retrieveSecret(KeystoreManager.ALIAS_DEVICE_JWT, any())
+        } returns "expired-jwt"
+
+        coEvery { cloudApiClient.refreshToken("old-refresh", "expired-jwt") } returns
             CloudTokenRefreshResult.Unauthorized
 
         assertFalse(provider.refreshAccessToken())
@@ -158,7 +176,15 @@ class DeviceTokenProviderTest {
             keystoreManager.retrieveSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, any())
         } returns "old-refresh"
 
-        coEvery { cloudApiClient.refreshToken("old-refresh") } returns
+        every { encryptedPrefs.getDeviceTokenBlob() } returns android.util.Base64.encodeToString(
+            byteArrayOf(4, 5, 6),
+            android.util.Base64.NO_WRAP,
+        )
+        every {
+            keystoreManager.retrieveSecret(KeystoreManager.ALIAS_DEVICE_JWT, any())
+        } returns "expired-jwt"
+
+        coEvery { cloudApiClient.refreshToken("old-refresh", "expired-jwt") } returns
             CloudTokenRefreshResult.Forbidden("DEVICE_DECOMMISSIONED")
 
         assertFalse(provider.refreshAccessToken())
@@ -176,7 +202,15 @@ class DeviceTokenProviderTest {
             keystoreManager.retrieveSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, any())
         } returns "old-refresh"
 
-        coEvery { cloudApiClient.refreshToken("old-refresh") } returns
+        every { encryptedPrefs.getDeviceTokenBlob() } returns android.util.Base64.encodeToString(
+            byteArrayOf(4, 5, 6),
+            android.util.Base64.NO_WRAP,
+        )
+        every {
+            keystoreManager.retrieveSecret(KeystoreManager.ALIAS_DEVICE_JWT, any())
+        } returns "expired-jwt"
+
+        coEvery { cloudApiClient.refreshToken("old-refresh", "expired-jwt") } returns
             CloudTokenRefreshResult.TransportError("timeout")
 
         assertFalse(provider.refreshAccessToken())

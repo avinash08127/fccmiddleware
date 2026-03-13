@@ -75,6 +75,7 @@ public sealed class UnmatchedReconciliationWorker : BackgroundService
 
         var retried = 0;
         var escalated = 0;
+        Dictionary<(Guid LegalEntityId, string SiteCode), ReconciliationSiteContext?> siteContextCache = [];
 
         foreach (var item in dueItems)
         {
@@ -89,7 +90,11 @@ public sealed class UnmatchedReconciliationWorker : BackgroundService
                 continue;
             }
 
-            var retryResult = await matcher.RetryUnmatchedAsync(item.Transaction, item.Reconciliation, ct);
+            var retryResult = await matcher.RetryUnmatchedAsync(
+                item.Transaction,
+                item.Reconciliation,
+                siteContextCache,
+                ct);
             if (retryResult.CreatedOrUpdated)
             {
                 retried++;

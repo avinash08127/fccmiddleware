@@ -6,6 +6,6 @@ export const SETTINGS_ROUTES: Routes = [
     path: '',
     loadComponent: () =>
       import('./settings.component').then((m) => m.SettingsComponent),
-    canActivate: [roleGuard(['SystemAdmin'])],
+    canActivate: [roleGuard(['SystemAdmin', 'OperationsManager'])],
   },
 ];

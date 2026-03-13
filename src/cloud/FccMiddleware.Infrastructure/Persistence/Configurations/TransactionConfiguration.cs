@@ -84,6 +84,13 @@ internal sealed class TransactionConfiguration : IEntityTypeConfiguration<Transa
             .HasDatabaseName("ix_transactions_reconciliation")
             .HasFilter("pre_auth_id IS NULL AND status = 'PENDING'");
 
+        // Fuzzy duplicate detection at ingestion time.
+        // Covers HasFuzzyMatchAsync: filters on (legal_entity_id, site_code, pump_number,
+        // nozzle_number, amount_minor_units, completed_at) WHERE status = 'PENDING'.
+        builder.HasIndex(e => new { e.LegalEntityId, e.SiteCode, e.PumpNumber, e.NozzleNumber, e.AmountMinorUnits, e.CompletedAt })
+            .HasDatabaseName("ix_transactions_fuzzy")
+            .HasFilter("status = 'PENDING'");
+
         // Stale detection worker.
         builder.HasIndex(e => new { e.Status, e.IsStale, e.CreatedAt })
             .HasDatabaseName("ix_transactions_stale")

@@ -191,8 +191,12 @@ import { environment } from '../../../environments/environment';
                   Scan this QR code with the Android edge agent to provision the device.
                 </p>
                 <p-message severity="warn" styleClass="qr-security-warn">
-                  This QR code contains the provisioning token. Do not leave printed copies unattended.
-                  The token expires in 72 hours.
+                  SENSITIVE CREDENTIAL: This QR code contains the provisioning token in plaintext.
+                  Treat it as a password — do not leave printed copies unattended, share via
+                  chat/email, or take screenshots. The token expires in 72 hours.
+                  @if (qrSecondsRemaining() > 0) {
+                    QR display auto-clears in {{ Math.floor(qrSecondsRemaining() / 60) }}:{{ (qrSecondsRemaining() % 60).toString().padStart(2, '0') }}.
+                  }
                 </p-message>
                 <div class="qr-image-wrapper">
                   <img [src]="qrDataUrl()" alt="Provisioning QR Code" class="qr-image" />
@@ -354,6 +358,7 @@ import { environment } from '../../../environments/environment';
   `],
 })
 export class BootstrapTokenComponent {
+  protected readonly Math = Math;
   private readonly bootstrapTokenService = inject(BootstrapTokenService);
   private readonly masterDataService = inject(MasterDataService);
   private readonly siteService = inject(SiteService);
@@ -391,6 +396,12 @@ export class BootstrapTokenComponent {
   readonly tokenRevealed = signal(false);
   readonly qrDataUrl = signal<string | null>(null);
 
+  // FM-S06: QR auto-expiry — clear QR code from UI after 5 minutes to limit exposure window.
+  private qrExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly QR_EXPIRY_MS = 5 * 60 * 1000;
+  readonly qrSecondsRemaining = signal<number>(0);
+  private qrCountdownTimer: ReturnType<typeof setInterval> | null = null;
+
   // M-17: Hold the raw token separately so it can be cleared from memory
   // after copy. The generatedToken signal retains metadata (tokenId, expiresAt, siteCode)
   // but rawToken is scrubbed.
@@ -422,6 +433,7 @@ export class BootstrapTokenComponent {
     this.sites.set([]);
     this.generatedToken.set(null);
     this.error.set(null);
+    this.clearQrExpiry();
     this.qrDataUrl.set(null);
 
     if (entityId) {
@@ -455,6 +467,7 @@ export class BootstrapTokenComponent {
     this.tokenCleared.set(false);
     this.copied.set(false);
     this.tokenRevealed.set(false);
+    this.clearQrExpiry();
     this.qrDataUrl.set(null);
     this.tokenRevoked.set(false);
 
@@ -516,6 +529,7 @@ export class BootstrapTokenComponent {
       .subscribe(() => {
         this.tokenRevoked.set(true);
         this.revoking.set(false);
+        this.clearQrExpiry();
         this.qrDataUrl.set(null);
       });
   }
@@ -531,6 +545,9 @@ export class BootstrapTokenComponent {
       this.rawTokenValue = null;
       this.tokenCleared.set(true);
       this.tokenRevealed.set(false);
+      // FM-S06: Also clear the QR code — it contains the raw token.
+      this.clearQrExpiry();
+      this.qrDataUrl.set(null);
       setTimeout(() => this.copied.set(false), 2000);
     } catch {
       this.error.set('Failed to copy to clipboard. Please reveal the token and copy it manually.');
@@ -557,9 +574,45 @@ export class BootstrapTokenComponent {
         color: { dark: '#000000', light: '#ffffff' },
       });
       this.qrDataUrl.set(dataUrl);
+      this.startQrExpiry();
     } catch {
       // QR generation failed silently — token is still usable via copy
     }
+  }
+
+  // FM-S06: Auto-clear the QR code from the UI after 5 minutes to limit
+  // the window during which the plaintext token is visible on screen.
+  private startQrExpiry(): void {
+    this.clearQrExpiry();
+    const expirySeconds = this.QR_EXPIRY_MS / 1000;
+    this.qrSecondsRemaining.set(expirySeconds);
+
+    this.qrCountdownTimer = setInterval(() => {
+      const remaining = this.qrSecondsRemaining() - 1;
+      if (remaining <= 0) {
+        this.clearQrExpiry();
+        this.qrDataUrl.set(null);
+      } else {
+        this.qrSecondsRemaining.set(remaining);
+      }
+    }, 1000);
+
+    this.qrExpiryTimer = setTimeout(() => {
+      this.qrDataUrl.set(null);
+      this.clearQrExpiry();
+    }, this.QR_EXPIRY_MS);
+  }
+
+  private clearQrExpiry(): void {
+    if (this.qrExpiryTimer) {
+      clearTimeout(this.qrExpiryTimer);
+      this.qrExpiryTimer = null;
+    }
+    if (this.qrCountdownTimer) {
+      clearInterval(this.qrCountdownTimer);
+      this.qrCountdownTimer = null;
+    }
+    this.qrSecondsRemaining.set(0);
   }
 
   downloadQr(): void {
@@ -606,6 +659,12 @@ export class BootstrapTokenComponent {
     img.style.cssText = 'width:400px;height:400px';
     img.alt = 'Provisioning QR Code';
     body.appendChild(img);
+
+    // FM-S06: Add security warning to printed QR page
+    const securityWarn = doc.createElement('p');
+    securityWarn.style.cssText = 'margin:1rem 0 0;font-size:0.85rem;color:#dc2626;font-weight:600;max-width:400px;text-align:center;border:2px solid #dc2626;padding:0.5rem;border-radius:0.25rem';
+    securityWarn.textContent = 'SENSITIVE CREDENTIAL — Treat this QR code as a password. Destroy this printout after use. Do not leave unattended.';
+    body.appendChild(securityWarn);
 
     const footerPara = doc.createElement('p');
     footerPara.style.cssText = 'margin:1rem 0 0;font-size:0.8rem;color:#94a3b8';

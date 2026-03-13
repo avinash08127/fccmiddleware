@@ -103,8 +103,43 @@ public sealed class SubmitTelemetryTests : IAsyncLifetime
         auditEvent.Should().NotBeNull();
         var payload = JsonSerializer.Deserialize<JsonElement>(auditEvent!.Payload);
         payload.GetProperty("eventType").GetString().Should().Be("AgentHealthReported");
-        payload.GetProperty("data").GetProperty("telemetry").GetProperty("sequenceNumber").GetInt32().Should().Be(7);
+        payload.GetProperty("data").GetProperty("sequenceNumber").GetInt32().Should().Be(7);
         payload.GetProperty("data").GetProperty("summary").GetProperty("bufferDepth").GetInt32().Should().Be(42);
+
+        var snapshot = await db.AgentTelemetrySnapshots.IgnoreQueryFilters()
+            .SingleAsync(s => s.DeviceId == TestDeviceId);
+        var snapshotPayload = JsonSerializer.Deserialize<JsonElement>(snapshot.PayloadJson);
+        snapshotPayload.GetProperty("format").GetString().Should().Be("supplemental-v1");
+        snapshotPayload.GetProperty("sequenceNumber").GetInt32().Should().Be(7);
+        snapshotPayload.TryGetProperty("reportedAtUtc", out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task SubmitTelemetry_RepeatedReportsWithinThrottleWindow_UpdateSnapshotWithoutAddingHealthAuditRows()
+    {
+        _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            CreateDeviceJwt(TestDeviceId.ToString(), TestSiteCode, TestLegalEntityId));
+
+        var firstResponse = await _client.PostAsJsonAsync("/api/v1/agent/telemetry", BuildTelemetryPayload(sequenceNumber: 11));
+        var secondResponse = await _client.PostAsJsonAsync("/api/v1/agent/telemetry", BuildTelemetryPayload(sequenceNumber: 12));
+        var duplicateSecondResponse = await _client.PostAsJsonAsync("/api/v1/agent/telemetry", BuildTelemetryPayload(sequenceNumber: 12));
+
+        firstResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        secondResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        duplicateSecondResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+
+        var healthAuditCount = await db.AuditEvents.IgnoreQueryFilters()
+            .CountAsync(a => a.EventType == "AgentHealthReported" && a.EntityId == TestDeviceId);
+        healthAuditCount.Should().Be(1);
+
+        var snapshot = await db.AgentTelemetrySnapshots.IgnoreQueryFilters()
+            .SingleAsync(s => s.DeviceId == TestDeviceId);
+        var snapshotPayload = JsonSerializer.Deserialize<JsonElement>(snapshot.PayloadJson);
+        snapshotPayload.GetProperty("sequenceNumber").GetInt32().Should().Be(12);
     }
 
     [Fact]

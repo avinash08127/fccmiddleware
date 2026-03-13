@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 
 @Dao
@@ -54,7 +55,7 @@ interface PreAuthDao {
     )
     suspend fun updateStatus(
         id: String,
-        status: String,
+        status: PreAuthStatus,
         fccCorrelationId: String?,
         fccAuthorizationCode: String?,
         failureReason: String?,
@@ -90,13 +91,17 @@ interface PreAuthDao {
 
     /**
      * Expiry worker: find active pre-auths at or past their expiry time.
+     * Results are ordered oldest-first and limited to [limit] rows to bound memory
+     * use during FCC outages that cause large simultaneous expiry backlogs.
      */
     @Query(
         "SELECT * FROM pre_auth_records " +
         "WHERE status IN ('PENDING', 'AUTHORIZED', 'DISPENSING') " +
-        "AND expires_at <= :now"
+        "AND expires_at <= :now " +
+        "ORDER BY expires_at ASC " +
+        "LIMIT :limit"
     )
-    suspend fun getExpiring(now: String): List<PreAuthRecord>
+    suspend fun getExpiring(now: String, limit: Int): List<PreAuthRecord>
 
     /**
      * Retention cleanup: delete terminal pre-auth records older than cutoff.
@@ -119,13 +124,18 @@ interface PreAuthDao {
      */
     @Query(
         "UPDATE pre_auth_records SET " +
-        "status = 'CANCELLED', " +
+        "status = :status, " +
         "is_cloud_synced = 0, " +
         "completed_at = :cancelledAt, " +
         "failure_reason = :failureReason " +
         "WHERE id = :id"
     )
-    suspend fun markCancelledAndUnsync(id: String, cancelledAt: String, failureReason: String?)
+    suspend fun markCancelledAndUnsync(
+        id: String,
+        status: PreAuthStatus,
+        cancelledAt: String,
+        failureReason: String?,
+    )
 
     /**
      * GAP-3: Atomically set status to EXPIRED and reset is_cloud_synced to 0.
@@ -134,11 +144,16 @@ interface PreAuthDao {
      */
     @Query(
         "UPDATE pre_auth_records SET " +
-        "status = 'EXPIRED', " +
+        "status = :status, " +
         "is_cloud_synced = 0, " +
         "completed_at = :expiredAt, " +
         "failure_reason = :failureReason " +
         "WHERE id = :id"
     )
-    suspend fun markExpiredAndUnsync(id: String, expiredAt: String, failureReason: String?)
+    suspend fun markExpiredAndUnsync(
+        id: String,
+        status: PreAuthStatus,
+        expiredAt: String,
+        failureReason: String?,
+    )
 }

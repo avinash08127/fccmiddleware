@@ -1,4 +1,5 @@
 using FccDesktopAgent.Core.Adapter.Common;
+using FccDesktopAgent.Core.PreAuth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
@@ -108,9 +109,12 @@ internal sealed class PreAuthRecordConfiguration : IEntityTypeConfiguration<PreA
         builder.Property(p => p.ExpiredAt).HasConversion(Converters.Optional);
         builder.Property(p => p.FailedAt).HasConversion(Converters.Optional);
 
-        // ix_par_idemp — UNIQUE(OdooOrderId, SiteCode)
+        var activeStatuses = string.Join("','", PreAuthStateMachine.ActiveStatusNames);
+
+        // ix_par_idemp — UNIQUE(OdooOrderId, SiteCode) for active records only
         builder.HasIndex(p => new { p.OdooOrderId, p.SiteCode })
             .IsUnique()
+            .HasFilter($"\"Status\" IN ('{activeStatuses}')")
             .HasDatabaseName("ix_par_idemp");
 
         // ix_par_unsent — pending cloud sync scan

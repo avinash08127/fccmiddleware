@@ -77,3 +77,15 @@ public sealed record BatchDiscardItemDto
     public required Guid Id { get; init; }
     public required string Reason { get; init; }
 }
+
+public sealed record BatchDiscardResultDto
+{
+    public required IReadOnlyList<Guid> Succeeded { get; init; }
+    public required IReadOnlyList<BatchDiscardFailureDto> Failed { get; init; }
+}
+
+public sealed record BatchDiscardFailureDto
+{
+    public required Guid Id { get; init; }
+    public required string Error { get; init; }
+}

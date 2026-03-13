@@ -324,6 +324,8 @@ sealed class CloudRegistrationResult {
 @Serializable
 data class TokenRefreshRequest(
     @Sensitive val refreshToken: String,
+    // FM-S03: Include the current (even expired) device JWT to bind refresh to device identity
+    @Sensitive val deviceToken: String,
 )
 
 @Serializable

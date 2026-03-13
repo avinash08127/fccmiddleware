@@ -407,11 +407,11 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     public async Task RefreshToken_ValidToken_ReturnsNewTokenPair()
     {
         // Register a device to get a refresh token
-        var (_, refreshToken) = await RegisterDeviceAsync("SN-REFRESH-001");
+        var (_, deviceToken, refreshToken) = await RegisterDeviceAsync("SN-REFRESH-001");
 
-        // Refresh
+        // FM-S03: Refresh requires both refresh token and device JWT
         var refreshResponse = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
-            new { refreshToken });
+            new { refreshToken, deviceToken });
 
         refreshResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
@@ -423,26 +423,58 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RefreshToken_WithoutDeviceToken_Returns401()
+    {
+        var (_, _, refreshToken) = await RegisterDeviceAsync("SN-REFRESH-NODEVICE-001");
+
+        // FM-S03: Missing device token should be rejected
+        var response = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
+            new { refreshToken });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("DEVICE_TOKEN_REQUIRED");
+    }
+
+    [Fact]
+    public async Task RefreshToken_WithInvalidDeviceToken_Returns401()
+    {
+        var (_, _, refreshToken) = await RegisterDeviceAsync("SN-REFRESH-BADJWT-001");
+
+        // FM-S03: Invalid device token (bad signature) should be rejected
+        var response = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
+            new { refreshToken, deviceToken = "invalid.jwt.token" });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("DEVICE_TOKEN_INVALID");
+    }
+
+    [Fact]
     public async Task RefreshToken_UsedTokenAfterRotation_Returns401()
     {
-        var (_, refreshToken) = await RegisterDeviceAsync("SN-ROTATION-001");
+        var (_, deviceToken, refreshToken) = await RegisterDeviceAsync("SN-ROTATION-001");
 
         // First refresh succeeds
         var firstRefresh = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
-            new { refreshToken });
+            new { refreshToken, deviceToken });
         firstRefresh.StatusCode.Should().Be(HttpStatusCode.OK);
 
         // Second refresh with old token fails (it was revoked during rotation)
         var secondRefresh = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
-            new { refreshToken });
+            new { refreshToken, deviceToken });
         secondRefresh.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
     [Fact]
     public async Task RefreshToken_InvalidToken_Returns401()
     {
+        var (_, deviceToken, _) = await RegisterDeviceAsync("SN-REFRESH-INVALID-001");
+
         var response = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
-            new { refreshToken = "invalid-token-value" });
+            new { refreshToken = "invalid-token-value", deviceToken });
 
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
@@ -452,11 +484,12 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     [Fact]
     public async Task Decommission_ActiveDevice_Returns200AndRevokesTokens()
     {
-        var (deviceId, refreshToken) = await RegisterDeviceAsync("SN-DECOM-001");
+        var (deviceId, deviceToken, refreshToken) = await RegisterDeviceAsync("SN-DECOM-001");
 
-        // Decommission
-        var decommResponse = await _client.PostAsync(
-            $"/api/v1/admin/agent/{deviceId}/decommission", null);
+        // FM-S04: Decommission requires a reason
+        var decommResponse = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{deviceId}/decommission",
+            new { reason = "Device hardware failure — replacing unit" });
 
         decommResponse.StatusCode.Should().Be(HttpStatusCode.OK);
 
@@ -471,18 +504,20 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
             .FirstOrDefaultAsync(a => a.Id == deviceId);
         agent!.IsActive.Should().BeFalse();
 
-        // Verify refresh token is revoked — refresh should fail with DEVICE_DECOMMISSIONED
+        // Verify refresh token is revoked — refresh should fail
         var refreshResponse = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
-            new { refreshToken });
+            new { refreshToken, deviceToken });
         refreshResponse.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
     [Fact]
-    public async Task Decommission_ActiveDevice_WritesActorToAuditEvent()
+    public async Task Decommission_ActiveDevice_WritesActorAndReasonToAuditEvent()
     {
-        var (deviceId, _) = await RegisterDeviceAsync("SN-DECOM-AUDIT-001");
+        var (deviceId, _, _) = await RegisterDeviceAsync("SN-DECOM-AUDIT-001");
 
-        var response = await _client.PostAsync($"/api/v1/admin/agent/{deviceId}/decommission", null);
+        var response = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{deviceId}/decommission",
+            new { reason = "Security incident — device compromised" });
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
 
@@ -497,15 +532,34 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         using var payload = JsonDocument.Parse(auditEvent!.Payload);
         payload.RootElement.GetProperty("DecommissionedBy").GetString().Should().Be("portal-admin");
         payload.RootElement.GetProperty("DeviceId").GetGuid().Should().Be(deviceId);
+        payload.RootElement.GetProperty("Reason").GetString().Should().Be("Security incident — device compromised");
+    }
+
+    [Fact]
+    public async Task Decommission_WithoutReason_Returns400()
+    {
+        var (deviceId, _, _) = await RegisterDeviceAsync("SN-DECOM-NOREASON-001");
+
+        // FM-S04: Missing reason should be rejected
+        var response = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{deviceId}/decommission",
+            new { reason = "" });
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("REASON_REQUIRED");
     }
 
     [Fact]
     public async Task Decommission_WithoutPortalAuth_Returns401()
     {
-        var (deviceId, _) = await RegisterDeviceAsync("SN-DECOM-NOAUTH-001");
+        var (deviceId, _, _) = await RegisterDeviceAsync("SN-DECOM-NOAUTH-001");
         _client.DefaultRequestHeaders.Authorization = null;
 
-        var response = await _client.PostAsync($"/api/v1/admin/agent/{deviceId}/decommission", null);
+        var response = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{deviceId}/decommission",
+            new { reason = "test decommission" });
 
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
@@ -514,14 +568,18 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     [Fact]
     public async Task Decommission_AlreadyDecommissioned_Returns409()
     {
-        var (deviceId, _) = await RegisterDeviceAsync("SN-DECOM-TWICE-001");
+        var (deviceId, _, _) = await RegisterDeviceAsync("SN-DECOM-TWICE-001");
 
         // First decommission
-        var first = await _client.PostAsync($"/api/v1/admin/agent/{deviceId}/decommission", null);
+        var first = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{deviceId}/decommission",
+            new { reason = "First decommission" });
         first.StatusCode.Should().Be(HttpStatusCode.OK);
 
         // Second decommission
-        var second = await _client.PostAsync($"/api/v1/admin/agent/{deviceId}/decommission", null);
+        var second = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{deviceId}/decommission",
+            new { reason = "Second attempt" });
         second.StatusCode.Should().Be(HttpStatusCode.Conflict);
 
         var body = await second.Content.ReadFromJsonAsync<JsonElement>();
@@ -531,8 +589,9 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     [Fact]
     public async Task Decommission_NonExistentDevice_Returns404()
     {
-        var response = await _client.PostAsync(
-            $"/api/v1/admin/agent/{Guid.NewGuid()}/decommission", null);
+        var response = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{Guid.NewGuid()}/decommission",
+            new { reason = "Does not exist" });
 
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
@@ -542,15 +601,17 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     [Fact]
     public async Task DecommissionedDevice_JwtStillValidButRefreshFails()
     {
-        var (deviceId, refreshToken) = await RegisterDeviceAsync("SN-E2E-DECOM-001");
+        var (deviceId, deviceToken, refreshToken) = await RegisterDeviceAsync("SN-E2E-DECOM-001");
 
         // Decommission
-        var decomm = await _client.PostAsync($"/api/v1/admin/agent/{deviceId}/decommission", null);
+        var decomm = await _client.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{deviceId}/decommission",
+            new { reason = "End-to-end test" });
         decomm.StatusCode.Should().Be(HttpStatusCode.OK);
 
         // Try to refresh — should get 401 (token revoked, then device decommissioned check)
         var refreshResp = await _client.PostAsJsonAsync("/api/v1/agent/token/refresh",
-            new { refreshToken });
+            new { refreshToken, deviceToken });
         // Revoked token returns Unauthorized
         refreshResp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
@@ -558,7 +619,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     [Fact]
     public async Task GetDiagnosticLogs_MaxBatchesAboveLimit_Returns400()
     {
-        var (deviceId, _) = await RegisterDeviceAsync("SN-DIAG-LIMIT-001");
+        var (deviceId, _, _) = await RegisterDeviceAsync("SN-DIAG-LIMIT-001");
 
         var response = await _client.GetAsync($"/api/v1/agents/{deviceId}/diagnostic-logs?maxBatches=101");
 
@@ -581,7 +642,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         return body.GetProperty("rawToken").GetString()!;
     }
 
-    private async Task<(Guid DeviceId, string RefreshToken)> RegisterDeviceAsync(string serialNumber)
+    private async Task<(Guid DeviceId, string DeviceToken, string RefreshToken)> RegisterDeviceAsync(string serialNumber)
     {
         // Each registration needs: deactivate old agent if present, so use replacePreviousAgent
         var bootstrapToken = await GenerateBootstrapTokenAsync();
@@ -607,9 +668,10 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
 
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         var deviceId = Guid.Parse(body.GetProperty("deviceId").GetString()!);
+        var deviceToken = body.GetProperty("deviceToken").GetString()!;
         var refreshToken = body.GetProperty("refreshToken").GetString()!;
 
-        return (deviceId, refreshToken);
+        return (deviceId, deviceToken, refreshToken);
     }
 
     private static string ComputeSha256Hex(string input)

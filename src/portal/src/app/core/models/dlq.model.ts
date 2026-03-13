@@ -9,13 +9,16 @@ export enum DeadLetterType {
 
 export enum DeadLetterStatus {
   PENDING = 'PENDING',
+  REPLAY_QUEUED = 'REPLAY_QUEUED',
   RETRYING = 'RETRYING',
   RESOLVED = 'RESOLVED',
+  REPLAY_FAILED = 'REPLAY_FAILED',
   DISCARDED = 'DISCARDED',
 }
 
 export enum DeadLetterReason {
   VALIDATION_FAILURE = 'VALIDATION_FAILURE',
+  NORMALIZATION_FAILURE = 'NORMALIZATION_FAILURE',
   DEDUPLICATION_ERROR = 'DEDUPLICATION_ERROR',
   ADAPTER_ERROR = 'ADAPTER_ERROR',
   PERSISTENCE_ERROR = 'PERSISTENCE_ERROR',
@@ -90,6 +93,11 @@ export interface BatchDiscardItem {
 }
 
 export interface BatchRetryResult {
+  succeeded: string[];
+  failed: Array<{ id: string; error: string }>;
+}
+
+export interface BatchDiscardResult {
   succeeded: string[];
   failed: Array<{ id: string; error: string }>;
 }

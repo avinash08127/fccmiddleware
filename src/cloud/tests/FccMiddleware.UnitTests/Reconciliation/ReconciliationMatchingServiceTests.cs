@@ -179,6 +179,56 @@ public sealed class ReconciliationMatchingServiceTests
     }
 
     [Fact]
+    public async Task MatchAsync_DefaultCompletedAt_SkipsTimeWindowAndFallsBackToOdoo()
+    {
+        var sut = CreateSut();
+        var tx = new Transaction
+        {
+            Id = Guid.NewGuid(),
+            LegalEntityId = Guid.Parse("10000000-0000-0000-0000-000000000001"),
+            SiteCode = "SITE-1",
+            PumpNumber = 1,
+            NozzleNumber = 1,
+            FccTransactionId = $"TX-{Guid.NewGuid():N}",
+            ProductCode = "PMS",
+            AmountMinorUnits = 5000,
+            VolumeMicrolitres = 10_000_000,
+            UnitPriceMinorPerLitre = 500,
+            CurrencyCode = "MWK",
+            StartedAt = DateTimeOffset.UtcNow.AddMinutes(-1),
+            CompletedAt = default,
+            FccVendor = FccVendor.DOMS,
+            Status = TransactionStatus.PENDING,
+            IngestionSource = IngestionSource.FCC_PUSH,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+            CorrelationId = Guid.NewGuid(),
+            OdooOrderId = "ODOO-NULL"
+        };
+        var candidate = CreatePreAuth("ODOO-NULL", authorizedAmount: 5000);
+
+        _db.FindByTransactionIdAsync(tx.Id, Arg.Any<CancellationToken>())
+            .Returns((ReconciliationRecord?)null);
+        _db.FindSiteContextAsync(tx.LegalEntityId, tx.SiteCode, Arg.Any<ReconciliationOptions>(), Arg.Any<CancellationToken>())
+            .Returns(CreateSiteContext(tx.LegalEntityId, tx.SiteCode));
+        _db.FindOdooOrderCandidatesAsync(tx.LegalEntityId, tx.SiteCode, "ODOO-NULL", Arg.Any<CancellationToken>())
+            .Returns([candidate]);
+
+        var result = await sut.MatchAsync(tx, CancellationToken.None);
+
+        result.Status.Should().Be(ReconciliationStatus.MATCHED);
+        tx.PreAuthId.Should().Be(candidate.Id);
+        _ = _db.DidNotReceive().FindPumpNozzleTimeCandidatesAsync(
+            Arg.Any<Guid>(),
+            Arg.Any<string>(),
+            Arg.Any<int>(),
+            Arg.Any<int>(),
+            Arg.Any<DateTimeOffset>(),
+            Arg.Any<DateTimeOffset>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task MatchAsync_AmbiguousMatch_ForcesVarianceFlagged()
     {
         var sut = CreateSut();

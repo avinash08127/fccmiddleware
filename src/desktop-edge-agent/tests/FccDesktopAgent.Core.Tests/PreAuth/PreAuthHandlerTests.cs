@@ -100,7 +100,10 @@ public sealed class PreAuthHandlerTests : IDisposable
         string vendor = "DOMS",
         string connectionProtocol = "REST",
         string hostAddress = "fcc-lan",
-        int port = 8080) =>
+        int port = 8080,
+        string? sharedSecret = null,
+        int? usnCode = null,
+        int? authPort = null) =>
         new()
         {
             Identity = new SiteConfigIdentity
@@ -120,6 +123,9 @@ public sealed class PreAuthHandlerTests : IDisposable
                 ConnectionProtocol = connectionProtocol,
                 HostAddress = hostAddress,
                 Port = port,
+                SharedSecret = sharedSecret,
+                UsnCode = usnCode,
+                AuthPort = authPort,
             },
             Mappings = new SiteConfigMappings
             {
@@ -258,11 +264,79 @@ public sealed class PreAuthHandlerTests : IDisposable
 
         result.IsSuccess.Should().BeTrue();
         result.Status.Should().Be(PreAuthStatus.Authorized);
-        // Terminal record is deleted and a new one is created with a fresh ID
-        var count = await _db.PreAuths.CountAsync();
-        count.Should().Be(1);
-        var record = await _db.PreAuths.SingleAsync();
-        record.Id.Should().NotBe(oldId);
+        var records = await _db.PreAuths
+            .OrderBy(r => r.CreatedAt)
+            .ToListAsync();
+        records.Should().HaveCount(2);
+        records[0].Id.Should().Be(oldId);
+        records[0].Status.Should().Be(terminalStatus);
+        records[1].Id.Should().NotBe(oldId);
+        records[1].Status.Should().Be(PreAuthStatus.Authorized);
+    }
+
+    [Fact]
+    public async Task PreAuthIndex_AllowsTerminalHistory_ButRejectsSecondActiveRecord()
+    {
+        _db.PreAuths.Add(new PreAuthEntity
+        {
+            Id = Guid.NewGuid().ToString(),
+            OdooOrderId = "ORDER-INDEX",
+            SiteCode = "SITE-A",
+            PumpNumber = 1,
+            NozzleNumber = 1,
+            ProductCode = "DIESEL",
+            RequestedAmount = 50_000,
+            UnitPrice = 1_500,
+            Currency = "ETB",
+            Status = PreAuthStatus.Completed,
+            RequestedAt = DateTimeOffset.UtcNow.AddMinutes(-30),
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-25),
+            CompletedAt = DateTimeOffset.UtcNow.AddMinutes(-20),
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-30),
+            UpdatedAt = DateTimeOffset.UtcNow.AddMinutes(-20),
+        });
+        await _db.SaveChangesAsync();
+
+        _db.PreAuths.Add(new PreAuthEntity
+        {
+            Id = Guid.NewGuid().ToString(),
+            OdooOrderId = "ORDER-INDEX",
+            SiteCode = "SITE-A",
+            PumpNumber = 1,
+            NozzleNumber = 1,
+            ProductCode = "DIESEL",
+            RequestedAmount = 50_000,
+            UnitPrice = 1_500,
+            Currency = "ETB",
+            Status = PreAuthStatus.Authorized,
+            RequestedAt = DateTimeOffset.UtcNow.AddMinutes(-5),
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
+            AuthorizedAt = DateTimeOffset.UtcNow.AddMinutes(-4),
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-5),
+            UpdatedAt = DateTimeOffset.UtcNow.AddMinutes(-4),
+        });
+        await _db.SaveChangesAsync();
+
+        _db.PreAuths.Add(new PreAuthEntity
+        {
+            Id = Guid.NewGuid().ToString(),
+            OdooOrderId = "ORDER-INDEX",
+            SiteCode = "SITE-A",
+            PumpNumber = 1,
+            NozzleNumber = 1,
+            ProductCode = "DIESEL",
+            RequestedAmount = 50_000,
+            UnitPrice = 1_500,
+            Currency = "ETB",
+            Status = PreAuthStatus.Pending,
+            RequestedAt = DateTimeOffset.UtcNow,
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        });
+
+        var act = async () => await _db.SaveChangesAsync();
+        await act.Should().ThrowAsync<DbUpdateException>();
     }
 
     // ── HandleAsync: Nozzle mapping ───────────────────────────────────────────
@@ -345,7 +419,11 @@ public sealed class PreAuthHandlerTests : IDisposable
     [Fact]
     public async Task HandleAsync_UsesConfiguredVendorFromSiteConfig()
     {
-        _currentSiteConfig = MakeSiteConfig(vendor: "RADIX");
+        _currentSiteConfig = MakeSiteConfig(
+            vendor: "RADIX",
+            sharedSecret: "radix-test-secret",
+            usnCode: 123456,
+            authPort: 9090);
         await SeedNozzleMappingAsync();
         _adapter.SendPreAuthAsync(Arg.Any<PreAuthCommand>(), Arg.Any<CancellationToken>())
             .Returns(AcceptedResult());
@@ -363,15 +441,15 @@ public sealed class PreAuthHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task HandleAsync_UnsupportedVendor_FailsExplicitly()
+    public async Task HandleAsync_InvalidVendorConfig_FailsExplicitly()
     {
-        _currentSiteConfig = MakeSiteConfig(vendor: "ADVATEC");
+        _currentSiteConfig = MakeSiteConfig(vendor: "RADIX");
         await SeedNozzleMappingAsync();
 
         var result = await _handler.HandleAsync(MakeRequest(), CancellationToken.None);
 
         result.IsSuccess.Should().BeFalse();
-        result.Error.Should().Be(PreAuthHandlerError.UnsupportedVendor);
+        result.Error.Should().Be(PreAuthHandlerError.AdapterNotConfigured);
         await _adapter.DidNotReceive().SendPreAuthAsync(Arg.Any<PreAuthCommand>(), Arg.Any<CancellationToken>());
     }
 
@@ -807,5 +885,48 @@ public sealed class PreAuthHandlerTests : IDisposable
     {
         var count = await _handler.RunExpiryCheckAsync(CancellationToken.None);
         count.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task RunExpiryCheckAsync_RespectsExpiryBatchSize_PA_P03()
+    {
+        // Seed 3 expired records but configure batch limit of 2
+        var config = new AgentConfiguration
+        {
+            FccBaseUrl = DefaultConfig.FccBaseUrl,
+            FccApiKey = DefaultConfig.FccApiKey,
+            FccVendor = DefaultConfig.FccVendor,
+            PreAuthTimeoutSeconds = DefaultConfig.PreAuthTimeoutSeconds,
+            PreAuthExpiryMinutes = DefaultConfig.PreAuthExpiryMinutes,
+            PreAuthExpiryBatchSize = 2, // limit to 2
+        };
+        var options = Options.Create(config);
+        var handler = new PreAuthHandler(_db, _connectivity, options, NullLogger<PreAuthHandler>.Instance);
+
+        var past = DateTimeOffset.UtcNow.AddMinutes(-10);
+        for (var i = 1; i <= 3; i++)
+        {
+            _db.PreAuths.Add(new PreAuthEntity
+            {
+                Id = $"PA-BATCH-{i}",
+                OdooOrderId = $"ORDER-BATCH-{i}",
+                SiteCode = "SITE-A",
+                Status = PreAuthStatus.Pending,
+                ExpiresAt = past.AddSeconds(i), // oldest first
+                RequestedAt = past,
+                CreatedAt = past,
+                UpdatedAt = past,
+            });
+        }
+        await _db.SaveChangesAsync();
+
+        var count = await handler.RunExpiryCheckAsync(CancellationToken.None);
+
+        count.Should().Be(2); // batch limit applied
+        var expired = await _db.PreAuths.AsNoTracking()
+            .Where(p => p.Status == PreAuthStatus.Expired).ToListAsync();
+        expired.Should().HaveCount(2);
+        // Oldest two should be expired (OrderBy ExpiresAt ASC)
+        expired.Select(r => r.Id).Should().BeEquivalentTo(["PA-BATCH-1", "PA-BATCH-2"]);
     }
 }

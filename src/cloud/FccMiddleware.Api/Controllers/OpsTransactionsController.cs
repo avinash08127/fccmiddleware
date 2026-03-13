@@ -91,7 +91,7 @@ public sealed class OpsTransactionsController : PortalControllerBase
         }
 
         var descending = !string.Equals(sortOrder, "asc", StringComparison.OrdinalIgnoreCase);
-        var useKeysetPagination = string.IsNullOrWhiteSpace(sortField) || string.Equals(sortField?.Trim(), "completedAt", StringComparison.OrdinalIgnoreCase);
+        var normalizedSortField = sortField?.Trim();
 
         var query = _db.Transactions.ForPortal(access, legalEntityId);
 
@@ -154,57 +154,14 @@ public sealed class OpsTransactionsController : PortalControllerBase
 
         query = ApplyOrdering(query, sortField, descending);
 
-        if (useKeysetPagination && PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
+        if (PortalCursor.TryDecodeKeyset(cursor, out var cursorSortValue, out var cursorId))
         {
-            query = descending
-                ? query.Where(item =>
-                    item.CompletedAt < cursorTimestamp
-                    || (item.CompletedAt == cursorTimestamp && item.Id.CompareTo(cursorId) < 0))
-                : query.Where(item =>
-                    item.CompletedAt > cursorTimestamp
-                    || (item.CompletedAt == cursorTimestamp && item.Id.CompareTo(cursorId) > 0));
-        }
-        else if (!useKeysetPagination)
-        {
-            var skip = DecodeOffset(cursor);
-            query = query.Skip(skip);
+            query = ApplyKeysetFilter(query, normalizedSortField, cursorSortValue, cursorId, descending);
         }
 
         var rows = await query
             .Take(pageSize + 1)
-            .Select(item => new PortalTransactionDto
-            {
-                Id = item.Id,
-                FccTransactionId = item.FccTransactionId,
-                SiteCode = item.SiteCode,
-                PumpNumber = item.PumpNumber,
-                NozzleNumber = item.NozzleNumber,
-                ProductCode = item.ProductCode,
-                VolumeMicrolitres = item.VolumeMicrolitres,
-                AmountMinorUnits = item.AmountMinorUnits,
-                UnitPriceMinorPerLitre = item.UnitPriceMinorPerLitre,
-                CurrencyCode = item.CurrencyCode,
-                Status = item.Status.ToString(),
-                ReconciliationStatus = item.ReconciliationStatus.HasValue ? item.ReconciliationStatus.Value.ToString() : null,
-                IngestionSource = item.IngestionSource.ToString(),
-                FccVendor = item.FccVendor.ToString(),
-                StartedAt = item.StartedAt,
-                CompletedAt = item.CompletedAt,
-                IngestedAt = item.CreatedAt,
-                UpdatedAt = item.UpdatedAt,
-                CorrelationId = item.CorrelationId,
-                LegalEntityId = item.LegalEntityId,
-                SchemaVersion = item.SchemaVersion,
-                IsDuplicate = item.IsDuplicate,
-                DuplicateOfId = item.DuplicateOfId,
-                PreAuthId = item.PreAuthId,
-                OdooOrderId = item.OdooOrderId,
-                FiscalReceiptNumber = item.FiscalReceiptNumber,
-                AttendantId = item.AttendantId,
-                RawPayloadRef = item.RawPayloadRef,
-                RawPayloadJson = null,
-                IsStale = item.IsStale
-            })
+            .Select(ProjectToDto)
             .ToListAsync(cancellationToken);
 
         var hasMore = rows.Count > pageSize;
@@ -216,16 +173,8 @@ public sealed class OpsTransactionsController : PortalControllerBase
         string? nextCursor = null;
         if (hasMore && rows.Count > 0)
         {
-            if (useKeysetPagination)
-            {
-                var last = rows[^1];
-                nextCursor = PortalCursor.Encode(last.CompletedAt, last.Id);
-            }
-            else
-            {
-                var currentOffset = DecodeOffset(cursor);
-                nextCursor = EncodeOffset(currentOffset + rows.Count);
-            }
+            var last = rows[^1];
+            nextCursor = PortalCursor.EncodeKeyset(GetSortValue(last, normalizedSortField), last.Id);
         }
 
         return Ok(new PortalPagedResult<PortalTransactionDto>
@@ -265,39 +214,7 @@ public sealed class OpsTransactionsController : PortalControllerBase
             ? await _rawPayloadArchiver.RetrieveAsync(transaction.RawPayloadRef, cancellationToken)
             : null;
 
-        return Ok(new PortalTransactionDto
-        {
-            Id = transaction.Id,
-            FccTransactionId = transaction.FccTransactionId,
-            SiteCode = transaction.SiteCode,
-            PumpNumber = transaction.PumpNumber,
-            NozzleNumber = transaction.NozzleNumber,
-            ProductCode = transaction.ProductCode,
-            VolumeMicrolitres = transaction.VolumeMicrolitres,
-            AmountMinorUnits = transaction.AmountMinorUnits,
-            UnitPriceMinorPerLitre = transaction.UnitPriceMinorPerLitre,
-            CurrencyCode = transaction.CurrencyCode,
-            Status = transaction.Status.ToString(),
-            ReconciliationStatus = transaction.ReconciliationStatus.HasValue ? transaction.ReconciliationStatus.Value.ToString() : null,
-            IngestionSource = transaction.IngestionSource.ToString(),
-            FccVendor = transaction.FccVendor.ToString(),
-            StartedAt = transaction.StartedAt,
-            CompletedAt = transaction.CompletedAt,
-            IngestedAt = transaction.CreatedAt,
-            UpdatedAt = transaction.UpdatedAt,
-            CorrelationId = transaction.CorrelationId,
-            LegalEntityId = transaction.LegalEntityId,
-            SchemaVersion = transaction.SchemaVersion,
-            IsDuplicate = transaction.IsDuplicate,
-            DuplicateOfId = transaction.DuplicateOfId,
-            PreAuthId = transaction.PreAuthId,
-            OdooOrderId = transaction.OdooOrderId,
-            FiscalReceiptNumber = transaction.FiscalReceiptNumber,
-            AttendantId = transaction.AttendantId,
-            RawPayloadRef = transaction.RawPayloadRef,
-            RawPayloadJson = rawPayloadJson,
-            IsStale = transaction.IsStale
-        });
+        return Ok(MapToDto(transaction) with { RawPayloadJson = rawPayloadJson });
     }
 
     [HttpPost("acknowledge")]
@@ -401,6 +318,43 @@ public sealed class OpsTransactionsController : PortalControllerBase
         return false;
     }
 
+    private static readonly Expression<Func<Transaction, PortalTransactionDto>> ProjectToDto =
+        item => new PortalTransactionDto
+        {
+            Id = item.Id,
+            FccTransactionId = item.FccTransactionId,
+            SiteCode = item.SiteCode,
+            PumpNumber = item.PumpNumber,
+            NozzleNumber = item.NozzleNumber,
+            ProductCode = item.ProductCode,
+            VolumeMicrolitres = item.VolumeMicrolitres,
+            AmountMinorUnits = item.AmountMinorUnits,
+            UnitPriceMinorPerLitre = item.UnitPriceMinorPerLitre,
+            CurrencyCode = item.CurrencyCode,
+            Status = item.Status.ToString(),
+            ReconciliationStatus = item.ReconciliationStatus.HasValue ? item.ReconciliationStatus.Value.ToString() : null,
+            IngestionSource = item.IngestionSource.ToString(),
+            FccVendor = item.FccVendor.ToString(),
+            StartedAt = item.StartedAt,
+            CompletedAt = item.CompletedAt,
+            IngestedAt = item.CreatedAt,
+            UpdatedAt = item.UpdatedAt,
+            CorrelationId = item.CorrelationId,
+            LegalEntityId = item.LegalEntityId,
+            SchemaVersion = item.SchemaVersion,
+            IsDuplicate = item.IsDuplicate,
+            DuplicateOfId = item.DuplicateOfId,
+            PreAuthId = item.PreAuthId,
+            OdooOrderId = item.OdooOrderId,
+            FiscalReceiptNumber = item.FiscalReceiptNumber,
+            AttendantId = item.AttendantId,
+            RawPayloadRef = item.RawPayloadRef,
+            RawPayloadJson = null,
+            IsStale = item.IsStale
+        };
+
+    private static readonly Func<Transaction, PortalTransactionDto> MapToDto = ProjectToDto.Compile();
+
     private static IQueryable<Transaction> ApplyOrdering(IQueryable<Transaction> query, string? sortField, bool descending)
     {
         var field = sortField?.Trim();
@@ -428,34 +382,105 @@ public sealed class OpsTransactionsController : PortalControllerBase
         bool descending) =>
         descending ? query.ThenByDescending(item => item.Id) : query.ThenBy(item => item.Id);
 
-    private static int DecodeOffset(string? cursor)
+    private static IQueryable<Transaction> ApplyKeysetFilter(
+        IQueryable<Transaction> query, string? sortField, string cursorValue, Guid cursorId, bool descending)
     {
-        if (string.IsNullOrWhiteSpace(cursor))
+        return sortField switch
         {
-            return 0;
-        }
+            "fccTransactionId" => descending
+                ? query.Where(t => t.FccTransactionId.CompareTo(cursorValue) < 0
+                    || (t.FccTransactionId == cursorValue && t.Id.CompareTo(cursorId) < 0))
+                : query.Where(t => t.FccTransactionId.CompareTo(cursorValue) > 0
+                    || (t.FccTransactionId == cursorValue && t.Id.CompareTo(cursorId) > 0)),
 
-        try
-        {
-            var padded = cursor.Replace('-', '+').Replace('_', '/');
-            padded += (padded.Length % 4) switch { 2 => "==", 3 => "=", _ => string.Empty };
+            "siteCode" => descending
+                ? query.Where(t => t.SiteCode.CompareTo(cursorValue) < 0
+                    || (t.SiteCode == cursorValue && t.Id.CompareTo(cursorId) < 0))
+                : query.Where(t => t.SiteCode.CompareTo(cursorValue) > 0
+                    || (t.SiteCode == cursorValue && t.Id.CompareTo(cursorId) > 0)),
 
-            var raw = Convert.FromBase64String(padded);
-            return int.TryParse(System.Text.Encoding.UTF8.GetString(raw), out var offset) && offset >= 0
-                ? offset
-                : 0;
-        }
-        catch
-        {
-            return 0;
-        }
+            "volumeMicrolitres" => ApplyNumericKeyset(query, t => t.VolumeMicrolitres,
+                long.Parse(cursorValue, System.Globalization.CultureInfo.InvariantCulture), cursorId, descending),
+
+            "amountMinorUnits" => ApplyNumericKeyset(query, t => t.AmountMinorUnits,
+                long.Parse(cursorValue, System.Globalization.CultureInfo.InvariantCulture), cursorId, descending),
+
+            "status" => ApplyNumericKeyset(query, t => (int)t.Status,
+                (int)Enum.Parse<TransactionStatus>(cursorValue, true), cursorId, descending),
+
+            "startedAt" => ApplyTimestampKeyset(query, t => t.StartedAt,
+                DateTimeOffset.Parse(cursorValue, null, System.Globalization.DateTimeStyles.RoundtripKind), cursorId, descending),
+
+            _ => ApplyTimestampKeyset(query, t => t.CompletedAt,
+                DateTimeOffset.Parse(cursorValue, null, System.Globalization.DateTimeStyles.RoundtripKind), cursorId, descending)
+        };
     }
 
-    private static string EncodeOffset(int offset) =>
-        Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(offset.ToString()))
-            .TrimEnd('=')
-            .Replace('+', '-')
-            .Replace('/', '_');
+    private static IQueryable<Transaction> ApplyTimestampKeyset(
+        IQueryable<Transaction> query,
+        Expression<Func<Transaction, DateTimeOffset>> selector,
+        DateTimeOffset cursorValue, Guid cursorId, bool descending)
+    {
+        var param = selector.Parameters[0];
+        var field = selector.Body;
+        var value = Expression.Constant(cursorValue);
+        var id = Expression.Property(param, nameof(Transaction.Id));
+        var cursorIdConst = Expression.Constant(cursorId);
+
+        var compare = descending
+            ? Expression.LessThan(field, value)
+            : Expression.GreaterThan(field, value);
+        var equal = Expression.Equal(field, value);
+        var idCompare = Expression.LessThan(
+            Expression.Call(id, nameof(Guid.CompareTo), null, cursorIdConst),
+            Expression.Constant(0));
+        if (!descending)
+            idCompare = Expression.GreaterThan(
+                Expression.Call(id, nameof(Guid.CompareTo), null, cursorIdConst),
+                Expression.Constant(0));
+
+        var body = Expression.OrElse(compare, Expression.AndAlso(equal, idCompare));
+        return query.Where(Expression.Lambda<Func<Transaction, bool>>(body, param));
+    }
+
+    private static IQueryable<Transaction> ApplyNumericKeyset<TValue>(
+        IQueryable<Transaction> query,
+        Expression<Func<Transaction, TValue>> selector,
+        TValue cursorValue, Guid cursorId, bool descending) where TValue : struct
+    {
+        var param = selector.Parameters[0];
+        var field = selector.Body;
+        var value = Expression.Constant(cursorValue, typeof(TValue));
+        var id = Expression.Property(param, nameof(Transaction.Id));
+        var cursorIdConst = Expression.Constant(cursorId);
+
+        var compare = descending
+            ? Expression.LessThan(field, value)
+            : Expression.GreaterThan(field, value);
+        var equal = Expression.Equal(field, value);
+        var idCompare = descending
+            ? Expression.LessThan(
+                Expression.Call(id, nameof(Guid.CompareTo), null, cursorIdConst),
+                Expression.Constant(0))
+            : Expression.GreaterThan(
+                Expression.Call(id, nameof(Guid.CompareTo), null, cursorIdConst),
+                Expression.Constant(0));
+
+        var body = Expression.OrElse(compare, Expression.AndAlso(equal, idCompare));
+        return query.Where(Expression.Lambda<Func<Transaction, bool>>(body, param));
+    }
+
+    private static string GetSortValue(PortalTransactionDto dto, string? sortField) =>
+        sortField switch
+        {
+            "fccTransactionId" => dto.FccTransactionId,
+            "siteCode" => dto.SiteCode,
+            "volumeMicrolitres" => dto.VolumeMicrolitres.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "amountMinorUnits" => dto.AmountMinorUnits.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "status" => dto.Status,
+            "startedAt" => dto.StartedAt.ToString("O"),
+            _ => dto.CompletedAt.ToString("O")
+        };
 
     private static string EscapeILikePattern(string value) =>
         value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");

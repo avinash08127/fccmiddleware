@@ -9,6 +9,8 @@ public sealed record GetReconciliationExceptionsQuery : IRequest<GetReconciliati
     public bool AllowAllLegalEntities { get; init; }
     public string? SiteCode { get; init; }
     public Domain.Enums.ReconciliationStatus? Status { get; init; }
+    public DateTimeOffset? From { get; init; }
+    public DateTimeOffset? To { get; init; }
     public DateTimeOffset? Since { get; init; }
     public string? Cursor { get; init; }
     public int PageSize { get; init; } = 50;

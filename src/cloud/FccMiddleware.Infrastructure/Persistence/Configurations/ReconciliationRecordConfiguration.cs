@@ -48,6 +48,10 @@ internal sealed class ReconciliationRecordConfiguration : IEntityTypeConfigurati
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();
         builder.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("now()").IsRequired();
 
+        builder.Property<uint>("xmin")
+            .HasColumnType("xid")
+            .IsRowVersion();
+
         builder.HasIndex(e => e.TransactionId)
             .IsUnique()
             .HasDatabaseName("ix_reconciliation_transaction");
