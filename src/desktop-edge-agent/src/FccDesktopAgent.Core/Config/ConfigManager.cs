@@ -2,6 +2,7 @@ using System.Text.Json;
 using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -97,7 +98,7 @@ public sealed class ConfigManager
                 "Config version {Version} rejected: {ValidationError}",
                 newConfig.ConfigVersion,
                 validationError);
-            return new ConfigApplyResult(ConfigApplyOutcome.Rejected, newConfig.ConfigVersion);
+            return new ConfigApplyResult(ConfigApplyOutcome.Rejected, newConfig.ConfigVersion, ErrorMessage: validationError);
         }
 
         // Detect changed sections
@@ -255,8 +256,13 @@ public sealed class ConfigManager
                 target.UploadBatchSize = source.Sync.UploadBatchSize;
             if (source.Sync.ConfigPollIntervalSeconds > 0)
                 target.ConfigPollIntervalSeconds = source.Sync.ConfigPollIntervalSeconds;
+            // S-DSK-019: Validate HTTPS before accepting a cloud-pushed CloudBaseUrl
             if (!string.IsNullOrWhiteSpace(source.Sync.CloudBaseUrl))
-                target.CloudBaseUrl = source.Sync.CloudBaseUrl;
+            {
+                if (CloudUrlGuard.IsSecure(source.Sync.CloudBaseUrl))
+                    target.CloudBaseUrl = source.Sync.CloudBaseUrl;
+                // else: silently reject — non-HTTPS URLs must not override the current value
+            }
         }
 
         // ── Buffer ──
@@ -280,6 +286,14 @@ public sealed class ConfigManager
         {
             if (source.Telemetry.TelemetryIntervalSeconds > 0)
                 target.TelemetryIntervalSeconds = source.Telemetry.TelemetryIntervalSeconds;
+        }
+
+        // T-DSK-015: Load additional certificate pins from cloud config so emergency
+        // pin rotations can be pushed without a software update.
+        if (source.Sync?.CertificatePins is { Count: > 0 })
+        {
+            target.AdditionalCertificatePins = source.Sync.CertificatePins;
+            CertificatePinValidator.LoadAdditionalPins(source.Sync.CertificatePins);
         }
     }
 

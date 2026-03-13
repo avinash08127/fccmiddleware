@@ -20,6 +20,7 @@ export interface ErrorResponse {
   details: Record<string, unknown> | null;
   traceId: string;
   timestamp: string;
+  retryable?: boolean;
 }
 
 // Status badge helper — maps domain status strings to severity levels used by PrimeNG Tag

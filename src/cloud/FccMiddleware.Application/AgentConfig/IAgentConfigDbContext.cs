@@ -14,6 +14,10 @@ public interface IAgentConfigDbContext
     /// </summary>
     Task<FccConfig?> GetFccConfigWithSiteDataAsync(string siteCode, Guid legalEntityId, CancellationToken ct);
 
+    Task<AdapterDefaultConfig?> GetAdapterDefaultConfigAsync(Guid legalEntityId, string adapterKey, CancellationToken ct);
+
+    Task<SiteAdapterOverride?> GetSiteAdapterOverrideAsync(Guid siteId, string adapterKey, CancellationToken ct);
+
     /// <summary>
     /// Finds the agent registration for the given device ID.
     /// </summary>

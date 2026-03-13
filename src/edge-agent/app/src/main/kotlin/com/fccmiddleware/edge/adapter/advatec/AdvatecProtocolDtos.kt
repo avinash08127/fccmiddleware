@@ -138,7 +138,8 @@ data class AdvatecPaymentItem(
 
 /**
  * Customer data submission request (Edge Agent -> Advatec).
- * POST http://{host}:{port}/api/v2/incoming
+ * POST {scheme}://{host}:{port}/api/v2/incoming
+ * Non-loopback deployments must use HTTPS; loopback localhost is the only cleartext exception.
  * Used for post-dispense fiscalization or pre-auth trigger (pending AQ-1).
  */
 @Serializable

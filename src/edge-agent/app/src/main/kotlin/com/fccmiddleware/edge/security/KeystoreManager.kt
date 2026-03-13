@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.security
 
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import com.fccmiddleware.edge.logging.AppLogger
@@ -7,6 +8,7 @@ import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
 /**
@@ -36,9 +38,13 @@ class KeystoreManager {
         const val ALIAS_FCC_CRED = "fcc-middleware-fcc-cred"
         const val ALIAS_LAN_KEY = "fcc-middleware-lan-key"
         const val ALIAS_CONFIG_INTEGRITY = "fcc-middleware-config-integrity"
+        const val ALIAS_PREAUTH_PII = "fcc-middleware-preauth-pii"
+        const val ALIAS_BUFFER_RAW_PAYLOAD = "fcc-middleware-buffer-raw-payload"
+        const val ALIAS_BUFFER_DB_PASSPHRASE = "fcc-middleware-buffer-db-passphrase"
     }
 
     private val keyStore: KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+    private val inspectedAliases = mutableSetOf<String>()
 
     /**
      * Store a secret string under the given alias.
@@ -119,6 +125,23 @@ class KeystoreManager {
     }
 
     /**
+     * Returns whether the alias is currently protected by secure hardware.
+     *
+     * `null` means the alias does not exist or Android could not provide [KeyInfo].
+     */
+    fun isHardwareBacked(alias: String): Boolean? {
+        val key = try {
+            keyStore.getKey(alias, null) as? SecretKey
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to inspect keystore alias=$alias", e)
+            return null
+        } ?: return null
+
+        val keyInfo = getKeyInfo(alias, key) ?: return null
+        return isInsideSecureHardware(keyInfo)
+    }
+
+    /**
      * Rotate the AES-256-GCM key for the given alias.
      *
      * Decrypts [currentEncrypted] with the existing key, deletes the old key,
@@ -149,7 +172,8 @@ class KeystoreManager {
     fun clearAll() {
         listOf(
             ALIAS_DEVICE_JWT, ALIAS_REFRESH_TOKEN, ALIAS_FCC_CRED,
-            ALIAS_LAN_KEY, ALIAS_CONFIG_INTEGRITY,
+            ALIAS_LAN_KEY, ALIAS_CONFIG_INTEGRITY, ALIAS_PREAUTH_PII,
+            ALIAS_BUFFER_RAW_PAYLOAD,
         ).forEach {
             deleteKey(it)
         }
@@ -158,7 +182,10 @@ class KeystoreManager {
 
     private fun getOrCreateKey(alias: String): SecretKey {
         val existing = keyStore.getKey(alias, null) as? SecretKey
-        if (existing != null) return existing
+        if (existing != null) {
+            logHardwareProtectionStatus(alias, existing)
+            return existing
+        }
 
         val spec = KeyGenParameterSpec.Builder(
             alias,
@@ -172,6 +199,33 @@ class KeystoreManager {
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
         generator.init(spec)
-        return generator.generateKey()
+        return generator.generateKey().also { generated ->
+            logHardwareProtectionStatus(alias, generated)
+        }
     }
+
+    private fun logHardwareProtectionStatus(alias: String, key: SecretKey) {
+        val shouldInspect = synchronized(inspectedAliases) { inspectedAliases.add(alias) }
+        if (!shouldInspect) return
+
+        val keyInfo = getKeyInfo(alias, key) ?: return
+        if (isInsideSecureHardware(keyInfo)) {
+            AppLogger.i(TAG, "SECURITY: Key alias=$alias confirmed hardware-backed by Android Keystore")
+        } else {
+            AppLogger.w(TAG, "SECURITY: Key alias=$alias is SOFTWARE-backed — not protected by hardware TEE")
+        }
+    }
+
+    private fun getKeyInfo(alias: String, key: SecretKey): KeyInfo? {
+        return try {
+            SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+                .getKeySpec(key, KeyInfo::class.java) as KeyInfo
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "SECURITY: Unable to inspect hardware backing for alias=$alias")
+            null
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isInsideSecureHardware(keyInfo: KeyInfo): Boolean = keyInfo.isInsideSecureHardware
 }

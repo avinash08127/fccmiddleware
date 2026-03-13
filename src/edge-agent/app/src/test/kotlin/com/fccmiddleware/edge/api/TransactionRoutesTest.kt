@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.api
 
+import com.fccmiddleware.edge.buffer.dao.LocalApiTransaction
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import io.ktor.client.request.get
@@ -85,9 +86,9 @@ class TransactionRoutesTest {
         setupRouting()
         coEvery { mockDao.countForLocalApi() } returns 3
         coEvery { mockDao.getForLocalApi(50, 0) } returns listOf(
-            buildTransaction("TX-001"),
-            buildTransaction("TX-002"),
-            buildTransaction("TX-003"),
+            buildListTransaction("TX-001"),
+            buildListTransaction("TX-002"),
+            buildListTransaction("TX-003"),
         )
 
         val response = client.get("/api/v1/transactions")
@@ -105,7 +106,7 @@ class TransactionRoutesTest {
     @Test
     fun `GET transactions with pumpNumber filter calls pump DAO method and filtered count`() = testApplication {
         setupRouting()
-        coEvery { mockDao.getForLocalApiByPump(2, 50, 0) } returns listOf(buildTransaction("TX-P2"))
+        coEvery { mockDao.getForLocalApiByPump(2, 50, 0) } returns listOf(buildListTransaction("TX-P2"))
         coEvery { mockDao.countForLocalApiByPump(2) } returns 1
 
         val response = client.get("/api/v1/transactions?pumpNumber=2")
@@ -120,7 +121,7 @@ class TransactionRoutesTest {
     fun `GET transactions with valid since parameter calls since DAO method and filtered count`() = testApplication {
         setupRouting()
         val since = "2024-01-15T10:00:00Z"
-        coEvery { mockDao.getForLocalApiSince(since, 50, 0) } returns listOf(buildTransaction("TX-SINCE"))
+        coEvery { mockDao.getForLocalApiSince(since, 50, 0) } returns listOf(buildListTransaction("TX-SINCE"))
         coEvery { mockDao.countForLocalApiSince(since) } returns 1
 
         val response = client.get("/api/v1/transactions?since=$since")
@@ -171,7 +172,7 @@ class TransactionRoutesTest {
     @Test
     fun `GET transaction by id returns 200 when found`() = testApplication {
         setupRouting()
-        val tx = buildTransaction("TX-FOUND")
+        val tx = buildDetailTransaction("TX-FOUND")
         coEvery { mockDao.getByIdForLocalApi("TX-FOUND") } returns tx
 
         val response = client.get("/api/v1/transactions/TX-FOUND")
@@ -271,7 +272,28 @@ class TransactionRoutesTest {
         }
     }
 
-    private fun buildTransaction(fccId: String) = BufferedTransaction(
+    private fun buildListTransaction(fccId: String) = LocalApiTransaction(
+        id = UUID.randomUUID().toString(),
+        fccTransactionId = fccId,
+        siteCode = "SITE_A",
+        pumpNumber = 1,
+        nozzleNumber = 1,
+        productCode = "ULP95",
+        volumeMicrolitres = 50_000_000L,
+        amountMinorUnits = 75_000L,
+        unitPriceMinorPerLitre = 1_500L,
+        currencyCode = "MWK",
+        startedAt = "2024-01-15T10:00:00Z",
+        completedAt = "2024-01-15T10:05:00Z",
+        fiscalReceiptNumber = null,
+        fccVendor = "DOMS",
+        attendantId = null,
+        syncStatus = "PENDING",
+        correlationId = UUID.randomUUID().toString(),
+        totalCount = 1,
+    )
+
+    private fun buildDetailTransaction(fccId: String) = BufferedTransaction(
         id = UUID.randomUUID().toString(),
         fccTransactionId = fccId,
         siteCode = "SITE_A",

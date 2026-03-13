@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.api
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
+import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.config.ConfigManager
@@ -57,6 +58,7 @@ import java.util.concurrent.ConcurrentHashMap
 class LocalApiServer(
     config: LocalApiServerConfig,
     private val transactionDao: TransactionBufferDao,
+    private val bufferManager: TransactionBufferManager,
     private val syncStateDao: SyncStateDao,
     private val connectivityManager: ConnectivityManager,
     private val preAuthHandler: PreAuthHandler,
@@ -265,6 +267,7 @@ class LocalApiServer(
         routing {
             transactionRoutes(
                 dao = transactionDao,
+                bufferManager = bufferManager,
                 ingestionOrchestrator = ingestionOrchestrator,
                 connectivityManager = connectivityManager,
                 lanApiKey = config.lanApiKey,

@@ -8,7 +8,6 @@ import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
-import com.fccmiddleware.edge.connectivity.ConnectivityTransitionListener
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.offline.OfflineScenarioTestHelpers.makeAllAcceptedResponse
 import com.fccmiddleware.edge.offline.OfflineScenarioTestHelpers.makeBatch
@@ -190,16 +189,10 @@ class OfflineScenarioStressTest {
     @Test
     fun `OFF-2 connectivity transitions to FCC_UNREACHABLE after 3 FCC failures`() =
         runTest(StandardTestDispatcher()) {
-            val transitions = mutableListOf<Pair<ConnectivityState, ConnectivityState>>()
-            val listener = ConnectivityTransitionListener { from, to ->
-                transitions.add(from to to)
-            }
-
             val mgr = ConnectivityManager(
                 internetProbe = { true },
                 fccProbe = { false },   // FCC always down
                 auditLogDao = auditLogDao,
-                listener = listener,
                 scope = this,
                 config = ConnectivityManager.ProbeConfig(
                     probeIntervalMs = 100L,
@@ -213,8 +206,6 @@ class OfflineScenarioStressTest {
             advanceTimeBy(500L) // enough for 3+ FCC failures
 
             assertEquals(ConnectivityState.FCC_UNREACHABLE, mgr.state.value)
-            // Verify at least one transition was recorded
-            assertTrue(transitions.any { it.second == ConnectivityState.FCC_UNREACHABLE })
             mgr.stop()
         }
 
@@ -607,11 +598,6 @@ class OfflineScenarioStressTest {
     @Test
     fun `OFF-6 transitions through FULLY_OFFLINE to FCC_UNREACHABLE to INTERNET_DOWN to FULLY_ONLINE`() =
         runTest(StandardTestDispatcher()) {
-            val transitions = mutableListOf<Pair<ConnectivityState, ConnectivityState>>()
-            val listener = ConnectivityTransitionListener { from, to ->
-                transitions.add(from to to)
-            }
-
             var internetAlive = false
             var fccAlive = false
 
@@ -619,7 +605,6 @@ class OfflineScenarioStressTest {
                 internetProbe = { internetAlive },
                 fccProbe = { fccAlive },
                 auditLogDao = auditLogDao,
-                listener = listener,
                 scope = this,
                 config = ConnectivityManager.ProbeConfig(
                     probeIntervalMs = 100L,
@@ -644,17 +629,6 @@ class OfflineScenarioStressTest {
             internetAlive = true
             advanceTimeBy(200L)
             assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
-
-            // Verify transition sequence: should have passed through the expected states
-            val toStates = transitions.map { it.second }
-            assertTrue(
-                "Should have transitioned to INTERNET_DOWN",
-                toStates.contains(ConnectivityState.INTERNET_DOWN),
-            )
-            assertTrue(
-                "Should have transitioned to FULLY_ONLINE",
-                toStates.contains(ConnectivityState.FULLY_ONLINE),
-            )
             mgr.stop()
         }
 

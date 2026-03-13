@@ -4,6 +4,7 @@ import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import com.fccmiddleware.edge.adapter.common.FccVendor
 import com.fccmiddleware.edge.adapter.common.IngestionMode
 import com.fccmiddleware.edge.adapter.common.PreAuthCommand
+import com.fccmiddleware.edge.logging.LogSanitizer
 import com.fccmiddleware.edge.sync.DeviceRegistrationRequest
 import com.fccmiddleware.edge.sync.DeviceRegistrationResponse
 import com.fccmiddleware.edge.sync.HttpCloudApiClient
@@ -79,14 +80,23 @@ class SecurityHardeningTest {
         }
 
         @Test
-        fun `all four aliases are distinct`() {
+        fun `buffer database passphrase alias matches security spec`() {
+            assertEquals("fcc-middleware-buffer-db-passphrase", KeystoreManager.ALIAS_BUFFER_DB_PASSPHRASE)
+        }
+
+        @Test
+        fun `all security aliases are distinct`() {
             val aliases = listOf(
                 KeystoreManager.ALIAS_DEVICE_JWT,
                 KeystoreManager.ALIAS_REFRESH_TOKEN,
                 KeystoreManager.ALIAS_FCC_CRED,
                 KeystoreManager.ALIAS_LAN_KEY,
+                KeystoreManager.ALIAS_CONFIG_INTEGRITY,
+                KeystoreManager.ALIAS_PREAUTH_PII,
+                KeystoreManager.ALIAS_BUFFER_RAW_PAYLOAD,
+                KeystoreManager.ALIAS_BUFFER_DB_PASSPHRASE,
             )
-            assertEquals(4, aliases.toSet().size, "All key aliases must be distinct")
+            assertEquals(aliases.size, aliases.toSet().size, "All key aliases must be distinct")
         }
     }
 
@@ -349,6 +359,48 @@ class SecurityHardeningTest {
     }
 
     // -------------------------------------------------------------------------
+    // 3b. Diagnostic log sanitization
+    // -------------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("Diagnostic log sanitization")
+    inner class DiagnosticLogSanitization {
+
+        @Test
+        fun `sanitizes structured log lines before export`() {
+            val rawLine = """
+                {"msg":"Hostname changed (api.fccmiddleware.io -> api-backup.fccmiddleware.io) for deviceId=12345678-1234-1234-1234-123456789abc host=192.168.1.100 port=5001 baseUrl=https://api.fccmiddleware.io","extra":{"cloudBaseUrl":"https://api.fccmiddleware.io","fccHost":"192.168.1.100","fccPort":"5001","deviceId":"12345678-1234-1234-1234-123456789abc"}}
+            """.trimIndent()
+
+            val sanitized = LogSanitizer.sanitizeJsonLine(rawLine)
+
+            assertFalse(sanitized.contains("192.168.1.100"))
+            assertFalse(sanitized.contains("5001"))
+            assertFalse(sanitized.contains("https://api.fccmiddleware.io"))
+            assertFalse(sanitized.contains("12345678-1234-1234-1234-123456789abc"))
+            assertTrue(sanitized.contains(LogSanitizer.REDACTED_HOST))
+            assertTrue(sanitized.contains(LogSanitizer.REDACTED_URL))
+            assertTrue(sanitized.contains("12345678..."))
+        }
+
+        @Test
+        fun `stack trace sanitization keeps only exception summary`() {
+            val stackTrace = """
+                java.net.ConnectException: Failed to connect to 192.168.1.100:5001
+                	at com.fccmiddleware.edge.sync.CloudUploadWorker.uploadPendingBatch(CloudUploadWorker.kt:42)
+                	at com.fccmiddleware.edge.sync.CloudUploadWorker.doWork(CloudUploadWorker.kt:18)
+            """.trimIndent()
+
+            val sanitized = LogSanitizer.sanitizeStackTrace(stackTrace)
+
+            assertTrue(sanitized.contains("ConnectException"))
+            assertFalse(sanitized.contains("CloudUploadWorker"))
+            assertFalse(sanitized.contains("192.168.1.100"))
+            assertFalse(sanitized.contains("\tat"))
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // 4. Certificate pinning hostname extraction
     // -------------------------------------------------------------------------
 
@@ -605,6 +657,7 @@ class SecurityHardeningTest {
             assertFalse(safe.contains("opaque-refresh"))
             assertTrue(safe.contains("ZM-LUSAKA-01"), "siteCode should be visible")
             assertTrue(safe.contains("d1234567"), "deviceId should be visible")
+            assertFalse(response.toString().contains("opaque-refresh-90d"))
         }
 
         @Test
@@ -628,6 +681,7 @@ class SecurityHardeningTest {
                 "FCC credential must never appear in log-safe output",
             )
             assertTrue(safe.contains("DOMS"), "Non-sensitive vendor should be visible")
+            assertFalse(config.toString().contains("fcc-secret-api-key"))
         }
 
         @Test
@@ -647,26 +701,21 @@ class SecurityHardeningTest {
                 "Customer TIN (PII) must never appear in log-safe output",
             )
             assertTrue(safe.contains("ZM-LUSAKA-01"), "Non-sensitive siteCode should be visible")
+            assertFalse(command.toString().contains("9876543210"))
         }
 
         @Test
-        fun `data class toString includes sensitive values — proving SensitiveFieldFilter is needed`() {
-            // This test proves that Kotlin data class toString() DOES leak sensitive data,
-            // confirming that SensitiveFieldFilter must always be used for logging.
+        fun `sensitive DTO toString redacts TokenRefreshRequest`() {
             val request = TokenRefreshRequest(
                 refreshToken = "opaque-secret-refresh-token",
                 deviceToken = "eyJhbGciOiJSUzI1NiJ9.payload.signature",
             )
-            val rawToString = request.toString()
+            val redactedToString = request.toString()
 
-            assertTrue(
-                rawToString.contains("opaque-secret-refresh-token"),
-                "Raw toString() leaks sensitive data — use SensitiveFieldFilter.redactToString() instead",
-            )
-
-            // But SensitiveFieldFilter protects it
-            val safe = SensitiveFieldFilter.redactToString(request)
-            assertFalse(safe.contains("opaque-secret"))
+            assertFalse(redactedToString.contains("opaque-secret-refresh-token"))
+            assertFalse(redactedToString.contains("eyJhbGciOiJSUzI1NiJ9"))
+            assertTrue(redactedToString.contains("[REDACTED]"))
+            assertTrue(redactedToString.contains("...ignature"))
         }
     }
 }

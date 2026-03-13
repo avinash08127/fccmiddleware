@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using FccDesktopAgent.Core.Adapter.Common;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.Logging;
 
 /// <summary>
@@ -33,6 +34,7 @@ public sealed class RadixAdapter : IFccAdapter
 
     private readonly IHttpClientFactory _httpFactory;
     private readonly FccConnectionConfig _config;
+    private readonly ICredentialStore? _credentialStore;
     private readonly ILogger<RadixAdapter> _logger;
     private readonly string _siteCode;
     private readonly string _legalEntityId;
@@ -110,8 +112,33 @@ public sealed class RadixAdapter : IFccAdapter
     /// <summary>Authorization port = AuthPort.</summary>
     private int AuthPort => _config.AuthPort ?? 0;
 
-    /// <summary>Shared secret for SHA-1 message signing.</summary>
-    private string SharedSecret => _config.SharedSecret ?? string.Empty;
+    /// <summary>Cached shared secret resolved from credential store or config. Null until first resolution.</summary>
+    private string? _resolvedSharedSecret;
+
+    /// <summary>
+    /// S-DSK-012: Resolves the shared secret from credential store (preferred) or config (fallback).
+    /// Caches the result after first resolution.
+    /// </summary>
+    private async ValueTask<string> ResolveSharedSecretAsync(CancellationToken ct = default)
+    {
+        if (_resolvedSharedSecret is not null) return _resolvedSharedSecret;
+
+        if (_credentialStore is not null)
+        {
+            var stored = await _credentialStore.GetSecretAsync(CredentialKeys.RadixSharedSecret, ct);
+            if (stored is not null)
+            {
+                _resolvedSharedSecret = stored;
+                return stored;
+            }
+        }
+
+        _resolvedSharedSecret = _config.SharedSecret ?? string.Empty;
+        return _resolvedSharedSecret;
+    }
+
+    /// <summary>Shared secret for SHA-1 message signing (sync fallback for non-async paths).</summary>
+    private string SharedSecret => _resolvedSharedSecret ?? _config.SharedSecret ?? string.Empty;
 
     /// <summary>Unique Station Number sent as USN-Code HTTP header.</summary>
     private int UsnCode => _config.UsnCode ?? 0;
@@ -157,10 +184,12 @@ public sealed class RadixAdapter : IFccAdapter
         string currencyCode = "TZS",
         string timezone = "Africa/Dar_es_Salaam",
         int pumpNumberOffset = 0,
-        IReadOnlyDictionary<string, string>? productCodeMapping = null)
+        IReadOnlyDictionary<string, string>? productCodeMapping = null,
+        ICredentialStore? credentialStore = null)
     {
         _httpFactory = httpFactory;
         _config = config;
+        _credentialStore = credentialStore;
         _logger = logger;
         _siteCode = string.IsNullOrWhiteSpace(siteCode) ? config.SiteCode : siteCode;
         _legalEntityId = legalEntityId;
@@ -207,6 +236,9 @@ public sealed class RadixAdapter : IFccAdapter
     /// </remarks>
     public async Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken ct)
     {
+        // S-DSK-012: Eagerly resolve shared secret from credential store on first call.
+        await ResolveSharedSecretAsync(ct).ConfigureAwait(false);
+
         PurgeStalePreAuths();
 
         var limit = Math.Clamp(cursor.MaxCount, 1, MaxFetchLimit);

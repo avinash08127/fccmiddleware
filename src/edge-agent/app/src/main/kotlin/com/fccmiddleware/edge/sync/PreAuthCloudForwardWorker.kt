@@ -3,9 +3,12 @@ package com.fccmiddleware.edge.sync
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
+import com.fccmiddleware.edge.security.KeystoreBackedStringCipher
+import com.fccmiddleware.edge.security.KeystoreManager
 import java.time.Instant
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -64,6 +67,7 @@ class PreAuthCloudForwardWorker(
     private val preAuthDao: PreAuthDao? = null,
     private val cloudApiClient: CloudApiClient? = null,
     private val tokenProvider: DeviceTokenProvider? = null,
+    private val keystoreManager: KeystoreManager? = null,
     val config: PreAuthCloudForwardWorkerConfig = PreAuthCloudForwardWorkerConfig(),
 ) {
 
@@ -81,6 +85,10 @@ class PreAuthCloudForwardWorker(
         name = "PreAuthForward",
         baseBackoffMs = config.baseBackoffMs,
         maxBackoffMs = config.maxBackoffMs,
+    )
+    private val customerTaxIdCipher = KeystoreBackedStringCipher(
+        keystoreManager = keystoreManager,
+        alias = KeystoreManager.ALIAS_PREAUTH_PII,
     )
 
     internal val consecutiveFailureCount: Int get() = circuitBreaker.consecutiveFailureCount
@@ -221,7 +229,19 @@ class PreAuthCloudForwardWorker(
         record: PreAuthRecord,
         token: String,
     ): ForwardAttemptResult {
-        val request = record.toForwardRequest()
+        val request = try {
+            buildForwardRequest(record)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IllegalStateException) {
+            return ForwardAttemptResult.TransportFailure(
+                "Failed to prepare pre-auth payload for cloud forward: ${e.message}",
+            )
+        } catch (e: Exception) {
+            return ForwardAttemptResult.TransportFailure(
+                "Failed to prepare pre-auth payload for cloud forward: ${e::class.simpleName}: ${e.message}",
+            )
+        }
         return when (val result = client.forwardPreAuth(request, token)) {
             is CloudPreAuthForwardResult.Success ->
                 ForwardAttemptResult.Success
@@ -317,7 +337,26 @@ class PreAuthCloudForwardWorker(
             ForwardAttemptResult.TransportFailure("403 Forbidden: $errorCode")
         }
 
-    private fun PreAuthRecord.toForwardRequest(): PreAuthForwardRequest =
+    private suspend fun buildForwardRequest(record: PreAuthRecord): PreAuthForwardRequest {
+        val customerTaxId = resolveCustomerTaxIdForForwarding(record)
+        return record.toForwardRequest(customerTaxId)
+    }
+
+    private suspend fun resolveCustomerTaxIdForForwarding(record: PreAuthRecord): String? {
+        val storedValue = record.customerTaxId ?: return null
+        if (storedValue.isBlank()) return storedValue
+
+        return if (customerTaxIdCipher.isEncrypted(storedValue)) {
+            customerTaxIdCipher.decryptFromStorage(storedValue)
+        } else {
+            val encryptedValue = customerTaxIdCipher.encryptForStorage(storedValue)
+            requireNotNull(preAuthDao) { "preAuthDao is required for legacy customerTaxId migration" }
+                .updateCustomerTaxId(record.id, encryptedValue)
+            storedValue
+        }
+    }
+
+    private fun PreAuthRecord.toForwardRequest(customerTaxId: String?): PreAuthForwardRequest =
         PreAuthForwardRequest(
             siteCode = siteCode,
             odooOrderId = odooOrderId,
@@ -332,8 +371,11 @@ class PreAuthCloudForwardWorker(
             expiresAt = expiresAt,
             fccCorrelationId = fccCorrelationId,
             fccAuthorizationCode = fccAuthorizationCode,
+            // NET-008: Map vehicleNumber and customerBusinessName for cloud reconciliation.
+            vehicleNumber = vehicleNumber,
             customerName = customerName,
             customerTaxId = customerTaxId,
+            customerBusinessName = customerBusinessName,
         )
 
     // -------------------------------------------------------------------------

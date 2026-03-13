@@ -1,62 +1,52 @@
 using System.Windows.Input;
+using Avalonia.Media;
+using Avalonia.Threading;
 using FccDesktopAgent.Core.Buffer;
+using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Connectivity;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.App.ViewModels;
 
 /// <summary>
-/// Drives the main window: sidebar navigation, connectivity status bar, and active page content.
-/// Subscribes to <see cref="IConnectivityMonitor"/> for real-time status bar updates
-/// and periodically polls buffer stats.
+/// ViewModel for the main dashboard window. Owns status bar state
+/// (connectivity, buffer depth, last sync) and navigation command.
+/// Created as part of the T-DSK-001 fix to replace direct code-behind control manipulation.
 /// </summary>
 public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 {
-    private readonly IConnectivityMonitor? _connectivity;
     private readonly IServiceProvider? _services;
-    private readonly ILogger<MainWindowViewModel> _logger;
-    private readonly CancellationTokenSource _cts = new();
-    private readonly Timer _bufferStatsTimer;
+    private readonly IConnectivityMonitor? _connectivity;
+    private readonly Timer _statusTimer;
+    private readonly CancellationTokenSource _disposeCts = new();
 
-    private string _selectedNav = "Dashboard";
-    private string _connectivityText = "Unknown";
-    private string _connectivityColor = "#888888";
-    private string _connectivityIcon = "\u25CF"; // filled circle
-    private int _bufferDepth;
-    private string _lastSyncText = "Never";
-    private DateTimeOffset? _lastSyncTime;
+    private string _connectivityText = "Online";
+    private IBrush _connectivityDotBrush = new SolidColorBrush(Color.Parse("#22C55E"));
+    private string _bufferText = "0 pending";
+    private string _lastSyncText = "Last sync: Never";
+    private string _currentNavTarget = "Dashboard";
 
-    public MainWindowViewModel()
+    public MainWindowViewModel(IServiceProvider? services)
     {
-        _services = AgentAppContext.ServiceProvider;
-        _logger = _services?.GetService<ILogger<MainWindowViewModel>>()
-            ?? LoggerFactory.Create(b => b.AddConsole()).CreateLogger<MainWindowViewModel>();
-        _connectivity = _services?.GetService<IConnectivityMonitor>();
+        _services = services;
+        _connectivity = services?.GetService<IConnectivityMonitor>();
 
-        NavigateCommand = new RelayCommand<string>(navTarget =>
-        {
-            if (navTarget is not null)
-                SelectedNav = navTarget;
-        });
+        NavigateCommand = new RelayCommand<string>(target =>
+            CurrentNavTarget = target ?? "Dashboard");
 
         if (_connectivity is not null)
         {
             _connectivity.StateChanged += OnConnectivityChanged;
-            UpdateConnectivityDisplay(_connectivity.Current);
+            UpdateConnectivity(_connectivity.Current);
         }
 
-        // Poll buffer stats every 5 seconds
-        _bufferStatsTimer = new Timer(_ => _ = RefreshBufferStatsAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+        _statusTimer = new Timer(
+            _ => _ = RefreshStatusBarAsync(),
+            null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
     }
 
-    public ICommand NavigateCommand { get; }
-
-    public string SelectedNav
-    {
-        get => _selectedNav;
-        set => SetProperty(ref _selectedNav, value);
-    }
+    // ── Status Bar Properties ────────────────────────────────────────────────
 
     public string ConnectivityText
     {
@@ -64,22 +54,16 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         private set => SetProperty(ref _connectivityText, value);
     }
 
-    public string ConnectivityColor
+    public IBrush ConnectivityDotBrush
     {
-        get => _connectivityColor;
-        private set => SetProperty(ref _connectivityColor, value);
+        get => _connectivityDotBrush;
+        private set => SetProperty(ref _connectivityDotBrush, value);
     }
 
-    public string ConnectivityIcon
+    public string BufferText
     {
-        get => _connectivityIcon;
-        private set => SetProperty(ref _connectivityIcon, value);
-    }
-
-    public int BufferDepth
-    {
-        get => _bufferDepth;
-        private set => SetProperty(ref _bufferDepth, value);
+        get => _bufferText;
+        private set => SetProperty(ref _bufferText, value);
     }
 
     public string LastSyncText
@@ -88,86 +72,93 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         private set => SetProperty(ref _lastSyncText, value);
     }
 
+    // ── Navigation ───────────────────────────────────────────────────────────
+
+    public string CurrentNavTarget
+    {
+        get => _currentNavTarget;
+        set => SetProperty(ref _currentNavTarget, value);
+    }
+
+    public ICommand NavigateCommand { get; }
+
+    // ── Connectivity ─────────────────────────────────────────────────────────
+
     private void OnConnectivityChanged(object? sender, ConnectivitySnapshot snapshot)
     {
-        Avalonia.Threading.Dispatcher.UIThread.Post(() => UpdateConnectivityDisplay(snapshot));
+        Dispatcher.UIThread.Post(() => UpdateConnectivity(snapshot));
     }
 
-    private void UpdateConnectivityDisplay(ConnectivitySnapshot snapshot)
+    private void UpdateConnectivity(ConnectivitySnapshot snapshot)
     {
-        (ConnectivityText, ConnectivityColor) = snapshot.State switch
+        var (text, color) = snapshot.State switch
         {
-            ConnectivityState.FullyOnline => ("Online", "#22C55E"),          // green
-            ConnectivityState.InternetDown => ("Internet Down", "#EAB308"), // yellow
+            ConnectivityState.FullyOnline => ("Online", "#22C55E"),
+            ConnectivityState.InternetDown => ("Internet Down", "#EAB308"),
             ConnectivityState.FccUnreachable => ("FCC Unreachable", "#EAB308"),
-            ConnectivityState.FullyOffline => ("Offline", "#EF4444"),       // red
+            ConnectivityState.FullyOffline => ("Offline", "#EF4444"),
             _ => ("Unknown", "#888888")
         };
-        ConnectivityIcon = "\u25CF"; // always filled circle, color conveys state
+
+        ConnectivityText = text;
+        ConnectivityDotBrush = new SolidColorBrush(Color.Parse(color));
     }
 
-    private async Task RefreshBufferStatsAsync()
+    // ── Buffer Stats ─────────────────────────────────────────────────────────
+
+    private async Task RefreshStatusBarAsync()
     {
-        if (_services is null) return;
+        if (_services is null || _disposeCts.IsCancellationRequested) return;
 
         try
         {
             using var scope = _services.CreateScope();
-            var bufferManager = scope.ServiceProvider.GetService<TransactionBufferManager>();
-            if (bufferManager is null) return;
+            var buffer = scope.ServiceProvider.GetService<TransactionBufferManager>();
+            if (buffer is null) return;
 
-            var stats = await bufferManager.GetBufferStatsAsync(_cts.Token);
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            var stats = await buffer.GetBufferStatsAsync();
+
+            // F-DSK-002: Read actual last upload time from SyncStateRecord
+            DateTimeOffset? lastUploadAt = null;
+            var db = scope.ServiceProvider.GetService<AgentDbContext>();
+            if (db is not null)
             {
-                BufferDepth = stats.Pending;
+                var syncState = await db.SyncStates.AsNoTracking()
+                    .FirstOrDefaultAsync(s => s.Id == 1);
+                lastUploadAt = syncState?.LastUploadAt;
+            }
 
-                // Update last sync time based on whether there are uploaded (synced) records
-                if (_connectivity?.Current.IsInternetUp == true)
+            Dispatcher.UIThread.Post(() =>
+            {
+                BufferText = $"{stats.Pending:N0} pending";
+
+                if (lastUploadAt.HasValue)
                 {
-                    _lastSyncTime = DateTimeOffset.UtcNow;
-                    LastSyncText = "Just now";
-                }
-                else if (_lastSyncTime.HasValue)
-                {
-                    var elapsed = DateTimeOffset.UtcNow - _lastSyncTime.Value;
-                    LastSyncText = elapsed.TotalMinutes < 1 ? "Just now"
+                    var elapsed = DateTimeOffset.UtcNow - lastUploadAt.Value;
+                    var ago = elapsed.TotalMinutes < 1 ? "Just now"
                         : elapsed.TotalMinutes < 60 ? $"{(int)elapsed.TotalMinutes}m ago"
                         : elapsed.TotalHours < 24 ? $"{(int)elapsed.TotalHours}h ago"
                         : $"{(int)elapsed.TotalDays}d ago";
+                    LastSyncText = $"Last sync: {ago}";
+                }
+                else
+                {
+                    LastSyncText = "Last sync: Never";
                 }
             });
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch
         {
-            _logger.LogDebug(ex, "Buffer stats refresh failed");
+            // Non-fatal
         }
     }
 
     public void Dispose()
     {
+        _disposeCts.Cancel();
         if (_connectivity is not null)
             _connectivity.StateChanged -= OnConnectivityChanged;
-
-        _cts.Cancel();
-        _bufferStatsTimer.Dispose();
-        _cts.Dispose();
+        _statusTimer.Dispose();
+        _disposeCts.Dispose();
     }
-}
-
-/// <summary>Simple ICommand relay for navigation.</summary>
-public sealed class RelayCommand<T> : ICommand
-{
-    private readonly Action<T?> _execute;
-
-    public RelayCommand(Action<T?> execute) => _execute = execute;
-
-    public event EventHandler? CanExecuteChanged
-    {
-        add { }
-        remove { }
-    }
-
-    public bool CanExecute(object? parameter) => true;
-
-    public void Execute(object? parameter) => _execute((T?)parameter);
 }

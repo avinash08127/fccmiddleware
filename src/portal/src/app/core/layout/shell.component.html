@@ -9,7 +9,7 @@
     </div>
 
     <ul class="shell-sidebar__nav">
-      @for (item of navItems; track item.route) {
+      @for (item of navItems(); track item.route) {
         <li>
           <a
             [routerLink]="item.route"

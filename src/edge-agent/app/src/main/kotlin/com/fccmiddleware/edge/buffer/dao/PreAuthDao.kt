@@ -90,6 +90,16 @@ interface PreAuthDao {
     suspend fun recordCloudSyncFailure(id: String, now: String)
 
     /**
+     * Re-encrypts sensitive legacy fields without changing the record lifecycle state.
+     */
+    @Query(
+        "UPDATE pre_auth_records SET " +
+        "customer_tax_id = :customerTaxId " +
+        "WHERE id = :id"
+    )
+    suspend fun updateCustomerTaxId(id: String, customerTaxId: String?)
+
+    /**
      * Expiry worker: find active pre-auths at or past their expiry time.
      * Results are ordered oldest-first and limited to [limit] rows to bound memory
      * use during FCC outages that cause large simultaneous expiry backlogs.

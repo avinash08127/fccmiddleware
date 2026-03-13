@@ -47,6 +47,13 @@ namespace FccDesktopAgent.Integration.Tests;
 [Collection("OfflineScenario")]
 public sealed class OfflineScenarioStressTests : IDisposable
 {
+    private sealed class StaticOptionsMonitor(AgentConfiguration value) : IOptionsMonitor<AgentConfiguration>
+    {
+        public AgentConfiguration CurrentValue => value;
+        public AgentConfiguration Get(string? name) => value;
+        public IDisposable? OnChange(Action<AgentConfiguration, string?> listener) => null;
+    }
+
     private readonly ITestOutputHelper _output;
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<AgentDbContext> _dbOptions;
@@ -144,10 +151,13 @@ public sealed class OfflineScenarioStressTests : IDisposable
         adapterFactory.Create(Arg.Any<FccVendor>(), Arg.Any<FccConnectionConfig>())
             .Returns(adapter);
 
+        var monitor = Substitute.For<IOptionsMonitor<AgentConfiguration>>();
+        monitor.CurrentValue.Returns(config);
+
         return new IngestionOrchestrator(
             adapterFactory,
             sp.GetRequiredService<IServiceScopeFactory>(),
-            Options.Create(config),
+            monitor,
             NullLogger<IngestionOrchestrator>.Instance);
     }
 
@@ -161,6 +171,9 @@ public sealed class OfflineScenarioStressTests : IDisposable
             .Returns(Task.FromResult<string?>("test-jwt"));
 
         var registrationManager = Substitute.For<IRegistrationManager>();
+        var authHandler = new AuthenticatedCloudRequestHandler(
+            tokenProvider, registrationManager,
+            NullLogger<AuthenticatedCloudRequestHandler>.Instance);
 
         return new CloudUploadWorker(
             sp.GetRequiredService<IServiceScopeFactory>(),
@@ -171,7 +184,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
                 SiteId = "SITE-A",
                 UploadBatchSize = 50,
             }),
-            tokenProvider,
+            authHandler,
             registrationManager,
             NullLogger<CloudUploadWorker>.Instance,
             ResiliencePipeline.Empty);
@@ -802,7 +815,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
         var mgr = new ConnectivityManager(
             _ => Task.FromResult(true),
             _ => Task.FromResult(true),
-            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
+            new StaticOptionsMonitor(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
             NullLogger<ConnectivityManager>.Instance);
 
         await mgr.RunSingleCycleAsync(CancellationToken.None);
@@ -815,7 +828,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
         var mgr2 = new ConnectivityManager(
             _ => Task.FromResult(internetResults.Count > 0 ? internetResults.Dequeue() : false),
             _ => Task.FromResult(true),
-            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
+            new StaticOptionsMonitor(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
             NullLogger<ConnectivityManager>.Instance);
 
         // Initial cycle to establish UP state first.
@@ -827,7 +840,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
         var mgr3 = new ConnectivityManager(
             _ => Task.FromResult(iResults.Dequeue()),
             _ => Task.FromResult(true),
-            Options.Create(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
+            new StaticOptionsMonitor(new AgentConfiguration { ConnectivityProbeIntervalSeconds = 30, CloudBaseUrl = "https://test" }),
             NullLogger<ConnectivityManager>.Instance);
 
         var stateChanges = new List<ConnectivityState>();

@@ -24,7 +24,7 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
 
     private readonly Func<CancellationToken, Task<bool>> _internetProbe;
     private readonly Func<CancellationToken, Task<bool>> _fccProbe;
-    private readonly IOptions<AgentConfiguration> _config;
+    private readonly IOptionsMonitor<AgentConfiguration> _config;
     private readonly ILogger<ConnectivityManager> _logger;
 
     // Failure counters — only mutated from the single probe-loop Task. No concurrent writes.
@@ -66,22 +66,17 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
     /// the FCC adapter is fully configured.
     /// </summary>
     /// <remarks>
-    /// H-10: The internet probe resolves CloudBaseUrl at probe time via IOptionsMonitor
-    /// instead of capturing the (potentially empty) value at construction time.
-    /// IOptions&lt;T&gt; caches its value after first resolution; if resolved before registration,
-    /// CloudBaseUrl would be permanently empty, causing "Internet Down" forever.
+    /// H-10: Uses IOptionsMonitor so CloudBaseUrl is resolved at probe time (not cached at construction).
     /// </remarks>
     public ConnectivityManager(
         IHttpClientFactory httpFactory,
         IServiceProvider services,
-        IOptions<AgentConfiguration> config,
+        IOptionsMonitor<AgentConfiguration> config,
         ILogger<ConnectivityManager> logger)
         : this(
             ct =>
             {
-                var monitor = (IOptionsMonitor<AgentConfiguration>?)services.GetService(
-                    typeof(IOptionsMonitor<AgentConfiguration>));
-                var cloudBaseUrl = monitor?.CurrentValue.CloudBaseUrl ?? config.Value.CloudBaseUrl;
+                var cloudBaseUrl = config.CurrentValue.CloudBaseUrl;
                 return PingCloudAsync(httpFactory, cloudBaseUrl, ct);
             },
             ct => ProbeFccAsync(services, ct),
@@ -128,7 +123,7 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
     internal ConnectivityManager(
         Func<CancellationToken, Task<bool>> internetProbe,
         Func<CancellationToken, Task<bool>> fccProbe,
-        IOptions<AgentConfiguration> config,
+        IOptionsMonitor<AgentConfiguration> config,
         ILogger<ConnectivityManager> logger)
     {
         _internetProbe = internetProbe;
@@ -202,12 +197,13 @@ public sealed class ConnectivityManager : IConnectivityMonitor, IHostedService
         // Run probes immediately on startup per spec §5.4.
         await RunSingleCycleAsync(ct).ConfigureAwait(false);
 
-        var config = _config.Value;
-        var interval = TimeSpan.FromSeconds(
-            config.ConnectivityProbeIntervalSeconds > 0 ? config.ConnectivityProbeIntervalSeconds : 30);
-
         while (!ct.IsCancellationRequested)
         {
+            // Re-read interval on each iteration so hot-reloaded config changes take effect.
+            var config = _config.CurrentValue;
+            var interval = TimeSpan.FromSeconds(
+                config.ConnectivityProbeIntervalSeconds > 0 ? config.ConnectivityProbeIntervalSeconds : 30);
+
             // ±20% jitter prevents synchronized probe bursts across multiple deployed devices.
             var jitterMs = (int)(interval.TotalMilliseconds * 0.2);
             var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(-jitterMs, jitterMs));

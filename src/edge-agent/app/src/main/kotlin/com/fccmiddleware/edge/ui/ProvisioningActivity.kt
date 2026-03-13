@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.ui
 
+import com.fccmiddleware.edge.R
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -8,15 +9,19 @@ import android.text.InputType
 import com.fccmiddleware.edge.logging.AppLogger
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -102,6 +107,10 @@ class ProvisioningActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
 
         // AF-011: If the device is already registered (e.g., activity recreated after a
         // config change during the Success → finish() window), skip straight to diagnostics.
@@ -408,21 +417,80 @@ class ProvisioningActivity : AppCompatActivity() {
     private fun buildLayout(): View {
         val padding = (16 * resources.displayMetrics.density).toInt()
         val halfPad = padding / 2
+        val pumaGreen = Color.parseColor("#007A33")
+        val pumaRed = Color.parseColor("#E30613")
+        val darkText = Color.parseColor("#1A1A1A")
+        val subtitleText = Color.parseColor("#4A4A4A")
+        val labelText = Color.parseColor("#333333")
+
+        fun primaryButtonStyle(button: Button) {
+            val bg = GradientDrawable().apply {
+                setColor(pumaGreen)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            button.background = bg
+            button.setTextColor(Color.WHITE)
+            button.isAllCaps = true
+            button.setPadding(padding * 2, halfPad, padding * 2, halfPad)
+        }
+
+        fun secondaryButtonStyle(button: Button) {
+            val bg = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke((2 * resources.displayMetrics.density).toInt(), pumaGreen)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            button.background = bg
+            button.setTextColor(pumaGreen)
+            button.isAllCaps = true
+            button.setPadding(padding * 2, halfPad, padding * 2, halfPad)
+        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
+            gravity = Gravity.CENTER_HORIZONTAL
             setPadding(padding, padding, padding, padding)
+            setBackgroundColor(Color.WHITE)
         }
 
-        // ── Title (always visible)
+        // ── Puma Energy logo
+        val logo = ImageView(this).apply {
+            setImageResource(R.drawable.puma_energy_logo)
+            adjustViewBounds = true
+            layoutParams = LinearLayout.LayoutParams(
+                (180 * resources.displayMetrics.density).toInt(),
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                gravity = Gravity.CENTER
+                topMargin = padding * 2
+                bottomMargin = halfPad
+            }
+        }
+        root.addView(logo)
+
+        // ── Title
         val title = TextView(this).apply {
             text = "Puma Energy FCC Agent"
             textSize = 22f
+            setTextColor(darkText)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, padding)
+            setPadding(0, 0, 0, halfPad)
         }
         root.addView(title)
+
+        // ── Red accent divider
+        val divider = View(this).apply {
+            setBackgroundColor(pumaRed)
+            layoutParams = LinearLayout.LayoutParams(
+                (60 * resources.displayMetrics.density).toInt(),
+                (3 * resources.displayMetrics.density).toInt(),
+            ).apply {
+                gravity = Gravity.CENTER
+                bottomMargin = padding
+            }
+        }
+        root.addView(divider)
 
         // ── Method selection panel ──────────────────────────────────
         methodPanel = LinearLayout(this).apply {
@@ -433,6 +501,7 @@ class ProvisioningActivity : AppCompatActivity() {
         val description = TextView(this).apply {
             text = "Choose how to register this device with the cloud."
             textSize = 16f
+            setTextColor(subtitleText)
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, padding * 2)
         }
@@ -442,6 +511,7 @@ class ProvisioningActivity : AppCompatActivity() {
             text = "Scan QR Code"
             textSize = 18f
         }
+        primaryButtonStyle(scanButton)
         methodPanel.addView(scanButton)
 
         val orLabel = TextView(this).apply {
@@ -449,7 +519,7 @@ class ProvisioningActivity : AppCompatActivity() {
             textSize = 14f
             gravity = Gravity.CENTER
             setPadding(0, halfPad, 0, halfPad)
-            setTextColor(0xFF888888.toInt())
+            setTextColor(Color.parseColor("#999999"))
         }
         methodPanel.addView(orLabel)
 
@@ -457,6 +527,7 @@ class ProvisioningActivity : AppCompatActivity() {
             text = "Enter Manually"
             textSize = 16f
         }
+        secondaryButtonStyle(manualEntryButton)
         methodPanel.addView(manualEntryButton)
 
         root.addView(methodPanel)
@@ -470,6 +541,8 @@ class ProvisioningActivity : AppCompatActivity() {
         val manualTitle = TextView(this).apply {
             text = "Manual Provisioning"
             textSize = 18f
+            setTextColor(darkText)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, halfPad)
         }
@@ -479,7 +552,7 @@ class ProvisioningActivity : AppCompatActivity() {
             text = "Enter the provisioning details from the admin portal."
             textSize = 14f
             gravity = Gravity.CENTER
-            setTextColor(0xFF666666.toInt())
+            setTextColor(subtitleText)
             setPadding(0, 0, 0, padding)
         }
         manualPanel.addView(manualDesc)
@@ -487,6 +560,7 @@ class ProvisioningActivity : AppCompatActivity() {
         val envLabel = TextView(this).apply {
             text = "Environment"
             textSize = 14f
+            setTextColor(labelText)
             setPadding(0, 0, 0, halfPad / 2)
         }
         manualPanel.addView(envLabel)
@@ -517,6 +591,7 @@ class ProvisioningActivity : AppCompatActivity() {
         val cloudUrlLabel = TextView(this).apply {
             text = "Cloud URL"
             textSize = 14f
+            setTextColor(labelText)
             setPadding(0, halfPad, 0, halfPad / 2)
         }
         manualPanel.addView(cloudUrlLabel)
@@ -527,6 +602,8 @@ class ProvisioningActivity : AppCompatActivity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine()
             isEnabled = false
+            setTextColor(darkText)
+            setHintTextColor(Color.parseColor("#AAAAAA"))
             setPadding(halfPad, halfPad, halfPad, halfPad)
         }
         manualPanel.addView(cloudUrlInput)
@@ -534,6 +611,7 @@ class ProvisioningActivity : AppCompatActivity() {
         val siteCodeLabel = TextView(this).apply {
             text = "Site Code"
             textSize = 14f
+            setTextColor(labelText)
             setPadding(0, halfPad, 0, halfPad / 2)
         }
         manualPanel.addView(siteCodeLabel)
@@ -542,6 +620,8 @@ class ProvisioningActivity : AppCompatActivity() {
             hint = "e.g., SITE-001"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
             setSingleLine()
+            setTextColor(darkText)
+            setHintTextColor(Color.parseColor("#AAAAAA"))
             setPadding(halfPad, halfPad, halfPad, halfPad)
         }
         manualPanel.addView(siteCodeInput)
@@ -549,6 +629,7 @@ class ProvisioningActivity : AppCompatActivity() {
         val tokenLabel = TextView(this).apply {
             text = "Provisioning Token"
             textSize = 14f
+            setTextColor(labelText)
             setPadding(0, halfPad, 0, halfPad / 2)
         }
         manualPanel.addView(tokenLabel)
@@ -557,6 +638,8 @@ class ProvisioningActivity : AppCompatActivity() {
             hint = "Paste the one-time token from the admin portal"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setSingleLine()
+            setTextColor(darkText)
+            setHintTextColor(Color.parseColor("#AAAAAA"))
             setPadding(halfPad, halfPad, halfPad, halfPad)
         }
         manualPanel.addView(tokenInput)
@@ -571,6 +654,7 @@ class ProvisioningActivity : AppCompatActivity() {
             text = "Back"
             textSize = 16f
         }
+        secondaryButtonStyle(manualBackButton)
         manualButtonRow.addView(manualBackButton)
 
         val spacer = View(this).apply {
@@ -582,6 +666,7 @@ class ProvisioningActivity : AppCompatActivity() {
             text = "Register"
             textSize = 16f
         }
+        primaryButtonStyle(manualRegisterButton)
         manualButtonRow.addView(manualRegisterButton)
 
         manualPanel.addView(manualButtonRow)
@@ -598,6 +683,7 @@ class ProvisioningActivity : AppCompatActivity() {
         statusText = TextView(this).apply {
             visibility = View.GONE
             textSize = 14f
+            setTextColor(subtitleText)
             gravity = Gravity.CENTER
             setPadding(0, padding, 0, 0)
         }
@@ -607,12 +693,14 @@ class ProvisioningActivity : AppCompatActivity() {
             visibility = View.GONE
             textSize = 14f
             gravity = Gravity.CENTER
-            setTextColor(0xFFCC0000.toInt())
+            setTextColor(pumaRed)
             setPadding(0, padding, 0, 0)
         }
         root.addView(errorText)
 
-        val scrollView = ScrollView(this)
+        val scrollView = ScrollView(this).apply {
+            setBackgroundColor(Color.WHITE)
+        }
         scrollView.addView(root)
         return scrollView
     }

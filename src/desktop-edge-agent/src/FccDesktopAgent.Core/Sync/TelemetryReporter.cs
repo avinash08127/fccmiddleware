@@ -35,7 +35,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
     private readonly IHttpClientFactory _httpFactory;
     private readonly IOptions<AgentConfiguration> _config;
     private readonly IConnectivityMonitor _connectivity;
-    private readonly IDeviceTokenProvider _tokenProvider;
+    private readonly AuthenticatedCloudRequestHandler _authHandler;
     private readonly IRegistrationManager _registrationManager;
     private readonly IErrorCountTracker _errorTracker;
     private readonly ILogger<TelemetryReporter> _logger;
@@ -51,7 +51,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
         IHttpClientFactory httpFactory,
         IOptions<AgentConfiguration> config,
         IConnectivityMonitor connectivity,
-        IDeviceTokenProvider tokenProvider,
+        AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
         IErrorCountTracker errorTracker,
         ILogger<TelemetryReporter> logger)
@@ -60,7 +60,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
         _httpFactory = httpFactory;
         _config = config;
         _connectivity = connectivity;
-        _tokenProvider = tokenProvider;
+        _authHandler = authHandler;
         _registrationManager = registrationManager;
         _errorTracker = errorTracker;
         _logger = logger;
@@ -69,6 +69,14 @@ public sealed class TelemetryReporter : ITelemetryReporter
     /// <inheritdoc />
     public async Task<bool> ReportAsync(CancellationToken ct)
     {
+        // T-DSK-013: Check centralized decommission flag — TelemetryReporter was missing
+        // this check, causing it to keep sending telemetry after other workers had stopped.
+        if (_registrationManager.IsDecommissioned)
+        {
+            _logger.LogDebug("Telemetry skipped: device is decommissioned");
+            return false;
+        }
+
         var config = _config.Value;
 
         // Peek at error counts before building the payload. Only reset after successful send.
@@ -85,70 +93,50 @@ public sealed class TelemetryReporter : ITelemetryReporter
             return false;
         }
 
-        var token = await _tokenProvider.GetTokenAsync(ct);
-        if (token is null)
-        {
-            _logger.LogDebug("Telemetry skipped: no device token available");
-            return false;
-        }
-
         var url = $"{config.CloudBaseUrl.TrimEnd('/')}{TelemetryPath}";
 
-        try
-        {
-            var http = _httpFactory.CreateClient("cloud");
+        // T-DSK-010: Delegate auth flow to the shared handler.
+        var result = await _authHandler.ExecuteAsync<bool>(
+            (token, innerCt) => SendTelemetryAsync(payload, url, token, innerCt),
+            "telemetry", ct);
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            request.Content = JsonContent.Create(payload);
-
-            var response = await http.SendAsync(request, ct);
-
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                // Attempt one token refresh
-                _logger.LogDebug("Telemetry received 401; refreshing token");
-                token = await _tokenProvider.RefreshTokenAsync(ct);
-                if (token is null)
-                {
-                    _logger.LogWarning("Telemetry skipped: token refresh failed");
-                    return false;
-                }
-
-                using var retryRequest = new HttpRequestMessage(HttpMethod.Post, url);
-                retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                retryRequest.Content = JsonContent.Create(payload);
-
-                response = await http.SendAsync(retryRequest, ct);
-            }
-
-            // Handle decommission
-            if (response.StatusCode == HttpStatusCode.Forbidden)
-            {
-                _logger.LogWarning("Telemetry submission returned 403 — device may be decommissioned");
-                await _registrationManager.MarkDecommissionedAsync(ct);
-                throw new DeviceDecommissionedException("Telemetry returned 403 Forbidden");
-            }
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning(
-                    "Telemetry submission failed with status {StatusCode}", response.StatusCode);
-                return false;
-            }
-
-            // Success — now atomically consume the error counts so they reset.
-            _errorTracker.TakeSnapshot();
-
-            _logger.LogDebug(
-                "Telemetry report #{Sequence} sent successfully", payload.SequenceNumber);
-            return true;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Telemetry submission failed");
+        if (!result.IsSuccess)
             return false;
+
+        // Success — now atomically consume the error counts so they reset.
+        _errorTracker.TakeSnapshot();
+
+        _logger.LogDebug(
+            "Telemetry report #{Sequence} sent successfully", payload.SequenceNumber);
+        return true;
+    }
+
+    // ── HTTP send ──────────────────────────────────────────────────────────────
+
+    private async Task<bool> SendTelemetryAsync(
+        TelemetryPayload payload, string url, string token, CancellationToken ct)
+    {
+        var http = _httpFactory.CreateClient("cloud");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Content = JsonContent.Create(payload);
+
+        var response = await http.SendAsync(request, ct);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+            throw new UnauthorizedAccessException();
+
+        if (response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (body.Contains("DEVICE_DECOMMISSIONED", StringComparison.OrdinalIgnoreCase))
+                throw new DeviceDecommissionedException(body);
+            throw new HttpRequestException($"403 Forbidden: {body}");
         }
+
+        response.EnsureSuccessStatusCode();
+        return true;
     }
 
     // ── Payload assembly ──────────────────────────────────────────────────────

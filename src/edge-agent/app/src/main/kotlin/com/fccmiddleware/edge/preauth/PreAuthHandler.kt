@@ -14,6 +14,8 @@ import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.AuditLog
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.security.KeystoreBackedStringCipher
+import com.fccmiddleware.edge.security.KeystoreManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
@@ -48,6 +50,7 @@ class PreAuthHandler(
     private val connectivityManager: ConnectivityManager,
     private val auditLogDao: AuditLogDao,
     private val scope: CoroutineScope,
+    private val keystoreManager: KeystoreManager? = null,
     fccAdapter: IFccAdapter? = null,
     val config: PreAuthHandlerConfig = PreAuthHandlerConfig(),
 ) {
@@ -69,10 +72,11 @@ class PreAuthHandler(
          */
         val defaultPreAuthTtlSeconds: Long = 300L,
         /**
-         * PA-P02: Maximum records loaded per expiry check cycle.
-         * Bounds memory use when a large backlog accumulates during an FCC outage.
+         * PA-P02 / AP-037: Maximum records loaded per expiry check cycle.
+         * Reduced from 50 to 5 to cap worst-case tick duration at 5 × timeout.
+         * Remaining records are picked up on subsequent ticks.
          */
-        val expiryBatchSize: Int = 50,
+        val expiryBatchSize: Int = 5,
     )
 
     companion object {
@@ -92,6 +96,10 @@ class PreAuthHandler(
      * Resets on process restart (acceptable — FCC adapter also gets a fresh session).
      */
     internal val deauthAttemptCounts = ConcurrentHashMap<String, Int>()
+    private val customerTaxIdCipher = KeystoreBackedStringCipher(
+        keystoreManager = keystoreManager,
+        alias = KeystoreManager.ALIAS_PREAUTH_PII,
+    )
 
     // -------------------------------------------------------------------------
     // handle — submit pre-auth to FCC over LAN
@@ -162,6 +170,12 @@ class PreAuthHandler(
         val now = Instant.now().toString()
         val expiresAt = Instant.now().plusSeconds(config.defaultPreAuthTtlSeconds).toString()
         val recordId = UUID.randomUUID().toString()
+        val encryptedCustomerTaxId = try {
+            customerTaxIdCipher.encryptForStorage(command.customerTaxId)
+        } catch (e: IllegalStateException) {
+            AppLogger.e(TAG, "Failed to encrypt customerTaxId before persistence: ${e.message}", e)
+            return error("LOCAL_PII_ENCRYPTION_FAILED")
+        }
 
         val record = PreAuthRecord(
             id = recordId,
@@ -178,8 +192,8 @@ class PreAuthHandler(
             fccCorrelationId = null,
             fccAuthorizationCode = null,
             failureReason = null,
-            customerName = null,
-            customerTaxId = command.customerTaxId, // PII — NEVER log
+            customerName = command.customerName,
+            customerTaxId = encryptedCustomerTaxId, // PII — stored as Keystore-encrypted Base64
             rawFccResponse = null,
             requestedAt = now,
             authorizedAt = null,
@@ -190,6 +204,8 @@ class PreAuthHandler(
             lastCloudSyncAttemptAt = null,
             schemaVersion = 1,
             createdAt = now,
+            vehicleNumber = command.vehicleNumber,
+            customerBusinessName = command.customerBusinessName,
         )
 
         val insertedRowId = preAuthDao.insert(record)
@@ -444,6 +460,7 @@ class PreAuthHandler(
                         }
                         // Fall through to mark EXPIRED below
                     } else {
+                        var fccUnreachable = false
                         val deauthSucceeded = try {
                             val cancelCommand = CancelPreAuthCommand(
                                 siteCode = r.siteCode,
@@ -455,6 +472,10 @@ class PreAuthHandler(
                                 adapter.cancelPreAuth(cancelCommand)
                             }
                         } catch (e: Exception) {
+                            // AP-037: Detect FCC unreachable conditions for early exit
+                            if (e is TimeoutCancellationException || e is java.io.IOException) {
+                                fccUnreachable = true
+                            }
                             AppLogger.w(TAG, "FCC deauth on expiry failed for id=${r.id} (attempt ${attempts + 1}/$MAX_DEAUTH_RETRIES): ${e.javaClass.simpleName}")
                             false
                         }
@@ -475,6 +496,12 @@ class PreAuthHandler(
                                 } catch (e: Exception) {
                                     AppLogger.e(TAG, "Audit log insert failed for PRE_AUTH_DEAUTH_RETRY_PENDING id=${r.id}: ${e.message}", e)
                                 }
+                            }
+                            // AP-037: If FCC is unreachable, stop processing remaining records —
+                            // subsequent deauth calls will also fail. Defer to next tick.
+                            if (fccUnreachable) {
+                                AppLogger.w(TAG, "AP-037: FCC unreachable during expiry check — deferring remaining expired record(s) to next tick")
+                                return
                             }
                             continue
                         }

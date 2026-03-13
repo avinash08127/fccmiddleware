@@ -52,7 +52,7 @@ class PetroniteAdapterTest {
 
     // ── Test helpers ─────────────────────────────────────────────────────────
 
-    private val baseUrl = "http://petronite.test"
+    private val baseUrl = "https://petronite.test"
     private val oauthUrl = "$baseUrl/oauth/token"
 
     private fun createConfig(): AgentFccConfig = AgentFccConfig(

@@ -51,6 +51,11 @@ export const routes: Routes = [
           ),
       },
       {
+        path: 'adapters',
+        loadChildren: () =>
+          import('./features/adapters/adapters.routes').then((m) => m.ADAPTER_ROUTES),
+      },
+      {
         path: 'sites',
         loadChildren: () =>
           import('./features/site-config/site-config.routes').then(
@@ -81,6 +86,13 @@ export const routes: Routes = [
         loadChildren: () =>
           import('./features/settings/settings.routes').then(
             (m) => m.SETTINGS_ROUTES
+          ),
+      },
+      {
+        path: 'admin/users',
+        loadChildren: () =>
+          import('./features/user-management/user-management.routes').then(
+            (m) => m.USER_MANAGEMENT_ROUTES
           ),
       },
     ],

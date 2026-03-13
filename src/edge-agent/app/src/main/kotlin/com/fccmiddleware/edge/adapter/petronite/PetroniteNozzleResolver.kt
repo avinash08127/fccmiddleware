@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.adapter.petronite
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
+import com.fccmiddleware.edge.adapter.common.FccTransportSecurity
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -106,7 +107,11 @@ class PetroniteNozzleResolver(
 
             try {
                 val token = oauthClient.getAccessToken()
-                val baseUrl = config.hostAddress.trimEnd('/')
+                val baseUrl = FccTransportSecurity.resolveEndpoint(
+                    rawAddress = config.hostAddress,
+                    component = TAG,
+                    defaultPort = config.port,
+                ).asBaseUrl()
                 val url = "$baseUrl/nozzles/assigned"
 
                 val response = httpClient.get(url) {

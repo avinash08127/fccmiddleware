@@ -1,4 +1,5 @@
 using FccDesktopAgent.Core.Adapter.Common;
+using FccDesktopAgent.Core.Security;
 
 namespace FccDesktopAgent.Core.Config;
 
@@ -21,6 +22,14 @@ internal static class DesktopFccRuntimeConfiguration
     public static bool TryValidateSiteConfig(SiteConfig config, out string error)
     {
         error = string.Empty;
+
+        // S-DSK-019: Reject non-HTTPS CloudBaseUrl in site config
+        if (!string.IsNullOrWhiteSpace(config.Sync?.CloudBaseUrl)
+            && !CloudUrlGuard.IsSecure(config.Sync.CloudBaseUrl))
+        {
+            error = $"Sync.CloudBaseUrl must use HTTPS: '{config.Sync.CloudBaseUrl}'";
+            return false;
+        }
 
         if (config.Fcc is null || !config.Fcc.Enabled)
             return true;

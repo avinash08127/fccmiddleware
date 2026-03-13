@@ -50,7 +50,13 @@ class TelemetryReporter(
 
     companion object {
         private const val TAG = "TelemetryReporter"
+        internal const val REDACTED_FCC_HOST = "***"
+        internal const val REDACTED_FCC_PORT = 1
+        private val UUID_REGEX =
+            Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
     }
+
+    private fun isValidUuid(value: String): Boolean = UUID_REGEX.matches(value)
 
     /**
      * Mutex serializing [nextSequenceNumber] so concurrent callers cannot
@@ -107,6 +113,12 @@ class TelemetryReporter(
         val siteCode = cfg.identity.siteCode
         val legalEntityId = cfg.identity.legalEntityId
 
+        // NET-002: Validate UUID format before submission to avoid silent 400 from backend.
+        if (!isValidUuid(deviceId) || !isValidUuid(legalEntityId)) {
+            AppLogger.e(TAG, "buildPayload() — invalid UUID: deviceId=$deviceId, legalEntityId=$legalEntityId")
+            return null
+        }
+
         val sequence = nextSequenceNumber()
 
         // AP-020: Query oldestPendingCreatedAt once and pass to both collectors
@@ -129,7 +141,7 @@ class TelemetryReporter(
                 siteCode = siteCode,
                 legalEntityId = legalEntityId,
                 reportedAtUtc = Instant.now().toString(),
-                sequenceNumber = sequence,
+                sequenceNumber = sequence.toInt(),
                 connectivityState = connectivityManager.state.value.name,
                 device = collectDeviceStatus(),
                 fccHealth = collectFccHealth(cfg),
@@ -238,8 +250,10 @@ class TelemetryReporter(
             lastHeartbeatAtUtc = lastHeartbeatAtUtc,
             heartbeatAgeSeconds = heartbeatAgeSeconds,
             fccVendor = cfg.fcc.vendor ?: "UNCONFIGURED",
-            fccHost = cfg.fcc.hostAddress ?: "UNCONFIGURED",
-            fccPort = cfg.fcc.port ?: 0,
+            // AS-022: Telemetry intentionally reports redacted connection details so the
+            // cloud receives health state without storing the site's exact LAN topology.
+            fccHost = if (cfg.fcc.hostAddress.isNullOrBlank()) "UNCONFIGURED" else REDACTED_FCC_HOST,
+            fccPort = if (cfg.fcc.port == null) 0 else REDACTED_FCC_PORT,
             consecutiveHeartbeatFailures = fccConnectionErrors.get(),
         )
     }
@@ -261,6 +275,10 @@ class TelemetryReporter(
         val uploadedCount = countMap["UPLOADED"] ?: 0
         val syncedToOdooCount = countMap["SYNCED_TO_ODOO"] ?: 0
         val failedCount = countMap["FAILED"] ?: 0
+        // AT-037: Extract DEAD_LETTER and ARCHIVED counts so cloud can detect
+        // permanent data loss and distinguish it from a healthy upload backlog.
+        val deadLetterCount = countMap["DEAD_LETTER"] ?: 0
+        val archivedCount = countMap["ARCHIVED"] ?: 0
         val totalRecords = countMap.values.sum()
 
         val bufferSizeMb = try {
@@ -277,6 +295,8 @@ class TelemetryReporter(
             syncedCount = uploadedCount,
             syncedToOdooCount = syncedToOdooCount,
             failedCount = failedCount,
+            deadLetterCount = deadLetterCount,
+            archivedCount = archivedCount,
             oldestPendingAtUtc = oldestPendingAtUtc,
             bufferSizeMb = bufferSizeMb,
         )

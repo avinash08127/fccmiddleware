@@ -1,7 +1,7 @@
-import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, OnInit, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Subject, EMPTY } from 'rxjs';
 import { switchMap, catchError } from 'rxjs/operators';
@@ -15,7 +15,12 @@ import { InputTextModule } from 'primeng/inputtext';
 
 import { AuditService } from '../../core/services/audit.service';
 import { MasterDataService } from '../../core/services/master-data.service';
-import { AuditEvent, AuditEventQueryParams, EventType } from '../../core/models/audit.model';
+import {
+  AuditEvent,
+  AuditEventQueryParams,
+  EventType,
+  KNOWN_AUDIT_EVENT_TYPES,
+} from '../../core/models/audit.model';
 import { LegalEntity } from '../../core/models/master-data.model';
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
@@ -29,7 +34,7 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
 
 const MAX_DATE_RANGE_DAYS = 30;
 
-function eventTypeSeverity(eventType: EventType): PrimeSeverity {
+function eventTypeSeverity(eventType: string): PrimeSeverity {
   if (eventType.startsWith('Transaction')) return 'info';
   if (eventType.startsWith('PreAuth')) return 'secondary';
   if (eventType.startsWith('Reconciliation')) return 'warn';
@@ -128,6 +133,16 @@ interface LoadRequest {
             <div class="filter-field">
               <label for="audit-filter-site-code">Site Code</label>
               <input pInputText id="audit-filter-site-code" [(ngModel)]="filterSiteCode" placeholder="e.g. MW-001" />
+            </div>
+
+            <div class="filter-field">
+              <label for="audit-filter-adapter-key">Adapter Key</label>
+              <input
+                pInputText
+                id="audit-filter-adapter-key"
+                [(ngModel)]="filterAdapterKey"
+                placeholder="e.g. DOMS"
+              />
             </div>
 
             <div class="filter-field filter-field--wide">
@@ -414,9 +429,10 @@ interface LoadRequest {
     `,
   ],
 })
-export class AuditLogComponent {
+export class AuditLogComponent implements OnInit {
   private readonly auditService = inject(AuditService);
   private readonly masterDataService = inject(MasterDataService);
+  private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
@@ -434,6 +450,7 @@ export class AuditLogComponent {
   filterCorrelationId = '';
   filterEventTypes: EventType[] = [];
   filterSiteCode = '';
+  filterAdapterKey = '';
   filterDateRange: DateRange = { from: null, to: null };
 
   readonly dateRangeError = signal<string | null>(null);
@@ -450,7 +467,7 @@ export class AuditLogComponent {
   expandedRowKeys: { [key: string]: boolean } = {};
 
   // ── Event type options ────────────────────────────────────────────────────
-  readonly eventTypeOptions = Object.values(EventType).map((v) => ({ label: v, value: v }));
+  readonly eventTypeOptions = KNOWN_AUDIT_EVENT_TYPES.map((value) => ({ label: value, value }));
 
   // ── Load subject ──────────────────────────────────────────────────────────
   private readonly load$ = new Subject<LoadRequest>();
@@ -488,6 +505,31 @@ export class AuditLogComponent {
         this.expandedRowKeys = {};
         this.searched.set(true);
       });
+  }
+
+  ngOnInit(): void {
+    this.route.queryParamMap.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((params) => {
+      const legalEntityId = params.get('legalEntityId');
+      this.selectedLegalEntityId.set(legalEntityId);
+
+      this.filterCorrelationId = params.get('correlationId') ?? '';
+      this.filterEventTypes = params.getAll('eventTypes');
+      this.filterSiteCode = params.get('siteCode') ?? '';
+      this.filterAdapterKey = params.get('adapterKey') ?? '';
+      this.filterDateRange = {
+        from: this.parseDateParam(params.get('from')),
+        to: this.parseDateParam(params.get('to')),
+      };
+      this.dateRangeError.set(null);
+      this.listState.set(emptyListState());
+      this.expandedRowKeys = {};
+      this.searched.set(false);
+      this.traceMode.set(false);
+
+      if (legalEntityId && this.shouldAutoSearch()) {
+        this.search();
+      }
+    });
   }
 
   // ── Event handlers ────────────────────────────────────────────────────────
@@ -536,12 +578,19 @@ export class AuditLogComponent {
 
     this.dateRangeError.set(null);
     this.activeCorrelationId.set(this.filterCorrelationId.trim());
-    this.traceMode.set(hasCorrelationId && !hasDateRange && this.filterEventTypes.length === 0 && !this.filterSiteCode.trim());
+    this.traceMode.set(
+      hasCorrelationId &&
+        !hasDateRange &&
+        this.filterEventTypes.length === 0 &&
+        !this.filterSiteCode.trim() &&
+        !this.filterAdapterKey.trim(),
+    );
 
     const params: AuditEventQueryParams = { legalEntityId: entityId, pageSize: this.pageSize };
     if (this.filterCorrelationId.trim()) params.correlationId = this.filterCorrelationId.trim();
     if (this.filterEventTypes.length) params.eventTypes = this.filterEventTypes;
     if (this.filterSiteCode.trim()) params.siteCode = this.filterSiteCode.trim();
+    if (this.filterAdapterKey.trim()) params.adapterKey = this.filterAdapterKey.trim();
     if (hasDateRange) {
       params.from = this.filterDateRange.from!.toISOString();
       params.to = this.filterDateRange.to!.toISOString();
@@ -556,6 +605,7 @@ export class AuditLogComponent {
     this.filterCorrelationId = '';
     this.filterEventTypes = [];
     this.filterSiteCode = '';
+    this.filterAdapterKey = '';
     this.filterDateRange = { from: null, to: null };
     this.dateRangeError.set(null);
     this.listState.set(emptyListState());
@@ -577,6 +627,7 @@ export class AuditLogComponent {
     if (this.activeCorrelationId()) params.correlationId = this.activeCorrelationId();
     if (this.filterEventTypes.length) params.eventTypes = this.filterEventTypes;
     if (this.filterSiteCode.trim()) params.siteCode = this.filterSiteCode.trim();
+    if (this.filterAdapterKey.trim()) params.adapterKey = this.filterAdapterKey.trim();
     if (this.filterDateRange.from && this.filterDateRange.to) {
       params.from = this.filterDateRange.from.toISOString();
       params.to = this.filterDateRange.to.toISOString();
@@ -600,7 +651,7 @@ export class AuditLogComponent {
     this.router.navigate(['/audit/events', eventId]);
   }
 
-  getEventSeverity(eventType: EventType): PrimeSeverity {
+  getEventSeverity(eventType: string): PrimeSeverity {
     return eventTypeSeverity(eventType);
   }
 
@@ -610,5 +661,24 @@ export class AuditLogComponent {
     } catch {
       return String(payload);
     }
+  }
+
+  private shouldAutoSearch(): boolean {
+    return !!(
+      this.filterCorrelationId.trim() ||
+      (this.filterDateRange.from && this.filterDateRange.to) ||
+      this.filterSiteCode.trim() ||
+      this.filterAdapterKey.trim() ||
+      this.filterEventTypes.length
+    );
+  }
+
+  private parseDateParam(value: string | null): Date | null {
+    if (!value) {
+      return null;
+    }
+
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 }

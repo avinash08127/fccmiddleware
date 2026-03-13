@@ -614,8 +614,7 @@ class CloudBackendAlignmentTest {
 
         // storeTokens encrypts and persists
         every { keystoreManager.storeSecret(any(), any()) } returns ByteArray(16)
-        every { encryptedPrefs.storeDeviceTokenBlob(any()) } just Runs
-        every { encryptedPrefs.storeRefreshTokenBlob(any()) } just Runs
+        every { encryptedPrefs.storeTokenBlobs(any(), any()) } returns true
 
         val provider = KeystoreDeviceTokenProvider(
             keystoreManager = keystoreManager,

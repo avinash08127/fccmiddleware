@@ -585,9 +585,27 @@ class RadixAdapter(
 
                                 // ACK with CMD_CODE=201 to dequeue from FCC FIFO
                                 val ackBody = RadixXmlBuilder.buildTransactionAck(tokenStr, sharedSecret)
-                                httpClient.post(url) {
+                                val ackResponse = httpClient.post(url) {
                                     headers.forEach { (key, value) -> header(key, value) }
                                     setBody(ackBody)
+                                }
+                                val ackResponseBody = ackResponse.bodyAsText()
+                                val ackResult = RadixXmlParser.parseTransactionResponse(ackResponseBody)
+                                when (ackResult) {
+                                    is RadixParseResult.Success -> {
+                                        if (ackResult.value.respCode != RESP_CODE_SUCCESS) {
+                                            AppLogger.w(TAG, "fetchTransactions: ACK failed RESP_CODE=${ackResult.value.respCode}: ${ackResult.value.respMsg} — removing transaction to avoid duplicate")
+                                            if (transactions.isNotEmpty()) {
+                                                transactions.removeAt(transactions.lastIndex)
+                                            }
+                                        }
+                                    }
+                                    is RadixParseResult.Error -> {
+                                        AppLogger.w(TAG, "fetchTransactions: ACK response parse error: ${ackResult.message} — removing transaction to avoid duplicate")
+                                        if (transactions.isNotEmpty()) {
+                                            transactions.removeAt(transactions.lastIndex)
+                                        }
+                                    }
                                 }
                             }
                             RESP_CODE_FIFO_EMPTY -> {
@@ -936,6 +954,13 @@ class RadixAdapter(
                 }
 
                 val responseBody = response.bodyAsText()
+                if (!RadixXmlParser.validateAuthResponseSignature(responseBody, sharedSecret)) {
+                    activePreAuths.remove(token)
+                    return@withTimeout PreAuthResult(
+                        status = PreAuthResultStatus.ERROR,
+                        message = "Auth response signature mismatch",
+                    )
+                }
                 val parseResult = RadixXmlParser.parseAuthResponse(responseBody)
 
                 // Step 5: Map ACKCODE to PreAuthResult
@@ -1079,6 +1104,13 @@ class RadixAdapter(
                 }
 
                 val responseBody = response.bodyAsText()
+                if (!RadixXmlParser.validateAuthResponseSignature(responseBody, sharedSecret)) {
+                    AppLogger.w(
+                        TAG,
+                        "Cancel pre-auth signature validation failed for pump=${command.pumpNumber}",
+                    )
+                    return@withTimeout false
+                }
                 val parseResult = RadixXmlParser.parseAuthResponse(responseBody)
 
                 when (parseResult) {

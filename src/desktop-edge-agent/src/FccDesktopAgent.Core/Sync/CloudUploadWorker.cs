@@ -38,7 +38,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IOptions<AgentConfiguration> _config;
-    private readonly IDeviceTokenProvider _tokenProvider;
+    private readonly AuthenticatedCloudRequestHandler _authHandler;
     private readonly IRegistrationManager _registrationManager;
     private readonly ILogger<CloudUploadWorker> _logger;
 
@@ -46,17 +46,14 @@ public sealed class CloudUploadWorker : ICloudSyncService
     // 401/403 are handled at the application layer and are NOT retried by this pipeline.
     private readonly ResiliencePipeline _retryPipeline;
 
-    // Set permanently on DEVICE_DECOMMISSIONED. Process restart required to clear.
-    private volatile bool _decommissioned;
-
     public CloudUploadWorker(
         IServiceScopeFactory scopeFactory,
         IHttpClientFactory httpFactory,
         IOptions<AgentConfiguration> config,
-        IDeviceTokenProvider tokenProvider,
+        AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
         ILogger<CloudUploadWorker> logger)
-        : this(scopeFactory, httpFactory, config, tokenProvider, registrationManager, logger, retryPipeline: null)
+        : this(scopeFactory, httpFactory, config, authHandler, registrationManager, logger, retryPipeline: null)
     {
     }
 
@@ -65,7 +62,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
         IServiceScopeFactory scopeFactory,
         IHttpClientFactory httpFactory,
         IOptions<AgentConfiguration> config,
-        IDeviceTokenProvider tokenProvider,
+        AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
         ILogger<CloudUploadWorker> logger,
         ResiliencePipeline? retryPipeline)
@@ -73,7 +70,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
         _scopeFactory = scopeFactory;
         _httpFactory = httpFactory;
         _config = config;
-        _tokenProvider = tokenProvider;
+        _authHandler = authHandler;
         _registrationManager = registrationManager;
         _logger = logger;
 
@@ -102,7 +99,8 @@ public sealed class CloudUploadWorker : ICloudSyncService
     /// <inheritdoc />
     public async Task<int> UploadBatchAsync(CancellationToken ct)
     {
-        if (_decommissioned)
+        // T-DSK-013: Check centralized decommission flag instead of per-worker volatile boolean.
+        if (_registrationManager.IsDecommissioned)
         {
             _logger.LogDebug("Upload skipped: device is decommissioned");
             return 0;
@@ -121,13 +119,6 @@ public sealed class CloudUploadWorker : ICloudSyncService
         var request = BuildUploadRequest(batch, config);
         _logger.LogDebug("Upload batch: batchId={BatchId} records={Count}", request.UploadBatchId, batch.Count);
 
-        var token = await _tokenProvider.GetTokenAsync(ct);
-        if (token is null)
-        {
-            _logger.LogWarning("Cloud upload skipped: no device token available (device not yet registered?)");
-            return 0;
-        }
-
         // DEA-6.2: Enforce HTTPS for cloud communication
         if (!CloudUrlGuard.IsSecure(config.CloudBaseUrl))
         {
@@ -135,72 +126,32 @@ public sealed class CloudUploadWorker : ICloudSyncService
             return 0;
         }
 
-        UploadResponse? uploadResponse;
-        try
-        {
-            uploadResponse = await SendWithRetryAsync(request, token, config, ct);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // 401: refresh token once and retry the entire batch
-            _logger.LogWarning("Cloud upload received 401; refreshing device token");
-            try
-            {
-                token = await _tokenProvider.RefreshTokenAsync(ct);
-            }
-            catch (RefreshTokenExpiredException rex)
-            {
-                await _registrationManager.MarkReprovisioningRequiredAsync();
-                _decommissioned = true;
-                _logger.LogCritical(
-                    "REFRESH_TOKEN_EXPIRED: Device requires re-provisioning. " +
-                    "Restart the agent to begin provisioning. Reason: {Reason}", rex.Message);
-                return 0;
-            }
-            catch (DeviceDecommissionedException dex)
-            {
-                await _registrationManager.MarkDecommissionedAsync();
-                _decommissioned = true;
-                _logger.LogCritical(
-                    "DEVICE_DECOMMISSIONED during token refresh. All cloud sync halted. " +
-                    "Reason: {Reason}", dex.Message);
-                return 0;
-            }
-            if (token is null)
-            {
-                _logger.LogWarning("Token refresh failed; recording upload failure for batch");
-                await RecordBatchFailureAsync(bufferManager, batch, "Token refresh failed after 401", ct);
-                return 0;
-            }
+        // T-DSK-010: Delegate auth flow to the shared handler.
+        var authResult = await _authHandler.ExecuteAsync<UploadResponse?>(
+            (token, innerCt) => SendWithRetryAsync(request, token, config, innerCt),
+            "cloud upload", ct);
 
-            try
-            {
-                uploadResponse = await SendWithRetryAsync(request, token, config, ct);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Cloud upload failed after token refresh");
-                await RecordBatchFailureAsync(bufferManager, batch, ex.Message, ct);
-                return 0;
-            }
-        }
-        catch (DeviceDecommissionedException ex)
-        {
-            await _registrationManager.MarkDecommissionedAsync();
-            _decommissioned = true;
-            _logger.LogCritical(
-                "DEVICE_DECOMMISSIONED received from cloud. All cloud sync halted. " +
-                "Agent restart required to re-enable. Reason: {Reason}", ex.Message);
+        // T-DSK-013: RequiresHalt means MarkDecommissionedAsync was already called
+        // by AuthenticatedCloudRequestHandler, updating the centralized flag.
+        if (authResult.RequiresHalt)
             return 0;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+
+        if (authResult.Outcome == AuthRequestOutcome.NoToken)
+            return 0;
+
+        if (authResult.Outcome == AuthRequestOutcome.AuthFailed)
         {
-            // HTTP failure exhausted all Polly retries
-            _logger.LogWarning(ex, "Cloud upload failed after retries for batch of {Count}", batch.Count);
-            await RecordBatchFailureAsync(bufferManager, batch, ex.Message, ct);
+            await RecordBatchFailureAsync(bufferManager, batch, "Token refresh failed after 401", ct);
             return 0;
         }
 
+        if (!authResult.IsSuccess)
+        {
+            await RecordBatchFailureAsync(bufferManager, batch, authResult.Error?.Message ?? "Request failed", ct);
+            return 0;
+        }
+
+        var uploadResponse = authResult.Value;
         if (uploadResponse is null)
         {
             await RecordBatchFailureAsync(bufferManager, batch, "Empty response from cloud", ct);

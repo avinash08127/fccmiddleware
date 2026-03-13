@@ -74,9 +74,10 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0")
 
     // Room (SQLite)
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    ksp("androidx.room:room-compiler:2.6.1")
+    implementation("androidx.room:room-runtime:2.8.4")
+    implementation("androidx.room:room-ktx:2.8.4")
+    implementation("net.zetetic:sqlcipher-android:4.13.0")
+    ksp("androidx.room:room-compiler:2.8.4")
 
     // Ktor (embedded server + client)
     val ktorVersion = "3.0.3"
@@ -105,7 +106,7 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("io.mockk:mockk:1.13.13")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    testImplementation("androidx.room:room-testing:2.6.1")
+    testImplementation("androidx.room:room-testing:2.8.4")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("io.ktor:ktor-server-test-host:$ktorVersion")
     testImplementation("io.ktor:ktor-client-mock:$ktorVersion")

@@ -22,6 +22,15 @@
 -->
 <network-security-config>
 
+    <!--
+        AS-009: This XML governs Android framework-managed outbound traffic only.
+        FCC adapters also talk to devices through direct HTTP clients, so their
+        transport rules are enforced in code via FccTransportSecurity instead.
+        Loopback cleartext to 127.0.0.1/localhost remains an intentional same-device
+        exception for FCC compatibility and simulators; non-loopback FCC endpoints
+        must use HTTPS and explicit cleartext LAN URLs are rejected in code.
+    -->
+
     <domain-config cleartextTrafficPermitted="false">
         <pin-set expiration="2027-03-13">
             <pin digest="SHA-256">YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=</pin>

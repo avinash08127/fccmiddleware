@@ -152,17 +152,13 @@ interface TimelineEvent {
               <p class="page-subtitle">
                 Device: <code>{{ registration()!.deviceId }}</code>
                 &nbsp;&bull;&nbsp; Registered {{ registration()!.registeredAt | utcDate:'mediumDate' }}
-                @if (registration()!.environment) {
-                  &nbsp;&bull;&nbsp;
-                  <span class="env-badge">{{ registration()!.environment }}</span>
-                }
               </p>
             }
           </div>
         </div>
         <div class="header-right">
           <!-- F08-08: Decommission button for admin roles -->
-          <ng-container *appRoleVisible="['SystemAdmin', 'SystemAdministrator', 'OperationsManager']">
+          <ng-container *appRoleVisible="['FccAdmin', 'FccUser']">
             @if (registration() && registration()!.status !== 'DEACTIVATED') {
               <p-button
                 label="Decommission"
@@ -241,12 +237,6 @@ interface TimelineEvent {
                 <span class="stat-label">Device Model</span>
                 <span>{{ telemetry()!.device.deviceModel }}</span>
               </div>
-              @if (registration()?.environment) {
-                <div class="stat-row">
-                  <span class="stat-label">Environment</span>
-                  <span class="env-badge">{{ registration()!.environment }}</span>
-                </div>
-              }
             </p-card>
           }
 

@@ -1,6 +1,7 @@
 package com.fccmiddleware.edge.api
 
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
+import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
@@ -27,6 +28,7 @@ import java.util.UUID
  */
 fun Routing.transactionRoutes(
     dao: TransactionBufferDao,
+    bufferManager: TransactionBufferManager? = null,
     ingestionOrchestrator: IngestionOrchestrator? = null,
     connectivityManager: ConnectivityManager? = null,
     lanApiKey: String? = null,
@@ -67,7 +69,10 @@ fun Routing.transactionRoutes(
             }
         }
 
-        val entities = when {
+        // AP-035: Projection queries exclude rawPayloadJson (~2–5 KB/record).
+        // AP-036: COUNT(*) OVER() window function provides total in the same query pass,
+        // eliminating the separate COUNT(*) round-trip.
+        val rows = when {
             pumpNumber != null && sinceParam != null ->
                 dao.getForLocalApiByPumpSince(pumpNumber, sinceParam, limit, offset)
             pumpNumber != null ->
@@ -78,22 +83,11 @@ fun Routing.transactionRoutes(
                 dao.getForLocalApi(limit, offset)
         }
 
-        val total = when {
-            pumpNumber != null && sinceParam != null ->
-                dao.countForLocalApiByPumpSince(pumpNumber, sinceParam)
-            pumpNumber != null ->
-                dao.countForLocalApiByPump(pumpNumber)
-            sinceParam != null ->
-                dao.countForLocalApiSince(sinceParam)
-            else ->
-                dao.countForLocalApi()
-        }
-
         call.respond(
             HttpStatusCode.OK,
             TransactionListResponse(
-                transactions = entities.map { LocalTransaction.from(it) },
-                total = total,
+                transactions = rows.map { LocalTransaction.from(it) },
+                total = rows.firstOrNull()?.totalCount ?: 0,
                 limit = limit,
                 offset = offset,
             )
@@ -120,7 +114,7 @@ fun Routing.transactionRoutes(
             return@get
         }
 
-        val entity = dao.getByIdForLocalApi(id)
+        val entity = bufferManager?.getByIdForLocalApi(id) ?: dao.getByIdForLocalApi(id)
         if (entity == null) {
             call.respond(
                 HttpStatusCode.NotFound,

@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.websocket
 
+import com.fccmiddleware.edge.buffer.dao.WsBufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.adapter.common.CurrencyUtils
 import com.fccmiddleware.edge.adapter.common.PumpStatus
@@ -117,6 +118,46 @@ private val txIdCounter = java.util.concurrent.atomic.AtomicInteger(
  * Volume conversion: microlitres → litres (divide by 1,000,000).
  */
 fun BufferedTransaction.toWsDto(): PumpTransactionWsDto {
+    val qty = volumeMicrolitres / 1_000_000.0
+    val currencyFactor = CurrencyUtils.getFactor(currencyCode)
+    val price = unitPriceMinorPerLitre / currencyFactor
+    val total = amountMinorUnits / currencyFactor
+
+    val wsState = when {
+        isDiscard -> "discard"
+        syncStatus == "SYNCED_TO_ODOO" -> "approved"
+        syncStatus == "UPLOADED" -> "approved"
+        else -> "pending"
+    }
+    val wsSyncStatus = if (syncStatus == "PENDING") 0 else 1
+
+    return PumpTransactionWsDto(
+        id = txIdCounter.incrementAndGet(),
+        transactionId = fccTransactionId,
+        pumpId = pumpNumber,
+        nozzleId = nozzleNumber,
+        attendant = attendantId,
+        productId = productCode,
+        qty = qty,
+        unitPrice = price,
+        total = total,
+        state = wsState,
+        startTime = startedAt,
+        endTime = completedAt,
+        orderUuid = orderUuid,
+        syncStatus = wsSyncStatus,
+        odooOrderId = odooOrderId,
+        addToCart = addToCart,
+        paymentId = paymentId,
+    )
+}
+
+/**
+ * AP-025: Map a [WsBufferedTransaction] projection to the legacy [PumpTransactionWsDto] format.
+ * Same logic as [BufferedTransaction.toWsDto] but operates on the lightweight projection
+ * that excludes rawPayloadJson.
+ */
+fun WsBufferedTransaction.toWsDto(): PumpTransactionWsDto {
     val qty = volumeMicrolitres / 1_000_000.0
     val currencyFactor = CurrencyUtils.getFactor(currencyCode)
     val price = unitPriceMinorPerLitre / currencyFactor

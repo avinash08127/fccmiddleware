@@ -14,14 +14,6 @@ export interface LegalEntity {
 
 // ── Sync status ───────────────────────────────────────────────────────────────
 
-export interface MasterDataSyncResponse {
-  upsertedCount: number;
-  unchangedCount: number;
-  deactivatedCount: number;
-  errorCount: number;
-  errors: import('./common.model').ErrorResponse[] | null;
-}
-
 /**
  * Aggregated view of the last master-data sync operation per entity type.
  * Displayed on the Master Data Status feature page.

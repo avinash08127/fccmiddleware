@@ -1,17 +1,23 @@
 package com.fccmiddleware.edge.ui
 
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.fccmiddleware.edge.R
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.fccmiddleware.edge.buffer.BufferDatabase
+import com.fccmiddleware.edge.config.LocalOverrideManager
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.security.KeystoreManager
@@ -38,6 +44,10 @@ class DecommissionedActivity : AppCompatActivity() {
     private val encryptedPrefs: EncryptedPrefsManager by inject()
     private val keystoreManager: KeystoreManager by inject()
     private val bufferDatabase: BufferDatabase by inject()
+    private val localOverrideManager: LocalOverrideManager by inject()
+
+    // LR-001: Track active dialog to dismiss on destroy, consistent with SettingsActivity
+    private var activeDialog: AlertDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,6 +57,13 @@ class DecommissionedActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() { /* no-op */ }
         })
+    }
+
+    override fun onDestroy() {
+        // LR-001: Dismiss any active dialog to prevent window leak
+        activeDialog?.dismiss()
+        activeDialog = null
+        super.onDestroy()
     }
 
     /**
@@ -71,6 +88,10 @@ class DecommissionedActivity : AppCompatActivity() {
         keystoreManager.clearAll()
         encryptedPrefs.clearAll()
 
+        // AF-052: Clear local FCC overrides so the old site's host, port, and
+        // credential settings do not leak to the new site after re-provisioning.
+        localOverrideManager.clearAllOverrides()
+
         val intent = Intent(this, ProvisioningActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
@@ -79,31 +100,67 @@ class DecommissionedActivity : AppCompatActivity() {
     }
 
     private fun buildLayout(): View {
-        val padding = (24 * resources.displayMetrics.density).toInt()
+        val dp = { value: Int -> (value * resources.displayMetrics.density).toInt() }
+        val padding = dp(24)
+        val halfPad = dp(12)
+        val pumaRed = 0xFFE30613.toInt()
+        val pumaGreen = 0xFF007A33.toInt()
+        val darkText = 0xFF1A1A1A.toInt()
+        val subtitleText = 0xFF4A4A4A.toInt()
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
+            gravity = Gravity.CENTER_HORIZONTAL
             setPadding(padding, padding, padding, padding)
+            setBackgroundColor(Color.WHITE)
         }
 
+        // Puma Energy logo
+        layout.addView(ImageView(this).apply {
+            setImageResource(R.drawable.puma_energy_logo)
+            adjustViewBounds = true
+            layoutParams = LinearLayout.LayoutParams(
+                dp(160),
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                gravity = Gravity.CENTER
+                topMargin = dp(32)
+                bottomMargin = halfPad
+            }
+        })
+
+        // Warning icon
         val icon = TextView(this).apply {
             text = "X"
             textSize = 64f
             gravity = Gravity.CENTER
-            setTextColor(0xFFCC0000.toInt())
-            setPadding(0, 0, 0, padding)
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(pumaRed)
+            setPadding(0, 0, 0, halfPad)
         }
         layout.addView(icon)
 
         val title = TextView(this).apply {
             text = "Device Decommissioned"
             textSize = 24f
+            setTypeface(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER
-            setTextColor(0xFFCC0000.toInt())
-            setPadding(0, 0, 0, padding)
+            setTextColor(pumaRed)
+            setPadding(0, 0, 0, halfPad)
         }
         layout.addView(title)
+
+        // Red accent divider
+        layout.addView(View(this).apply {
+            setBackgroundColor(pumaRed)
+            layoutParams = LinearLayout.LayoutParams(
+                dp(60),
+                dp(3),
+            ).apply {
+                gravity = Gravity.CENTER
+                bottomMargin = padding
+            }
+        })
 
         val message = TextView(this).apply {
             text = "This device has been decommissioned by the management portal.\n\n" +
@@ -113,6 +170,7 @@ class DecommissionedActivity : AppCompatActivity() {
                 "2. Request a new provisioning QR code from the admin portal\n" +
                 "3. Tap \"Re-Provision Device\" below and scan the new QR code"
             textSize = 16f
+            setTextColor(subtitleText)
             gravity = Gravity.START
             setPadding(0, 0, 0, padding)
         }
@@ -121,22 +179,36 @@ class DecommissionedActivity : AppCompatActivity() {
         val reProvisionButton = Button(this).apply {
             text = "Re-Provision Device"
             textSize = 16f
-            setPadding(padding, padding / 2, padding, padding / 2)
+            background = GradientDrawable().apply {
+                setColor(pumaGreen)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            setTextColor(Color.WHITE)
+            isAllCaps = true
+            setPadding(dp(32), halfPad, dp(32), halfPad)
         }
         reProvisionButton.setOnClickListener {
-            AlertDialog.Builder(this)
+            // LR-001: Track dialog reference for lifecycle dismissal
+            activeDialog?.dismiss()
+            activeDialog = AlertDialog.Builder(this)
                 .setTitle("Re-Provision Device?")
                 .setMessage(
                     "This will clear all local data and credentials. " +
                     "You will need a new provisioning QR code from the admin portal to continue."
                 )
-                .setPositiveButton("Re-Provision") { _, _ -> startReProvisioning() }
-                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Re-Provision") { _, _ ->
+                    activeDialog = null
+                    startReProvisioning()
+                }
+                .setNegativeButton("Cancel") { _, _ -> activeDialog = null }
+                .setOnCancelListener { activeDialog = null }
                 .show()
         }
         layout.addView(reProvisionButton)
 
-        val scrollView = ScrollView(this)
+        val scrollView = ScrollView(this).apply {
+            setBackgroundColor(Color.WHITE)
+        }
         scrollView.addView(layout)
         return scrollView
     }

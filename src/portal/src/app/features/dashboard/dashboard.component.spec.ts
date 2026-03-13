@@ -12,7 +12,7 @@ const mockSummary: DashboardSummary = {
     hourlyBuckets: Array.from({ length: 24 }, (_, i) => ({
       hour: new Date(Date.now() - (23 - i) * 3_600_000).toISOString(),
       total: 100 + i * 10,
-      bySource: { FCC_PUSH: 60 + i, EDGE_UPLOAD: 30 + i, CLOUD_PULL: 10 + i },
+      bySource: { fccPush: 60 + i, edgeUpload: 30 + i, cloudPull: 10 + i },
     })),
   },
   ingestionHealth: {

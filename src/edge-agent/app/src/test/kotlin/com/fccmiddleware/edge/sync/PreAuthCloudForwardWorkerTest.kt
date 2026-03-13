@@ -3,6 +3,8 @@ package com.fccmiddleware.edge.sync
 import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
+import com.fccmiddleware.edge.security.KeystoreBackedStringCipher
+import com.fccmiddleware.edge.security.KeystoreManager
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -49,6 +51,7 @@ class PreAuthCloudForwardWorkerTest {
     private val preAuthDao: PreAuthDao = mockk(relaxed = true)
     private val cloudApiClient: CloudApiClient = mockk()
     private val tokenProvider: DeviceTokenProvider = mockk()
+    private val keystoreManager: KeystoreManager = mockk()
 
     private val config = PreAuthCloudForwardWorkerConfig(
         batchSize = 10,
@@ -64,11 +67,18 @@ class PreAuthCloudForwardWorkerTest {
             preAuthDao = preAuthDao,
             cloudApiClient = cloudApiClient,
             tokenProvider = tokenProvider,
+            keystoreManager = keystoreManager,
             config = config,
         )
         every { tokenProvider.isDecommissioned() } returns false
         every { tokenProvider.markDecommissioned() } just Runs
         every { tokenProvider.getAccessToken() } returns "valid-jwt-token"
+        every { keystoreManager.storeSecret(any(), any()) } answers {
+            secondArg<String>().toByteArray(Charsets.UTF_8)
+        }
+        every { keystoreManager.retrieveSecret(any(), any()) } answers {
+            String(secondArg<ByteArray>(), Charsets.UTF_8)
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -252,6 +262,28 @@ class PreAuthCloudForwardWorkerTest {
         assertEquals("AUTH-456", req.fccAuthorizationCode)
         assertEquals("Test Customer", req.customerName)
         assertEquals("TIN-123456789", req.customerTaxId)
+        coVerify {
+            preAuthDao.updateCustomerTaxId(
+                record.id,
+                match { it?.startsWith(KeystoreBackedStringCipher.ENCRYPTED_PREFIX_V1) == true },
+            )
+        }
+    }
+
+    @Test
+    fun `encrypted customerTaxId is decrypted before cloud forward`() = runTest {
+        val cipher = KeystoreBackedStringCipher(keystoreManager, KeystoreManager.ALIAS_PREAUTH_PII)
+        val record = makePreAuth(customerTaxId = cipher.encryptForStorage("TIN-ENCRYPTED-123"))
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+
+        val requestSlot = slot<PreAuthForwardRequest>()
+        coEvery { cloudApiClient.forwardPreAuth(capture(requestSlot), any()) } returns
+            CloudPreAuthForwardResult.Success(makeForwardResponse(record))
+
+        worker.forwardUnsyncedPreAuths()
+
+        assertEquals("TIN-ENCRYPTED-123", requestSlot.captured.customerTaxId)
+        coVerify(exactly = 0) { preAuthDao.updateCustomerTaxId(record.id, any()) }
     }
 
     // -------------------------------------------------------------------------
@@ -396,6 +428,7 @@ class PreAuthCloudForwardWorkerTest {
             preAuthDao = preAuthDao,
             cloudApiClient = cloudApiClient,
             tokenProvider = tokenProvider,
+            keystoreManager = keystoreManager,
             config = PreAuthCloudForwardWorkerConfig(batchSize = 10, maxConcurrency = 1),
         )
         val r1 = makePreAuth()

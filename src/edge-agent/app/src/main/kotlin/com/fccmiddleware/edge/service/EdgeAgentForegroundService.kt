@@ -33,7 +33,9 @@ import com.fccmiddleware.edge.R
 import com.fccmiddleware.edge.ui.DecommissionedActivity
 import com.fccmiddleware.edge.ui.ProvisioningActivity
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -172,20 +174,25 @@ class EdgeAgentForegroundService : Service() {
     override fun onDestroy() {
         serviceStarted.set(false)
         cadenceController.stop()
-        // AT-006: Synchronously close the FCC adapter to release TCP connections,
+        // AT-006/AT-018: Synchronously close the FCC adapter to release TCP connections,
         // embedded Ktor servers (RadixPushListener, AdvatecWebhookListener), and
         // heartbeat managers before cancelling the app scope. cadenceController.stop()
         // launches a disconnect coroutine, but appScope.cancel() below would cancel
-        // it before completion. FccRuntimeState.clear() uses (adapter as Closeable).close()
+        // it before completion. FccRuntimeState.clear() calls IFccAdapter.close()
         // which is synchronous — DomsJplAdapter cancels its scope, RadixAdapter stops its
-        // push listener, AdvatecAdapter stops its webhook listener.
+        // push listener, AdvatecAdapter stops its webhook listener, PetroniteAdapter
+        // closes its HttpClient.
         fccRuntimeState.clear()
         connectivityManager.stop()
         networkBinder.stop()
         localApiServer.stop()
         odooWebSocketServer.stop()
         fileLogger.close()
-        appScope.cancel()
+        // LR-004: Use cancelChildren() instead of cancel() so the Koin singleton scope
+        // remains usable if the service is restarted via START_STICKY after decommission/
+        // re-provision paths. cancel() permanently kills the scope; cancelChildren()
+        // cancels all running coroutines but allows new launches after restart.
+        appScope.coroutineContext[Job]?.cancelChildren()
         AppLogger.i(TAG, "EdgeAgentForegroundService destroyed")
         super.onDestroy()
     }
@@ -274,8 +281,8 @@ class EdgeAgentForegroundService : Service() {
         odooWebSocketServer.wireFccAdapter(adapter)
         cadenceController.updateFccAdapter(adapter)
 
-        encryptedPrefs.fccHost = agentFccConfig.hostAddress
-        encryptedPrefs.fccPort = agentFccConfig.port
+        // AP-030: Batch FCC host+port into single encrypted prefs write.
+        encryptedPrefs.updateFccConnection(host = agentFccConfig.hostAddress, port = agentFccConfig.port)
         lastAppliedConfigVersion = siteConfig.configVersion
 
         AppLogger.i(
@@ -316,6 +323,10 @@ class EdgeAgentForegroundService : Service() {
                 }
                 consecutiveFailures = 0
             } catch (e: Exception) {
+                // LR-010: Rethrow CancellationException to allow proper coroutine cancellation.
+                // Without this, scope.cancel() in onDestroy would be swallowed, causing 10
+                // spurious error log entries before the loop exits via the failure guard.
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 consecutiveFailures++
                 AppLogger.e(TAG, "monitorReprovisioningState error ($consecutiveFailures/$MAX_CONSECUTIVE_MONITOR_FAILURES): ${e.message}", e)
                 if (consecutiveFailures >= MAX_CONSECUTIVE_MONITOR_FAILURES) {
@@ -346,6 +357,8 @@ class EdgeAgentForegroundService : Service() {
                 }
                 consecutiveFailures = 0
             } catch (e: Exception) {
+                // LR-010: Rethrow CancellationException to allow proper coroutine cancellation.
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 consecutiveFailures++
                 AppLogger.e(TAG, "monitorDecommissionedState error ($consecutiveFailures/$MAX_CONSECUTIVE_MONITOR_FAILURES): ${e.message}", e)
                 if (consecutiveFailures >= MAX_CONSECUTIVE_MONITOR_FAILURES) {

@@ -40,6 +40,7 @@ public sealed class OpsReconciliationController : PortalControllerBase
         [FromQuery] Guid? legalEntityId,
         [FromQuery] string? siteCode,
         [FromQuery] string? status,
+        [FromQuery] string? decision,
         [FromQuery] DateTimeOffset? from,
         [FromQuery] DateTimeOffset? to,
         [FromQuery] DateTimeOffset? since,
@@ -68,6 +69,27 @@ public sealed class OpsReconciliationController : PortalControllerBase
             parsedStatus = statusValue;
         }
 
+        // M-06: Support decision filter (APPROVED, REJECTED, or PENDING_DECISION)
+        ReconciliationStatus? parsedDecisionStatus = null;
+        if (!string.IsNullOrWhiteSpace(decision))
+        {
+            if (string.Equals(decision, "PENDING_DECISION", StringComparison.OrdinalIgnoreCase))
+            {
+                // PENDING_DECISION means: not yet APPROVED or REJECTED — handled by the query handler
+                // We leave parsedDecisionStatus null and pass a flag instead
+            }
+            else if (Enum.TryParse<ReconciliationStatus>(decision, true, out var decisionValue)
+                     && decisionValue is ReconciliationStatus.APPROVED or ReconciliationStatus.REJECTED)
+            {
+                parsedDecisionStatus = decisionValue;
+            }
+            else
+            {
+                return BadRequest(BuildError("VALIDATION.INVALID_DECISION",
+                    $"decision must be 'APPROVED', 'REJECTED', or 'PENDING_DECISION'."));
+            }
+        }
+
         var access = _accessResolver.Resolve(User);
         if (!access.IsValid)
         {
@@ -79,13 +101,16 @@ public sealed class OpsReconciliationController : PortalControllerBase
             return Forbid();
         }
 
+        // When decision filter is specified and no explicit status filter, derive status from decision
+        var effectiveStatus = parsedStatus ?? parsedDecisionStatus;
+
         var result = await _mediator.Send(new GetReconciliationExceptionsQuery
         {
             LegalEntityId = legalEntityId,
             ScopedLegalEntityIds = access.ScopedLegalEntityIds,
             AllowAllLegalEntities = access.AllowAllLegalEntities,
             SiteCode = siteCode,
-            Status = parsedStatus,
+            Status = effectiveStatus,
             From = from,
             To = to,
             Since = since,

@@ -34,25 +34,22 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IOptions<AgentConfiguration> _config;
-    private readonly IDeviceTokenProvider _tokenProvider;
+    private readonly AuthenticatedCloudRequestHandler _authHandler;
     private readonly IRegistrationManager _registrationManager;
     private readonly ILogger<StatusPollWorker> _logger;
-
-    // Set permanently on DEVICE_DECOMMISSIONED. Process restart required to clear.
-    private volatile bool _decommissioned;
 
     public StatusPollWorker(
         IServiceScopeFactory scopeFactory,
         IHttpClientFactory httpFactory,
         IOptions<AgentConfiguration> config,
-        IDeviceTokenProvider tokenProvider,
+        AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
         ILogger<StatusPollWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _httpFactory = httpFactory;
         _config = config;
-        _tokenProvider = tokenProvider;
+        _authHandler = authHandler;
         _registrationManager = registrationManager;
         _logger = logger;
     }
@@ -60,16 +57,10 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
     /// <inheritdoc />
     public async Task<int> PollAsync(CancellationToken ct)
     {
-        if (_decommissioned)
+        // T-DSK-013: Check centralized decommission flag instead of per-worker volatile boolean.
+        if (_registrationManager.IsDecommissioned)
         {
             _logger.LogDebug("Status poll skipped: device is decommissioned");
-            return 0;
-        }
-
-        var token = await _tokenProvider.GetTokenAsync(ct);
-        if (token is null)
-        {
-            _logger.LogWarning("Status poll skipped: no device token available (device not yet registered?)");
             return 0;
         }
 
@@ -81,47 +72,18 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
 
         _logger.LogDebug("SYNCED_TO_ODOO poll: querying since {Since:O}", since);
 
-        SyncedStatusResponse? response;
-        try
-        {
-            response = await SendPollRequestAsync(since, token, ct);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // 401: refresh token once and retry
-            _logger.LogWarning("Status poll received 401; refreshing device token");
-            token = await _tokenProvider.RefreshTokenAsync(ct);
-            if (token is null)
-            {
-                _logger.LogWarning("Token refresh failed; status poll aborted");
-                return 0;
-            }
+        // T-DSK-010: Delegate auth flow to the shared handler.
+        var result = await _authHandler.ExecuteAsync<SyncedStatusResponse?>(
+            (token, innerCt) => SendPollRequestAsync(since, token, innerCt),
+            "status poll", ct);
 
-            try
-            {
-                response = await SendPollRequestAsync(since, token, ct);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Status poll failed after token refresh");
-                return 0;
-            }
-        }
-        catch (DeviceDecommissionedException ex)
-        {
-            await _registrationManager.MarkDecommissionedAsync();
-            _decommissioned = true;
-            _logger.LogCritical(
-                "DEVICE_DECOMMISSIONED received from cloud during status poll. " +
-                "All cloud sync halted. Agent restart required to re-enable. Reason: {Reason}", ex.Message);
+        if (result.RequiresHalt)
             return 0;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Status poll HTTP request failed");
-            return 0;
-        }
 
+        if (!result.IsSuccess)
+            return 0;
+
+        var response = result.Value;
         if (response is null || response.FccTransactionIds.Count == 0)
         {
             // No new synced records — advance the timestamp so the next poll window moves forward.

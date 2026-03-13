@@ -97,6 +97,8 @@ public static class ServiceCollectionExtensions
 
         // DEA-3.1: Cloud upload pipeline.
         services.AddSingleton<IDeviceTokenProvider, DeviceTokenProvider>();
+        // T-DSK-010: Shared auth handler eliminates duplicated 401/refresh/retry logic across workers.
+        services.AddSingleton<AuthenticatedCloudRequestHandler>();
         services.AddSingleton<ICloudSyncService, CloudUploadWorker>();
 
         // DEA-3.2: SYNCED_TO_ODOO status poller.
@@ -112,6 +114,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IPostConfigureOptions<AgentConfiguration>>(
             sp => sp.GetRequiredService<ConfigManager>());
         services.AddSingleton<IConfigPoller, ConfigPollWorker>();
+        // T-DSK-016: Config save service — encapsulates SiteConfig construction and apply orchestration.
+        services.AddSingleton<ConfigSaveService>();
 
         // DEA-3.4: Telemetry reporter and error tracker.
         services.AddSingleton<IErrorCountTracker, ErrorCountTracker>();
@@ -152,6 +156,8 @@ public static class ServiceCollectionExtensions
     {
         services.AddScoped<TransactionBufferManager>();
         services.AddScoped<IntegrityChecker>();
+        // T-DSK-014: Transaction update service — shared by WebSocket handler and REST API.
+        services.AddScoped<ITransactionUpdateService, TransactionUpdateService>();
         return services;
     }
 

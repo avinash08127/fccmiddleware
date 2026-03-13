@@ -29,7 +29,6 @@ import kotlin.random.Random
  * UP recovery:    1 successful probe immediately transitions back to UP.
  *
  * Exposes [state] as a [StateFlow<ConnectivityState>] for observers.
- * Notifies [ConnectivityTransitionListener] for worker side-effect triggers.
  *
  * Architecture rule: probes are injectable lambdas for testability — the caller
  * wires the real HTTP and FCC adapter calls. Network binding (WiFi for FCC,
@@ -45,7 +44,6 @@ class ConnectivityManager(
     /** suspend () -> Boolean: true = FCC reachable; wraps IFccAdapter.heartbeat() with 5s timeout */
     private val fccProbe: suspend () -> Boolean,
     private val auditLogDao: AuditLogDao,
-    private val listener: ConnectivityTransitionListener? = null,
     private val scope: CoroutineScope,
     val config: ProbeConfig = ProbeConfig(),
     /** Optional — used only for logging which physical network each probe runs over. */
@@ -75,12 +73,22 @@ class ConnectivityManager(
     private var internetConsecSuccesses = 0
     private var fccConsecSuccesses = 0
 
+    // AF-050: Skip recovery threshold on the very first probe round. The initial
+    // FULLY_OFFLINE state has no prior "DOWN" evidence to protect against oscillation,
+    // so requiring multiple consecutive successes just adds a ~30s cold-start delay.
+    private var internetInitialProbe = true
+    private var fccInitialProbe = true
+
     // Diagnostics timestamps (ms epoch, volatile for read outside mutex)
     @Volatile var lastInternetProbeMs: Long = 0L
     @Volatile var lastFccProbeMs: Long = 0L
     @Volatile var lastFccSuccessMs: Long = 0L
 
     private var probeJobs: Job? = null
+
+    // LR-005: Guard to make stop() terminal. Once stopped, start() is a no-op
+    // to prevent accidental restart on the same scope after the lifecycle has ended.
+    private var stopped = false
 
     companion object {
         private const val TAG = "ConnectivityManager"
@@ -89,8 +97,14 @@ class ConnectivityManager(
     /**
      * Start both probe loops immediately. First probe runs without delay
      * per spec: "Initialize in FULLY_OFFLINE on app start, run both probes immediately."
+     *
+     * Once [stop] has been called, subsequent calls to [start] are ignored.
      */
     fun start() {
+        if (stopped) {
+            AppLogger.w(TAG, "start() called after stop() — ignoring (create a new instance to restart)")
+            return
+        }
         probeJobs?.cancel()
         probeJobs = scope.launch {
             launch { runInternetProbeLoop() }
@@ -100,7 +114,17 @@ class ConnectivityManager(
     }
 
     fun stop() {
+        stopped = true
         probeJobs?.cancel()
+        // AT-049: Reset all state so observers see FULLY_OFFLINE immediately after stop,
+        // and no stale counters survive if the instance is ever re-used.
+        _state.value = ConnectivityState.FULLY_OFFLINE
+        internetUp = false
+        fccUp = false
+        internetConsecFailures = 0
+        fccConsecFailures = 0
+        internetConsecSuccesses = 0
+        fccConsecSuccesses = 0
         AppLogger.i(TAG, "ConnectivityManager stopped")
     }
 
@@ -134,11 +158,16 @@ class ConnectivityManager(
     }
 
     // -------------------------------------------------------------------------
-    // Probe result processing (mutex-protected)
+    // Probe result processing
     // -------------------------------------------------------------------------
 
+    /**
+     * AP-027: State derivation is mutex-protected; audit log write and listener
+     * notification happen outside the lock to avoid blocking the other probe loop
+     * on disk I/O.
+     */
     private suspend fun processProbeResult(isInternet: Boolean, success: Boolean) {
-        mutex.withLock {
+        val transition: Pair<ConnectivityState, ConnectivityState>? = mutex.withLock {
             val prevInternetUp = internetUp
             val prevFccUp = fccUp
 
@@ -146,14 +175,17 @@ class ConnectivityManager(
                 if (success) {
                     internetConsecFailures = 0
                     internetConsecSuccesses++
-                    // Require recoveryThreshold consecutive successes before UP recovery
-                    // (prevents oscillation under marginal networks)
-                    if (internetConsecSuccesses >= config.recoveryThreshold) {
+                    // AF-050: On the initial probe, skip recovery threshold to avoid
+                    // ~30s cold-start delay. The initial FULLY_OFFLINE state has no
+                    // prior DOWN evidence, so anti-oscillation is not needed.
+                    if (internetInitialProbe || internetConsecSuccesses >= config.recoveryThreshold) {
                         internetUp = true
+                        internetInitialProbe = false
                     }
                 } else {
                     internetConsecSuccesses = 0
                     internetConsecFailures++
+                    internetInitialProbe = false
                     if (internetConsecFailures >= config.failureThreshold) {
                         internetUp = false
                     }
@@ -162,12 +194,14 @@ class ConnectivityManager(
                 if (success) {
                     fccConsecFailures = 0
                     fccConsecSuccesses++
-                    if (fccConsecSuccesses >= config.recoveryThreshold) {
+                    if (fccInitialProbe || fccConsecSuccesses >= config.recoveryThreshold) {
                         fccUp = true
+                        fccInitialProbe = false
                     }
                 } else {
                     fccConsecSuccesses = 0
                     fccConsecFailures++
+                    fccInitialProbe = false
                     if (fccConsecFailures >= config.failureThreshold) {
                         fccUp = false
                     }
@@ -176,44 +210,38 @@ class ConnectivityManager(
 
             val probeChanged = internetUp != prevInternetUp || fccUp != prevFccUp
             if (probeChanged) {
-                deriveAndEmitStateUnlocked()
+                val newState = when {
+                    internetUp && fccUp -> ConnectivityState.FULLY_ONLINE
+                    !internetUp && fccUp -> ConnectivityState.INTERNET_DOWN
+                    internetUp && !fccUp -> ConnectivityState.FCC_UNREACHABLE
+                    else -> ConnectivityState.FULLY_OFFLINE
+                }
+                val prevState = _state.value
+                if (newState != prevState) {
+                    _state.value = newState
+                    Pair(prevState, newState)
+                } else null
+            } else null
+        }
+
+        // Audit log write and listener notification outside the mutex
+        if (transition != null) {
+            val (prevState, newState) = transition
+            AppLogger.i(TAG, "State transition: $prevState → $newState")
+            val now = Instant.now().toString()
+            try {
+                auditLogDao.insert(
+                    AuditLog(
+                        eventType = "CONNECTIVITY_TRANSITION",
+                        message = "$prevState → $newState",
+                        correlationId = UUID.randomUUID().toString(),
+                        createdAt = now,
+                    )
+                )
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Failed to write connectivity audit log: ${e.message}")
             }
         }
-    }
-
-    // -------------------------------------------------------------------------
-    // State derivation (call with mutex held)
-    // -------------------------------------------------------------------------
-
-    private suspend fun deriveAndEmitStateUnlocked() {
-        val newState = when {
-            internetUp && fccUp -> ConnectivityState.FULLY_ONLINE
-            !internetUp && fccUp -> ConnectivityState.INTERNET_DOWN
-            internetUp && !fccUp -> ConnectivityState.FCC_UNREACHABLE
-            else -> ConnectivityState.FULLY_OFFLINE
-        }
-        val prevState = _state.value
-        if (newState == prevState) return
-
-        _state.value = newState
-        AppLogger.i(TAG, "State transition: $prevState → $newState")
-
-        // Write audit log — suspend OK here (called from probe coroutine, not UI)
-        val now = Instant.now().toString()
-        try {
-            auditLogDao.insert(
-                AuditLog(
-                    eventType = "CONNECTIVITY_TRANSITION",
-                    message = "$prevState → $newState",
-                    correlationId = UUID.randomUUID().toString(),
-                    createdAt = now,
-                )
-            )
-        } catch (e: Exception) {
-            AppLogger.w(TAG, "Failed to write connectivity audit log: ${e.message}")
-        }
-
-        listener?.onTransition(prevState, newState)
     }
 
     // -------------------------------------------------------------------------
@@ -276,16 +304,4 @@ class ConnectivityManager(
     }
 
     private fun jitter(): Long = if (config.jitterRangeMs <= 0L) 0L else Random.nextLong(0L, config.jitterRangeMs)
-}
-
-/**
- * Listener for connectivity state transition side effects.
- *
- * Implemented by CadenceController (or foreground service) to react to state
- * changes with worker start/stop logic per §5.4 transition table.
- *
- * Declared as `fun interface` to enable SAM conversion (lambda syntax) in tests.
- */
-fun interface ConnectivityTransitionListener {
-    fun onTransition(from: ConnectivityState, to: ConnectivityState)
 }

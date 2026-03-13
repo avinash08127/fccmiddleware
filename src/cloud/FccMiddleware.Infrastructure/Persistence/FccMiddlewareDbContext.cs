@@ -66,6 +66,8 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     // Configuration & registration
     // -------------------------------------------------------------------------
     public DbSet<FccConfig> FccConfigs => Set<FccConfig>();
+    public DbSet<AdapterDefaultConfig> AdapterDefaultConfigs => Set<AdapterDefaultConfig>();
+    public DbSet<SiteAdapterOverride> SiteAdapterOverrides => Set<SiteAdapterOverride>();
     public DbSet<AgentRegistration> AgentRegistrations => Set<AgentRegistration>();
     public DbSet<AgentTelemetrySnapshot> AgentTelemetrySnapshots => Set<AgentTelemetrySnapshot>();
     public DbSet<AgentDiagnosticLog> DiagnosticLogs => Set<AgentDiagnosticLog>();
@@ -90,6 +92,13 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     // -------------------------------------------------------------------------
     public DbSet<BootstrapToken>     BootstrapTokens     => Set<BootstrapToken>();
     public DbSet<DeviceRefreshToken> DeviceRefreshTokens => Set<DeviceRefreshToken>();
+
+    // -------------------------------------------------------------------------
+    // Portal users & roles
+    // -------------------------------------------------------------------------
+    public DbSet<PortalUser>              PortalUsers              => Set<PortalUser>();
+    public DbSet<PortalRole>              PortalRoles              => Set<PortalRole>();
+    public DbSet<PortalUserLegalEntity>   PortalUserLegalEntities  => Set<PortalUserLegalEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -350,6 +359,14 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
 
+        modelBuilder.Entity<AdapterDefaultConfig>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
+        modelBuilder.Entity<SiteAdapterOverride>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
         modelBuilder.Entity<AgentRegistration>()
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
@@ -534,6 +551,20 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         Guid deviceId, CancellationToken ct) =>
         await Set<AgentRegistration>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(a => a.Id == deviceId, ct);
+
+    async Task<AdapterDefaultConfig?> IAgentConfigDbContext.GetAdapterDefaultConfigAsync(
+        Guid legalEntityId,
+        string adapterKey,
+        CancellationToken ct) =>
+        await Set<AdapterDefaultConfig>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(item => item.LegalEntityId == legalEntityId && item.AdapterKey == adapterKey, ct);
+
+    async Task<SiteAdapterOverride?> IAgentConfigDbContext.GetSiteAdapterOverrideAsync(
+        Guid siteId,
+        string adapterKey,
+        CancellationToken ct) =>
+        await Set<SiteAdapterOverride>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(item => item.SiteId == siteId && item.AdapterKey == adapterKey, ct);
 
     // -------------------------------------------------------------------------
     // ITelemetryDbContext implementation

@@ -1,3 +1,4 @@
+using FccDesktopAgent.Api.Auth;
 using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.WebSocket;
 using Microsoft.AspNetCore.Builder;
@@ -30,6 +31,7 @@ public static class OdooWsBridge
     {
         var wsServer = app.Services.GetRequiredService<OdooWebSocketServer>();
         var options = app.Services.GetRequiredService<IOptions<WebSocketServerOptions>>().Value;
+        var apiOptions = app.Services.GetRequiredService<IOptionsMonitor<LocalApiOptions>>();
         var logger = app.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger("OdooWsBridge");
 
@@ -53,6 +55,11 @@ public static class OdooWsBridge
                 return;
             }
 
+            // F-DSK-012: Validate API key on the HTTP upgrade request before accepting
+            // the WebSocket connection, matching the REST API's ApiKeyMiddleware gate.
+            if (!ValidateApiKey(context, apiOptions, logger))
+                return;
+
             using var ws = await context.WebSockets.AcceptWebSocketAsync();
             logger.LogInformation("WebSocket upgrade accepted from {RemoteIp}",
                 context.Connection.RemoteIpAddress);
@@ -71,6 +78,10 @@ public static class OdooWsBridge
                 return;
             }
 
+            // F-DSK-012: Validate API key on the HTTP upgrade request.
+            if (!ValidateApiKey(context, apiOptions, logger))
+                return;
+
             using var ws = await context.WebSockets.AcceptWebSocketAsync();
             logger.LogInformation("WebSocket upgrade accepted at root from {RemoteIp}",
                 context.Connection.RemoteIpAddress);
@@ -81,5 +92,41 @@ public static class OdooWsBridge
         logger.LogInformation("Odoo WebSocket server mapped at /ws and / (port configured in Kestrel)");
 
         return app;
+    }
+
+    /// <summary>
+    /// F-DSK-012: Validates the API key on the WebSocket HTTP upgrade request.
+    /// Accepts the key via the <c>X-Api-Key</c> header or <c>apiKey</c> query parameter
+    /// (WebSocket clients often cannot set custom headers).
+    /// Returns <c>true</c> if authenticated, <c>false</c> if the request was rejected (401 already written).
+    /// </summary>
+    private static bool ValidateApiKey(
+        HttpContext context,
+        IOptionsMonitor<LocalApiOptions> apiOptions,
+        ILogger logger)
+    {
+        var configuredKey = apiOptions.CurrentValue.ApiKey;
+
+        // No key configured → auth disabled (dev / unprovisioned)
+        if (string.IsNullOrWhiteSpace(configuredKey))
+            return true;
+
+        // Check header first, then query parameter
+        var providedKey = context.Request.Headers.TryGetValue("X-Api-Key", out var headerKey)
+            ? headerKey.ToString()
+            : context.Request.Query.TryGetValue("apiKey", out var queryKey)
+                ? queryKey.ToString()
+                : null;
+
+        if (providedKey is null || !ApiKeyMiddleware.ConstantTimeEquals(providedKey, configuredKey))
+        {
+            logger.LogWarning(
+                "WebSocket upgrade rejected from {RemoteIp} — missing or invalid API key",
+                context.Connection.RemoteIpAddress);
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return false;
+        }
+
+        return true;
     }
 }

@@ -17,6 +17,7 @@ export class AuditService {
       params.eventTypes.forEach((t) => (p = p.append('eventTypes', t)));
     }
     if (params.siteCode) p = p.set('siteCode', params.siteCode);
+    if (params.adapterKey) p = p.set('adapterKey', params.adapterKey);
     if (params.from) p = p.set('from', params.from);
     if (params.to) p = p.set('to', params.to);
     return this.http.get<PagedResult<AuditEvent>>('/api/v1/audit/events', { params: p });

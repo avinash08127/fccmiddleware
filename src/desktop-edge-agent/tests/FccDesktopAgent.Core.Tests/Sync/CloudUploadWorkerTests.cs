@@ -75,13 +75,16 @@ public sealed class CloudUploadWorkerTests : IDisposable
         });
 
         var registrationManager = Substitute.For<IRegistrationManager>();
+        var authHandler = new AuthenticatedCloudRequestHandler(
+            _tokenProvider, registrationManager,
+            NullLogger<AuthenticatedCloudRequestHandler>.Instance);
 
         // noRetry: use ResiliencePipeline.Empty so tests don't wait for backoff delays.
         return new CloudUploadWorker(
             _serviceProvider.GetRequiredService<IServiceScopeFactory>(),
             factory,
             config,
-            _tokenProvider,
+            authHandler,
             registrationManager,
             NullLogger<CloudUploadWorker>.Instance,
             noRetry ? ResiliencePipeline.Empty : null);

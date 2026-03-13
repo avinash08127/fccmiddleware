@@ -92,7 +92,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task GetExceptions_ReturnsScopedFlaggedAndUnmatchedRecords()
     {
-        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user-1", ScopedLegalEntityId);
 
         var response = await _client.GetAsync(
             $"/api/v1/ops/reconciliation/exceptions?legalEntityId={ScopedLegalEntityId}&siteCode=OPS-SITE-001");
@@ -133,7 +133,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task GetExceptions_WithStatusFilter_OnlyReturnsRequestedStatus()
     {
-        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user-1", ScopedLegalEntityId);
 
         var response = await _client.GetAsync(
             $"/api/v1/ops/reconciliation/exceptions?legalEntityId={ScopedLegalEntityId}&status=APPROVED");
@@ -151,7 +151,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task GetExceptions_CorruptedCrossTenantLinks_DoNotLeakEnrichmentData()
     {
-        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user-1", ScopedLegalEntityId);
 
         var response = await _client.GetAsync(
             $"/api/v1/ops/reconciliation/exceptions?legalEntityId={ScopedLegalEntityId}&siteCode=OPS-SITE-003&status=VARIANCE_FLAGGED");
@@ -170,7 +170,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task GetById_ReturnsVariancePercentAlongsideLegacyVarianceBps()
     {
-        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user-1", ScopedLegalEntityId);
 
         var response = await _client.GetAsync($"/api/v1/ops/reconciliation/{FlaggedReconciliationId}");
 
@@ -184,7 +184,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task GetById_CorruptedCrossTenantLinks_DoNotLeakEnrichmentData()
     {
-        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user-1", ScopedLegalEntityId);
 
         var response = await _client.GetAsync($"/api/v1/ops/reconciliation/{CorruptedScopedReconciliationId}");
 
@@ -199,7 +199,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task Approve_UpdatesReviewFieldsAndPublishesEvent()
     {
-        SetPortalAuth("OperationsManager", "portal-user-approve", ScopedLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user-approve", ScopedLegalEntityId);
 
         var response = await _client.PostAsJsonAsync(
             $"/api/v1/ops/reconciliation/{FlaggedReconciliationId}/approve",
@@ -228,7 +228,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task Reject_RequiresAllowedRole()
     {
-        SetPortalAuth("Auditor", "portal-auditor", ScopedLegalEntityId);
+        SetPortalAuth("FccViewer", "portal-auditor", ScopedLegalEntityId);
 
         var response = await _client.PostAsJsonAsync(
             $"/api/v1/ops/reconciliation/{FlaggedReconciliationId}/reject",
@@ -240,7 +240,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task Reject_RequiresReason()
     {
-        SetPortalAuth("SystemAdmin", "portal-admin", ScopedLegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", ScopedLegalEntityId);
 
         var response = await _client.PostAsJsonAsync(
             $"/api/v1/ops/reconciliation/{FlaggedReconciliationId}/reject",
@@ -255,7 +255,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task Reject_RequiresReasonWithMinimumLength()
     {
-        SetPortalAuth("SystemAdmin", "portal-admin", ScopedLegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", ScopedLegalEntityId);
 
         var response = await _client.PostAsJsonAsync(
             $"/api/v1/ops/reconciliation/{FlaggedReconciliationId}/reject",
@@ -270,7 +270,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
     [Fact]
     public async Task Approve_RejectsCrossTenantReview()
     {
-        SetPortalAuth("OperationsManager", "portal-user-1", ScopedLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user-1", ScopedLegalEntityId);
 
         var response = await _client.PostAsJsonAsync(
             $"/api/v1/ops/reconciliation/{CrossTenantReconciliationId}/approve",
@@ -291,7 +291,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
             new("roles", role)
         };
 
-        if (legalEntityIds.Length == 0 && role.Equals("SystemAdmin", StringComparison.OrdinalIgnoreCase))
+        if (legalEntityIds.Length == 0 && role.Equals("FccAdmin", StringComparison.OrdinalIgnoreCase))
         {
             claims.Add(new Claim("legal_entities", "*"));
         }
@@ -328,7 +328,7 @@ public sealed class ReconciliationReviewApiTests : IAsyncLifetime
                 new Claim(JwtRegisteredClaimNames.Sub, "device-review-test"),
                 new Claim("site", siteCode),
                 new Claim("lei", legalEntityId.ToString()),
-                new Claim("roles", "OperationsManager")
+                new Claim("roles", "FccUser")
             ]),
             Expires = DateTime.UtcNow.AddMinutes(30),
             Issuer = TestDeviceIssuer,

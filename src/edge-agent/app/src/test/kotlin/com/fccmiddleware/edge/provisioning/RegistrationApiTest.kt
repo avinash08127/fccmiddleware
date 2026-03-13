@@ -153,6 +153,63 @@ class RegistrationApiTest {
             assertTrue(result is CloudRegistrationResult.TransportError)
             assertTrue((result as CloudRegistrationResult.TransportError).message.contains("Connection refused"))
         }
+
+        @Test
+        fun `uses dedicated pinned registration client when bootstrap pins are present`() = runTest {
+            var recordedBaseUrl: String? = null
+            var recordedPins: List<String>? = null
+
+            val baseClient = HttpClient(
+                MockEngine {
+                    error("un-pinned pre-registration client should not be used for registerDevice")
+                },
+            ) {
+                install(ContentNegotiation) {
+                    json(jsonParser)
+                }
+            }
+
+            val response = DeviceRegistrationResponse(
+                deviceId = "d1234567-0000-0000-0000-000000000001",
+                deviceToken = "eyJhbGciOiJFUzI1NiJ9.test",
+                refreshToken = "opaque-refresh-token",
+                tokenExpiresAt = "2026-03-12T00:00:00Z",
+                siteCode = "MW-LLW-001",
+                legalEntityId = "10000000-0000-0000-0000-000000000001",
+                siteConfig = null,
+                registeredAt = "2026-03-11T12:00:00Z",
+            )
+            val pinnedClient = HttpClient(
+                MockEngine {
+                    respond(
+                        content = jsonParser.encodeToString(response),
+                        status = HttpStatusCode.Created,
+                        headers = jsonHeaders,
+                    )
+                },
+            ) {
+                install(ContentNegotiation) {
+                    json(jsonParser)
+                }
+            }
+
+            val client = HttpCloudApiClient(
+                cloudBaseUrl = HttpCloudApiClient.PRE_REGISTRATION_URL,
+                httpClient = baseClient,
+                certificatePins = listOf("sha256/test-bootstrap-pin"),
+                registrationClientFactory = { baseUrl, pins, _ ->
+                    recordedBaseUrl = baseUrl
+                    recordedPins = pins
+                    pinnedClient
+                },
+            )
+
+            val result = client.registerDevice("https://api.test.io", sampleRequest)
+
+            assertTrue(result is CloudRegistrationResult.Success)
+            assertEquals("https://api.test.io", recordedBaseUrl)
+            assertEquals(listOf("sha256/test-bootstrap-pin"), recordedPins)
+        }
     }
 
     @Nested

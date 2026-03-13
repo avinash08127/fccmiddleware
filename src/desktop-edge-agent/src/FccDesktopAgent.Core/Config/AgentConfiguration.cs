@@ -101,6 +101,15 @@ public sealed class AgentConfiguration
     /// </summary>
     public int PetroniteWebhookListenerPort { get; set; } = 8090;
 
+    // ── Certificate Pinning ────────────────────────────────────────────────
+
+    /// <summary>
+    /// T-DSK-015: Additional SPKI SHA-256 Base64 hashes to trust alongside the compiled-in
+    /// bootstrap pins. Loaded from cloud config or appsettings to enable emergency pin rotation
+    /// without a software update. Null or empty means only bootstrap pins are used.
+    /// </summary>
+    public List<string>? AdditionalCertificatePins { get; set; }
+
     // ── WebSocket Server ──────────────────────────────────────────────────
 
     /// <summary>Whether the Odoo backward-compat WebSocket server is enabled.</summary>

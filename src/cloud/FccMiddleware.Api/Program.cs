@@ -58,6 +58,19 @@ try
     // Registers: Serilog (structured JSON → console), OpenTelemetry, base health check
     builder.AddServiceDefaults();
 
+    // CORS — allow Angular dev server in Development
+    if (builder.Environment.IsDevelopment())
+    {
+        builder.Services.AddCors(options =>
+        {
+            options.AddPolicy("DevCors", policy =>
+                policy.WithOrigins("http://localhost:4200")
+                      .AllowAnyHeader()
+                      .AllowAnyMethod()
+                      .AllowCredentials());
+        });
+    }
+
     // ── Authentication ─────────────────────────────────────────────────────────
     // Auth schemes:
     //   1. Bearer       — Edge Agent device JWT
@@ -183,6 +196,10 @@ try
             options.RequireHttpsMetadata = true;
         });
 
+    builder.Services.AddScoped<PortalUserService>();
+    builder.Services.AddSingleton<AdapterCatalogService>();
+    builder.Services.AddScoped<AdapterConfigPortalService>();
+
     builder.Services.AddAuthorization(opts =>
     {
         static bool HasAnyRole(AuthorizationHandlerContext context, params string[] allowedRoles)
@@ -194,36 +211,35 @@ try
             return roles.Overlaps(allowedRoles);
         }
 
+        // Portal policies — role names are injected by PortalRoleEnrichmentMiddleware
+        // from the local portal_users table (Entra tokens do not carry roles).
         opts.AddPolicy("PortalUser", policy =>
             policy
                 .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
                 .RequireAuthenticatedUser()
-                // "SystemAdministrator" is a legacy alias for "SystemAdmin" — kept for backward-compatible JWT recognition.
                 .RequireAssertion(context => HasAnyRole(context,
-                    "OperationsManager",
-                    "SystemAdmin",
-                    "SystemAdministrator",
-                    "Auditor",
-                    "SiteSupervisor",
-                    "SupportReadOnly")));
+                    "FccAdmin", "FccUser", "FccViewer")));
 
         opts.AddPolicy("PortalReconciliationReview", policy =>
             policy
                 .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
                 .RequireAuthenticatedUser()
                 .RequireAssertion(context => HasAnyRole(context,
-                    "OperationsManager",
-                    "SystemAdmin",
-                    "SystemAdministrator"))); // legacy alias
+                    "FccAdmin", "FccUser")));
 
         opts.AddPolicy("PortalAdminWrite", policy =>
             policy
                 .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
                 .RequireAuthenticatedUser()
                 .RequireAssertion(context => HasAnyRole(context,
-                    "OperationsManager",
-                    "SystemAdmin",
-                    "SystemAdministrator"))); // legacy alias
+                    "FccAdmin", "FccUser")));
+
+        opts.AddPolicy("PortalUserManagement", policy =>
+            policy
+                .AddAuthenticationSchemes(PortalJwtOptions.SchemeName)
+                .RequireAuthenticatedUser()
+                .RequireAssertion(context => HasAnyRole(context,
+                    "FccAdmin")));
 
         // H-13: Pin to JWT Bearer scheme so HMAC-authenticated clients with
         // matching "site"/"lei" claims cannot satisfy this policy.
@@ -480,8 +496,14 @@ try
         app.UseHsts();
     }
 
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseCors("DevCors");
+    }
+
     app.UseRateLimiter();
     app.UseAuthentication();
+    app.UseMiddleware<PortalRoleEnrichmentMiddleware>();
     app.UseMiddleware<DeviceActiveCheckMiddleware>();
     app.UseMiddleware<TenantScopeMiddleware>();
     app.UseAuthorization();

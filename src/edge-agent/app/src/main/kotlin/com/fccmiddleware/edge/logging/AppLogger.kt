@@ -1,13 +1,14 @@
 package com.fccmiddleware.edge.logging
 
-import android.util.Log
+import com.fccmiddleware.edge.security.SensitiveFieldFilter
 
 /**
  * Static facade for [StructuredFileLogger] — enables `AppLogger.i(TAG, msg)` call-site
  * migration from `Log.i(TAG, msg)` without modifying every constructor in the codebase.
  *
  * Initialized in [FccEdgeApplication.onCreate] after Koin starts.
- * Before initialization, calls fall through to [android.util.Log] only.
+ * Before initialization, debug builds fall through to logcat; release builds
+ * avoid mirroring app logs into logcat.
  */
 object AppLogger {
 
@@ -19,25 +20,27 @@ object AppLogger {
     }
 
     fun d(tag: String, msg: String, extra: Map<String, String>? = null) {
-        val l = delegate
-        if (l != null) l.d(tag, msg, extra) else Log.d(tag, msg)
+        delegate?.d(tag, msg, extra) ?: PlatformLogBridge.d(tag, msg)
     }
 
     fun i(tag: String, msg: String, extra: Map<String, String>? = null) {
-        val l = delegate
-        if (l != null) l.i(tag, msg, extra) else Log.i(tag, msg)
+        delegate?.i(tag, msg, extra) ?: PlatformLogBridge.i(tag, msg)
     }
 
     fun w(tag: String, msg: String, extra: Map<String, String>? = null) {
-        val l = delegate
-        if (l != null) l.w(tag, msg, extra) else Log.w(tag, msg)
+        delegate?.w(tag, msg, extra) ?: PlatformLogBridge.w(tag, msg)
     }
 
     fun e(tag: String, msg: String, throwable: Throwable? = null, extra: Map<String, String>? = null) {
-        val l = delegate
-        if (l != null) l.e(tag, msg, throwable, extra)
-        else if (throwable != null) Log.e(tag, msg, throwable)
-        else Log.e(tag, msg)
+        delegate?.e(tag, msg, throwable, extra) ?: PlatformLogBridge.e(tag, msg, throwable)
+    }
+
+    /**
+     * Log an object using the runtime @Sensitive redactor so accidental object logging
+     * never falls back to the raw Kotlin data-class toString().
+     */
+    fun redacted(tag: String, obj: Any?, extra: Map<String, String>? = null) {
+        i(tag, obj?.let(SensitiveFieldFilter::redactToString) ?: "null", extra)
     }
 
     /** Correlation ID for the current operation context (thread-local, AF-002). */

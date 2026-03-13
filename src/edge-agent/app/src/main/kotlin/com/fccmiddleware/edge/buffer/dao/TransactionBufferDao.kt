@@ -13,6 +13,62 @@ data class StatusCount(
     @ColumnInfo(name = "count") val count: Int,
 )
 
+/**
+ * AP-035 + AP-036: Lightweight projection for Local API list queries.
+ * Excludes rawPayloadJson (~2–5 KB/record) and other fields not used by LocalTransaction.from().
+ * Includes total_count via window function to eliminate the separate COUNT(*) query.
+ */
+data class LocalApiTransaction(
+    @ColumnInfo(name = "id") val id: String,
+    @ColumnInfo(name = "fcc_transaction_id") val fccTransactionId: String,
+    @ColumnInfo(name = "site_code") val siteCode: String,
+    @ColumnInfo(name = "pump_number") val pumpNumber: Int,
+    @ColumnInfo(name = "nozzle_number") val nozzleNumber: Int,
+    @ColumnInfo(name = "product_code") val productCode: String,
+    @ColumnInfo(name = "volume_microlitres") val volumeMicrolitres: Long,
+    @ColumnInfo(name = "amount_minor_units") val amountMinorUnits: Long,
+    @ColumnInfo(name = "unit_price_minor_per_litre") val unitPriceMinorPerLitre: Long,
+    @ColumnInfo(name = "currency_code") val currencyCode: String,
+    @ColumnInfo(name = "started_at") val startedAt: String,
+    @ColumnInfo(name = "completed_at") val completedAt: String,
+    @ColumnInfo(name = "fiscal_receipt_number") val fiscalReceiptNumber: String?,
+    @ColumnInfo(name = "fcc_vendor") val fccVendor: String,
+    @ColumnInfo(name = "attendant_id") val attendantId: String?,
+    @ColumnInfo(name = "sync_status") val syncStatus: String,
+    @ColumnInfo(name = "correlation_id") val correlationId: String,
+    @ColumnInfo(name = "total_count") val totalCount: Int,
+)
+
+/**
+ * AP-025: Lightweight projection for WebSocket queries.
+ * Excludes rawPayloadJson and other heavy fields not used by [toWsDto].
+ */
+data class WsBufferedTransaction(
+    @ColumnInfo(name = "fcc_transaction_id") val fccTransactionId: String,
+    @ColumnInfo(name = "pump_number") val pumpNumber: Int,
+    @ColumnInfo(name = "nozzle_number") val nozzleNumber: Int,
+    @ColumnInfo(name = "product_code") val productCode: String,
+    @ColumnInfo(name = "volume_microlitres") val volumeMicrolitres: Long,
+    @ColumnInfo(name = "amount_minor_units") val amountMinorUnits: Long,
+    @ColumnInfo(name = "unit_price_minor_per_litre") val unitPriceMinorPerLitre: Long,
+    @ColumnInfo(name = "currency_code") val currencyCode: String,
+    @ColumnInfo(name = "started_at") val startedAt: String,
+    @ColumnInfo(name = "completed_at") val completedAt: String,
+    @ColumnInfo(name = "sync_status") val syncStatus: String,
+    @ColumnInfo(name = "attendant_id") val attendantId: String?,
+    @ColumnInfo(name = "order_uuid") val orderUuid: String?,
+    @ColumnInfo(name = "odoo_order_id") val odooOrderId: String?,
+    @ColumnInfo(name = "add_to_cart") val addToCart: Boolean,
+    @ColumnInfo(name = "payment_id") val paymentId: String?,
+    @ColumnInfo(name = "is_discard") val isDiscard: Boolean,
+)
+
+/** Legacy buffered row whose raw payload still needs at-rest encryption. */
+data class LegacyRawPayloadRow(
+    @ColumnInfo(name = "id") val id: String,
+    @ColumnInfo(name = "raw_payload_json") val rawPayloadJson: String,
+)
+
 @Dao
 interface TransactionBufferDao {
 
@@ -39,31 +95,56 @@ interface TransactionBufferDao {
      * Buffer-backed query for GET /api/transactions (Odoo POS and portal).
      * Excludes SYNCED_TO_ODOO and acknowledged records. Results ordered by completed_at DESC.
      * Uses ix_bt_local_api; must remain <= 150 ms p95 at 30,000 records.
+     * AP-035: Column projection excludes rawPayloadJson (~2–5 KB/record).
+     * AP-036: COUNT(*) OVER() provides total in the same query pass.
      */
     @Query(
-        "SELECT * FROM buffered_transactions " +
+        "SELECT id, fcc_transaction_id, site_code, pump_number, nozzle_number, " +
+        "product_code, volume_microlitres, amount_minor_units, unit_price_minor_per_litre, " +
+        "currency_code, started_at, completed_at, fiscal_receipt_number, fcc_vendor, " +
+        "attendant_id, sync_status, correlation_id, " +
+        "(SELECT COUNT(*) FROM buffered_transactions " +
+        " WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        " AND acknowledged_at IS NULL) AS total_count " +
+        "FROM buffered_transactions " +
         "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "AND acknowledged_at IS NULL " +
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
     )
-    suspend fun getForLocalApi(limit: Int, offset: Int): List<BufferedTransaction>
+    suspend fun getForLocalApi(limit: Int, offset: Int): List<LocalApiTransaction>
 
     /**
      * Pump-filtered variant of [getForLocalApi] for pump-specific queries.
+     * AP-035: Column projection excludes rawPayloadJson.
+     * AP-036: COUNT(*) OVER() provides total in the same query pass.
      */
     @Query(
-        "SELECT * FROM buffered_transactions " +
+        "SELECT id, fcc_transaction_id, site_code, pump_number, nozzle_number, " +
+        "product_code, volume_microlitres, amount_minor_units, unit_price_minor_per_litre, " +
+        "currency_code, started_at, completed_at, fiscal_receipt_number, fcc_vendor, " +
+        "attendant_id, sync_status, correlation_id, " +
+        "(SELECT COUNT(*) FROM buffered_transactions " +
+        " WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        " AND acknowledged_at IS NULL " +
+        " AND pump_number = :pumpNumber) AS total_count " +
+        "FROM buffered_transactions " +
         "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "AND acknowledged_at IS NULL " +
         "AND pump_number = :pumpNumber " +
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
     )
-    suspend fun getForLocalApiByPump(pumpNumber: Int, limit: Int, offset: Int): List<BufferedTransaction>
+    suspend fun getForLocalApiByPump(pumpNumber: Int, limit: Int, offset: Int): List<LocalApiTransaction>
 
     @Query("SELECT * FROM buffered_transactions WHERE id = :id")
     suspend fun getById(id: String): BufferedTransaction?
+
+    @Query(
+        "UPDATE buffered_transactions SET raw_payload_json = :rawPayloadJson " +
+        "WHERE id = :id"
+    )
+    suspend fun updateRawPayloadJson(id: String, rawPayloadJson: String)
 
     /**
      * AF-025: Detail endpoint query with the same visibility rules as [getForLocalApi].
@@ -306,22 +387,43 @@ interface TransactionBufferDao {
     /**
      * Time-filtered variant of [getForLocalApi]: returns records with completed_at >= [since].
      * [since] must be an ISO 8601 UTC string. Uses ix_bt_local_api index for p95 <= 150 ms.
+     * AP-035: Column projection excludes rawPayloadJson.
+     * AP-036: COUNT(*) OVER() provides total in the same query pass.
      */
     @Query(
-        "SELECT * FROM buffered_transactions " +
+        "SELECT id, fcc_transaction_id, site_code, pump_number, nozzle_number, " +
+        "product_code, volume_microlitres, amount_minor_units, unit_price_minor_per_litre, " +
+        "currency_code, started_at, completed_at, fiscal_receipt_number, fcc_vendor, " +
+        "attendant_id, sync_status, correlation_id, " +
+        "(SELECT COUNT(*) FROM buffered_transactions " +
+        " WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        " AND acknowledged_at IS NULL " +
+        " AND completed_at >= :since) AS total_count " +
+        "FROM buffered_transactions " +
         "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "AND acknowledged_at IS NULL " +
         "AND completed_at >= :since " +
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
     )
-    suspend fun getForLocalApiSince(since: String, limit: Int, offset: Int): List<BufferedTransaction>
+    suspend fun getForLocalApiSince(since: String, limit: Int, offset: Int): List<LocalApiTransaction>
 
     /**
      * Pump-filtered + time-filtered variant for pump-specific queries with a [since] cutoff.
+     * AP-035: Column projection excludes rawPayloadJson.
+     * AP-036: COUNT(*) OVER() provides total in the same query pass.
      */
     @Query(
-        "SELECT * FROM buffered_transactions " +
+        "SELECT id, fcc_transaction_id, site_code, pump_number, nozzle_number, " +
+        "product_code, volume_microlitres, amount_minor_units, unit_price_minor_per_litre, " +
+        "currency_code, started_at, completed_at, fiscal_receipt_number, fcc_vendor, " +
+        "attendant_id, sync_status, correlation_id, " +
+        "(SELECT COUNT(*) FROM buffered_transactions " +
+        " WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        " AND acknowledged_at IS NULL " +
+        " AND pump_number = :pumpNumber " +
+        " AND completed_at >= :since) AS total_count " +
+        "FROM buffered_transactions " +
         "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "AND acknowledged_at IS NULL " +
         "AND pump_number = :pumpNumber " +
@@ -329,7 +431,7 @@ interface TransactionBufferDao {
         "ORDER BY completed_at DESC " +
         "LIMIT :limit OFFSET :offset"
     )
-    suspend fun getForLocalApiByPumpSince(pumpNumber: Int, since: String, limit: Int, offset: Int): List<BufferedTransaction>
+    suspend fun getForLocalApiByPumpSince(pumpNumber: Int, since: String, limit: Int, offset: Int): List<LocalApiTransaction>
 
     // ── AF-022: POS transaction acknowledge ────────────────────────────────
 
@@ -352,9 +454,14 @@ interface TransactionBufferDao {
      * Unsynced transactions for the WebSocket "latest" mode.
      * Returns records NOT marked as SYNCED_TO_ODOO, ARCHIVED, or DEAD_LETTER, with optional filters.
      * AF-044: Added DEAD_LETTER to exclusion list.
+     * AP-025: Uses column projection to exclude rawPayloadJson and other unused fields.
      */
     @Query(
-        "SELECT * FROM buffered_transactions " +
+        "SELECT fcc_transaction_id, pump_number, nozzle_number, product_code, " +
+        "volume_microlitres, amount_minor_units, unit_price_minor_per_litre, " +
+        "currency_code, started_at, completed_at, sync_status, attendant_id, " +
+        "order_uuid, odoo_order_id, add_to_cart, payment_id, is_discard " +
+        "FROM buffered_transactions " +
         "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "AND (:pumpNumber IS NULL OR pump_number = :pumpNumber) " +
         "AND (:nozzleNumber IS NULL OR nozzle_number = :nozzleNumber) " +
@@ -368,19 +475,24 @@ interface TransactionBufferDao {
         nozzleNumber: Int?,
         attendant: String?,
         since: String?,
-    ): List<BufferedTransaction>
+    ): List<WsBufferedTransaction>
 
     /**
      * Active transactions for the WebSocket "all" mode.
      * AF-044: Added sync_status filter to exclude terminal states.
+     * AP-025: Uses column projection to exclude rawPayloadJson and other unused fields.
      */
     @Query(
-        "SELECT * FROM buffered_transactions " +
+        "SELECT fcc_transaction_id, pump_number, nozzle_number, product_code, " +
+        "volume_microlitres, amount_minor_units, unit_price_minor_per_litre, " +
+        "currency_code, started_at, completed_at, sync_status, attendant_id, " +
+        "order_uuid, odoo_order_id, add_to_cart, payment_id, is_discard " +
+        "FROM buffered_transactions " +
         "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "ORDER BY completed_at DESC " +
         "LIMIT 500"
     )
-    suspend fun getAllForWs(): List<BufferedTransaction>
+    suspend fun getAllForWs(): List<WsBufferedTransaction>
 
     /**
      * Update Odoo cart fields on a transaction (WebSocket manager_update / attendant_update).
@@ -435,6 +547,14 @@ interface TransactionBufferDao {
     @Query("SELECT * FROM buffered_transactions WHERE fcc_transaction_id = :fccTransactionId LIMIT 1")
     suspend fun getByFccTransactionId(fccTransactionId: String): BufferedTransaction?
 
+    @Query(
+        "SELECT id, raw_payload_json FROM buffered_transactions " +
+        "WHERE raw_payload_json IS NOT NULL " +
+        "AND raw_payload_json NOT LIKE 'ENCv1:%' " +
+        "LIMIT :limit"
+    )
+    suspend fun getLegacyPlaintextRawPayloads(limit: Int): List<LegacyRawPayloadRow>
+
     /**
      * L-12: Cross-adapter dedup — find an existing transaction matching the same physical
      * dispense event (same site, pump, completion time, and amount) but from a different adapter.
@@ -468,6 +588,23 @@ interface TransactionBufferDao {
         "WHERE id = :id"
     )
     suspend fun updateFiscalReceipt(id: String, receiptCode: String, now: String)
+
+    // ── AP-033: Batch upload failure recording ─────────────────────────────
+
+    /**
+     * AP-033: Record upload failure for an entire batch in a single UPDATE.
+     * Replaces the per-record loop that executed N individual UPDATEs.
+     * Increments upload_attempts by 1 and sets the same error/timestamp on all records.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "upload_attempts = upload_attempts + 1, " +
+        "last_upload_attempt_at = :attemptAt, " +
+        "last_upload_error = :error, " +
+        "updated_at = :now " +
+        "WHERE id IN (:ids)"
+    )
+    suspend fun recordBatchUploadFailure(ids: List<String>, attemptAt: String, error: String, now: String)
 
     // ── GAP-1: Dead-letter queries ──────────────────────────────────────────
 

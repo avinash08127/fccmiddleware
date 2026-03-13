@@ -60,6 +60,13 @@ internal sealed class VelopackUpdateService : IUpdateService
             return new UpdateCheckResult(false, null, false, "No update URL configured");
         }
 
+        // S-DSK-003: Enforce HTTPS for update URLs to prevent MitM code execution.
+        if (!cfg.UpdateUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Update URL rejected — must use HTTPS: {Url}", cfg.UpdateUrl);
+            return new UpdateCheckResult(false, null, false, "Update URL must use HTTPS");
+        }
+
         try
         {
             var source = new SimpleWebSource(cfg.UpdateUrl);

@@ -73,10 +73,13 @@ public sealed class IngestionOrchestratorTests : IDisposable
             IngestionMode = IngestionMode.Relay,
         };
 
+        var monitor = Substitute.For<IOptionsMonitor<AgentConfiguration>>();
+        monitor.CurrentValue.Returns(config);
+
         return new IngestionOrchestrator(
             _adapterFactory,
             _serviceProvider.GetRequiredService<IServiceScopeFactory>(),
-            Options.Create(config),
+            monitor,
             NullLogger<IngestionOrchestrator>.Instance);
     }
 

@@ -111,7 +111,11 @@ class PetroniteAdapter(
 
     /** Derived base URL from config. */
     private val baseUrl: String
-        get() = config.hostAddress.trimEnd('/')
+        get() = FccTransportSecurity.resolveEndpoint(
+            rawAddress = config.hostAddress,
+            component = TAG,
+            defaultPort = config.port,
+        ).asBaseUrl()
 
     // -----------------------------------------------------------------------
     // IFccAdapter -- fetchTransactions (push-only, no-op)
@@ -935,22 +939,11 @@ class PetroniteAdapter(
      * Returns the currency factor (10^decimals) as BigDecimal for the given ISO 4217 currency code.
      * Uses integer exponentiation -- no floating point.
      */
-    private fun getCurrencyFactor(currencyCode: String): BigDecimal {
-        val decimals = getCurrencyDecimals(currencyCode)
-        return BigDecimal.TEN.pow(decimals)
-    }
+    private fun getCurrencyFactor(currencyCode: String): BigDecimal =
+        CurrencyUtils.getFactorBigDecimal(currencyCode)
 
-    /**
-     * Returns the number of decimal places for the given ISO 4217 currency code.
-     * Defaults to 2 for unrecognized currencies.
-     */
-    private fun getCurrencyDecimals(currencyCode: String): Int = when (currencyCode.uppercase()) {
-        "BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND" -> 3
-        "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF",
-        "KRW", "PYG", "RWF", "UGX", "UYI", "VND",
-        "VUV", "XAF", "XOF", "XPF" -> 0
-        else -> 2
-    }
+    private fun getCurrencyDecimals(currencyCode: String): Int =
+        CurrencyUtils.getDecimalPlaces(currencyCode)
 
     /** Returns the number of active pre-authorizations currently tracked. */
     val activePreAuthCount: Int
@@ -982,5 +975,14 @@ class PetroniteAdapter(
 
         /** Volume conversion factor: 1 litre = 1,000,000 microlitres. */
         private val MICROLITRES_PER_LITRE = BigDecimal(1_000_000)
+    }
+
+    // AT-018: Implement IFccAdapter.close() to release OkHttp connection pool threads.
+    override fun close() {
+        try {
+            httpClient.close()
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error closing HttpClient: ${e.message}")
+        }
     }
 }

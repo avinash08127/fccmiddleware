@@ -280,15 +280,22 @@
             <TextBlock Text="Local API Key (for HHT Configuration)" FontWeight="SemiBold" FontSize="14" Opacity="0.7" />
             <TextBlock Text="Configure your Odoo POS HHTs to use this API key when connecting to the agent's local API."
                        TextWrapping="Wrap" FontSize="12" Opacity="0.6" />
-            <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+            <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,4,0,0">
               <TextBox x:Name="ApiKeyDisplay"
                        IsReadOnly="True"
                        FontFamily="Consolas, monospace"
-                       FontSize="13" />
-              <Button x:Name="CopyApiKeyButton"
+                       FontSize="13"
+                       PasswordChar="*" />
+              <Button x:Name="ToggleApiKeyButton"
                       Grid.Column="1"
-                      Content="Copy"
+                      Content="Show"
                       Margin="8,0,0,0"
+                      Padding="12,6"
+                      Click="OnToggleApiKeyClicked" />
+              <Button x:Name="CopyApiKeyButton"
+                      Grid.Column="2"
+                      Content="Copy"
+                      Margin="4,0,0,0"
                       Padding="16,6"
                       Click="OnCopyApiKeyClicked" />
             </Grid>

@@ -44,7 +44,8 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             return null;
         }
 
-        return (BuildSiteFccConfig(row), row.LegalEntityId);
+        var extras = await LoadEffectiveExtrasAsync(row, ct);
+        return (BuildSiteFccConfig(row, extras), row.LegalEntityId);
     }
 
     /// <inheritdoc />
@@ -64,7 +65,8 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             return null;
         }
 
-        return (BuildSiteFccConfig(row), row.LegalEntityId);
+        var extras = await LoadEffectiveExtrasAsync(row, ct);
+        return (BuildSiteFccConfig(row, extras), row.LegalEntityId);
     }
 
     /// <inheritdoc />
@@ -96,7 +98,8 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             return null;
         }
 
-        return (BuildSiteFccConfig(row), row.LegalEntityId);
+        var extras = await LoadEffectiveExtrasAsync(row, ct);
+        return (BuildSiteFccConfig(row, extras), row.LegalEntityId);
     }
 
     /// <inheritdoc />
@@ -128,7 +131,8 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             return null;
         }
 
-        return (BuildSiteFccConfig(row), row.LegalEntityId);
+        var extras = await LoadEffectiveExtrasAsync(row, ct);
+        return (BuildSiteFccConfig(row, extras), row.LegalEntityId);
     }
 
     /// <summary>
@@ -149,6 +153,7 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
         return await filter(_dbContext.FccConfigs.IgnoreQueryFilters())
             .Select(cfg => new FccConfigProjection
             {
+                SiteId = cfg.SiteId,
                 SiteCode = cfg.Site.SiteCode,
                 FccVendor = cfg.FccVendor,
                 ConnectionProtocol = cfg.ConnectionProtocol,
@@ -186,7 +191,7 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             .FirstOrDefaultAsync(ct);
     }
 
-    private SiteFccConfig BuildSiteFccConfig(FccConfigProjection row)
+    private SiteFccConfig BuildSiteFccConfig(FccConfigProjection row, AdapterExtras extras)
     {
         ValidateVendorRequiredFields(row);
 
@@ -202,8 +207,8 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             PullIntervalSeconds = row.PullIntervalSeconds,
             CurrencyCode = row.CurrencyCode,
             Timezone = row.DefaultTimezone,
-            PumpNumberOffset = 0,
-            ProductCodeMapping = new Dictionary<string, string>(),
+            PumpNumberOffset = extras.PumpNumberOffset,
+            ProductCodeMapping = extras.ProductCodeMapping,
             SharedSecret = row.SharedSecret,
             UsnCode = row.UsnCode,
             AuthPort = row.AuthPort,
@@ -228,6 +233,62 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
             ConfiguredPumps = row.ConfiguredPumps,
             FccPumpAddressMap = ParsePumpAddressMap(row.FccPumpAddressMapJson),
         };
+    }
+
+    private async Task<AdapterExtras> LoadEffectiveExtrasAsync(FccConfigProjection row, CancellationToken ct)
+    {
+        var adapterKey = row.FccVendor.ToString();
+        var defaultJson = await _dbContext.AdapterDefaultConfigs
+            .IgnoreQueryFilters()
+            .Where(item => item.LegalEntityId == row.LegalEntityId && item.AdapterKey == adapterKey)
+            .Select(item => item.ConfigJson)
+            .FirstOrDefaultAsync(ct);
+
+        var overrideJson = await _dbContext.SiteAdapterOverrides
+            .IgnoreQueryFilters()
+            .Where(item => item.SiteId == row.SiteId && item.AdapterKey == adapterKey)
+            .Select(item => item.OverrideJson)
+            .FirstOrDefaultAsync(ct);
+
+        var effectivePumpOffset = 0;
+        var productCodeMapping = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        using var defaultDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(defaultJson) ? "{}" : defaultJson);
+        using var overrideDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(overrideJson) ? "{}" : overrideJson);
+
+        if (defaultDoc.RootElement.TryGetProperty("pumpNumberOffset", out var defaultOffset) && defaultOffset.TryGetInt32(out var parsedDefaultOffset))
+        {
+            effectivePumpOffset = parsedDefaultOffset;
+        }
+
+        if (defaultDoc.RootElement.TryGetProperty("productCodeMapping", out var defaultMapping) && defaultMapping.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in defaultMapping.EnumerateObject())
+            {
+                if (property.Value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(property.Value.GetString()))
+                {
+                    productCodeMapping[property.Name] = property.Value.GetString()!;
+                }
+            }
+        }
+
+        if (overrideDoc.RootElement.TryGetProperty("pumpNumberOffset", out var overrideOffset) && overrideOffset.TryGetInt32(out var parsedOverrideOffset))
+        {
+            effectivePumpOffset = parsedOverrideOffset;
+        }
+
+        if (overrideDoc.RootElement.TryGetProperty("productCodeMapping", out var overrideMapping) && overrideMapping.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in overrideMapping.EnumerateObject())
+            {
+                if (property.Value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(property.Value.GetString()))
+                {
+                    productCodeMapping[property.Name] = property.Value.GetString()!;
+                }
+            }
+        }
+
+        return new AdapterExtras(effectivePumpOffset, productCodeMapping);
     }
 
     /// <summary>
@@ -337,6 +398,7 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
 
     private sealed class FccConfigProjection
     {
+        public required Guid SiteId { get; init; }
         public required string SiteCode { get; init; }
         public required FccVendor FccVendor { get; init; }
         public required ConnectionProtocol ConnectionProtocol { get; init; }
@@ -370,4 +432,6 @@ public sealed class SiteFccConfigProvider : ISiteFccConfigProvider
         public string? ConfiguredPumps { get; init; }
         public string? FccPumpAddressMapJson { get; init; }
     }
+
+    private sealed record AdapterExtras(int PumpNumberOffset, IReadOnlyDictionary<string, string> ProductCodeMapping);
 }

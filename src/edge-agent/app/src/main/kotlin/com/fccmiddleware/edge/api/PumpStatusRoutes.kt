@@ -122,7 +122,11 @@ class PumpStatusCache(
 
             val result = try {
                 withTimeoutOrNull(liveTimeoutMs) { adapter.getPumpStatus() }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                // AT-041: Rethrow CancellationException to preserve structured concurrency.
+                // withTimeoutOrNull handles internal timeouts (returns null), but external
+                // cancellation (e.g., service shutdown) must propagate.
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 null
             }
 

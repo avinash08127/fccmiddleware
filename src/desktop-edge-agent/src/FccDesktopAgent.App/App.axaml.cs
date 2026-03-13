@@ -80,7 +80,8 @@ public sealed partial class App : Application
 
     private void InitializeProvisioningMode(IClassicDesktopStyleApplicationLifetime desktop)
     {
-        var provisioningWindow = new ProvisioningWindow();
+        // T-DSK-002: Pass IServiceProvider via constructor instead of static service locator.
+        var provisioningWindow = new ProvisioningWindow(AgentAppContext.ServiceProvider);
         desktop.MainWindow = provisioningWindow;
 
         provisioningWindow.RegistrationCompleted += (_, _) =>
@@ -88,7 +89,7 @@ public sealed partial class App : Application
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
                 // Transition to normal operational mode
-                var mainWindow = new MainWindow();
+                var mainWindow = new MainWindow(AgentAppContext.ServiceProvider);
                 desktop.MainWindow = mainWindow;
                 mainWindow.Show();
 
@@ -103,7 +104,7 @@ public sealed partial class App : Application
 
     private void InitializeNormalMode(IClassicDesktopStyleApplicationLifetime desktop)
     {
-        var mainWindow = new MainWindow();
+        var mainWindow = new MainWindow(AgentAppContext.ServiceProvider);
         desktop.MainWindow = mainWindow;
         SetupTrayIcon(desktop, mainWindow);
     }
@@ -149,21 +150,30 @@ public sealed partial class App : Application
             try
             {
                 var exePath = Environment.ProcessPath;
-                if (exePath is not null)
+                if (exePath is null)
                 {
+                    logger.LogWarning("Cannot restart: unable to determine process path");
+                    return;
+                }
+
+                // F-DSK-004: Shutdown first, then start the new process.
+                // Starting the new process before shutdown causes port conflicts
+                // because the old process still holds port 8585 (Kestrel).
+                mainWindow.ForceClose();
+
+                // Launch the new process in the desktop.Exit handler so it starts
+                // after the old host has released ports and database locks.
+                void OnExit(object? s, EventArgs e)
+                {
+                    desktop.Exit -= OnExit;
                     Process.Start(new ProcessStartInfo
                     {
                         FileName = exePath,
                         UseShellExecute = true,
                     });
                 }
-                else
-                {
-                    logger.LogWarning("Cannot restart: unable to determine process path");
-                    return;
-                }
 
-                mainWindow.ForceClose();
+                desktop.Exit += OnExit;
                 desktop.Shutdown();
             }
             catch (Exception ex)
@@ -210,7 +220,7 @@ public sealed partial class App : Application
                     _trayIconManager?.Dispose();
                     _trayIconManager = null;
 
-                    var provisioningWindow = new ProvisioningWindow();
+                    var provisioningWindow = new ProvisioningWindow(AgentAppContext.ServiceProvider);
                     desktop.MainWindow = provisioningWindow;
                     provisioningWindow.Show();
 
@@ -218,7 +228,7 @@ public sealed partial class App : Application
                     {
                         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                         {
-                            var newMainWindow = new MainWindow();
+                            var newMainWindow = new MainWindow(AgentAppContext.ServiceProvider);
                             desktop.MainWindow = newMainWindow;
                             newMainWindow.Show();
                             SetupTrayIcon(desktop, newMainWindow);

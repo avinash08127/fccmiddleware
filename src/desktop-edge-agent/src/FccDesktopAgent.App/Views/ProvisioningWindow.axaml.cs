@@ -1,35 +1,24 @@
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using FccDesktopAgent.App.Services;
 using FccDesktopAgent.Core.Config;
-using FccDesktopAgent.Core.Registration;
-using FccDesktopAgent.Core.Security;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace FccDesktopAgent.App.Views;
 
+/// <summary>
+/// Provisioning wizard window. Business logic (registration, validation, connection testing,
+/// state persistence) is delegated to <see cref="SetupOrchestrator"/> (T-DSK-003).
+/// Services are injected via constructor (T-DSK-002).
+/// </summary>
 public sealed partial class ProvisioningWindow : Window
 {
-    private readonly IDeviceRegistrationService? _registrationService;
-    private readonly IRegistrationManager? _registrationManager;
-    private readonly IConfigManager? _configManager;
-    private readonly IHttpClientFactory? _httpClientFactory;
-    private readonly ILogger<ProvisioningWindow>? _logger;
+    private readonly SetupOrchestrator _orchestrator;
 
     private static readonly List<string> EnvDisplayItems = BuildEnvDisplayItems();
 
     private int _currentStep = 1;
     private bool _isCodeMethod = true;
-    private string _resolvedCloudUrl = string.Empty;
-    private string _resolvedSiteCode = string.Empty;
-    private string _resolvedFccHost = string.Empty;
-    private int _resolvedFccPort;
-    private string _resolvedDeviceId = string.Empty;
-    private string _resolvedEnvironment = string.Empty;
-    private string _apiKey = string.Empty;
 
     // M-05: Named reference for the "Continue Anyway" handler so it can be properly removed.
     private EventHandler<RoutedEventArgs>? _continueAnywayHandler;
@@ -37,19 +26,17 @@ public sealed partial class ProvisioningWindow : Window
     // M-08: Cancellation source for in-flight registration calls so users can go back.
     private CancellationTokenSource? _registrationCts;
 
+    // S-DSK-001: Cancellation source for API key auto-hide timer.
+    private CancellationTokenSource? _apiKeyVisibilityCts;
+
     /// <summary>Raised after a successful registration. App.axaml.cs listens to trigger host start + MainWindow.</summary>
     public event EventHandler? RegistrationCompleted;
 
-    public ProvisioningWindow()
+    public ProvisioningWindow(IServiceProvider? services)
     {
         InitializeComponent();
 
-        var services = AgentAppContext.ServiceProvider;
-        _registrationService = services?.GetService<IDeviceRegistrationService>();
-        _registrationManager = services?.GetService<IRegistrationManager>();
-        _configManager = services?.GetService<IConfigManager>();
-        _httpClientFactory = services?.GetService<IHttpClientFactory>();
-        _logger = services?.GetService<ILogger<ProvisioningWindow>>();
+        _orchestrator = new SetupOrchestrator(services);
 
         // Populate environment combo boxes
         EnvComboBox.ItemsSource = EnvDisplayItems;
@@ -66,17 +53,15 @@ public sealed partial class ProvisioningWindow : Window
         {
             case 1:
                 _isCodeMethod = RadioCodeMethod.IsChecked == true;
-                GoToStep(_isCodeMethod ? 2 : 2); // Both go to step 2 (different panels)
+                GoToStep(2);
                 break;
             case 2:
                 _ = ExecuteStep2Async();
                 break;
             case 3:
-                // Step 3 auto-advances, but allow manual retry
                 _ = RunConnectionTestsAsync();
                 break;
             case 4:
-                // Launch agent
                 _ = LaunchAgentAsync();
                 break;
         }
@@ -126,7 +111,9 @@ public sealed partial class ProvisioningWindow : Window
                 break;
             case 3:
                 Step3Panel.IsVisible = true;
-                BackButton.IsVisible = true;
+                // F-DSK-008: Hide back button after successful cloud registration
+                // to prevent re-submission of the consumed one-time token.
+                BackButton.IsVisible = !_orchestrator.CloudRegistrationDone;
                 NextButton.Content = "Retry Tests";
                 NextButton.IsEnabled = false; // Enabled after tests complete
                 _ = RunConnectionTestsAsync();
@@ -148,9 +135,7 @@ public sealed partial class ProvisioningWindow : Window
         var green = new SolidColorBrush(Color.Parse("#22C55E"));
         var gray = new SolidColorBrush(Color.Parse("#D1D5DB"));
 
-        // Step bars (border backgrounds inside each indicator)
         var bars = new[] { StepBar2, StepBar3, StepBar4 };
-        // Step 1 bar is always blue/green; bars[0]=step2, bars[1]=step3, bars[2]=step4
 
         for (int i = 0; i < bars.Length; i++)
         {
@@ -173,193 +158,73 @@ public sealed partial class ProvisioningWindow : Window
 
     private async Task RegisterWithCodeAsync()
     {
-        var cloudUrl = CloudUrlBox.Text?.Trim();
-        var siteCode = SiteCodeBox.Text?.Trim();
-        var token = TokenBox.Text?.Trim();
-        var selectedEnv = GetEnvironmentKey(EnvComboBox.SelectedIndex);
-
-        if (string.IsNullOrWhiteSpace(cloudUrl))
-        {
-            ShowRegStatus("Please enter the cloud URL.", isError: true);
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(siteCode))
-        {
-            ShowRegStatus("Please enter the site code.", isError: true);
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(token))
-        {
-            ShowRegStatus("Please enter the provisioning token.", isError: true);
-            return;
-        }
-        if (_registrationService is null)
-        {
-            ShowRegStatus("Registration service unavailable.", isError: true);
-            return;
-        }
-
         NextButton.IsEnabled = false;
         BackButton.IsEnabled = false;
         NextButton.Content = "Registering...";
         ShowRegStatus("Contacting cloud server...", isError: false);
 
-        // M-08: 30-second timeout prevents indefinite UI freeze on unresponsive servers.
+        // M-08: 30-second timeout prevents indefinite UI freeze.
         _registrationCts?.Cancel();
         _registrationCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var ct = _registrationCts.Token;
 
-        try
+        var outcome = await _orchestrator.RegisterWithCodeAsync(
+            CloudUrlBox.Text?.Trim(),
+            SiteCodeBox.Text?.Trim(),
+            TokenBox.Text?.Trim(),
+            GetEnvironmentKey(EnvComboBox.SelectedIndex),
+            ReplaceCheck.IsChecked == true,
+            _registrationCts.Token);
+
+        // S-DSK-004: Clear provisioning token from UI after use.
+        TokenBox.Text = string.Empty;
+
+        if (outcome.Kind == RegistrationOutcomeKind.Success)
         {
-            var request = DeviceInfoProvider.BuildRequest(
-                provisioningToken: token,
-                siteCode: siteCode,
-                replacePreviousAgent: ReplaceCheck.IsChecked == true);
-
-            var result = await _registrationService.RegisterAsync(cloudUrl, request, ct);
-
-            switch (result)
-            {
-                case RegistrationResult.Success success:
-                    _logger?.LogInformation("Registration successful — deviceId={DeviceId}",
-                        success.Response.DeviceId);
-
-                    _resolvedCloudUrl = cloudUrl;
-                    _resolvedSiteCode = siteCode;
-                    _resolvedDeviceId = success.Response.DeviceId;
-                    _resolvedEnvironment = selectedEnv ?? string.Empty;
-
-                    // Patch environment into persisted registration state
-                    if (selectedEnv is not null && _registrationManager is not null)
-                    {
-                        var state = _registrationManager.LoadState();
-                        state.Environment = selectedEnv;
-                        await _registrationManager.SaveStateAsync(state);
-                    }
-
-                    // Extract FCC details from bootstrap config
-                    var siteConfig = success.Response.SiteConfig;
-                    if (siteConfig?.Fcc is not null)
-                    {
-                        _resolvedFccHost = siteConfig.Fcc.HostAddress ?? string.Empty;
-                        _resolvedFccPort = siteConfig.Fcc.Port ?? 8080;
-                    }
-
-                    // M-09: Sync equipment data so local API has pump/nozzle info immediately
-                    if (siteConfig is not null && _registrationManager is not null)
-                    {
-                        try { _registrationManager.SyncSiteData(siteConfig); }
-                        catch (Exception ex) { _logger?.LogWarning(ex, "Site data sync failed — will populate on first config poll"); }
-                    }
-
-                    GoToStep(3);
-                    break;
-
-                case RegistrationResult.Rejected rejected:
-                    var hint = GetErrorHint(rejected.Code);
-                    ShowRegStatus($"Registration rejected: {rejected.Message}{hint}", isError: true);
-                    NextButton.IsEnabled = true;
-                    BackButton.IsEnabled = true;
-                    NextButton.Content = "Register";
-                    break;
-
-                case RegistrationResult.TransportError transport:
-                    ShowRegStatus($"Connection error: {transport.Message}", isError: true);
-                    NextButton.IsEnabled = true;
-                    BackButton.IsEnabled = true;
-                    NextButton.Content = "Register";
-                    break;
-            }
+            GoToStep(3);
+            return;
         }
-        catch (OperationCanceledException)
+
+        var msg = outcome.Kind switch
         {
-            ShowRegStatus("Registration timed out. Check connectivity and try again.", isError: true);
-            NextButton.IsEnabled = true;
-            BackButton.IsEnabled = true;
-            NextButton.Content = "Register";
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "Unexpected error during registration");
-            ShowRegStatus($"Unexpected error: {ex.Message}", isError: true);
-            NextButton.IsEnabled = true;
-            BackButton.IsEnabled = true;
-            NextButton.Content = "Register";
-        }
+            RegistrationOutcomeKind.Rejected => $"Registration rejected: {outcome.ErrorMessage}{outcome.ErrorHint}",
+            RegistrationOutcomeKind.TransportError => $"Connection error: {outcome.ErrorMessage}",
+            _ => outcome.ErrorMessage ?? "Registration failed.",
+        };
+        ShowRegStatus(msg, isError: true);
+        NextButton.IsEnabled = true;
+        BackButton.IsEnabled = true;
+        NextButton.Content = "Register";
     }
 
     private async Task ValidateManualConfigAsync()
     {
-        var cloudUrl = ManualCloudUrlBox.Text?.Trim();
-        var siteCode = ManualSiteCodeBox.Text?.Trim();
-        var fccHost = ManualFccHostBox.Text?.Trim();
-        var fccPortText = ManualFccPortBox.Text?.Trim();
-        var manualToken = ManualTokenBox.Text?.Trim();
-        var selectedEnv = GetEnvironmentKey(ManualEnvComboBox.SelectedIndex);
+        var validation = _orchestrator.ValidateManualConfig(
+            ManualCloudUrlBox.Text?.Trim(),
+            ManualSiteCodeBox.Text?.Trim(),
+            ManualFccHostBox.Text?.Trim(),
+            ManualFccPortBox.Text?.Trim(),
+            GetEnvironmentKey(ManualEnvComboBox.SelectedIndex));
 
-        if (string.IsNullOrWhiteSpace(cloudUrl))
+        if (!validation.IsValid)
         {
-            ShowManualStatus("Please enter the cloud URL.", isError: true);
+            ShowManualStatus(validation.ErrorMessage!, isError: true);
             return;
         }
-        if (string.IsNullOrWhiteSpace(siteCode))
-        {
-            ShowManualStatus("Please enter the site code.", isError: true);
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(fccHost))
-        {
-            ShowManualStatus("Please enter the FCC host address.", isError: true);
-            return;
-        }
-        if (!int.TryParse(fccPortText, out var fccPort) || fccPort < 1 || fccPort > 65535)
-        {
-            ShowManualStatus("Please enter a valid FCC port (1-65535).", isError: true);
-            return;
-        }
-
-        // Validate URL format
-        if (!Uri.TryCreate(cloudUrl, UriKind.Absolute, out var uri)
-            || (uri.Scheme != "http" && uri.Scheme != "https"))
-        {
-            ShowManualStatus("Cloud URL must be a valid HTTP/HTTPS URL.", isError: true);
-            return;
-        }
-
-        _resolvedCloudUrl = cloudUrl;
-        _resolvedSiteCode = siteCode;
-        _resolvedFccHost = fccHost;
-        _resolvedFccPort = fccPort;
-        _resolvedEnvironment = selectedEnv ?? string.Empty;
 
         // If a provisioning token was provided, perform cloud registration
-        // instead of generating a local-only device ID.
+        var manualToken = ManualTokenBox.Text?.Trim();
         if (!string.IsNullOrWhiteSpace(manualToken))
         {
-            await RegisterManualWithTokenAsync(cloudUrl, siteCode, manualToken, fccHost, fccPort);
+            await RegisterManualWithTokenAsync(manualToken);
             return;
         }
 
-        // Offline mode — generate a local device ID (no cloud registration)
-        _resolvedDeviceId = $"manual-{Guid.NewGuid():N}"[..24];
-
+        // Offline mode — local device ID already generated by orchestrator
         GoToStep(3);
     }
 
-    /// <summary>
-    /// Perform cloud registration using a provisioning token entered in the manual config form.
-    /// On success, store the cloud-assigned device ID and FCC details, then advance to step 3.
-    /// </summary>
-    private async Task RegisterManualWithTokenAsync(
-        string cloudUrl, string siteCode, string token,
-        string fccHost, int fccPort)
+    private async Task RegisterManualWithTokenAsync(string token)
     {
-        if (_registrationService is null)
-        {
-            ShowManualStatus("Registration service unavailable.", isError: true);
-            return;
-        }
-
         NextButton.IsEnabled = false;
         BackButton.IsEnabled = false;
         NextButton.Content = "Registering...";
@@ -368,88 +233,32 @@ public sealed partial class ProvisioningWindow : Window
         // M-08: 30-second timeout for manual-token registration path
         _registrationCts?.Cancel();
         _registrationCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var ct = _registrationCts.Token;
 
-        try
+        var outcome = await _orchestrator.RegisterManualWithTokenAsync(
+            _orchestrator.CloudUrl, _orchestrator.SiteCode, token,
+            _orchestrator.FccHost, _orchestrator.FccPort,
+            _orchestrator.Environment,
+            _registrationCts.Token);
+
+        // S-DSK-004: Clear provisioning token from UI after use.
+        ManualTokenBox.Text = string.Empty;
+
+        if (outcome.Kind == RegistrationOutcomeKind.Success)
         {
-            var request = DeviceInfoProvider.BuildRequest(
-                provisioningToken: token,
-                siteCode: siteCode,
-                replacePreviousAgent: false);
-
-            var result = await _registrationService.RegisterAsync(cloudUrl, request, ct);
-
-            switch (result)
-            {
-                case RegistrationResult.Success success:
-                    _logger?.LogInformation(
-                        "Manual config registration successful — deviceId={DeviceId}",
-                        success.Response.DeviceId);
-
-                    _resolvedDeviceId = success.Response.DeviceId;
-
-                    // Use FCC details from bootstrap config if available,
-                    // otherwise keep the user-provided values.
-                    var siteConfig = success.Response.SiteConfig;
-                    if (siteConfig?.Fcc is not null)
-                    {
-                        _resolvedFccHost = siteConfig.Fcc.HostAddress ?? fccHost;
-                        _resolvedFccPort = siteConfig.Fcc.Port ?? fccPort;
-                    }
-
-                    // Mark as code method so LaunchAgentAsync skips duplicate state save
-                    // (DeviceRegistrationService.RegisterAsync already persisted state).
-                    _isCodeMethod = true;
-
-                    // Patch environment into persisted registration state
-                    if (!string.IsNullOrEmpty(_resolvedEnvironment) && _registrationManager is not null)
-                    {
-                        var regState = _registrationManager.LoadState();
-                        regState.Environment = _resolvedEnvironment;
-                        await _registrationManager.SaveStateAsync(regState);
-                    }
-
-                    // M-09: Sync equipment data so local API has pump/nozzle info immediately
-                    if (siteConfig is not null && _registrationManager is not null)
-                    {
-                        try { _registrationManager.SyncSiteData(siteConfig); }
-                        catch (Exception ex) { _logger?.LogWarning(ex, "Site data sync failed — will populate on first config poll"); }
-                    }
-
-                    GoToStep(3);
-                    break;
-
-                case RegistrationResult.Rejected rejected:
-                    var hint = GetErrorHint(rejected.Code);
-                    ShowManualStatus($"Registration rejected: {rejected.Message}{hint}", isError: true);
-                    NextButton.IsEnabled = true;
-                    BackButton.IsEnabled = true;
-                    NextButton.Content = "Next";
-                    break;
-
-                case RegistrationResult.TransportError transport:
-                    ShowManualStatus($"Connection error: {transport.Message}", isError: true);
-                    NextButton.IsEnabled = true;
-                    BackButton.IsEnabled = true;
-                    NextButton.Content = "Next";
-                    break;
-            }
+            GoToStep(3);
+            return;
         }
-        catch (OperationCanceledException)
+
+        var msg = outcome.Kind switch
         {
-            ShowManualStatus("Registration timed out. Check connectivity and try again.", isError: true);
-            NextButton.IsEnabled = true;
-            BackButton.IsEnabled = true;
-            NextButton.Content = "Next";
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "Unexpected error during manual-token registration");
-            ShowManualStatus($"Unexpected error: {ex.Message}", isError: true);
-            NextButton.IsEnabled = true;
-            BackButton.IsEnabled = true;
-            NextButton.Content = "Next";
-        }
+            RegistrationOutcomeKind.Rejected => $"Registration rejected: {outcome.ErrorMessage}{outcome.ErrorHint}",
+            RegistrationOutcomeKind.TransportError => $"Connection error: {outcome.ErrorMessage}",
+            _ => outcome.ErrorMessage ?? "Registration failed.",
+        };
+        ShowManualStatus(msg, isError: true);
+        NextButton.IsEnabled = true;
+        BackButton.IsEnabled = true;
+        NextButton.Content = "Next";
     }
 
     // ── Step 3: Connection Tests ────────────────────────────────────────────
@@ -464,84 +273,18 @@ public sealed partial class ProvisioningWindow : Window
         SetTestState(CloudTestIcon, CloudTestDetail, CloudTestStatus, "...", "Testing...", "In progress");
         SetTestState(FccTestIcon, FccTestDetail, FccTestStatus, "...", "Testing...", "In progress");
 
-        bool cloudOk = false;
-        bool fccOk = false;
+        var results = await _orchestrator.RunConnectionTestsAsync();
 
-        // M-06: Use the DI-registered "cloud" named client so the connection test
-        // respects certificate pinning. Falls back to a raw HttpClient if DI is unavailable.
-        try
-        {
-            using var httpClient = _httpClientFactory?.CreateClient("cloud")
-                ?? new HttpClient();
-            httpClient.Timeout = TimeSpan.FromSeconds(10);
-            var response = await httpClient.GetAsync($"{_resolvedCloudUrl.TrimEnd('/')}/health");
-            cloudOk = response.IsSuccessStatusCode;
+        ApplyTestOutcome(CloudTestIcon, CloudTestDetail, CloudTestStatus, results.Cloud);
+        ApplyTestOutcome(FccTestIcon, FccTestDetail, FccTestStatus, results.Fcc);
 
-            if (cloudOk)
-                SetTestState(CloudTestIcon, CloudTestDetail, CloudTestStatus,
-                    "OK", $"Connected to {_resolvedCloudUrl}", "Connected",
-                    "#22C55E");
-            else
-                SetTestState(CloudTestIcon, CloudTestDetail, CloudTestStatus,
-                    "!", $"HTTP {(int)response.StatusCode} from {_resolvedCloudUrl}", "Warning",
-                    "#EAB308");
-        }
-        catch (Exception ex)
-        {
-            SetTestState(CloudTestIcon, CloudTestDetail, CloudTestStatus,
-                "X", $"Failed: {ex.Message}", "Failed",
-                "#EF4444");
-        }
-
-        // Test FCC connectivity
-        if (!string.IsNullOrEmpty(_resolvedFccHost))
-        {
-            try
-            {
-                using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                var fccUrl = $"http://{_resolvedFccHost}:{_resolvedFccPort}";
-                var response = await httpClient.GetAsync(fccUrl);
-                fccOk = true; // Any response means FCC is reachable
-
-                SetTestState(FccTestIcon, FccTestDetail, FccTestStatus,
-                    "OK", $"Reachable at {_resolvedFccHost}:{_resolvedFccPort}", "Connected",
-                    "#22C55E");
-            }
-            catch (HttpRequestException)
-            {
-                SetTestState(FccTestIcon, FccTestDetail, FccTestStatus,
-                    "X", $"Cannot reach {_resolvedFccHost}:{_resolvedFccPort}", "Unreachable",
-                    "#EF4444");
-            }
-            catch (TaskCanceledException)
-            {
-                SetTestState(FccTestIcon, FccTestDetail, FccTestStatus,
-                    "X", $"Timeout connecting to {_resolvedFccHost}:{_resolvedFccPort}", "Timeout",
-                    "#EF4444");
-            }
-            catch (Exception ex)
-            {
-                SetTestState(FccTestIcon, FccTestDetail, FccTestStatus,
-                    "X", $"Error: {ex.Message}", "Failed",
-                    "#EF4444");
-            }
-        }
-        else
-        {
-            SetTestState(FccTestIcon, FccTestDetail, FccTestStatus,
-                "--", "No FCC host configured (will be set from cloud config)", "Skipped",
-                "#6B7280");
-            fccOk = true; // Not a blocker — FCC info may come from cloud config
-        }
-
-        // Show overall result
-        if (cloudOk && fccOk)
+        if (results.AllPassed)
         {
             ShowTestOverall("All connection tests passed. You can proceed.", isError: false);
             PopulateSuccessSummary();
             GoToStep(4);
         }
-        else if (cloudOk)
+        else if (results.CloudOnlyPassed)
         {
             ShowTestOverall(
                 "Cloud connected but FCC unreachable. You can still proceed — the agent will retry FCC connection.",
@@ -551,8 +294,6 @@ public sealed partial class ProvisioningWindow : Window
             NextButton.Content = "Continue Anyway";
             // M-05: Remove the previous "Continue Anyway" handler (if any) and
             // the permanent handler before attaching a new one-shot handler.
-            // The old code removed OnNextClicked inside the lambda (already detached)
-            // instead of the anonymous handler itself, causing handler accumulation.
             NextButton.Click -= OnNextClicked;
             if (_continueAnywayHandler is not null)
                 NextButton.Click -= _continueAnywayHandler;
@@ -577,7 +318,21 @@ public sealed partial class ProvisioningWindow : Window
         }
     }
 
-    private void SetTestState(
+    private static void ApplyTestOutcome(TextBlock icon, TextBlock detail, TextBlock status, TestOutcome outcome)
+    {
+        var (iconText, statusText, color) = outcome.State switch
+        {
+            TestState.Connected => ("OK", "Connected", "#22C55E"),
+            TestState.Warning => ("!", "Warning", "#EAB308"),
+            TestState.Failed => ("X", "Failed", "#EF4444"),
+            TestState.Skipped => ("--", "Skipped", "#6B7280"),
+            _ => ("?", "Unknown", "#888888"),
+        };
+
+        SetTestState(icon, detail, status, iconText, outcome.Detail, statusText, color);
+    }
+
+    private static void SetTestState(
         TextBlock icon, TextBlock detail, TextBlock status,
         string iconText, string detailText, string statusText,
         string? color = null)
@@ -598,20 +353,49 @@ public sealed partial class ProvisioningWindow : Window
 
     private void PopulateSuccessSummary()
     {
-        SummaryDeviceId.Text = _resolvedDeviceId;
-        SummarySiteCode.Text = _resolvedSiteCode;
-        SummaryCloudUrl.Text = _resolvedCloudUrl;
-        SummaryFccEndpoint.Text = !string.IsNullOrEmpty(_resolvedFccHost)
-            ? $"{_resolvedFccHost}:{_resolvedFccPort}"
+        _orchestrator.ResolveApiKey();
+
+        SummaryDeviceId.Text = _orchestrator.DeviceId;
+        SummarySiteCode.Text = _orchestrator.SiteCode;
+        SummaryCloudUrl.Text = _orchestrator.CloudUrl;
+        SummaryFccEndpoint.Text = !string.IsNullOrEmpty(_orchestrator.FccHost)
+            ? $"{_orchestrator.FccHost}:{_orchestrator.FccPort}"
             : "Will be configured from cloud";
 
-        // Generate or retrieve API key
-        var config = AgentAppContext.ServiceProvider?.GetService<IOptions<AgentConfiguration>>()?.Value;
-        _apiKey = config?.FccApiKey ?? Guid.NewGuid().ToString("N");
-        ApiKeyDisplay.Text = _apiKey;
+        ApiKeyDisplay.Text = _orchestrator.ApiKey;
 
-        var port = config?.LocalApiPort ?? 8585;
+        var port = _orchestrator.GetLocalApiPort();
         ApiKeyPortHint.Text = $"Local API available at http://<agent-ip>:{port}/api — use header X-Api-Key: <key above>";
+    }
+
+    // S-DSK-001: Toggle API key visibility with auto-hide after 10 seconds.
+    private void OnToggleApiKeyClicked(object? sender, RoutedEventArgs e)
+    {
+        if (ApiKeyDisplay.PasswordChar == '\0')
+        {
+            ApiKeyDisplay.PasswordChar = '*';
+            ToggleApiKeyButton.Content = "Show";
+            _apiKeyVisibilityCts?.Cancel();
+        }
+        else
+        {
+            ApiKeyDisplay.PasswordChar = '\0';
+            ToggleApiKeyButton.Content = "Hide";
+            _apiKeyVisibilityCts?.Cancel();
+            _apiKeyVisibilityCts = new CancellationTokenSource();
+            _ = AutoHideApiKeyAsync(_apiKeyVisibilityCts.Token);
+        }
+    }
+
+    private async Task AutoHideApiKeyAsync(CancellationToken ct)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), ct);
+            ApiKeyDisplay.PasswordChar = '*';
+            ToggleApiKeyButton.Content = "Show";
+        }
+        catch (OperationCanceledException) { }
     }
 
     private async void OnCopyApiKeyClicked(object? sender, RoutedEventArgs e)
@@ -621,7 +405,7 @@ public sealed partial class ProvisioningWindow : Window
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
             if (clipboard is not null)
             {
-                await clipboard.SetTextAsync(_apiKey);
+                await clipboard.SetTextAsync(_orchestrator.ApiKey);
                 CopyApiKeyButton.Content = "Copied!";
                 _ = ResetCopyButtonAsync();
             }
@@ -648,59 +432,18 @@ public sealed partial class ProvisioningWindow : Window
 
         try
         {
-            // For the manual config path, persist registration state now.
-            // The code-based path already saved state inside DeviceRegistrationService.RegisterAsync().
-            if (!_isCodeMethod && _registrationManager is not null)
-            {
-                await _registrationManager.SaveStateAsync(new RegistrationState
-                {
-                    IsRegistered = true,
-                    DeviceId = _resolvedDeviceId,
-                    SiteCode = _resolvedSiteCode,
-                    // L-02: Explicitly set LegalEntityId (empty for offline manual config;
-                    // will be populated on first cloud config poll).
-                    LegalEntityId = string.Empty,
-                    CloudBaseUrl = _resolvedCloudUrl,
-                    Environment = string.IsNullOrEmpty(_resolvedEnvironment) ? null : _resolvedEnvironment,
-                    RegisteredAt = DateTimeOffset.UtcNow,
-                    DeviceModel = Environment.MachineName,
-                    OsVersion = Environment.OSVersion.VersionString,
-                    AgentVersion = typeof(ProvisioningWindow).Assembly.GetName().Version?.ToString() ?? "1.0.0",
-                });
-                _logger?.LogInformation(
-                    "Manual config registration state persisted (deviceId={DeviceId}, site={SiteCode})",
-                    _resolvedDeviceId, _resolvedSiteCode);
-            }
+            await _orchestrator.PersistManualStateAsync();
+            await _orchestrator.PersistApiKeyAsync();
 
-            // Persist the generated LAN API key to credential store before starting
-            // the host, so ApiKeyMiddleware can load it via PostConfigure.
-            var credStore = AgentAppContext.ServiceProvider?.GetService<ICredentialStore>();
-            if (credStore is not null && !string.IsNullOrEmpty(_apiKey))
-            {
-                try
-                {
-                    await credStore.SetSecretAsync(CredentialKeys.LanApiKey, _apiKey);
-                    _logger?.LogInformation("LAN API key persisted to credential store");
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogError(ex, "Failed to persist LAN API key to credential store");
-                }
-            }
-
-            // Start the host if not already running
-            if (AgentAppContext.WebApp is { } webApp)
-            {
-                await Task.Run(() => webApp.Start());
-                _logger?.LogInformation("Host started after setup wizard");
-            }
+            // F-DSK-007: Only start the host if it is not already running.
+            await _orchestrator.StartHostAsync(AgentAppContext.WebApp, AgentAppContext.IsHostStarted);
+            AgentAppContext.IsHostStarted = true;
 
             // Signal App.axaml.cs to transition to MainWindow
             RegistrationCompleted?.Invoke(this, EventArgs.Empty);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _logger?.LogError(ex, "Failed to start agent host");
             NextButton.IsEnabled = true;
             NextButton.Content = "Retry Launch";
         }
@@ -789,16 +532,4 @@ public sealed partial class ProvisioningWindow : Window
             ? new SolidColorBrush(Color.FromRgb(153, 27, 27))
             : new SolidColorBrush(Color.FromRgb(22, 101, 52));
     }
-
-    private static string GetErrorHint(RegistrationErrorCode code) => code switch
-    {
-        RegistrationErrorCode.BootstrapTokenExpired => "\n\nThe token has expired. Please generate a new one from the admin portal.",
-        RegistrationErrorCode.BootstrapTokenAlreadyUsed => "\n\nThis token has already been used. Please generate a new one.",
-        RegistrationErrorCode.BootstrapTokenInvalid => "\n\nThe token is not recognized. Please check you copied it correctly.",
-        RegistrationErrorCode.BootstrapTokenRevoked => "\n\nThis token has been revoked by an administrator.",
-        RegistrationErrorCode.ActiveAgentExists => "\n\nAnother agent is already registered at this site. Check 'Replace existing agent' to override.",
-        RegistrationErrorCode.SiteNotFound => "\n\nThe site code was not found. Please check the site code.",
-        RegistrationErrorCode.SiteMismatch => "\n\nThe site code does not match the token. Please verify both values.",
-        _ => "",
-    };
 }

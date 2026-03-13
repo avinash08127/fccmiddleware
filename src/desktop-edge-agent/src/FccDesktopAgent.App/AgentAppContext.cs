@@ -39,4 +39,11 @@ internal static class AgentAppContext
     /// Set in Program.cs based on registration state.
     /// </summary>
     public static StartupMode Mode { get; set; } = StartupMode.Normal;
+
+    /// <summary>
+    /// F-DSK-007: Tracks whether the web host has been started.
+    /// Prevents ProvisioningWindow.LaunchAgentAsync from calling Start() on an already-running host
+    /// during re-provisioning (when ReprovisioningRequired fires at runtime).
+    /// </summary>
+    public static bool IsHostStarted { get; set; }
 }

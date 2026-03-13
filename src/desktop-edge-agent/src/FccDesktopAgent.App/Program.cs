@@ -10,9 +10,11 @@ using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.WebSocket;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using Serilog;
 using Serilog.Events;
 using Velopack;
@@ -62,32 +64,21 @@ try
     var wsPort = wsConfig.GetValue<int?>("Port") ?? 8443;
     var wsUseTls = wsConfig.GetValue<bool>("UseTls");
     var wsCertPath = wsConfig.GetValue<string?>("CertificatePath");
-    var wsCertPassword = wsConfig.GetValue<string?>("CertificatePassword");
     var apiPort = int.TryParse(builder.Configuration["LocalApi:Port"], out var parsedApiPort) ? parsedApiPort : 8585;
 
-    builder.WebHost.ConfigureKestrel(serverOptions =>
-    {
-        // REST API — always HTTP
-        serverOptions.ListenAnyIP(apiPort);
-
-        // WebSocket — separate port if enabled and different from API port
-        if (wsEnabled && wsPort != apiPort)
+    // S-DSK-002 + S-DSK-005: Kestrel endpoint configuration uses IConfigureOptions
+    // so the WebSocket TLS certificate password can be read from ICredentialStore
+    // instead of plaintext config. The password variable is scoped to
+    // ConfigureWebSocketTls() to prevent accidental logging.
+    builder.Services.AddSingleton<IConfigureOptions<KestrelServerOptions>>(sp =>
+        new ConfigureOptions<KestrelServerOptions>(options =>
         {
-            if (wsUseTls && !string.IsNullOrEmpty(wsCertPath))
-            {
-                serverOptions.ListenAnyIP(wsPort, listenOptions =>
-                {
-                    listenOptions.UseHttps(wsCertPath, wsCertPassword ?? "");
-                    Log.Information("WebSocket TLS endpoint configured on port {Port} with certificate {Cert}", wsPort, wsCertPath);
-                });
-            }
-            else
-            {
-                serverOptions.ListenAnyIP(wsPort);
-                Log.Information("WebSocket endpoint configured on port {Port} (no TLS)", wsPort);
-            }
-        }
-    });
+            options.ListenAnyIP(apiPort);
+
+            if (wsEnabled && wsPort != apiPort)
+                ConfigureWebSocketTls(options, wsPort, wsUseTls, wsCertPath, wsConfig,
+                    sp.GetService<ICredentialStore>());
+        }));
 
     var webApp = builder.Build();
     webApp.UseWebSockets();
@@ -121,6 +112,7 @@ try
 
         // Normal operational mode — start all services, then show dashboard
         webApp.Start();
+        AgentAppContext.IsHostStarted = true;
         Log.Information("FCC Desktop Agent host started — listening on port 8585");
 
         // Non-blocking startup update check
@@ -144,7 +136,7 @@ try
 
         // Graceful shutdown after Avalonia exits
         Log.Information("Avalonia exited (code {ExitCode}), stopping host", exitCode);
-        webApp.StopAsync().GetAwaiter().GetResult();
+        await webApp.StopAsync();
         return exitCode;
     }
 
@@ -160,7 +152,7 @@ try
         Log.Information("Avalonia exited (code {ExitCode}), stopping host", provisioningExitCode);
         try
         {
-            webApp.StopAsync().GetAwaiter().GetResult();
+            await webApp.StopAsync();
         }
         catch (Exception ex)
         {
@@ -177,7 +169,7 @@ catch (Exception ex) when (ex is not OperationCanceledException)
 }
 finally
 {
-    Log.CloseAndFlushAsync().GetAwaiter().GetResult();
+    await Log.CloseAndFlushAsync();
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -199,4 +191,39 @@ static string GetLogPath()
         "agent-.log");
     Directory.CreateDirectory(Path.GetDirectoryName(logDir)!);
     return logDir;
+}
+
+// S-DSK-002 + S-DSK-005: Dedicated method for WebSocket TLS configuration.
+// Certificate password is scoped to this method — do NOT log it.
+static void ConfigureWebSocketTls(
+    KestrelServerOptions options,
+    int wsPort,
+    bool wsUseTls,
+    string? wsCertPath,
+    IConfigurationSection wsConfig,
+    ICredentialStore? credentialStore)
+{
+    if (wsUseTls && !string.IsNullOrEmpty(wsCertPath))
+    {
+        // S-DSK-002: Read certificate password from credential store (preferred)
+        // or fall back to config file. Do NOT log this variable.
+        string? certPassword = null;
+        if (credentialStore is not null)
+        {
+            try { certPassword = credentialStore.GetSecretAsync(CredentialKeys.WsCertPassword).GetAwaiter().GetResult(); }
+            catch { /* credential store unavailable — fall through to config */ }
+        }
+        certPassword ??= wsConfig.GetValue<string?>("CertificatePassword");
+
+        options.ListenAnyIP(wsPort, listenOptions =>
+        {
+            listenOptions.UseHttps(wsCertPath, certPassword ?? "");
+            Log.Information("WebSocket TLS endpoint configured on port {Port} with certificate {Cert}", wsPort, wsCertPath);
+        });
+    }
+    else
+    {
+        options.ListenAnyIP(wsPort);
+        Log.Information("WebSocket endpoint configured on port {Port} (no TLS)", wsPort);
+    }
 }

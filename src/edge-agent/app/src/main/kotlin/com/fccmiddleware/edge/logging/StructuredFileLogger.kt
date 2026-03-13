@@ -1,25 +1,26 @@
 package com.fccmiddleware.edge.logging
 
 import android.content.Context
-import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.BufferedWriter
 import java.io.File
+import java.io.FileOutputStream
 import java.io.FileWriter
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * StructuredFileLogger — persistent JSONL logging for the Android Edge Agent.
@@ -33,7 +34,7 @@ import java.time.format.DateTimeFormatter
  * ## Design constraints (Urovo i9100, sub-Saharan Africa)
  * - Async buffered I/O via [Dispatchers.IO] + [Mutex] — never blocks the pre-auth hot path
  * - Rolling: 1 file/day, max [maxFiles] files (~10 MB cap)
- * - Bridges to [android.util.Log] simultaneously so ADB debugging still works
+ * - Mirrors to logcat in debug builds only; release builds keep diagnostics in JSONL
  * - Flushes immediately on ERROR level
  * - Respects [minLevel] from config (configurable at runtime via [updateLogLevel])
  */
@@ -53,8 +54,31 @@ class StructuredFileLogger(
     }
 
     private val logDir: File = File(context.filesDir, LOG_DIR).also { it.mkdirs() }
-    private val writeMutex = Mutex()
     private val json = Json { encodeDefaults = false }
+
+    /**
+     * AP-034: Channel-based write pipeline. A single long-lived writer coroutine
+     * consumes entries from this channel, eliminating per-entry coroutine allocations.
+     * Capacity 256 with DROP_OLDEST handles burst logging without blocking callers.
+     */
+    private data class WriteCommand(val jsonLine: String, val flushNow: Boolean)
+    private val writeChannel = Channel<WriteCommand>(capacity = 256, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
+
+    init {
+        // Single long-lived writer coroutine — replaces per-entry scope.launch
+        scope.launch(Dispatchers.IO) {
+            for (cmd in writeChannel) {
+                try {
+                    val writer = getOrCreateWriter()
+                    writer.write(cmd.jsonLine)
+                    writer.newLine()
+                    if (cmd.flushNow) writer.flush()
+                } catch (e: Exception) {
+                    PlatformLogBridge.e("StructuredFileLogger", "Failed to write log entry", e)
+                }
+            }
+        }
+    }
 
     @Volatile
     private var currentDate: LocalDate? = null
@@ -94,27 +118,27 @@ class StructuredFileLogger(
     // ── Public logging API ──────────────────────────────────────────────────
 
     fun d(tag: String, msg: String, extra: Map<String, String>? = null) {
-        Log.d(tag, msg)
+        PlatformLogBridge.d(tag, msg)
         writeEntry(LogLevel.DEBUG, tag, msg, extra)
     }
 
     fun i(tag: String, msg: String, extra: Map<String, String>? = null) {
-        Log.i(tag, msg)
+        PlatformLogBridge.i(tag, msg)
         writeEntry(LogLevel.INFO, tag, msg, extra)
     }
 
     fun w(tag: String, msg: String, extra: Map<String, String>? = null) {
-        Log.w(tag, msg)
+        PlatformLogBridge.w(tag, msg)
         writeEntry(LogLevel.WARN, tag, msg, extra)
     }
 
     fun e(tag: String, msg: String, throwable: Throwable? = null, extra: Map<String, String>? = null) {
-        if (throwable != null) Log.e(tag, msg, throwable) else Log.e(tag, msg)
+        PlatformLogBridge.e(tag, msg, throwable)
         val merged = buildMap {
             extra?.let { putAll(it) }
             throwable?.let {
-                put("exception", it.javaClass.name)
-                put("stackTrace", it.stackTraceToString().take(MAX_MESSAGE_LENGTH))
+                put("exception", LogSanitizer.sanitizeExceptionClassName(it.javaClass))
+                put("stackTrace", LogSanitizer.sanitizeStackTrace(it.stackTraceToString().take(MAX_MESSAGE_LENGTH)))
             }
         }
         writeEntry(LogLevel.ERROR, tag, msg, merged.ifEmpty { null })
@@ -122,16 +146,16 @@ class StructuredFileLogger(
 
     /** Write a crash entry synchronously (called from uncaught exception handler). */
     fun crash(tag: String, msg: String, throwable: Throwable) {
-        Log.e(tag, "CRASH: $msg", throwable)
+        PlatformLogBridge.e(tag, "CRASH: $msg", throwable)
         val entry = LogEntry(
             ts = Instant.now().toString(),
             lvl = "FATAL",
             tag = tag,
-            msg = msg.take(MAX_MESSAGE_LENGTH),
+            msg = LogSanitizer.sanitizeMessage(msg).take(MAX_MESSAGE_LENGTH),
             cid = correlationId,
             extra = buildJsonObject(mapOf(
-                "exception" to throwable.javaClass.name,
-                "stackTrace" to throwable.stackTraceToString().take(MAX_MESSAGE_LENGTH),
+                "exception" to LogSanitizer.sanitizeExceptionClassName(throwable.javaClass),
+                "stackTrace" to LogSanitizer.sanitizeStackTrace(throwable.stackTraceToString().take(MAX_MESSAGE_LENGTH)),
             )),
         )
         val jsonLine = json.encodeToString(entry)
@@ -224,6 +248,38 @@ class StructuredFileLogger(
             ?: emptyList()
 
     /**
+     * Writes a sanitized ZIP archive for technician sharing.
+     *
+     * Existing files are re-sanitized on export so historical pre-fix logs do not
+     * leak raw topology, URLs, or verbose stack traces.
+     */
+    fun exportRedactedLogs(destinationZip: File): Int {
+        flush()
+        val files = getLogFiles()
+        if (files.isEmpty()) {
+            if (destinationZip.exists()) destinationZip.delete()
+            return 0
+        }
+
+        destinationZip.parentFile?.mkdirs()
+        ZipOutputStream(FileOutputStream(destinationZip)).use { zos ->
+            for (file in files) {
+                zos.putNextEntry(ZipEntry(file.name))
+                file.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        val sanitizedLine = LogSanitizer.sanitizeJsonLine(line)
+                        zos.write(sanitizedLine.toByteArray(StandardCharsets.UTF_8))
+                        zos.write('\n'.code)
+                    }
+                }
+                zos.closeEntry()
+            }
+        }
+
+        return files.size
+    }
+
+    /**
      * Total size of all log files in bytes.
      *
      * AP-023: Returns a cached value that is invalidated on file rotation and
@@ -282,13 +338,16 @@ class StructuredFileLogger(
     private fun writeEntry(level: LogLevel, tag: String, msg: String, extra: Map<String, String>?) {
         if (level.severity < minLevel.severity) return
 
+        val sanitizedMessage = LogSanitizer.sanitizeMessage(msg).take(MAX_MESSAGE_LENGTH)
+        val sanitizedExtra = extra?.let(LogSanitizer::sanitizeExtra)
+
         val entry = LogEntry(
             ts = Instant.now().toString(),
             lvl = level.name,
             tag = tag,
-            msg = msg.take(MAX_MESSAGE_LENGTH),
+            msg = sanitizedMessage,
             cid = correlationId,
-            extra = extra?.let { buildJsonObject(it) },
+            extra = sanitizedExtra?.let { buildJsonObject(it) },
         )
 
         val jsonLine = json.encodeToString(entry)
@@ -306,19 +365,10 @@ class StructuredFileLogger(
 
         val flushNow = level.severity >= LogLevel.ERROR.severity
 
-        scope.launch(Dispatchers.IO) {
-            writeMutex.withLock {
-                try {
-                    val writer = getOrCreateWriter()
-                    writer.write(jsonLine)
-                    writer.newLine()
-                    if (flushNow) writer.flush()
-                } catch (e: Exception) {
-                    // Can't log a failure to log — avoid infinite recursion
-                    Log.e("StructuredFileLogger", "Failed to write log entry", e)
-                }
-            }
-        }
+        // AP-034: Send to the single writer coroutine via channel instead of
+        // launching a new coroutine per entry. trySend is non-blocking and
+        // drops the oldest entry if the channel is full (burst logging).
+        writeChannel.trySend(WriteCommand(jsonLine, flushNow))
     }
 
     private fun getOrCreateWriter(): BufferedWriter {
@@ -327,14 +377,21 @@ class StructuredFileLogger(
             currentWriter?.let {
                 try { it.flush(); it.close() } catch (_: Exception) {}
             }
+            currentWriter = null
             val file = File(logDir, "$FILE_PREFIX${today.format(DateTimeFormatter.ISO_LOCAL_DATE)}$FILE_SUFFIX")
-            currentWriter = BufferedWriter(FileWriter(file, true))
+            // AT-040: Assign writer before updating currentDate so that if the
+            // FileWriter constructor throws (e.g. disk full), currentDate stays stale
+            // and the next call retries. The IOException propagates directly instead
+            // of being masked by an NPE from the force-unwrap below.
+            val writer = BufferedWriter(FileWriter(file, true))
+            currentWriter = writer
             currentDate = today
             rotateOldFiles()
             // AP-023: Invalidate cached log size on file rotation
             cachedLogSizeBytes = -1L
         }
-        return currentWriter!!
+        return currentWriter
+            ?: throw java.io.IOException("Failed to create log writer — no writer available")
     }
 
     private fun buildJsonObject(map: Map<String, String>): JsonObject =

@@ -32,26 +32,23 @@ public sealed class ConfigPollWorker : IConfigPoller
 
     private readonly IHttpClientFactory _httpFactory;
     private readonly IOptions<AgentConfiguration> _config;
-    private readonly IDeviceTokenProvider _tokenProvider;
     private readonly IConfigManager _configManager;
+    private readonly AuthenticatedCloudRequestHandler _authHandler;
     private readonly IRegistrationManager _registrationManager;
     private readonly ILogger<ConfigPollWorker> _logger;
-
-    // Set permanently on DEVICE_DECOMMISSIONED. Process restart required to clear.
-    private volatile bool _decommissioned;
 
     public ConfigPollWorker(
         IHttpClientFactory httpFactory,
         IOptions<AgentConfiguration> config,
-        IDeviceTokenProvider tokenProvider,
         IConfigManager configManager,
+        AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
         ILogger<ConfigPollWorker> logger)
     {
         _httpFactory = httpFactory;
         _config = config;
-        _tokenProvider = tokenProvider;
         _configManager = configManager;
+        _authHandler = authHandler;
         _registrationManager = registrationManager;
         _logger = logger;
     }
@@ -59,78 +56,43 @@ public sealed class ConfigPollWorker : IConfigPoller
     /// <inheritdoc />
     public async Task<bool> PollAsync(CancellationToken ct)
     {
-        if (_decommissioned)
+        // T-DSK-013: Check centralized decommission flag instead of per-worker volatile boolean.
+        if (_registrationManager.IsDecommissioned)
         {
             _logger.LogDebug("Config poll skipped: device is decommissioned");
             return false;
         }
 
-        var token = await _tokenProvider.GetTokenAsync(ct);
-        if (token is null)
-        {
-            _logger.LogWarning("Config poll skipped: no device token available (device not yet registered?)");
-            return false;
-        }
+        // T-DSK-010: Delegate auth flow (token acquisition, 401 refresh, decommission handling)
+        // to the shared handler — eliminates duplicated try/catch pattern.
+        var result = await _authHandler.ExecuteAsync<ConfigPollResponse?>(
+            SendPollRequestAsync, "config poll", ct);
 
-        ConfigPollResponse? response;
-        try
-        {
-            response = await SendPollRequestAsync(token, ct);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // 401: refresh token once and retry
-            _logger.LogWarning("Config poll received 401; refreshing device token");
-            token = await _tokenProvider.RefreshTokenAsync(ct);
-            if (token is null)
-            {
-                _logger.LogWarning("Token refresh failed; config poll aborted");
-                return false;
-            }
+        if (result.RequiresHalt)
+            return false;
 
-            try
-            {
-                response = await SendPollRequestAsync(token, ct);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Config poll failed after token refresh");
-                return false;
-            }
-        }
-        catch (DeviceDecommissionedException ex)
-        {
-            await _registrationManager.MarkDecommissionedAsync();
-            _decommissioned = true;
-            _logger.LogCritical(
-                "DEVICE_DECOMMISSIONED received during config poll. " +
-                "All cloud sync halted. Agent restart required. Reason: {Reason}", ex.Message);
+        if (!result.IsSuccess)
             return false;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Config poll HTTP request failed");
-            return false;
-        }
 
         // null = 304 Not Modified
+        var response = result.Value;
         if (response is null)
             return false;
 
         // Apply the new config
-        var result = await _configManager.ApplyConfigAsync(
+        var applyResult = await _configManager.ApplyConfigAsync(
             response.Config, response.RawJson, response.ConfigVersion, ct);
 
-        if (result.Outcome == ConfigApplyOutcome.Applied)
+        if (applyResult.Outcome == ConfigApplyOutcome.Applied)
         {
             _logger.LogInformation(
-                "Config version {Version} applied successfully", result.ConfigVersion);
+                "Config version {Version} applied successfully", applyResult.ConfigVersion);
             return true;
         }
 
         _logger.LogDebug(
             "Config version {Version} not applied: {Outcome}",
-            result.ConfigVersion, result.Outcome);
+            applyResult.ConfigVersion, applyResult.Outcome);
         return false;
     }
 

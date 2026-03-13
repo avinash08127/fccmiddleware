@@ -26,7 +26,7 @@ import java.util.UUID
  *
  * NEVER log token values, credentials, or sensitive identity fields.
  */
-class EncryptedPrefsManager(context: Context) {
+class EncryptedPrefsManager(context: Context, masterKey: MasterKey) {
 
     companion object {
         private const val TAG = "EncryptedPrefsManager"
@@ -46,15 +46,14 @@ class EncryptedPrefsManager(context: Context) {
         const val KEY_REPROVISIONING_REQUIRED = "reprovisioning_required"
         const val KEY_ENVIRONMENT = "environment"
         const val KEY_PROVISIONING_DEVICE_SERIAL_FALLBACK = "provisioning_device_serial_fallback"
+        const val KEY_LAST_KEY_ROTATION_AT = "last_key_rotation_at"
     }
 
     // No fallback to regular SharedPreferences — storing sensitive identity data
     // (device tokens, site binding) unencrypted is a security violation.
     // If EncryptedSharedPreferences fails, the agent cannot operate safely.
+    // AP-031: MasterKey is injected to avoid redundant Keystore IPC on startup.
     private val prefs: SharedPreferences = run {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
         EncryptedSharedPreferences.create(
             context,
             PREFS_FILE,
@@ -131,10 +130,26 @@ class EncryptedPrefsManager(context: Context) {
             .commit()
     }
 
+    // ---- Batched update methods (AP-030) ----
+
+    /**
+     * AP-030: Batch FCC connection fields into a single editor/apply cycle.
+     * On EncryptedSharedPreferences each apply() rewrites the entire encrypted XML;
+     * batching avoids redundant AES encryption + disk write cycles on the hot path.
+     */
+    fun updateFccConnection(host: String? = null, port: Int? = null) {
+        val editor = prefs.edit()
+        if (host != null) editor.putString(KEY_FCC_HOST, host)
+        if (port != null) editor.putInt(KEY_FCC_PORT, port)
+        editor.apply()
+    }
+
     // ---- Encrypted token blobs (Keystore-encrypted, stored as Base64) ----
 
     fun storeDeviceTokenBlob(encoded: String) {
-        prefs.edit().putString(KEY_DEVICE_TOKEN_ENCRYPTED, encoded).apply()
+        if (!prefs.edit().putString(KEY_DEVICE_TOKEN_ENCRYPTED, encoded).commit()) {
+            AppLogger.e(TAG, "Failed to persist device token blob")
+        }
     }
 
     fun getDeviceTokenBlob(): String? {
@@ -142,11 +157,24 @@ class EncryptedPrefsManager(context: Context) {
     }
 
     fun storeRefreshTokenBlob(encoded: String) {
-        prefs.edit().putString(KEY_REFRESH_TOKEN_ENCRYPTED, encoded).apply()
+        if (!prefs.edit().putString(KEY_REFRESH_TOKEN_ENCRYPTED, encoded).commit()) {
+            AppLogger.e(TAG, "Failed to persist refresh token blob")
+        }
     }
 
     fun getRefreshTokenBlob(): String? {
         return prefs.getString(KEY_REFRESH_TOKEN_ENCRYPTED, null)
+    }
+
+    /**
+     * Persist both token blobs in one synchronous commit so a process death cannot
+     * leave the device with a new JWT blob and an old single-use refresh blob.
+     */
+    fun storeTokenBlobs(deviceBlob: String, refreshBlob: String): Boolean {
+        return prefs.edit()
+            .putString(KEY_DEVICE_TOKEN_ENCRYPTED, deviceBlob)
+            .putString(KEY_REFRESH_TOKEN_ENCRYPTED, refreshBlob)
+            .commit()
     }
 
     /**
@@ -165,6 +193,9 @@ class EncryptedPrefsManager(context: Context) {
 
     /**
      * Persist all registration data atomically after a successful registration.
+     *
+     * AF-053: Returns the result of commit() so callers can detect disk-full or
+     * I/O failures. A false return means the data was NOT durably persisted.
      */
     fun saveRegistration(
         deviceId: String,
@@ -172,11 +203,11 @@ class EncryptedPrefsManager(context: Context) {
         legalEntityId: String,
         cloudBaseUrl: String,
         environment: String? = null,
-    ) {
+    ): Boolean {
         // Use commit() (synchronous) instead of apply() (async) to ensure registration
         // data is durably persisted before the foreground service starts. An async apply()
         // could race with the service reading isRegistered=false before the write completes.
-        prefs.edit()
+        val committed = prefs.edit()
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_SITE_CODE, siteCode)
             .putString(KEY_LEGAL_ENTITY_ID, legalEntityId)
@@ -186,8 +217,20 @@ class EncryptedPrefsManager(context: Context) {
             .putBoolean(KEY_IS_DECOMMISSIONED, false)
             .putBoolean(KEY_REPROVISIONING_REQUIRED, false)
             .commit()
-        AppLogger.i(TAG, "Registration data saved for site=$siteCode env=${environment ?: "none"}")
+        if (committed) {
+            AppLogger.i(TAG, "Registration data saved (env=${environment ?: "none"})")
+        } else {
+            AppLogger.e(TAG, "Failed to persist registration data — commit() returned false (disk full or I/O error)")
+        }
+        return committed
     }
+
+    // ---- Key rotation tracking (AT-051) ----
+
+    /** Epoch millis of the last successful Keystore key rotation. 0 = never rotated. */
+    var lastKeyRotationAt: Long
+        get() = prefs.getLong(KEY_LAST_KEY_ROTATION_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_LAST_KEY_ROTATION_AT, value).apply()
 
     // ---- Runtime certificate pins (from SiteConfig) ----
 

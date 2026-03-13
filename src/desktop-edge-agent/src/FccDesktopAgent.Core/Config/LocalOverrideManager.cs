@@ -1,6 +1,9 @@
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FccDesktopAgent.Core.Buffer;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.Core.Config;
@@ -16,6 +19,8 @@ namespace FccDesktopAgent.Core.Config;
 public sealed class LocalOverrideManager
 {
     private const string OverridesFileName = "overrides.json";
+    private const string HmacFileName = "overrides.hmac";
+    private const string HmacKeyName = "config:overrides_hmac_key";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -24,20 +29,41 @@ public sealed class LocalOverrideManager
     };
 
     private readonly string _filePath;
+    private readonly string _hmacFilePath;
+    private readonly ICredentialStore? _credentialStore;
     private readonly ILogger<LocalOverrideManager> _logger;
     private readonly object _lock = new();
     private OverrideData? _cached;
 
-    public LocalOverrideManager(ILogger<LocalOverrideManager> logger)
+    public LocalOverrideManager(ICredentialStore credentialStore, ILogger<LocalOverrideManager> logger)
     {
-        _filePath = Path.Combine(AgentDataDirectory.Resolve(), OverridesFileName);
+        var baseDir = AgentDataDirectory.Resolve();
+        _filePath = Path.Combine(baseDir, OverridesFileName);
+        _hmacFilePath = Path.Combine(baseDir, HmacFileName);
+        _credentialStore = credentialStore;
         _logger = logger;
+    }
+
+    /// <summary>Backward-compatible constructor (no HMAC protection).</summary>
+    public LocalOverrideManager(ILogger<LocalOverrideManager> logger)
+        : this(credentialStore: null!, logger)
+    {
     }
 
     /// <summary>Test constructor that allows overriding the data directory.</summary>
     internal LocalOverrideManager(ILogger<LocalOverrideManager> logger, string baseDirectory)
+        : this(credentialStore: null!, logger)
     {
         _filePath = Path.Combine(baseDirectory, OverridesFileName);
+        _hmacFilePath = Path.Combine(baseDirectory, HmacFileName);
+    }
+
+    /// <summary>Test constructor with credential store and custom base directory.</summary>
+    internal LocalOverrideManager(ICredentialStore credentialStore, ILogger<LocalOverrideManager> logger, string baseDirectory)
+    {
+        _filePath = Path.Combine(baseDirectory, OverridesFileName);
+        _hmacFilePath = Path.Combine(baseDirectory, HmacFileName);
+        _credentialStore = credentialStore;
         _logger = logger;
     }
 
@@ -155,6 +181,8 @@ public sealed class LocalOverrideManager
         {
             if (File.Exists(_filePath))
                 File.Delete(_filePath);
+            if (File.Exists(_hmacFilePath))
+                File.Delete(_hmacFilePath);
         }
         catch (Exception ex)
         {
@@ -212,6 +240,17 @@ public sealed class LocalOverrideManager
         try
         {
             var json = File.ReadAllText(_filePath);
+
+            // S-DSK-018: Validate HMAC integrity before trusting the file contents
+            if (!VerifyHmac(json))
+            {
+                _logger.LogWarning(
+                    "Overrides file HMAC validation failed — file may have been tampered with. Ignoring overrides.");
+                var fallback = new OverrideData();
+                lock (_lock) _cached = fallback;
+                return fallback;
+            }
+
             var data = JsonSerializer.Deserialize<OverrideData>(json, JsonOptions) ?? new OverrideData();
             lock (_lock) _cached = data;
             return data;
@@ -233,12 +272,87 @@ public sealed class LocalOverrideManager
         {
             var json = JsonSerializer.Serialize(data, JsonOptions);
             File.WriteAllText(_filePath, json);
+
+            // S-DSK-018: Write HMAC alongside the data file
+            WriteHmac(json);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to write overrides.json");
             throw;
         }
+    }
+
+    // ── HMAC integrity protection (S-DSK-018) ──────────────────────────────
+
+    private byte[] GetOrCreateHmacKey()
+    {
+        if (_credentialStore is null)
+            return Array.Empty<byte>();
+
+        var keyBase64 = _credentialStore.GetSecretAsync(HmacKeyName).GetAwaiter().GetResult();
+        if (!string.IsNullOrWhiteSpace(keyBase64))
+            return Convert.FromBase64String(keyBase64);
+
+        // Generate and persist a new 256-bit HMAC key
+        var newKey = RandomNumberGenerator.GetBytes(32);
+        _credentialStore.SetSecretAsync(HmacKeyName, Convert.ToBase64String(newKey)).GetAwaiter().GetResult();
+        return newKey;
+    }
+
+    private bool VerifyHmac(string json)
+    {
+        if (_credentialStore is null)
+            return true; // No credential store — skip integrity check
+
+        if (!File.Exists(_hmacFilePath))
+        {
+            // First load after upgrade — no HMAC file yet. Accept and write HMAC for next load.
+            WriteHmac(json);
+            return true;
+        }
+
+        try
+        {
+            var key = GetOrCreateHmacKey();
+            if (key.Length == 0) return true;
+
+            var storedHmac = File.ReadAllText(_hmacFilePath).Trim();
+            var computedHmac = ComputeHmac(json, key);
+            return CryptographicOperations.FixedTimeEquals(
+                Convert.FromBase64String(storedHmac),
+                Convert.FromBase64String(computedHmac));
+        }
+        catch (Exception ex) when (ex is FormatException or IOException)
+        {
+            _logger.LogWarning(ex, "Failed to verify overrides HMAC");
+            return false;
+        }
+    }
+
+    private void WriteHmac(string json)
+    {
+        if (_credentialStore is null) return;
+
+        try
+        {
+            var key = GetOrCreateHmacKey();
+            if (key.Length == 0) return;
+
+            var hmac = ComputeHmac(json, key);
+            File.WriteAllText(_hmacFilePath, hmac);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to write overrides HMAC file");
+        }
+    }
+
+    private static string ComputeHmac(string data, byte[] key)
+    {
+        var dataBytes = Encoding.UTF8.GetBytes(data);
+        var hash = HMACSHA256.HashData(key, dataBytes);
+        return Convert.ToBase64String(hash);
     }
 
     private static int ParseAndValidatePort(string value)

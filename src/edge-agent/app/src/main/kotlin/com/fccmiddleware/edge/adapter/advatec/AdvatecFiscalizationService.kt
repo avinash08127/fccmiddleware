@@ -80,8 +80,7 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
             // Drain any stale receipts from prior calls
             while (receiptChannel.tryReceive().isSuccess) { /* drain */ }
 
-            val host = config.advatecDeviceAddress ?: "127.0.0.1"
-            val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
+            val deviceEndpoint = resolveDeviceEndpoint()
 
             // Convert volume back to litres for Advatec Dose field
             val doseLitres = BigDecimal(transaction.volumeMicrolitres)
@@ -117,12 +116,12 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
                 ),
             )
 
-            val url = "http://$host:$port/api/v2/incoming"
+            val url = deviceEndpoint.resolve("/api/v2/incoming")
             val jsonBody = json.encodeToString(AdvatecCustomerRequest.serializer(), request)
 
             AppLogger.i(
                 TAG,
-                "Fiscalization: submitting to Advatec (Pump=${transaction.pumpNumber}, " +
+                "Fiscalization: submitting to ${deviceEndpoint.scheme}://${deviceEndpoint.host}:${deviceEndpoint.port}/api/v2/incoming (Pump=${transaction.pumpNumber}, " +
                     "Dose=$doseLitres L, CustIdType=$custIdType)",
             )
 
@@ -177,11 +176,15 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
     }
 
     override suspend fun isAvailable(): Boolean {
-        val host = config.advatecDeviceAddress ?: "127.0.0.1"
-        val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
+        val deviceEndpoint = try {
+            resolveDeviceEndpoint()
+        } catch (e: IllegalArgumentException) {
+            AppLogger.w(TAG, e.message ?: "Advatec endpoint configuration is invalid")
+            return false
+        }
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), HEARTBEAT_TIMEOUT_MS)
+                socket.connect(InetSocketAddress(deviceEndpoint.host, deviceEndpoint.port), HEARTBEAT_TIMEOUT_MS)
                 true
             }
         } catch (_: Exception) {
@@ -263,7 +266,9 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
 
     // ── HTTP submission ─────────────────────────────────────────────────────
 
-    private fun submitCustomerData(url: String, jsonBody: String): FiscalSubmitResult {
+    // AT-019: Wrap blocking HttpURLConnection I/O in Dispatchers.IO to prevent
+    // Dispatchers.Default thread pool starvation during connect/read timeouts.
+    private suspend fun submitCustomerData(url: String, jsonBody: String): FiscalSubmitResult = withContext(Dispatchers.IO) {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = SUBMIT_TIMEOUT_MS
@@ -272,7 +277,7 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
             setRequestProperty("Content-Type", "application/json; charset=UTF-8")
         }
 
-        return try {
+        try {
             connection.outputStream.use { os ->
                 OutputStreamWriter(os, Charsets.UTF_8).use { writer ->
                     writer.write(jsonBody)
@@ -312,12 +317,13 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private fun getCurrencyFactor(currencyCode: String): BigDecimal {
-        return when (currencyCode.uppercase()) {
-            "KWD", "BHD", "OMR" -> BigDecimal("1000")
-            "JPY", "KRW", "TZS", "UGX", "RWF" -> BigDecimal.ONE
-            else -> BigDecimal("100")
-        }
+    private fun getCurrencyFactor(currencyCode: String): BigDecimal =
+        CurrencyUtils.getFactorBigDecimal(currencyCode)
+
+    private fun resolveDeviceEndpoint(): FccTransportSecurity.HttpEndpoint {
+        val address = config.advatecDeviceAddress ?: "127.0.0.1"
+        val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
+        return FccTransportSecurity.resolveEndpoint(address, TAG, port)
     }
 }
 

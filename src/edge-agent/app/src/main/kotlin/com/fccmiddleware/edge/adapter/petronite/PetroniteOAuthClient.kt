@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.adapter.petronite
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
+import com.fccmiddleware.edge.adapter.common.FccTransportSecurity
 import io.ktor.client.HttpClient
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -83,6 +84,7 @@ class PetroniteOAuthClient(
     private suspend fun requestToken(): PetroniteTokenResponse {
         val tokenEndpoint = config.oauthTokenEndpoint
             ?: throw IllegalStateException("Petronite OAuth token endpoint is not configured")
+        val secureTokenEndpoint = FccTransportSecurity.resolveAbsoluteUrl(tokenEndpoint, TAG)
         val clientId = config.clientId
             ?: throw IllegalStateException("Petronite OAuth client ID is not configured")
         val clientSecret = config.clientSecret
@@ -95,7 +97,7 @@ class PetroniteOAuthClient(
         )
 
         try {
-            val response = httpClient.post(tokenEndpoint) {
+            val response = httpClient.post(secureTokenEndpoint) {
                 header("Authorization", "Basic $credentials")
                 contentType(ContentType.Application.FormUrlEncoded)
                 setBody("grant_type=client_credentials")

@@ -497,8 +497,7 @@ export class AgentListComponent {
   private readonly destroyRef = inject(DestroyRef);
 
   readonly isAdmin = computed(() => {
-    const account = getCurrentAccount(this.msal.instance);
-    return account ? hasAnyRequiredRole(account, ['SystemAdmin', 'SystemAdministrator']) : false;
+    return hasAnyRequiredRole(null, ['FccAdmin', 'FccUser']);
   });
 
   // ── Legal entity ─────────────────────────────────────────────────────────

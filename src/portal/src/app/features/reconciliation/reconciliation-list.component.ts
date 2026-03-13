@@ -222,8 +222,8 @@ interface LoadRequest {
                       <td>{{ ex.matchMethod ?? '—' }}</td>
                       <td>
                         <app-status-badge
-                          [label]="ex.reconciliationStatus | statusLabel"
-                          [severity]="getSeverity(ex.reconciliationStatus)"
+                          [label]="ex.status | statusLabel"
+                          [severity]="getSeverity(ex.status)"
                         />
                         @if (ex.ambiguityFlag) {
                           <i class="pi pi-exclamation-triangle ambiguity-icon" title="Ambiguous match"></i>
@@ -302,8 +302,8 @@ interface LoadRequest {
                       <td>{{ ex.matchMethod ?? '—' }}</td>
                       <td>
                         <app-status-badge
-                          [label]="ex.reconciliationStatus | statusLabel"
-                          [severity]="getSeverity(ex.reconciliationStatus)"
+                          [label]="ex.status | statusLabel"
+                          [severity]="getSeverity(ex.status)"
                         />
                       </td>
                       <td>{{ ex.createdAt | utcDate: 'short' }}</td>
@@ -379,8 +379,8 @@ interface LoadRequest {
                       <td>{{ ex.matchMethod ?? '—' }}</td>
                       <td>
                         <app-status-badge
-                          [label]="ex.reconciliationStatus | statusLabel"
-                          [severity]="getSeverity(ex.reconciliationStatus)"
+                          [label]="ex.status | statusLabel"
+                          [severity]="getSeverity(ex.status)"
                         />
                         @if (ex.ambiguityFlag) {
                           <i class="pi pi-exclamation-triangle ambiguity-icon" title="Ambiguous match"></i>
@@ -469,8 +469,8 @@ interface LoadRequest {
                       <td>{{ ex.matchMethod ?? '—' }}</td>
                       <td>
                         <app-status-badge
-                          [label]="ex.reconciliationStatus | statusLabel"
-                          [severity]="getSeverity(ex.reconciliationStatus)"
+                          [label]="ex.status | statusLabel"
+                          [severity]="getSeverity(ex.status)"
                         />
                       </td>
                       <td>{{ (ex.decidedAt ?? ex.updatedAt) | utcDate: 'short' }}</td>
@@ -757,7 +757,6 @@ export class ReconciliationListComponent {
           return next;
         });
       });
-  }
 
     // RC-P05: switchMap cancels any in-flight site request when a new entity is selected;
     // siteCache prevents redundant fetches on returning to a previously loaded entity.
@@ -916,7 +915,7 @@ export class ReconciliationListComponent {
     const variancePercent = resolveVariancePercent(ex.variancePercent, ex.varianceBps);
     if (variancePercent == null) return 'variance-null';
     if (variancePercent === 0) return 'variance-zero';
-    return ex.reconciliationStatus === ReconciliationStatus.VARIANCE_FLAGGED
+    return ex.status === ReconciliationStatus.VARIANCE_FLAGGED
       ? 'variance-positive'
       : 'variance-zero';
   }

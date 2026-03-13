@@ -3,10 +3,17 @@ package com.fccmiddleware.edge.buffer
 import android.database.sqlite.SQLiteFullException
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.CanonicalTransaction
+import com.fccmiddleware.edge.adapter.common.FccVendor
+import com.fccmiddleware.edge.adapter.common.IngestionSource
 import com.fccmiddleware.edge.adapter.common.SyncStatus
+import com.fccmiddleware.edge.adapter.common.TransactionStatus
+import com.fccmiddleware.edge.buffer.dao.LocalApiTransaction
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.buffer.dao.WsBufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import java.time.Instant
+import com.fccmiddleware.edge.security.KeystoreBackedStringCipher
+import com.fccmiddleware.edge.security.KeystoreManager
 
 /**
  * Buffer management layer on top of [TransactionBufferDao].
@@ -27,6 +34,7 @@ import java.time.Instant
 class TransactionBufferManager(
     private val dao: TransactionBufferDao,
     private val crossAdapterDedupEnabled: Boolean = false,
+    private val keystoreManager: KeystoreManager? = null,
 ) {
 
     companion object {
@@ -37,6 +45,10 @@ class TransactionBufferManager(
 
         /** Maximum upload attempts before a record is dead-lettered (GAP-1). */
         const val MAX_UPLOAD_ATTEMPTS = 20
+    }
+
+    private val rawPayloadCipher = keystoreManager?.let {
+        KeystoreBackedStringCipher(it, KeystoreManager.ALIAS_BUFFER_RAW_PAYLOAD)
     }
 
     /**
@@ -119,7 +131,7 @@ class TransactionBufferManager(
      * The upload worker must not skip past a failed record.
      */
     suspend fun getPendingBatch(batchSize: Int): List<BufferedTransaction> =
-        dao.getPendingForUpload(batchSize)
+        dao.getPendingForUpload(batchSize).map(::decryptBufferedTransaction)
 
     /**
      * Mark records as UPLOADED after the cloud upload API accepts them.
@@ -186,7 +198,7 @@ class TransactionBufferManager(
      *
      * @param pumpNumber FCC pump number filter; null returns all pumps.
      */
-    suspend fun getForLocalApi(pumpNumber: Int?, limit: Int, offset: Int): List<BufferedTransaction> =
+    suspend fun getForLocalApi(pumpNumber: Int?, limit: Int, offset: Int): List<LocalApiTransaction> =
         if (pumpNumber != null) {
             dao.getForLocalApiByPump(pumpNumber, limit, offset)
         } else {
@@ -219,6 +231,20 @@ class TransactionBufferManager(
     }
 
     /**
+     * AP-033: Record a failed upload attempt against an entire batch in a single UPDATE.
+     * Replaces the per-record [recordUploadFailure] loop to reduce N individual UPDATEs
+     * to 1 batch UPDATE, cutting SQLite I/O from 50–250ms to ~2–5ms.
+     *
+     * @param ids       Local Room primary keys (UUIDs) of all records in the batch.
+     * @param attemptAt ISO 8601 UTC timestamp of this attempt.
+     * @param error     Error message or cloud error code to store for diagnostics.
+     */
+    suspend fun recordBatchUploadFailure(ids: List<String>, attemptAt: String, error: String) {
+        if (ids.isEmpty()) return
+        dao.recordBatchUploadFailure(ids, attemptAt, error, attemptAt)
+    }
+
+    /**
      * Per-status record counts for telemetry reporting.
      *
      * Statuses not present in the DB are omitted from the returned map.
@@ -227,8 +253,10 @@ class TransactionBufferManager(
         val counts = dao.countByStatus()
         return counts.associate { row ->
             val status = SyncStatus.entries.firstOrNull { it.name == row.syncStatus }
-                ?: SyncStatus.PENDING
-            status to row.count
+            if (status == null) {
+                AppLogger.w(TAG, "Unknown sync_status '${row.syncStatus}' mapped to PENDING")
+            }
+            (status ?: SyncStatus.PENDING) to row.count
         }
     }
 
@@ -270,6 +298,91 @@ class TransactionBufferManager(
     }
 
     // -------------------------------------------------------------------------
+    // AT-043: WebSocket operations — routed through the manager so all
+    // transaction mutations go through a single business layer.
+    // -------------------------------------------------------------------------
+
+    suspend fun getUnsyncedForWs(
+        pumpNumber: Int?,
+        nozzleNumber: Int?,
+        attendant: String?,
+        since: String?,
+    ): List<WsBufferedTransaction> =
+        dao.getUnsyncedForWs(pumpNumber, nozzleNumber, attendant, since)
+
+    suspend fun getAllForWs(): List<WsBufferedTransaction> =
+        dao.getAllForWs()
+
+    suspend fun getByIdForLocalApi(id: String): BufferedTransaction? =
+        dao.getByIdForLocalApi(id)?.let { decryptBufferedTransaction(it) }
+
+    suspend fun getByFccTransactionId(fccTransactionId: String): BufferedTransaction? =
+        dao.getByFccTransactionId(fccTransactionId)?.let { decryptBufferedTransaction(it) }
+
+    /**
+     * Re-encrypt legacy plaintext raw payload rows in-place without blocking startup.
+     *
+     * Existing rows written before AS-017 used plaintext storage. New writes always go
+     * through [toEntity], which encrypts the raw payload before persisting it.
+     */
+    suspend fun migrateLegacyRawPayloads(batchSize: Int = 100): Int {
+        val cipher = rawPayloadCipher ?: return 0
+        var migrated = 0
+
+        while (true) {
+            val legacyRows = dao.getLegacyPlaintextRawPayloads(batchSize)
+            if (legacyRows.isEmpty()) break
+
+            legacyRows.forEach { row ->
+                val encrypted = try {
+                    cipher.encryptForStorage(row.rawPayloadJson)
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to encrypt raw payload for tx=${row.id}", e)
+                    null
+                }
+
+                if (encrypted != null) {
+                    dao.updateRawPayloadJson(row.id, encrypted)
+                    migrated++
+                }
+            }
+
+            if (legacyRows.size < batchSize) break
+        }
+
+        if (migrated > 0) {
+            AppLogger.i(TAG, "Migrated $migrated plaintext raw payload(s) to keystore-backed storage")
+        }
+        return migrated
+    }
+
+    suspend fun updateOdooFields(
+        transactionId: String,
+        orderUuid: String?,
+        odooOrderId: String?,
+        paymentId: String?,
+        now: String,
+    ) {
+        dao.updateOdooFields(transactionId, orderUuid, odooOrderId, paymentId, now)
+        AppLogger.d(TAG, "Updated Odoo fields for tx=$transactionId")
+    }
+
+    suspend fun updateAddToCart(
+        transactionId: String,
+        addToCart: Boolean,
+        paymentId: String?,
+        now: String,
+    ) {
+        dao.updateAddToCart(transactionId, addToCart, paymentId, now)
+        AppLogger.d(TAG, "Updated add_to_cart=$addToCart for tx=$transactionId")
+    }
+
+    suspend fun markDiscarded(transactionId: String, now: String) {
+        dao.markDiscarded(transactionId, now)
+        AppLogger.w(TAG, "Marked tx=$transactionId as discarded via WebSocket")
+    }
+
+    // -------------------------------------------------------------------------
     // Mapping
     // -------------------------------------------------------------------------
 
@@ -294,7 +407,7 @@ class TransactionBufferManager(
             status = status.name,
             syncStatus = SyncStatus.PENDING.name,
             ingestionSource = ingestionSource.name,
-            rawPayloadJson = rawPayloadJson,
+            rawPayloadJson = encryptRawPayload(rawPayloadJson),
             correlationId = correlationId,
             uploadAttempts = 0,
             lastUploadAttemptAt = null,
@@ -303,5 +416,67 @@ class TransactionBufferManager(
             createdAt = ingestedAt,
             updatedAt = now,
         )
+    }
+
+    /**
+     * AT-023: Single reverse mapping from [BufferedTransaction] → [CanonicalTransaction].
+     *
+     * Used by [IngestionOrchestrator.retryPendingFiscalization] and any future code
+     * that needs to reconstruct a [CanonicalTransaction] from the buffer. Fields not
+     * stored in the buffer (legalEntityId, isDuplicate) use safe defaults documented
+     * inline — callers that need these values must populate them from another source.
+     */
+    fun BufferedTransaction.toCanonical(): CanonicalTransaction = CanonicalTransaction(
+        id = id,
+        fccTransactionId = fccTransactionId,
+        siteCode = siteCode,
+        pumpNumber = pumpNumber,
+        nozzleNumber = nozzleNumber,
+        productCode = productCode,
+        volumeMicrolitres = volumeMicrolitres,
+        amountMinorUnits = amountMinorUnits,
+        unitPriceMinorPerLitre = unitPriceMinorPerLitre,
+        currencyCode = currencyCode,
+        startedAt = startedAt,
+        completedAt = completedAt,
+        fccVendor = FccVendor.valueOf(fccVendor),
+        legalEntityId = "",  // Not stored in buffer; populated upstream on cloud upload
+        status = TransactionStatus.valueOf(status),
+        ingestionSource = IngestionSource.valueOf(ingestionSource),
+        ingestedAt = createdAt,
+        updatedAt = updatedAt,
+        schemaVersion = schemaVersion,
+        isDuplicate = false,  // Not stored in buffer; always false for buffered records
+        correlationId = correlationId,
+        fiscalReceiptNumber = fiscalReceiptNumber,
+        attendantId = attendantId,
+        rawPayloadJson = decryptRawPayload(rawPayloadJson),
+        odooOrderId = odooOrderId,
+    )
+
+    private fun decryptBufferedTransaction(entity: BufferedTransaction): BufferedTransaction {
+        val storedRawPayload = entity.rawPayloadJson ?: return entity
+        val plaintext = decryptRawPayload(storedRawPayload)
+        return entity.copy(rawPayloadJson = plaintext)
+    }
+
+    private fun encryptRawPayload(rawPayloadJson: String?): String? {
+        val cipher = rawPayloadCipher ?: return rawPayloadJson
+        return try {
+            cipher.encryptForStorage(rawPayloadJson)
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Dropping raw payload because encryption failed", e)
+            null
+        }
+    }
+
+    private fun decryptRawPayload(rawPayloadJson: String?): String? {
+        val cipher = rawPayloadCipher ?: return rawPayloadJson
+        return try {
+            cipher.decryptFromStorage(rawPayloadJson)
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Dropping raw payload because decryption failed", e)
+            null
+        }
     }
 }

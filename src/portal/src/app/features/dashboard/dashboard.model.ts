@@ -6,9 +6,9 @@ export interface TransactionVolumeHourlyBucket {
   hour: string; // ISO 8601 UTC — start of the hour
   total: number;
   bySource: {
-    FCC_PUSH: number;
-    EDGE_UPLOAD: number;
-    CLOUD_PULL: number;
+    fccPush: number;
+    edgeUpload: number;
+    cloudPull: number;
   };
 }
 

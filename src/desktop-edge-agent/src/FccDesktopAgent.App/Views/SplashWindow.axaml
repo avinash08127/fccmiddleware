@@ -7,7 +7,7 @@
         CanResize="False"
         WindowStartupLocation="CenterScreen"
         SystemDecorations="None"
-        Background="White">
+        Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
 
   <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12">
     <Image Source="/Assets/AppIcon.png"
@@ -19,7 +19,7 @@
                HorizontalAlignment="Center" />
     <TextBlock Text="FCC Desktop Agent"
                FontSize="14"
-               Foreground="#666666"
+               Opacity="0.6"
                HorizontalAlignment="Center" />
   </StackPanel>
 

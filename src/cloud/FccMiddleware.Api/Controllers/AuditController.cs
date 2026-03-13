@@ -32,6 +32,7 @@ public sealed class AuditController : PortalControllerBase
         [FromQuery] Guid? correlationId = null,
         [FromQuery] List<string>? eventTypes = null,
         [FromQuery] string? siteCode = null,
+        [FromQuery] string? adapterKey = null,
         [FromQuery] DateTimeOffset? from = null,
         [FromQuery] DateTimeOffset? to = null,
         CancellationToken cancellationToken = default)
@@ -68,6 +69,12 @@ public sealed class AuditController : PortalControllerBase
         if (!string.IsNullOrWhiteSpace(siteCode))
         {
             query = query.Where(item => item.SiteCode == siteCode);
+        }
+
+        if (!string.IsNullOrWhiteSpace(adapterKey))
+        {
+            var adapterToken = $"\"adapterKey\":\"{adapterKey}\"";
+            query = query.Where(item => item.Payload.Contains(adapterToken));
         }
 
         if (from.HasValue)

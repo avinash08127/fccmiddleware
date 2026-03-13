@@ -1,29 +1,30 @@
 package com.fccmiddleware.edge.ui
 
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.fccmiddleware.edge.R
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.logging.AppLogger
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.koin.androidx.viewmodel.ext.android.viewModel
 import java.io.File
-import java.io.FileOutputStream
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
 /**
  * DiagnosticsActivity — supervisor/technician diagnostics screen.
@@ -37,6 +38,10 @@ import java.util.zip.ZipOutputStream
 class DiagnosticsActivity : AppCompatActivity() {
 
     private val viewModel: DiagnosticsViewModel by viewModel()
+    private val shareLogsLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            isShareInProgress = false
+        }
 
     private var isShareInProgress = false
 
@@ -60,10 +65,12 @@ class DiagnosticsActivity : AppCompatActivity() {
     private lateinit var pumpCountValue: TextView
     private lateinit var nozzleCountValue: TextView
     private lateinit var siteLastSyncValue: TextView
+    private lateinit var localOverridesValue: TextView
     private lateinit var lastRefreshValue: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        cleanupSharedLogArchives()
         setContentView(buildLayout())
 
         lifecycleScope.launch {
@@ -76,6 +83,8 @@ class DiagnosticsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        cleanupSharedLogArchives()
+        isShareInProgress = false
         viewModel.startAutoRefresh()
     }
 
@@ -131,6 +140,15 @@ class DiagnosticsActivity : AppCompatActivity() {
         lastSyncValue.text = lastSyncUtc ?: "Never"
         configVersionValue.text = snapshot.configVersion?.toString() ?: "None"
 
+        // AF-052: Show active local overrides so technicians can identify conflicts
+        if (snapshot.activeOverrides.isNotEmpty()) {
+            localOverridesValue.text = snapshot.activeOverrides.joinToString(", ")
+            localOverridesValue.setTextColor(COLOR_YELLOW)
+        } else {
+            localOverridesValue.text = "None"
+            localOverridesValue.setTextColor(COLOR_GREEN)
+        }
+
         // Site data
         if (snapshot.siteInfo != null) {
             val vendor = snapshot.siteInfo.fccVendor ?: "Unknown"
@@ -158,6 +176,12 @@ class DiagnosticsActivity : AppCompatActivity() {
             errorTextViews.add(tv)
             recentErrorsContainer.addView(tv)
         }
+        // LR-009: Trim excess TextViews that are no longer needed to prevent
+        // monotonic pool growth across refresh cycles with fluctuating entry counts.
+        while (errorTextViews.size > errorNeeded) {
+            val removed = errorTextViews.removeAt(errorTextViews.lastIndex)
+            recentErrorsContainer.removeView(removed)
+        }
         if (errorEntries.isEmpty()) {
             errorTextViews[0].apply {
                 text = "No recent audit entries"
@@ -167,7 +191,6 @@ class DiagnosticsActivity : AppCompatActivity() {
                 setPadding(0, dp(4), 0, dp(4))
                 visibility = View.VISIBLE
             }
-            for (i in 1 until errorTextViews.size) errorTextViews[i].visibility = View.GONE
         } else {
             for (i in errorEntries.indices) {
                 val entry = errorEntries[i]
@@ -184,7 +207,6 @@ class DiagnosticsActivity : AppCompatActivity() {
                     visibility = View.VISIBLE
                 }
             }
-            for (i in errorEntries.size until errorTextViews.size) errorTextViews[i].visibility = View.GONE
         }
 
         // Structured file logs (WARN/ERROR) — update in-place (P-003)
@@ -195,6 +217,11 @@ class DiagnosticsActivity : AppCompatActivity() {
             structuredLogTextViews.add(tv)
             structuredLogsContainer.addView(tv)
         }
+        // LR-009: Trim excess TextViews from structured log pool.
+        while (structuredLogTextViews.size > structuredNeeded) {
+            val removed = structuredLogTextViews.removeAt(structuredLogTextViews.lastIndex)
+            structuredLogsContainer.removeView(removed)
+        }
         if (structuredEntries.isEmpty()) {
             structuredLogTextViews[0].apply {
                 text = "No recent WARN/ERROR file log entries"
@@ -204,7 +231,6 @@ class DiagnosticsActivity : AppCompatActivity() {
                 setPadding(0, dp(4), 0, dp(4))
                 visibility = View.VISIBLE
             }
-            for (i in 1 until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
         } else {
             for (i in structuredEntries.indices) {
                 val entry = structuredEntries[i]
@@ -217,7 +243,6 @@ class DiagnosticsActivity : AppCompatActivity() {
                     visibility = View.VISIBLE
                 }
             }
-            for (i in structuredEntries.size until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
         }
 
         logFileSizeValue.text = "${snapshot.logSizeBytes / 1024} KB"
@@ -230,19 +255,48 @@ class DiagnosticsActivity : AppCompatActivity() {
 
     private fun buildLayout(): View {
         val padding = dp(16)
+        val halfPad = dp(8)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(padding, padding, padding, padding)
+            setBackgroundColor(Color.WHITE)
         }
+
+        // Puma Energy logo
+        root.addView(ImageView(this).apply {
+            setImageResource(R.drawable.puma_energy_logo)
+            adjustViewBounds = true
+            layoutParams = LinearLayout.LayoutParams(
+                dp(140),
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                gravity = Gravity.CENTER
+                topMargin = dp(32)
+                bottomMargin = halfPad
+            }
+        })
 
         // Title
         root.addView(TextView(this).apply {
             text = "Edge Agent Diagnostics"
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
+            setTextColor(COLOR_TEXT)
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(16))
+            setPadding(0, 0, 0, halfPad)
+        })
+
+        // Red accent divider
+        root.addView(View(this).apply {
+            setBackgroundColor(PUMA_RED)
+            layoutParams = LinearLayout.LayoutParams(
+                dp(60),
+                dp(3),
+            ).apply {
+                gravity = Gravity.CENTER
+                bottomMargin = padding
+            }
         })
 
         // Connectivity section
@@ -270,6 +324,9 @@ class DiagnosticsActivity : AppCompatActivity() {
         root.addView(makeSectionHeader("Configuration"))
         configVersionValue = makeValue("...")
         root.addView(makeRow("Config Version:", configVersionValue))
+
+        localOverridesValue = makeValue("...")
+        root.addView(makeRow("Local Overrides:", localOverridesValue))
 
         // Site Data section
         root.addView(makeSectionHeader("Site Data"))
@@ -308,15 +365,32 @@ class DiagnosticsActivity : AppCompatActivity() {
         root.addView(View(this).apply { minimumHeight = dp(12) })
         root.addView(Button(this).apply {
             text = "Settings"
+            textSize = 16f
             setOnClickListener {
                 startActivity(Intent(this@DiagnosticsActivity, SettingsActivity::class.java))
             }
+            background = GradientDrawable().apply {
+                setColor(PUMA_GREEN)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            setTextColor(Color.WHITE)
+            isAllCaps = true
+            setPadding(dp(32), halfPad, dp(32), halfPad)
         })
 
         root.addView(View(this).apply { minimumHeight = dp(8) })
         root.addView(Button(this).apply {
             text = "Share Logs"
-            setOnClickListener { shareLogs() }
+            textSize = 16f
+            setOnClickListener { confirmShareLogs() }
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(dp(2), PUMA_GREEN)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            setTextColor(PUMA_GREEN)
+            isAllCaps = true
+            setPadding(dp(32), halfPad, dp(32), halfPad)
         })
 
         // Last refresh timestamp
@@ -330,7 +404,9 @@ class DiagnosticsActivity : AppCompatActivity() {
         }
         root.addView(lastRefreshValue)
 
-        val scrollView = ScrollView(this)
+        val scrollView = ScrollView(this).apply {
+            setBackgroundColor(Color.WHITE)
+        }
         scrollView.addView(root)
         return scrollView
     }
@@ -341,7 +417,7 @@ class DiagnosticsActivity : AppCompatActivity() {
             textSize = 15f
             setTypeface(null, Typeface.BOLD)
             setPadding(0, dp(12), 0, dp(4))
-            setTextColor(COLOR_TEXT)
+            setTextColor(PUMA_GREEN)
         }
     }
 
@@ -373,64 +449,85 @@ class DiagnosticsActivity : AppCompatActivity() {
 
     // ── Phase 2B: Share Logs ────────────────────────────────────────────────
 
+    private fun confirmShareLogs() {
+        if (isShareInProgress) return
+        AlertDialog.Builder(this)
+            .setTitle("Share Redacted Logs")
+            .setMessage(
+                "The exported archive redacts network identifiers and stack traces, " +
+                    "but it still contains operational timing and error summaries. " +
+                    "Only share it with authorized support personnel.",
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Share") { _, _ -> shareLogs() }
+            .show()
+    }
+
     private fun shareLogs() {
         if (isShareInProgress) return
         isShareInProgress = true
 
         lifecycleScope.launch {
+            var launchedShareIntent = false
             try {
-                val logFiles = viewModel.getLogFiles()
-                if (logFiles.isEmpty()) {
+                cleanupSharedLogArchives()
+                val archive = viewModel.exportRedactedLogArchive(cacheDir)
+                if (archive == null) {
                     AppLogger.i(TAG, "No log files to share")
                     Toast.makeText(this@DiagnosticsActivity, "No log files to share", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
-                val zipFile = withContext(Dispatchers.IO) {
-                    val zip = File(cacheDir, "edge-agent-logs.zip")
-                    ZipOutputStream(FileOutputStream(zip)).use { zos ->
-                        for (file in logFiles) {
-                            zos.putNextEntry(ZipEntry(file.name))
-                            file.inputStream().use { it.copyTo(zos) }
-                            zos.closeEntry()
-                        }
-                    }
-                    zip
-                }
-
                 val uri = FileProvider.getUriForFile(
                     this@DiagnosticsActivity,
                     "${packageName}.fileprovider",
-                    zipFile,
+                    archive.file,
                 )
 
                 val shareIntent = Intent(Intent.ACTION_SEND).apply {
                     type = "application/zip"
                     putExtra(Intent.EXTRA_STREAM, uri)
-                    putExtra(Intent.EXTRA_SUBJECT, "FCC Edge Agent Logs")
+                    putExtra(Intent.EXTRA_SUBJECT, "FCC Edge Agent Logs (Redacted)")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                startActivity(Intent.createChooser(shareIntent, "Share Logs"))
-                AppLogger.i(TAG, "Log share initiated, ${logFiles.size} files zipped")
+                shareLogsLauncher.launch(Intent.createChooser(shareIntent, "Share Logs"))
+                launchedShareIntent = true
+                AppLogger.i(TAG, "Redacted log share initiated, ${archive.fileCount} files zipped")
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Failed to share logs", e)
                 Toast.makeText(this@DiagnosticsActivity, "Failed to share logs", Toast.LENGTH_SHORT).show()
             } finally {
-                isShareInProgress = false
+                if (!launchedShareIntent) {
+                    cleanupSharedLogArchives()
+                    isShareInProgress = false
+                }
             }
         }
+    }
+
+    private fun cleanupSharedLogArchives() {
+        cacheDir.listFiles()
+            ?.filter { file -> file.isFile && file.name.startsWith(SHARED_LOG_ARCHIVE_PREFIX) && file.extension == "zip" }
+            ?.forEach { archive ->
+                if (!archive.delete()) {
+                    archive.deleteOnExit()
+                }
+            }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
         private const val TAG = "DiagnosticsActivity"
+        private const val SHARED_LOG_ARCHIVE_PREFIX = "edge-agent-logs"
+        private const val PUMA_GREEN = 0xFF007A33.toInt()
+        private const val PUMA_RED = 0xFFE30613.toInt()
         private const val COLOR_GREEN = 0xFF2E7D32.toInt()
         private const val COLOR_YELLOW = 0xFFF9A825.toInt()
         private const val COLOR_RED = 0xFFC62828.toInt()
         private const val COLOR_GRAY = 0xFF9E9E9E.toInt()
-        private const val COLOR_TEXT = 0xFF212121.toInt()
-        private const val COLOR_LABEL = 0xFF616161.toInt()
+        private const val COLOR_TEXT = 0xFF1A1A1A.toInt()
+        private const val COLOR_LABEL = 0xFF4A4A4A.toInt()
 
         // AF-040: Critical event types that should be highlighted in red even though
         // they don't contain "ERROR" or "FAIL" in their name.

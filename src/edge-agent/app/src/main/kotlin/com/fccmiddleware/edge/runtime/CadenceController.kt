@@ -13,6 +13,8 @@ import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
 import com.fccmiddleware.edge.logging.StructuredFileLogger
 import com.fccmiddleware.edge.preauth.PreAuthHandler
+import com.fccmiddleware.edge.security.EncryptedPrefsManager
+import com.fccmiddleware.edge.security.KeystoreManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudUploadWorker
 import com.fccmiddleware.edge.sync.CloudVersionCheckResult
@@ -25,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import android.util.Base64
 import kotlin.random.Random
 
 /**
@@ -44,9 +47,7 @@ import kotlin.random.Random
  *   - FULLY_ONLINE: trigger immediate buffer replay + SYNCED_TO_ODOO status sync.
  *   - Other transitions: workers are naturally suspended on next tick via state check.
  *
- * M-10: Observes [ConnectivityManager.state] StateFlow only — does NOT implement
- * [ConnectivityTransitionListener]. The listener callback was redundant with the
- * StateFlow collection and caused double-trigger on recovery transitions.
+ * M-10: Observes [ConnectivityManager.state] StateFlow only for transition side effects.
  */
 class CadenceController(
     private val connectivityManager: ConnectivityManager,
@@ -70,6 +71,10 @@ class CadenceController(
     private val cleanupWorker: CleanupWorker? = null,
     /** AF-034: File logger — log rotation is triggered alongside cleanup. */
     private val fileLogger: StructuredFileLogger? = null,
+    /** AT-051: KeystoreManager for periodic key rotation. */
+    private val keystoreManager: KeystoreManager? = null,
+    /** AT-051: EncryptedPrefsManager for key rotation blob read/write and tracking. */
+    private val encryptedPrefsManager: EncryptedPrefsManager? = null,
     fccAdapter: IFccAdapter? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) {
@@ -95,6 +100,8 @@ class CadenceController(
         val fiscalRetryTickFrequency: Int = 4,
         /** AF-034: Run cleanup every N ticks. 2880 ticks * 30s ≈ 24 hours. */
         val cleanupTickFrequency: Int = 2880,
+        /** AT-051: Key rotation interval in days. Checked on each cleanup tick. */
+        val keyRotationIntervalDays: Int = 30,
     )
 
     /**
@@ -443,6 +450,12 @@ class CadenceController(
             return
         }
 
+        // AP-032: Pre-auth expiry check runs FIRST, before any FCC or cloud I/O.
+        // This is time-critical (safety-sensitive) and fast under normal conditions
+        // (index-backed query returns empty set immediately). Running it first ensures
+        // expired pre-auth records are cancelled promptly even when FCC/cloud I/O is slow.
+        preAuthHandler?.runExpiryCheck()
+
         if (!versionCompatible) {
             AppLogger.w(TAG, "runTick() — FCC communication disabled (agent version below minimum). " +
                 "Cloud operations continue for telemetry and config updates.")
@@ -512,10 +525,6 @@ class CadenceController(
             }
         }
 
-        // Pre-auth expiry check runs every tick regardless of connectivity state.
-        // Fast under normal conditions: index-backed query returns empty set immediately.
-        preAuthHandler?.runExpiryCheck()
-
         // AP-004: Fiscalization retry runs on its own cadence to avoid blocking the main
         // tick with sequential Advatec HTTP calls. Only runs when FCC is reachable since
         // the Advatec device is on the LAN.
@@ -533,6 +542,8 @@ class CadenceController(
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Cleanup tick failed: ${e.message}", e)
             }
+            // AT-051: Key rotation piggybacks on the cleanup tick (~24h).
+            performKeyRotationIfDue()
         }
     }
 
@@ -655,6 +666,75 @@ class CadenceController(
             } else {
                 AppLogger.i(TAG, "Version check passed (compatible, up to date)")
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AT-051: Periodic key rotation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Rotate Keystore AES-256-GCM keys for token aliases if enough time has passed
+     * since the last rotation. Each alias is rotated independently — a failure on
+     * one alias does not prevent the others from rotating.
+     */
+    private fun performKeyRotationIfDue() {
+        val km = keystoreManager ?: return
+        val prefs = encryptedPrefsManager ?: return
+
+        val intervalMs = config.keyRotationIntervalDays.toLong() * 24 * 60 * 60 * 1_000
+        val lastRotation = prefs.lastKeyRotationAt
+        val now = System.currentTimeMillis()
+        if (lastRotation > 0L && (now - lastRotation) < intervalMs) return
+
+        AppLogger.i(TAG, "Key rotation due (last=${if (lastRotation == 0L) "never" else "${(now - lastRotation) / 86_400_000}d ago"})")
+
+        var anyRotated = false
+        // Rotate device JWT key
+        anyRotated = rotateTokenAlias(km, prefs, KeystoreManager.ALIAS_DEVICE_JWT,
+            readBlob = { prefs.getDeviceTokenBlob() },
+            writeBlob = { prefs.storeDeviceTokenBlob(it) },
+        ) || anyRotated
+
+        // Rotate refresh token key
+        anyRotated = rotateTokenAlias(km, prefs, KeystoreManager.ALIAS_REFRESH_TOKEN,
+            readBlob = { prefs.getRefreshTokenBlob() },
+            writeBlob = { prefs.storeRefreshTokenBlob(it) },
+        ) || anyRotated
+
+        if (anyRotated) {
+            prefs.lastKeyRotationAt = now
+            AppLogger.i(TAG, "Key rotation completed")
+        }
+    }
+
+    /**
+     * Rotate a single Keystore alias. Returns true if rotation succeeded.
+     */
+    private fun rotateTokenAlias(
+        km: KeystoreManager,
+        prefs: EncryptedPrefsManager,
+        alias: String,
+        readBlob: () -> String?,
+        writeBlob: (String) -> Unit,
+    ): Boolean {
+        val base64Blob = readBlob() ?: return false // no data stored for this alias
+        if (!km.hasKey(alias)) return false
+
+        return try {
+            val encrypted = Base64.decode(base64Blob, Base64.NO_WRAP)
+            val rotated = km.rotateKey(alias, encrypted)
+            if (rotated != null) {
+                writeBlob(Base64.encodeToString(rotated, Base64.NO_WRAP))
+                AppLogger.d(TAG, "Rotated key alias=$alias")
+                true
+            } else {
+                AppLogger.w(TAG, "Key rotation returned null for alias=$alias — skipping")
+                false
+            }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Key rotation failed for alias=$alias: ${e.message}", e)
+            false
         }
     }
 

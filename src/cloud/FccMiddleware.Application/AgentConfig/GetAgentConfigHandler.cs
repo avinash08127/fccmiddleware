@@ -5,6 +5,7 @@ using FccMiddleware.Domain.Enums;
 using MediatR;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
+using System.Text.Json;
 
 namespace FccMiddleware.Application.AgentConfig;
 
@@ -118,7 +119,7 @@ public sealed class GetAgentConfigHandler
                 LocalApi = BuildLocalApiDto(),
                 Telemetry = BuildTelemetryDto(),
                 Fiscalization = BuildFiscalizationDto(site),
-                Mappings = BuildMappingsDto(site),
+                Mappings = await BuildMappingsDtoAsync(fccConfig, cancellationToken),
                 Rollout = BuildRolloutDto()
             };
 
@@ -182,7 +183,27 @@ public sealed class GetAgentConfigHandler
             HybridCatchUpIntervalSeconds = hybridCatchUpIntervalSeconds,
             HeartbeatIntervalSeconds = fccConfig.HeartbeatIntervalSeconds,
             HeartbeatTimeoutSeconds = fccConfig.HeartbeatIntervalSeconds * 3,
-            PushSourceIpAllowList = []
+            PushSourceIpAllowList = [],
+            JplPort = fccConfig.JplPort,
+            FcAccessCode = fccConfig.FcAccessCode,
+            DomsCountryCode = fccConfig.DomsCountryCode,
+            PosVersionId = fccConfig.PosVersionId,
+            ConfiguredPumps = fccConfig.ConfiguredPumps,
+            DppPorts = fccConfig.DppPorts,
+            ReconnectBackoffMaxSeconds = fccConfig.ReconnectBackoffMaxSeconds,
+            SharedSecret = fccConfig.SharedSecret,
+            UsnCode = fccConfig.UsnCode,
+            AuthPort = fccConfig.AuthPort,
+            FccPumpAddressMap = fccConfig.FccPumpAddressMap,
+            ClientId = fccConfig.ClientId,
+            ClientSecret = fccConfig.ClientSecret,
+            WebhookSecret = fccConfig.WebhookSecret,
+            OAuthTokenEndpoint = fccConfig.OAuthTokenEndpoint,
+            AdvatecDevicePort = fccConfig.AdvatecDevicePort,
+            AdvatecWebhookToken = fccConfig.AdvatecWebhookToken,
+            AdvatecEfdSerialNumber = fccConfig.AdvatecEfdSerialNumber,
+            AdvatecCustIdType = fccConfig.AdvatecCustIdType,
+            AdvatecPumpMap = fccConfig.AdvatecPumpMap
         };
     }
 
@@ -255,10 +276,41 @@ public sealed class GetAgentConfigHandler
         };
     }
 
-    private static MappingsDto BuildMappingsDto(Domain.Entities.Site site)
+    private async Task<MappingsDto> BuildMappingsDtoAsync(Domain.Entities.FccConfig fccConfig, CancellationToken cancellationToken)
     {
+        var site = fccConfig.Site;
+        var adapterKey = fccConfig.FccVendor.ToString();
+        var defaultRow = await _db.GetAdapterDefaultConfigAsync(fccConfig.LegalEntityId, adapterKey, cancellationToken);
+        var overrideRow = await _db.GetSiteAdapterOverrideAsync(site.Id, adapterKey, cancellationToken);
+        var extras = ReadEffectiveAdapterExtras(defaultRow?.ConfigJson, overrideRow?.OverrideJson);
+        var pumpNumberOffset = ReadPumpNumberOffset(extras);
+        var configuredProductMap = ReadProductCodeMapping(extras);
+
         var products = new List<ProductMappingDto>();
         var nozzles = new List<NozzleMappingDto>();
+
+        if (configuredProductMap.Count > 0)
+        {
+            var knownProducts = site.Pumps
+                .Where(pump => pump.IsActive)
+                .SelectMany(pump => pump.Nozzles.Where(nozzle => nozzle.IsActive))
+                .Select(nozzle => nozzle.Product)
+                .DistinctBy(product => product.ProductCode)
+                .ToDictionary(product => product.ProductCode, product => product.ProductName);
+
+            foreach (var mapping in configuredProductMap)
+            {
+                products.Add(new ProductMappingDto
+                {
+                    FccProductCode = mapping.Key,
+                    CanonicalProductCode = mapping.Value,
+                    DisplayName = knownProducts.TryGetValue(mapping.Value, out var displayName)
+                        ? displayName
+                        : mapping.Value,
+                    Active = true
+                });
+            }
+        }
 
         foreach (var pump in site.Pumps.Where(p => p.IsActive))
         {
@@ -292,12 +344,72 @@ public sealed class GetAgentConfigHandler
 
         return new MappingsDto
         {
-            PumpNumberOffset = 0,
+            PumpNumberOffset = pumpNumberOffset,
             PriceDecimalPlaces = 2,
             VolumeUnit = "LITRES",
             Products = products.ToArray(),
             Nozzles = nozzles.ToArray()
         };
+    }
+
+    private static JsonElement ReadEffectiveAdapterExtras(string? defaultJson, string? overrideJson)
+    {
+        using var defaultsDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(defaultJson) ? "{}" : defaultJson);
+        using var overridesDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(overrideJson) ? "{}" : overrideJson);
+
+        var merged = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var property in defaultsDoc.RootElement.EnumerateObject())
+        {
+            if (property.Name is "pumpNumberOffset" or "productCodeMapping")
+            {
+                merged[property.Name] = property.Value.Clone();
+            }
+        }
+
+        foreach (var property in overridesDoc.RootElement.EnumerateObject())
+        {
+            if (property.Name is "pumpNumberOffset" or "productCodeMapping")
+            {
+                merged[property.Name] = property.Value.Clone();
+            }
+        }
+
+        return JsonSerializer.SerializeToElement(merged);
+    }
+
+    private static int ReadPumpNumberOffset(JsonElement extras)
+    {
+        if (extras.ValueKind == JsonValueKind.Object
+            && extras.TryGetProperty("pumpNumberOffset", out var value)
+            && value.TryGetInt32(out var offset))
+        {
+            return offset;
+        }
+
+        return 0;
+    }
+
+    private static Dictionary<string, string> ReadProductCodeMapping(JsonElement extras)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (extras.ValueKind != JsonValueKind.Object
+            || !extras.TryGetProperty("productCodeMapping", out var mapping)
+            || mapping.ValueKind != JsonValueKind.Object)
+        {
+            return result;
+        }
+
+        foreach (var property in mapping.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(property.Value.GetString()))
+            {
+                result[property.Name] = property.Value.GetString()!;
+            }
+        }
+
+        return result;
     }
 
     private RolloutDto BuildRolloutDto()

@@ -15,8 +15,8 @@ public sealed class ConnectivityManagerTests
 {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static IOptions<AgentConfiguration> DefaultConfig() =>
-        Options.Create(new AgentConfiguration
+    private static IOptionsMonitor<AgentConfiguration> DefaultConfig() =>
+        new StaticOptionsMonitor(new AgentConfiguration
         {
             ConnectivityProbeIntervalSeconds = 30,
             CloudBaseUrl = "http://cloud.test.local",
@@ -26,6 +26,13 @@ public sealed class ConnectivityManagerTests
         Func<CancellationToken, Task<bool>> internetProbe,
         Func<CancellationToken, Task<bool>> fccProbe) =>
         new(internetProbe, fccProbe, DefaultConfig(), NullLogger<ConnectivityManager>.Instance);
+
+    private sealed class StaticOptionsMonitor(AgentConfiguration value) : IOptionsMonitor<AgentConfiguration>
+    {
+        public AgentConfiguration CurrentValue => value;
+        public AgentConfiguration Get(string? name) => value;
+        public IDisposable? OnChange(Action<AgentConfiguration, string?> listener) => null;
+    }
 
     private static Task<bool> Up => Task.FromResult(true);
     private static Task<bool> Down => Task.FromResult(false);

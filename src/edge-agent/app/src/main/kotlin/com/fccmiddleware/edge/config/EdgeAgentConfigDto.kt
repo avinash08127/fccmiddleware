@@ -91,6 +91,26 @@ data class FccDto(
     val heartbeatIntervalSeconds: Int = 15,
     val heartbeatTimeoutSeconds: Int = 45,
     val pushSourceIpAllowList: List<String> = emptyList(),
+    val jplPort: Int? = null,
+    val fcAccessCode: String? = null,
+    val domsCountryCode: String? = null,
+    val posVersionId: String? = null,
+    val configuredPumps: String? = null,
+    val dppPorts: String? = null,
+    val reconnectBackoffMaxSeconds: Int? = null,
+    val sharedSecret: String? = null,
+    val usnCode: Int? = null,
+    val authPort: Int? = null,
+    val fccPumpAddressMap: String? = null,
+    val clientId: String? = null,
+    val clientSecret: String? = null,
+    val webhookSecret: String? = null,
+    val oauthTokenEndpoint: String? = null,
+    val advatecDevicePort: Int? = null,
+    val advatecWebhookToken: String? = null,
+    val advatecEfdSerialNumber: String? = null,
+    val advatecCustIdType: Int? = null,
+    val advatecPumpMap: String? = null,
 )
 
 @Serializable
@@ -165,18 +185,21 @@ data class WebSocketDto(
     val port: Int = 8443,
     /** Whether to use TLS (WSS). Requires a certificate to be configured. */
     val useTls: Boolean = false,
-    /** Bind address for the WebSocket server. */
-    val bindAddress: String = "0.0.0.0",
+    /** Bind address for the WebSocket server. Defaults to loopback for secure local-only access. */
+    val bindAddress: String = "127.0.0.1",
     /** Maximum concurrent WebSocket connections. */
     val maxConnections: Int = 10,
+    /** Maximum inbound WebSocket frame size in KiB. */
+    val maxFrameSizeKb: Int = 64,
     /** Interval in seconds for per-connection pump status broadcasts. */
     val pumpStatusBroadcastIntervalSeconds: Int = 3,
-    /** Whether LAN WebSocket connections require an API key. */
-    val requireApiKeyForLan: Boolean = false,
+    /** Whether non-loopback WebSocket connections require an API key. */
+    val requireApiKeyForLan: Boolean = true,
     /**
      * S-005: Shared secret required in the `X-Api-Key` header for every incoming
-     * WebSocket connection. Null or blank disables authentication (legacy mode for
-     * Odoo POS deployments that cannot supply a header). Deliver via cloud config.
+     * WebSocket connection when LAN auth is enabled. Null or blank keeps the server
+     * in unauthenticated compatibility mode for read-only commands and blocks
+     * sensitive commands that require an authenticated session. Deliver via cloud config.
      */
     val sharedSecret: String? = null,
     /**
@@ -267,6 +290,24 @@ fun EdgeAgentConfigDto.toAgentFccConfig(
         currencyCode = identity.currencyCode,
         pumpNumberOffset = mappings.pumpNumberOffset,
         heartbeatIntervalSeconds = fcc.heartbeatIntervalSeconds,
+        sharedSecret = fcc.sharedSecret,
+        usnCode = fcc.usnCode,
+        authPort = fcc.authPort,
+        fccPumpAddressMap = fcc.fccPumpAddressMap,
+        jplPort = fcc.jplPort,
+        fcAccessCode = fcc.fcAccessCode,
+        domsCountryCode = fcc.domsCountryCode,
+        posVersionId = fcc.posVersionId,
+        reconnectBackoffMaxSeconds = fcc.reconnectBackoffMaxSeconds,
+        configuredPumps = fcc.configuredPumps,
+        clientId = fcc.clientId,
+        clientSecret = fcc.clientSecret,
+        webhookSecret = fcc.webhookSecret,
+        oauthTokenEndpoint = fcc.oauthTokenEndpoint,
+        advatecDevicePort = fcc.advatecDevicePort,
+        advatecWebhookToken = fcc.advatecWebhookToken,
+        advatecEfdSerialNumber = fcc.advatecEfdSerialNumber,
+        advatecCustIdType = fcc.advatecCustIdType,
     )
 
     if (overrideManager == null || !overrideManager.hasAnyOverrides()) return baseConfig

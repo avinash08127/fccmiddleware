@@ -1,5 +1,7 @@
 package com.fccmiddleware.edge.security
 
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.reflect.KClass
 import kotlin.reflect.full.memberProperties
 import kotlin.reflect.full.primaryConstructor
 import kotlin.reflect.jvm.isAccessible
@@ -25,6 +27,30 @@ object SensitiveFieldFilter {
     private const val REDACTED = "[REDACTED]"
     private const val JWT_SUFFIX_LENGTH = 8
 
+    // AT-052: Cache sensitive property names per class to avoid repeated reflection.
+    private val sensitivePropsCache = ConcurrentHashMap<KClass<*>, Set<String>>()
+
+    private fun getSensitiveProps(klass: KClass<*>): Set<String> {
+        return sensitivePropsCache.getOrPut(klass) {
+            val sensitiveCtorParams: Set<String> = klass.primaryConstructor
+                ?.parameters
+                ?.filter { p -> p.annotations.any { it is Sensitive } }
+                ?.mapNotNull { it.name }
+                ?.toSet()
+                ?: emptySet()
+
+            val result = mutableSetOf<String>()
+            result.addAll(sensitiveCtorParams)
+            for (prop in klass.memberProperties) {
+                val isSensitive = prop.javaField?.isAnnotationPresent(Sensitive::class.java) == true ||
+                    prop.annotations.any { it is Sensitive } ||
+                    prop.name in sensitiveCtorParams
+                if (isSensitive) result.add(prop.name)
+            }
+            result
+        }
+    }
+
     /**
      * Returns a map representation of [obj] with sensitive fields redacted.
      *
@@ -35,22 +61,11 @@ object SensitiveFieldFilter {
     fun redact(obj: Any): Map<String, Any?> {
         val klass = obj::class
         val result = mutableMapOf<String, Any?>()
-
-        // Build a set of parameter names annotated @Sensitive on the primary constructor.
-        // This is a fallback for cases where the annotation ends up on the constructor
-        // parameter rather than the property (e.g. if @Sensitive targets VALUE_PARAMETER).
-        val sensitiveCtorParams: Set<String> = klass.primaryConstructor
-            ?.parameters
-            ?.filter { p -> p.annotations.any { it is Sensitive } }
-            ?.mapNotNull { it.name }
-            ?.toSet()
-            ?: emptySet()
+        val sensitiveNames = getSensitiveProps(klass)
 
         for (prop in klass.memberProperties) {
             val name = prop.name
-            val isSensitive = prop.javaField?.isAnnotationPresent(Sensitive::class.java) == true ||
-                prop.annotations.any { it is Sensitive } ||
-                name in sensitiveCtorParams
+            val isSensitive = name in sensitiveNames
 
             val rawValue = try {
                 prop.isAccessible = true

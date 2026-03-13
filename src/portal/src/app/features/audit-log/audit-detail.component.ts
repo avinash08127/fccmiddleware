@@ -6,14 +6,14 @@ import { ButtonModule } from 'primeng/button';
 import { CardModule } from 'primeng/card';
 
 import { AuditService } from '../../core/services/audit.service';
-import { AuditEvent, EventType } from '../../core/models/audit.model';
+import { AuditEvent } from '../../core/models/audit.model';
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
 
 type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast';
 
-function eventTypeSeverity(eventType: EventType): PrimeSeverity {
+function eventTypeSeverity(eventType: string): PrimeSeverity {
   if (eventType.startsWith('Transaction')) return 'info';
   if (eventType.startsWith('PreAuth')) return 'secondary';
   if (eventType.startsWith('Reconciliation')) return 'warn';
@@ -261,10 +261,14 @@ export class AuditDetailComponent implements OnInit {
   }
 
   viewTrace(): void {
-    const correlationId = this.event()?.correlationId;
-    if (!correlationId) return;
+    const current = this.event();
+    const correlationId = current?.correlationId;
+    if (!current || !correlationId) return;
     this.router.navigate(['/audit/list'], {
-      queryParams: { correlationId },
+      queryParams: {
+        legalEntityId: current.legalEntityId,
+        correlationId,
+      },
     });
   }
 
@@ -273,7 +277,7 @@ export class AuditDetailComponent implements OnInit {
     navigator.clipboard.writeText(text).catch(() => {});
   }
 
-  getEventSeverity(eventType: EventType): PrimeSeverity {
+  getEventSeverity(eventType: string): PrimeSeverity {
     return eventTypeSeverity(eventType);
   }
 

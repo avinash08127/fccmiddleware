@@ -93,14 +93,18 @@ class CleanupWorker(
         pendingKeepCount: Int = DEFAULT_PENDING_KEEP_COUNT,
         stalePendingDays: Int = DEFAULT_STALE_PENDING_DAYS,
     ): CleanupResult {
+        // AP-038: Single timestamp for all cleanup operations — avoids 4+ Instant.now() calls
+        // and ensures consistent cutoff across all passes.
+        val cleanupStart = Instant.now()
+        val now = cleanupStart.toString()
+
         // GAP-2: Revert stale UPLOADED records back to PENDING before retention cleanup.
         // Records stuck at UPLOADED for >stalePendingDays are likely due to a cloud-side
         // processing delay. Re-uploading is safe because the cloud deduplicates.
-        val staleCutoff = Instant.now()
+        val staleCutoff = cleanupStart
             .minus(stalePendingDays.toLong(), ChronoUnit.DAYS)
             .toString()
-        val staleNow = Instant.now().toString()
-        val staleReverted = transactionDao.revertStaleUploaded(staleCutoff, staleNow)
+        val staleReverted = transactionDao.revertStaleUploaded(staleCutoff, now)
         if (staleReverted > 0) {
             AppLogger.w(TAG, "GAP-2: Reverted $staleReverted stale UPLOADED records (older than ${stalePendingDays}d) back to PENDING")
         }
@@ -108,10 +112,9 @@ class CleanupWorker(
         // Pass 1: retention-based cleanup
         //   M-14: Follow the documented lifecycle SYNCED_TO_ODOO → ARCHIVED → (deleted).
         //   First archive old SYNCED_TO_ODOO records, then delete old ARCHIVED records.
-        val cutoff = Instant.now()
+        val cutoff = cleanupStart
             .minus(retentionDays.toLong(), ChronoUnit.DAYS)
             .toString()
-        val now = Instant.now().toString()
 
         val txArchived = transactionDao.archiveOldSynced(cutoff, now)
         val txDeleted = transactionDao.deleteOldArchived(cutoff)
@@ -127,14 +130,14 @@ class CleanupWorker(
         )
 
         // Pass 2: quota-based cleanup
-        val quotaResult = enforceQuota(maxBufferRecords, pendingKeepCount)
+        val quotaResult = enforceQuota(maxBufferRecords, pendingKeepCount, now)
 
         // Pass 3: disk space check — if free space is critically low, aggressively trim
         val diskLow = isDiskSpaceLow()
         if (diskLow) {
             AppLogger.w(TAG, "Disk space critically low — running emergency quota cleanup")
             // Use a tighter quota (half of normal) to aggressively free space
-            enforceQuota(maxBufferRecords / 2, pendingKeepCount)
+            enforceQuota(maxBufferRecords / 2, pendingKeepCount, now)
         }
 
         val result = CleanupResult(
@@ -156,7 +159,7 @@ class CleanupWorker(
                 eventType = "CLEANUP_RUN",
                 message = buildAuditMessage(result, retentionDays),
                 correlationId = null,
-                createdAt = Instant.now().toString(),
+                createdAt = now,
             )
         )
 
@@ -181,9 +184,11 @@ class CleanupWorker(
      * 3. Delete SYNCED_TO_ODOO (Odoo has confirmed receipt)
      * 4. Force-archive oldest PENDING (last resort — these haven't been uploaded yet)
      */
+    /** AP-038: [now] parameter avoids redundant Instant.now() calls. */
     private suspend fun enforceQuota(
         maxRecords: Int,
         pendingKeepCount: Int,
+        now: String,
     ): QuotaCleanupResult {
         val totalCount = transactionDao.countAll()
         if (totalCount <= maxRecords) {
@@ -193,7 +198,6 @@ class CleanupWorker(
         val excess = totalCount - maxRecords
         AppLogger.w(TAG, "Buffer quota exceeded: $totalCount records (max=$maxRecords), need to free $excess")
 
-        val now = Instant.now().toString()
         var remaining = excess
 
         // Step 1: delete DEAD_LETTER records first (permanently failed, least valuable)

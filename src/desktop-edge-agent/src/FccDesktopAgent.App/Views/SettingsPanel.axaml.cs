@@ -15,11 +15,14 @@ public sealed partial class SettingsPanel : UserControl
     private readonly LocalOverrideManager? _overrideManager;
     private readonly ILogger<SettingsPanel>? _logger;
 
-    public SettingsPanel()
+    /// <summary>
+    /// T-DSK-002: Services injected via constructor instead of static AgentAppContext.
+    /// </summary>
+    public SettingsPanel(IServiceProvider? services)
     {
         InitializeComponent();
 
-        _services = AgentAppContext.ServiceProvider;
+        _services = services;
         _overrideManager = _services?.GetService<LocalOverrideManager>();
         _logger = _services?.GetService<ILogger<SettingsPanel>>();
 

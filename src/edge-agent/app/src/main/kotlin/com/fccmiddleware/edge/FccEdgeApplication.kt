@@ -1,10 +1,12 @@
 package com.fccmiddleware.edge
 
 import android.app.Application
-import android.util.Log
 import com.fccmiddleware.edge.di.appModule
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.logging.StructuredFileLogger
+import com.fccmiddleware.edge.buffer.TransactionBufferManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.context.startKoin
 import org.koin.java.KoinJavaComponent.getKoin
@@ -13,7 +15,6 @@ class FccEdgeApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i("FccEdgeApplication", "FCC Edge Agent application starting")
 
         startKoin {
             androidContext(this@FccEdgeApplication)
@@ -30,7 +31,7 @@ class FccEdgeApplication : Application() {
             try {
                 logger.crash(
                     "UNCAUGHT_EXCEPTION",
-                    "Uncaught exception on thread ${thread.name}: ${throwable.message}",
+                    "Uncaught exception on thread ${thread.name}",
                     throwable,
                 )
             } catch (_: Exception) {
@@ -41,5 +42,13 @@ class FccEdgeApplication : Application() {
         }
 
         logger.i("FccEdgeApplication", "FCC Edge Agent application started, crash handler installed")
+
+        getKoin().get<CoroutineScope>().launch {
+            try {
+                getKoin().get<TransactionBufferManager>().migrateLegacyRawPayloads()
+            } catch (e: Exception) {
+                logger.e("FccEdgeApplication", "Failed to migrate legacy raw payload encryption", e)
+            }
+        }
     }
 }

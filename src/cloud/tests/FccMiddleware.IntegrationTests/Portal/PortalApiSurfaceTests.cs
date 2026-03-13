@@ -84,7 +84,7 @@ public sealed class PortalApiSurfaceTests : IAsyncLifetime
         await SeedAsync(db);
 
         _client = _factory.CreateClient();
-        SetPortalAuth("SystemAdmin", "portal-admin", LegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", LegalEntityId);
     }
 
     public async Task DisposeAsync()

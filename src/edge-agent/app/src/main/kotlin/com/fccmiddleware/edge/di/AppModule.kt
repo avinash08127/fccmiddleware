@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.di
 
 import com.fccmiddleware.edge.api.LocalApiServer
 import com.fccmiddleware.edge.buffer.BufferDatabase
+import com.fccmiddleware.edge.buffer.BufferDatabaseFactory
 import com.fccmiddleware.edge.buffer.CleanupWorker
 import com.fccmiddleware.edge.buffer.IntegrityChecker
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
@@ -29,26 +30,22 @@ import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.registration.RegistrationHandler
 import com.fccmiddleware.edge.logging.LogLevel
+import com.fccmiddleware.edge.logging.PlatformLogBridge
 import com.fccmiddleware.edge.logging.StructuredFileLogger
 import com.fccmiddleware.edge.sync.TelemetryReporter
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
-import android.util.Log
+import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import com.fccmiddleware.edge.ui.DiagnosticsViewModel
 import com.fccmiddleware.edge.ui.ProvisioningViewModel
 import org.koin.android.ext.koin.androidApplication
 import org.koin.android.ext.koin.androidContext
 import org.koin.androidx.viewmodel.dsl.viewModel
 import org.koin.dsl.module
-import java.net.InetSocketAddress
-import java.net.Socket
-import java.util.concurrent.TimeUnit
 
 val appModule = module {
 
@@ -63,11 +60,11 @@ val appModule = module {
     single<CoroutineScope> {
         val koin = getKoin()
         val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
-            Log.e("CoroutineScope", "Uncaught coroutine exception: ${throwable.message}", throwable)
+            PlatformLogBridge.e("CoroutineScope", "Uncaught coroutine exception", throwable)
             try {
                 koin.get<StructuredFileLogger>().e(
                     "CoroutineScope",
-                    "Uncaught coroutine exception: ${throwable.message}",
+                    "Uncaught coroutine exception",
                     throwable,
                 )
             } catch (_: Exception) {
@@ -93,7 +90,7 @@ val appModule = module {
     // -------------------------------------------------------------------------
     // Database — single WAL-mode Room instance shared across all consumers
     // -------------------------------------------------------------------------
-    single { BufferDatabase.create(androidContext()) }
+    single { BufferDatabaseFactory.create(androidContext(), get()) }
     single { get<BufferDatabase>().transactionDao() }
     single { get<BufferDatabase>().preAuthDao() }
     single { get<BufferDatabase>().nozzleDao() }
@@ -104,11 +101,13 @@ val appModule = module {
 
     // -------------------------------------------------------------------------
     // Security — Keystore and EncryptedSharedPreferences
+    // AP-031: Single shared MasterKey eliminates redundant Keystore IPC on startup.
     // -------------------------------------------------------------------------
     single { KeystoreManager() }
-    single { EncryptedPrefsManager(androidContext()) }
+    single { MasterKey.Builder(androidContext()).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build() }
+    single { EncryptedPrefsManager(androidContext(), get()) }
     single { ConfigManager(agentConfigDao = get(), keystoreManager = get(), encryptedPrefsManager = get()) }
-    single { LocalOverrideManager(androidContext(), get()) }
+    single { LocalOverrideManager(androidContext(), get(), get()) }
     single { SiteDataManager(siteDataDao = get()) }
     single { FccRuntimeState() }
 
@@ -159,7 +158,7 @@ val appModule = module {
     // -------------------------------------------------------------------------
     // Buffer management
     // -------------------------------------------------------------------------
-    single { TransactionBufferManager(get()) }
+    single { TransactionBufferManager(get(), keystoreManager = get()) }
     single { CleanupWorker(get(), get(), get(), androidContext()) }
     single { IntegrityChecker(get(), get(), androidContext()) }
 
@@ -184,29 +183,20 @@ val appModule = module {
         val configManager = get<ConfigManager>()
         val runtimeState = get<FccRuntimeState>()
         val networkBinderInstance = get<NetworkBinder>()
-
-        // Internet probe OkHttp client bound to cloudNetwork (mobile > WiFi > default).
-        val probeHttpClient = OkHttpClient.Builder()
-            .socketFactory(BoundSocketFactory { networkBinderInstance.cloudNetwork.value })
-            .connectTimeout(4, TimeUnit.SECONDS)
-            .readTimeout(4, TimeUnit.SECONDS)
-            .build()
+        // AP-029: Reuse CloudApiClient for the internet probe instead of a
+        // separate OkHttpClient. This shares the connection pool (single TCP
+        // connection to cloud host) and benefits from certificate pinning.
+        val cloudApiClient = get<CloudApiClient>()
 
         ConnectivityManager(
             internetProbe = {
                 val baseUrl = configManager.config.value?.sync?.cloudBaseUrl ?: encryptedPrefs.cloudBaseUrl
                 if (baseUrl.isNullOrBlank()) {
                     false
+                } else if (networkBinderInstance.cloudNetwork.value == null) {
+                    false
                 } else {
-                    try {
-                        val request = Request.Builder()
-                            .url("${baseUrl.trimEnd('/')}/health")
-                            .get()
-                            .build()
-                        probeHttpClient.newCall(request).execute().use { it.isSuccessful }
-                    } catch (_: Exception) {
-                        false
-                    }
+                    cloudApiClient.healthCheck()
                 }
             },
             fccProbe = {
@@ -218,7 +208,6 @@ val appModule = module {
                 }
             },
             auditLogDao = get(),
-            listener = null, // CadenceController registers itself after construction
             scope = get<CoroutineScope>(),
             networkBinder = networkBinderInstance,
         )
@@ -265,6 +254,7 @@ val appModule = module {
             connectivityManager = get(),
             auditLogDao = get(),
             scope = get<CoroutineScope>(),
+            keystoreManager = get(),
         )
     }
 
@@ -276,6 +266,7 @@ val appModule = module {
             preAuthDao = get(),
             cloudApiClient = get(),
             tokenProvider = get(),
+            keystoreManager = get(),
         )
     }
 
@@ -316,6 +307,8 @@ val appModule = module {
                 .getPackageInfo(androidContext().packageName, 0).versionName ?: "1.0.0",
             cleanupWorker = get(),
             fileLogger = get(),
+            keystoreManager = get(),
+            encryptedPrefsManager = get(),
         )
     }
 
@@ -324,7 +317,7 @@ val appModule = module {
     // -------------------------------------------------------------------------
     single {
         OdooWebSocketServer(
-            transactionDao = get(),
+            bufferManager = get(),
             serviceScope = get<CoroutineScope>(),
         )
     }
@@ -341,6 +334,7 @@ val appModule = module {
             auditLogDao = get(),
             configManager = get(),
             fileLogger = get(),
+            localOverrideManager = get(),
         )
     }
     // AT-014: RegistrationHandler owns credential storage, config encryption,
@@ -354,6 +348,7 @@ val appModule = module {
             tokenProvider = get(),
             siteDataManager = get(),
             bufferDatabase = get(),
+            localOverrideManager = get(),
         )
     }
     viewModel {
@@ -377,6 +372,7 @@ val appModule = module {
                 lanApiKey = null,
             ),
             transactionDao = get(),
+            bufferManager = get(),
             syncStateDao = get(),
             connectivityManager = get(),
             preAuthHandler = get(),

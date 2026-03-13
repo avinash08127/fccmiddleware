@@ -50,6 +50,18 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
     public event EventHandler? DeviceDecommissioned;
     public event EventHandler? ReprovisioningRequired;
 
+    /// <inheritdoc />
+    public bool IsDecommissioned
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _cached?.IsDecommissioned ?? false;
+            }
+        }
+    }
+
     public RegistrationState LoadState()
     {
         // M-04: Return a defensive copy so concurrent callers (MarkDecommissionedAsync,

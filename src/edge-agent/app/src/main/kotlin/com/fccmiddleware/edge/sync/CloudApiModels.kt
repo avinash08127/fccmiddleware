@@ -1,6 +1,7 @@
 package com.fccmiddleware.edge.sync
 
 import com.fccmiddleware.edge.security.Sensitive
+import com.fccmiddleware.edge.security.SensitiveFieldFilter
 import kotlinx.serialization.Serializable
 
 // ---------------------------------------------------------------------------
@@ -133,6 +134,8 @@ data class CloudUploadRecordResult(
 data class CloudErrorResponse(
     val errorCode: String,
     val message: String,
+    /** NET-015: Backend `Retryable` hint — when false the error is permanent (no point retrying). */
+    val retryable: Boolean? = null,
 )
 
 /** Typed outcome values matching the cloud API enum. */
@@ -201,7 +204,7 @@ data class TelemetryPayload(
     val siteCode: String,
     val legalEntityId: String,
     val reportedAtUtc: String,
-    val sequenceNumber: Long,
+    val sequenceNumber: Int,
     val connectivityState: String,
     val device: DeviceStatusDto,
     val fccHealth: FccHealthStatusDto,
@@ -242,6 +245,10 @@ data class BufferStatusDto(
     val syncedCount: Int,
     val syncedToOdooCount: Int,
     val failedCount: Int,
+    /** AT-037: Count of records permanently failed after max upload retries (DEAD_LETTER status). */
+    val deadLetterCount: Int = 0,
+    /** AT-037: Count of records archived after successful sync lifecycle completion. */
+    val archivedCount: Int = 0,
     val oldestPendingAtUtc: String?,
     val bufferSizeMb: Int,
     val fiscalPendingCount: Int = 0,
@@ -287,7 +294,9 @@ data class DeviceRegistrationRequest(
     val osVersion: String,
     val agentVersion: String,
     val replacePreviousAgent: Boolean = false,
-)
+) {
+    override fun toString(): String = SensitiveFieldFilter.redactToString(this)
+}
 
 /**
  * Response from POST /api/v1/agent/register (HTTP 201).
@@ -303,7 +312,9 @@ data class DeviceRegistrationResponse(
     val legalEntityId: String,
     val siteConfig: kotlinx.serialization.json.JsonObject? = null,
     val registeredAt: String,
-)
+) {
+    override fun toString(): String = SensitiveFieldFilter.redactToString(this)
+}
 
 /** Result of calling POST /api/v1/agent/register. */
 sealed class CloudRegistrationResult {
@@ -326,14 +337,18 @@ data class TokenRefreshRequest(
     @Sensitive val refreshToken: String,
     // FM-S03: Include the current (even expired) device JWT to bind refresh to device identity
     @Sensitive val deviceToken: String,
-)
+) {
+    override fun toString(): String = SensitiveFieldFilter.redactToString(this)
+}
 
 @Serializable
 data class TokenRefreshResponse(
     @Sensitive val deviceToken: String,
     @Sensitive val refreshToken: String,
     val tokenExpiresAt: String,
-)
+) {
+    override fun toString(): String = SensitiveFieldFilter.redactToString(this)
+}
 
 /** Result of calling POST /api/v1/agent/token/refresh. */
 sealed class CloudTokenRefreshResult {

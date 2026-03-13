@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Buffer;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -99,6 +100,12 @@ public sealed class OdooWebSocketServer : IDisposable
 
     // ── Receive loop ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// S-DSK-020: Maximum allowed WebSocket message size (1 MB).
+    /// Messages exceeding this limit are rejected and the connection is closed.
+    /// </summary>
+    private const int MaxMessageSize = 1 * 1024 * 1024;
+
     private async Task ReceiveLoopAsync(System.Net.WebSockets.WebSocket ws, CancellationToken ct)
     {
         var buffer = new byte[4096];
@@ -113,6 +120,19 @@ public sealed class OdooWebSocketServer : IDisposable
                 if (result.MessageType == WebSocketMessageType.Close)
                     return;
                 sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+
+                // S-DSK-020: Guard against unbounded memory allocation
+                if (sb.Length > MaxMessageSize)
+                {
+                    _logger.LogWarning(
+                        "WebSocket message exceeded maximum size ({MaxSize} bytes) — closing connection",
+                        MaxMessageSize);
+                    await ws.CloseAsync(
+                        WebSocketCloseStatus.PolicyViolation,
+                        "Message too large",
+                        ct);
+                    return;
+                }
             }
             while (!result.EndOfMessage);
 
@@ -285,5 +305,6 @@ public sealed class WebSocketServerOptions
     public string? CertificatePath { get; set; }
 
     /// <summary>Password for the PFX certificate file.</summary>
+    [SensitiveData]
     public string? CertificatePassword { get; set; }
 }

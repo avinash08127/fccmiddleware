@@ -5,6 +5,7 @@ import com.fccmiddleware.edge.buffer.BufferDatabase
 import com.fccmiddleware.edge.buffer.dao.AgentConfigDao
 import com.fccmiddleware.edge.buffer.entity.AgentConfig
 import com.fccmiddleware.edge.config.EdgeAgentConfigJson
+import com.fccmiddleware.edge.config.LocalOverrideManager
 import com.fccmiddleware.edge.config.SiteDataManager
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
@@ -12,6 +13,7 @@ import com.fccmiddleware.edge.security.KeystoreManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.DeviceRegistrationResponse
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
+import kotlinx.coroutines.delay
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -33,12 +35,18 @@ class RegistrationHandler(
     private val tokenProvider: DeviceTokenProvider,
     private val siteDataManager: SiteDataManager,
     private val bufferDatabase: BufferDatabase,
+    private val localOverrideManager: LocalOverrideManager,
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     companion object {
         private const val TAG = "RegistrationHandler"
+        private const val CONFIG_ENCRYPTION_ATTEMPTS = 2
+        private const val CONFIG_ENCRYPTION_RETRY_DELAY_MS = 200L
+
+        internal fun redactDeviceIdForLog(deviceId: String): String =
+            if (deviceId.length <= 8) deviceId else "${deviceId.take(8)}..."
     }
 
     /**
@@ -55,8 +63,6 @@ class RegistrationHandler(
         environment: String?,
         response: DeviceRegistrationResponse,
     ) {
-        AppLogger.i(TAG, "Registration successful: deviceId=${response.deviceId}, site=${response.siteCode}")
-
         // AF-013: Clear the Room database before credentials to prevent cross-site
         // data contamination when re-provisioning for a different site.
         bufferDatabase.clearAllData()
@@ -64,6 +70,10 @@ class RegistrationHandler(
         // Clear stale Keystore keys and EncryptedPrefs from any previous registration.
         keystoreManager.clearAll()
         encryptedPrefs.clearAll()
+
+        // AF-052: Clear local FCC overrides so the old site's host, port, and
+        // credential settings do not leak to the new site after re-provisioning.
+        localOverrideManager.clearAllOverrides()
 
         val parsedSiteConfig = response.siteConfig?.let { siteConfig ->
             runCatching {
@@ -87,28 +97,32 @@ class RegistrationHandler(
             )
         }
 
-        encryptedPrefs.saveRegistration(
+        // AF-053: Check commit() return value to detect disk-full or I/O failures.
+        val registrationSaved = encryptedPrefs.saveRegistration(
             deviceId = response.deviceId,
             siteCode = response.siteCode,
             legalEntityId = response.legalEntityId,
             cloudBaseUrl = effectiveCloudBaseUrl,
             environment = environment,
         )
+        if (!registrationSaved) {
+            throw IllegalStateException(
+                "Failed to persist registration data — disk may be full. " +
+                "The device cannot operate safely without durable registration state. " +
+                "Free storage space and try again."
+            )
+        }
 
-        parsedSiteConfig?.fcc?.hostAddress?.let { encryptedPrefs.fccHost = it }
-        parsedSiteConfig?.fcc?.port?.let { encryptedPrefs.fccPort = it }
+        // AP-030: Batch FCC host+port into single encrypted prefs write.
+        val fccHost = parsedSiteConfig?.fcc?.hostAddress
+        val fccPort = parsedSiteConfig?.fcc?.port
+        if (fccHost != null || fccPort != null) {
+            encryptedPrefs.updateFccConnection(host = fccHost, port = fccPort)
+        }
 
         parsedSiteConfig?.let { siteConfig ->
             val rawConfigJson = EdgeAgentConfigJson.encode(siteConfig)
-            val encryptedBytes = keystoreManager.storeSecret(
-                KeystoreManager.ALIAS_CONFIG_INTEGRITY, rawConfigJson
-            )
-            val persistedJson = if (encryptedBytes != null) {
-                "ENC:" + Base64.encodeToString(encryptedBytes, Base64.NO_WRAP)
-            } else {
-                AppLogger.w(TAG, "Config encryption failed — persisting raw JSON")
-                rawConfigJson
-            }
+            val persistedJson = encryptConfigForStorage(rawConfigJson)
 
             // AT-015: Log warning when schemaVersion fallback is triggered.
             val parsedSchemaVersion = siteConfig.schemaVersion.substringBefore(".").toIntOrNull()
@@ -118,6 +132,15 @@ class RegistrationHandler(
                     "schemaVersion '${siteConfig.schemaVersion}' could not be parsed as integer — " +
                         "falling back to 1. Check cloud config for version format mismatch.",
                 )
+            }
+
+            if (persistedJson == null) {
+                AppLogger.e(
+                    TAG,
+                    "Config encryption failed after $CONFIG_ENCRYPTION_ATTEMPTS attempt(s) - " +
+                        "skipping initial Room persistence; service will fetch config on first poll",
+                )
+                return@let
             }
 
             val entity = AgentConfig(
@@ -153,5 +176,32 @@ class RegistrationHandler(
                 AppLogger.e(TAG, "Failed to sync site data — will populate on first config poll", e)
             }
         }
+
+        AppLogger.i(
+            TAG,
+            "Registration completed: deviceId=${redactDeviceIdForLog(response.deviceId)}, env=${environment ?: "none"}",
+        )
+    }
+
+    private suspend fun encryptConfigForStorage(rawConfigJson: String): String? {
+        for (attempt in 1..CONFIG_ENCRYPTION_ATTEMPTS) {
+            val encryptedBytes = keystoreManager.storeSecret(
+                KeystoreManager.ALIAS_CONFIG_INTEGRITY,
+                rawConfigJson,
+            )
+            if (encryptedBytes != null) {
+                return "ENC:" + Base64.encodeToString(encryptedBytes, Base64.NO_WRAP)
+            }
+
+            if (attempt < CONFIG_ENCRYPTION_ATTEMPTS) {
+                AppLogger.w(
+                    TAG,
+                    "Config encryption attempt $attempt failed - retrying in ${CONFIG_ENCRYPTION_RETRY_DELAY_MS}ms",
+                )
+                delay(CONFIG_ENCRYPTION_RETRY_DELAY_MS)
+            }
+        }
+
+        return null
     }
 }

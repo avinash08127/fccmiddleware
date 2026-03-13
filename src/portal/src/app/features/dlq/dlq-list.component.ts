@@ -192,7 +192,7 @@ interface LoadRequest {
         </p-panel>
 
         <!-- Batch action bar (OpsManager+ only) -->
-        <ng-container *appRoleVisible="['SystemAdmin', 'OperationsManager']">
+        <ng-container *appRoleVisible="['FccAdmin', 'FccUser']">
           @if (selectedItems.length > 0) {
             <div class="batch-actions">
               <span class="batch-count">{{ selectedItems.length }} item(s) selected</span>
@@ -534,8 +534,8 @@ export class DlqListComponent {
   private readonly msalService = inject(MsalService);
 
   readonly canBatchAction = hasAnyRequiredRole(
-    getCurrentAccount(this.msalService.instance),
-    ['SystemAdmin', 'OperationsManager'],
+    null,
+    ['FccAdmin', 'FccUser'],
   );
 
   pageSize = 20;

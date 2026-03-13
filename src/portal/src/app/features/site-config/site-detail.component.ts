@@ -2,7 +2,6 @@ import {
   Component,
   DestroyRef,
   OnInit,
-  ViewChild,
   inject,
   signal,
 } from '@angular/core';
@@ -10,7 +9,6 @@ import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
-import { concatMap, of, catchError, map } from 'rxjs';
 import { ButtonModule } from 'primeng/button';
 import { CardModule } from 'primeng/card';
 import { SelectModule } from 'primeng/select';
@@ -26,7 +24,6 @@ import {
   SiteOperatingModel,
   ConnectivityMode,
   FiscalizationMode,
-  FccConfig,
   Product,
   Pump,
   ToleranceConfig,
@@ -38,7 +35,6 @@ import { EmptyStateComponent } from '../../shared/components/empty-state/empty-s
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
 import { RoleVisibleDirective } from '../../shared/directives/role-visible.directive';
-import { FccConfigFormComponent, FccConfigDraft } from './fcc-config-form.component';
 import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.component';
 
 @Component({
@@ -58,7 +54,6 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
     StatusBadgeComponent,
     UtcDatePipe,
     RoleVisibleDirective,
-    FccConfigFormComponent,
     PumpMappingComponent,
   ],
   providers: [MessageService],
@@ -100,8 +95,8 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
             />
           </div>
 
-          <!-- Edit / Save / Cancel actions — SystemAdmin and OpsManager only -->
-          <ng-container *appRoleVisible="['SystemAdmin', 'OperationsManager']">
+          <!-- Edit / Save / Cancel actions — FccAdmin and FccUser only -->
+          <ng-container *appRoleVisible="['FccAdmin', 'FccUser']">
             <div class="action-buttons">
               @if (!editMode()) {
                 <p-button
@@ -202,13 +197,55 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
           </div>
         </p-card>
 
-        <!-- ── FCC configuration section ──────────────────────────────────── -->
-        <app-fcc-config-form
-          [fccConfig]="site()!.fcc"
-          [fccId]="site()!.fcc?.fccId ?? null"
-          [editMode]="editMode()"
-          (configChange)="onFccConfigChange($event)"
-        />
+        <!-- ── Adapter configuration section ──────────────────────────────── -->
+        <p-card styleClass="section-card">
+          <ng-template pTemplate="header">
+            <div class="section-header">
+              <span><i class="pi pi-sliders-h"></i> Adapter Configuration</span>
+            </div>
+          </ng-template>
+
+          @if (!site()!.fcc) {
+            <app-empty-state
+              icon="pi pi-sliders-h"
+              title="No adapter is configured"
+              description="This site does not currently have an active adapter binding."
+            />
+          } @else {
+            <div class="field-grid">
+              <div class="field">
+                <span class="field-label">Adapter</span>
+                <span class="field-value">{{ site()!.fcc!.vendor ?? '—' }}</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Connection Protocol</span>
+                <span class="field-value">{{ site()!.fcc!.connectionProtocol ?? '—' }}</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Host Address</span>
+                <span class="field-value">{{ site()!.fcc!.hostAddress ?? '—' }}</span>
+              </div>
+              <div class="field">
+                <span class="field-label">Port</span>
+                <span class="field-value">{{ site()!.fcc!.port ?? '—' }}</span>
+              </div>
+            </div>
+
+            <div class="adapter-config-actions">
+              <p-button
+                label="Open Adapter Config"
+                icon="pi pi-external-link"
+                severity="secondary"
+                (onClick)="openAdapterConfig()"
+              />
+            </div>
+
+            <small class="adapter-config-hint">
+              Adapter defaults, site overrides, secrets, and audit history are managed from the
+              Adapters area.
+            </small>
+          }
+        </p-card>
 
         <!-- ── Pump mapping section ───────────────────────────────────────── -->
         <app-pump-mapping
@@ -455,6 +492,14 @@ import { PumpMappingComponent, NozzleUpdateEvent } from './pump-mapping.componen
         padding: 0.1rem 0.35rem;
         border-radius: 4px;
       }
+      .adapter-config-actions {
+        margin-top: 1rem;
+      }
+      .adapter-config-hint {
+        display: block;
+        margin-top: 0.75rem;
+        color: var(--p-text-muted-color, #64748b);
+      }
       .form-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -500,9 +545,6 @@ export class SiteDetailComponent implements OnInit {
   private readonly messageService = inject(MessageService);
   private readonly destroyRef = inject(DestroyRef);
 
-  // F10-02: Reference to FCC config form for validation
-  @ViewChild(FccConfigFormComponent) fccConfigForm?: FccConfigFormComponent;
-
   // ── State ─────────────────────────────────────────────────────────────────
   readonly loading = signal(false);
   readonly saving = signal(false);
@@ -516,7 +558,6 @@ export class SiteDetailComponent implements OnInit {
   draftOperatingModel: SiteOperatingModel | null = null;
   draftConnectivityMode: ConnectivityMode | null = null;
   draftSiteUsesPreAuth = false;
-  draftFccConfig: FccConfigDraft | null = null;
   draftTolerance: ToleranceConfig = {
     amountTolerancePct: 0,
     amountToleranceAbsoluteMinorUnits: 0,
@@ -565,47 +606,24 @@ export class SiteDetailComponent implements OnInit {
     this.router.navigate(['/sites/list']);
   }
 
+  openAdapterConfig(): void {
+    const s = this.site();
+    const adapterKey = s?.fcc?.vendor;
+    if (!s || !adapterKey) {
+      return;
+    }
+
+    this.router.navigate(['/adapters', adapterKey, 'sites', s.id], {
+      queryParams: { legalEntityId: s.legalEntityId },
+    });
+  }
+
   enterEditMode(): void {
     const s = this.site();
     if (!s) return;
     this.draftOperatingModel = s.operatingModel;
     this.draftConnectivityMode = s.connectivityMode;
     this.draftSiteUsesPreAuth = s.siteUsesPreAuth;
-    this.draftFccConfig = s.fcc
-      ? {
-          vendor: s.fcc.vendor,
-          connectionProtocol: s.fcc.connectionProtocol,
-          hostAddress: s.fcc.hostAddress,
-          port: s.fcc.port,
-          transactionMode: s.fcc.transactionMode,
-          ingestionMode: s.fcc.ingestionMode,
-          pullIntervalSeconds: s.fcc.pullIntervalSeconds,
-          catchUpPullIntervalSeconds: s.fcc.catchUpPullIntervalSeconds,
-          hybridCatchUpIntervalSeconds: s.fcc.hybridCatchUpIntervalSeconds,
-          heartbeatIntervalSeconds: s.fcc.heartbeatIntervalSeconds,
-          heartbeatTimeoutSeconds: s.fcc.heartbeatTimeoutSeconds,
-          enabled: s.fcc.enabled,
-          jplPort: s.fcc.jplPort,
-          fcAccessCode: s.fcc.fcAccessCode,
-          domsCountryCode: s.fcc.domsCountryCode,
-          posVersionId: s.fcc.posVersionId,
-          configuredPumps: s.fcc.configuredPumps,
-          sharedSecret: s.fcc.sharedSecret,
-          usnCode: s.fcc.usnCode,
-          authPort: s.fcc.authPort,
-          fccPumpAddressMap: s.fcc.fccPumpAddressMap,
-          clientId: s.fcc.clientId,
-          clientSecret: s.fcc.clientSecret,
-          webhookSecret: s.fcc.webhookSecret,
-          oauthTokenEndpoint: s.fcc.oauthTokenEndpoint,
-          advatecDevicePort: s.fcc.advatecDevicePort,
-          advatecWebhookListenerPort: s.fcc.advatecWebhookListenerPort,
-          advatecWebhookToken: s.fcc.advatecWebhookToken,
-          advatecEfdSerialNumber: s.fcc.advatecEfdSerialNumber,
-          advatecCustIdType: s.fcc.advatecCustIdType,
-          advatecPumpMap: s.fcc.advatecPumpMap,
-        }
-      : null;
     this.draftTolerance = s.tolerance
       ? { ...s.tolerance }
       : { amountTolerancePct: 0, amountToleranceAbsoluteMinorUnits: 0, timeWindowMinutes: 60 };
@@ -623,14 +641,7 @@ export class SiteDetailComponent implements OnInit {
   }
 
   canSave(): boolean {
-    if (this.saving() || !this.draftOperatingModel) return false;
-    // F10-02: Validate FCC config form when present
-    if (this.draftFccConfig && this.fccConfigForm && !this.fccConfigForm.isValid()) return false;
-    return true;
-  }
-
-  onFccConfigChange(draft: FccConfigDraft): void {
-    this.draftFccConfig = draft;
+    return !this.saving() && !!this.draftOperatingModel;
   }
 
   saveAll(): void {
@@ -652,45 +663,10 @@ export class SiteDetailComponent implements OnInit {
       },
     };
 
-    const siteUpdate$ = this.siteService.updateSite(s.id, siteUpdate);
-
-    if (this.draftFccConfig) {
-      const fccPayload: Partial<FccConfig> = { ...this.draftFccConfig } as Partial<FccConfig>;
-      // F10-04: Sequential saves — site first, then FCC config.
-      // If site succeeds but FCC fails, user sees partial-save warning.
-      siteUpdate$
-        .pipe(
-          concatMap((updatedSite) =>
-            this.siteService.updateFccConfig(s.id, fccPayload).pipe(
-              map(() => ({ updatedSite, fccSaved: true })),
-              catchError(() => of({ updatedSite, fccSaved: false })),
-            ),
-          ),
-          takeUntilDestroyed(this.destroyRef),
-        )
-        .subscribe({
-          next: ({ updatedSite, fccSaved }) => {
-            if (fccSaved) {
-              this.onSaveSuccess(updatedSite);
-            } else {
-              this.site.set(updatedSite);
-              this.saving.set(false);
-              this.messageService.add({
-                severity: 'warn',
-                summary: 'Partial save',
-                detail: 'Site settings saved, but FCC configuration update failed. Please retry.',
-                life: 5000,
-              });
-            }
-          },
-          error: () => this.onSaveError(),
-        });
-    } else {
-      siteUpdate$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-        next: (updatedSite) => this.onSaveSuccess(updatedSite),
-        error: () => this.onSaveError(),
-      });
-    }
+    this.siteService.updateSite(s.id, siteUpdate).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (updatedSite) => this.onSaveSuccess(updatedSite),
+      error: () => this.onSaveError(),
+    });
   }
 
   onPumpAdded(req: AddPumpRequest): void {

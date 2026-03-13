@@ -23,6 +23,12 @@ public sealed class PlatformCredentialStore : ICredentialStore
     private const string ServiceName = "FccDesktopAgent";
 
     private readonly ILogger<PlatformCredentialStore> _logger;
+
+    // T-DSK-012: This semaphore serializes access to the file-backed credential stores
+    // (Windows DPAPI + JSON file, and Linux AES encrypted file fallback). macOS Keychain
+    // and Linux secret-tool have their own platform-level locking and do not acquire this
+    // semaphore. The overhead on those platforms is negligible since the semaphore is only
+    // used by the file-backed code paths.
     private readonly SemaphoreSlim _fileLock = new(1, 1);
 
     // Lazy-evaluated Linux fallback flag
@@ -345,14 +351,42 @@ public sealed class PlatformCredentialStore : ICredentialStore
 
     /// <summary>
     /// OB-S02: Loads or generates a 32-byte random per-installation salt.
-    /// Stored at {AgentDataDirectory}/secrets/installation.salt.
+    /// S-DSK-008: On Linux, the salt is stored in a separate directory from the
+    /// encrypted credentials (~/.config/fcc-desktop-agent/) so that reading the
+    /// agent data directory alone is insufficient to derive the encryption key.
     /// </summary>
     private byte[] GetOrCreateInstallationSalt()
     {
-        var dir = Path.Combine(AgentDataDirectory.Resolve(), "secrets");
-        Directory.CreateDirectory(dir);
-        AgentDataDirectory.SetRestrictivePermissions(dir);
-        var saltPath = Path.Combine(dir, "installation.salt");
+        var saltDir = GetSaltDirectory();
+        Directory.CreateDirectory(saltDir);
+        AgentDataDirectory.SetRestrictivePermissions(saltDir);
+        var saltPath = Path.Combine(saltDir, "installation.salt");
+
+        // S-DSK-008: Backward compatibility — migrate salt from legacy location
+        // (same directory as credentials) to the new separate directory.
+        if (!File.Exists(saltPath))
+        {
+            var legacyPath = Path.Combine(AgentDataDirectory.Resolve(), "secrets", "installation.salt");
+            if (File.Exists(legacyPath))
+            {
+                try
+                {
+                    var legacySalt = File.ReadAllBytes(legacyPath);
+                    if (legacySalt.Length == 32)
+                    {
+                        File.WriteAllBytes(saltPath, legacySalt);
+                        File.Delete(legacyPath);
+                        _logger.LogInformation(
+                            "Migrated installation salt to separate directory for improved credential isolation");
+                        return legacySalt;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to migrate legacy installation salt — will regenerate");
+                }
+            }
+        }
 
         if (File.Exists(saltPath))
         {
@@ -382,6 +416,26 @@ public sealed class PlatformCredentialStore : ICredentialStore
         }
 
         return salt;
+    }
+
+    /// <summary>
+    /// S-DSK-008: Returns a directory for salt storage that is separate from the
+    /// credentials directory. On Linux, uses XDG_CONFIG_HOME (~/.config/fcc-desktop-agent/)
+    /// so that the salt and encrypted data reside under different filesystem paths
+    /// with potentially different ACLs.
+    /// </summary>
+    private static string GetSaltDirectory()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            var configHome = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
+                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config");
+            return Path.Combine(configHome, "fcc-desktop-agent");
+        }
+
+        // Windows/macOS: salt separation is not needed since DPAPI/Keychain are used,
+        // but if this method is called, keep the original location.
+        return Path.Combine(AgentDataDirectory.Resolve(), "secrets");
     }
 
     private async Task<bool> HasSecretToolAsync(CancellationToken ct)

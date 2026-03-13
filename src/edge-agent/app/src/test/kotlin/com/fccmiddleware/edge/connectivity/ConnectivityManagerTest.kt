@@ -32,7 +32,6 @@ import org.robolectric.annotation.Config
  *   - Rapid probe alternation doesn't cause premature DOWN
  *   - StateFlow emits correct states on transition
  *   - Audit log entries written on every state transition
- *   - ConnectivityTransitionListener called with correct arguments
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -262,28 +261,62 @@ class ConnectivityManagerTest {
         }
 
     // -------------------------------------------------------------------------
-    // Transition listener called
+    // AF-050: Initial probe bypasses recovery threshold
     // -------------------------------------------------------------------------
 
     @Test
-    fun `transition listener called with correct from and to states`() =
+    fun `AF-050 first successful probe transitions immediately without waiting for recovery threshold`() =
         runTest(testDispatcher) {
-            val transitions = mutableListOf<Pair<ConnectivityState, ConnectivityState>>()
-            val listener = ConnectivityTransitionListener { from, to ->
-                transitions.add(from to to)
-            }
+            val mgr = buildManager(internet = { true }, fcc = { true })
+            mgr.start()
+            // With AF-050 fix, the very first successful probe should transition
+            // to UP immediately — no need to wait for recoveryThreshold (2) successes.
+            // One probe cycle (100ms) should be sufficient.
+            advanceTimeBy(150L)
+            assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
+            mgr.stop()
+        }
 
+    @Test
+    fun `AF-050 after initial transition, recovery from DOWN still requires threshold`() =
+        runTest(testDispatcher) {
+            var internetCallCount = 0
             val mgr = buildManager(
-                internet = { true },
+                internet = {
+                    internetCallCount++
+                    when {
+                        // Call 1: success → immediate UP (initial probe bypass)
+                        internetCallCount == 1 -> true
+                        // Calls 2-4: fail → triggers DOWN after 3 consecutive failures
+                        internetCallCount in 2..4 -> false
+                        // Call 5: single success — should NOT recover (needs 2 consecutive)
+                        internetCallCount == 5 -> true
+                        // Call 6: fail again — resets consecutive success counter
+                        internetCallCount == 6 -> false
+                        // Calls 7+: success — recovery after call 8 (2 consecutive)
+                        else -> true
+                    }
+                },
                 fcc = { true },
-                listener = listener,
             )
             mgr.start()
-            advanceTimeBy(300L) // 2 consecutive successes needed
 
-            assert(transitions.isNotEmpty()) { "Expected at least one transition" }
-            val toOnline = transitions.firstOrNull { (_, to) -> to == ConnectivityState.FULLY_ONLINE }
-            assertNotNull("Expected transition to FULLY_ONLINE", toOnline)
+            // Call 1: internet up (initial bypass), fcc up (initial bypass) → FULLY_ONLINE
+            advanceTimeBy(150L)
+            assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
+
+            // Calls 2-4: 3 consecutive failures → internet DOWN → FCC_UNREACHABLE
+            advanceTimeBy(400L)
+            assertEquals(ConnectivityState.FCC_UNREACHABLE, mgr.state.value)
+
+            // Call 5: single success → NOT enough (need 2 consecutive, initial bypass consumed)
+            // Call 6: fail → resets
+            advanceTimeBy(250L)
+            assertEquals(ConnectivityState.FCC_UNREACHABLE, mgr.state.value)
+
+            // Calls 7-8: 2 consecutive successes → recovery → FULLY_ONLINE
+            advanceTimeBy(250L)
+            assertEquals(ConnectivityState.FULLY_ONLINE, mgr.state.value)
             mgr.stop()
         }
 
@@ -314,12 +347,10 @@ class ConnectivityManagerTest {
     private fun TestScope.buildManager(
         internet: suspend () -> Boolean,
         fcc: suspend () -> Boolean,
-        listener: ConnectivityTransitionListener? = null,
     ) = ConnectivityManager(
         internetProbe = internet,
         fccProbe = fcc,
         auditLogDao = auditLogDao,
-        listener = listener,
         scope = this,
         config = fastConfig,
     )

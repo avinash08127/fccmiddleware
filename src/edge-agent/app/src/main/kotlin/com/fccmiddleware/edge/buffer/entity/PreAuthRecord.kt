@@ -14,7 +14,7 @@ import com.fccmiddleware.edge.adapter.common.PreAuthStatus
  * on the request path.
  *
  * All timestamps: ISO 8601 UTC TEXT. Money: Long minor units. UUIDs: TEXT.
- * customer_tax_id is sensitive — NEVER log this field.
+ * customer_tax_id is sensitive — stored as a Keystore-encrypted blob and NEVER logged.
  */
 @Entity(
     tableName = "pre_auth_records",
@@ -80,7 +80,7 @@ data class PreAuthRecord(
     @ColumnInfo(name = "customer_name")
     val customerName: String?,
 
-    /** SENSITIVE — never log */
+    /** SENSITIVE — persisted as a Keystore-encrypted Base64 blob; never log */
     @ColumnInfo(name = "customer_tax_id")
     val customerTaxId: String?,
 
@@ -120,4 +120,12 @@ data class PreAuthRecord(
     /** ISO 8601 UTC */
     @ColumnInfo(name = "created_at")
     val createdAt: String,
+
+    /** NET-008: Vehicle registration plate, if captured. */
+    @ColumnInfo(name = "vehicle_number")
+    val vehicleNumber: String? = null,
+
+    /** NET-008: B2B customer business name for reconciliation. */
+    @ColumnInfo(name = "customer_business_name")
+    val customerBusinessName: String? = null,
 )

@@ -2,7 +2,7 @@ package com.fccmiddleware.edge.websocket
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
-import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.config.WebSocketDto
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
@@ -24,14 +24,23 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlin.time.Duration.Companion.seconds
+import java.net.InetAddress
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Duration.Companion.seconds
+
+private val SENSITIVE_WS_MODES = setOf(
+    "manager_update",
+    "attendant_update",
+    "manager_manual_update",
+    "fp_unblock",
+)
 
 /**
  * Odoo backward-compatible WebSocket server.
@@ -45,13 +54,15 @@ import java.util.concurrent.ConcurrentHashMap
  * All `mode` commands dispatched to [OdooWsMessageHandler].
  *
  * Security (S-005):
- *  - If [WebSocketDto.sharedSecret] is set, every connection must supply it in
- *    the `X-Api-Key` header or the upgrade is rejected with 4008 VIOLATED_POLICY.
+ *  - Non-loopback clients are rejected when [WebSocketDto.requireApiKeyForLan]
+ *    is enabled and the `X-Api-Key` header is missing or invalid.
+ *  - Sensitive mutating commands require an authenticated session even when
+ *    compatibility mode allows unauthenticated read-only access.
  *  - Inbound command messages are rate-limited per [WebSocketDto.commandRateLimitPerMinute].
  *  - Every inbound command is logged with the client's remote IP for audit.
  */
 class OdooWebSocketServer(
-    private val transactionDao: TransactionBufferDao,
+    private val bufferManager: TransactionBufferManager,
     private val serviceScope: CoroutineScope,
 ) {
     companion object {
@@ -88,6 +99,7 @@ class OdooWebSocketServer(
      */
     private data class ClientEntry(
         val remoteHost: String,
+        val isAuthenticated: Boolean,
         var commandCountInWindow: Int = 0,
         var windowStartMs: Long = System.currentTimeMillis(),
     )
@@ -99,7 +111,7 @@ class OdooWebSocketServer(
     private var sharedBroadcastJob: Job? = null
 
     private val messageHandler = OdooWsMessageHandler(
-        transactionDao = transactionDao,
+        bufferManager = bufferManager,
         wsJson = wsJson,
         broadcastToAll = ::broadcastToAll,
         getFccAdapter = { fccAdapter },
@@ -127,13 +139,22 @@ class OdooWebSocketServer(
             AppLogger.d(TAG, "WebSocket server disabled in config")
             return
         }
+        if (config.sharedSecret.isNullOrBlank()) {
+            AppLogger.w(TAG, "SECURITY: WebSocket server running WITHOUT authentication")
+        }
+        if (config.requireApiKeyForLan && config.sharedSecret.isNullOrBlank()) {
+            AppLogger.w(
+                TAG,
+                "SECURITY: LAN API key enforcement is enabled but no shared secret is configured; non-loopback clients will be rejected",
+            )
+        }
         server?.stop(1_000, 2_000)
 
         server = embeddedServer(CIO, port = config.port, host = config.bindAddress) {
             install(WebSockets) {
                 pingPeriod = 15.seconds
                 timeout = 30.seconds
-                maxFrameSize = Long.MAX_VALUE
+                maxFrameSize = resolveWebSocketMaxFrameSizeBytes(config.maxFrameSizeKb)
                 masking = false
             }
             routing {
@@ -141,23 +162,27 @@ class OdooWebSocketServer(
                     // S-005(a): extract client IP for auth and audit logging
                     val remoteHost = call.request.origin.remoteHost
 
-                    // S-005(a): reject connections without the shared secret when configured
-                    val secret = config.sharedSecret
-                    if (!secret.isNullOrBlank()) {
-                        val provided = call.request.headers[API_KEY_HEADER]
-                        if (provided != secret) {
-                            AppLogger.w(TAG, "Rejected unauthenticated WebSocket connection from $remoteHost")
-                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Unauthorized"))
-                            return@webSocket
-                        }
+                    // S-005(a): enforce optional LAN auth while still allowing
+                    // authenticated-sensitive-command gating for compatibility mode.
+                    val secret = config.sharedSecret?.takeIf { it.isNotBlank() }
+                    val provided = call.request.headers[API_KEY_HEADER]
+                    val isAuthenticated = secret != null && webSocketSharedSecretEquals(provided, secret)
+                    if (shouldRequireApiKeyForLan(config, remoteHost) && !isAuthenticated) {
+                        AppLogger.w(TAG, "Rejected unauthenticated WebSocket connection from $remoteHost")
+                        close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Unauthorized"))
+                        return@webSocket
                     }
 
-                    onClientConnected(this, remoteHost)
+                    onClientConnected(this, remoteHost, isAuthenticated)
                 }
             }
         }.also {
             it.start(wait = false)
-            AppLogger.i(TAG, "WebSocket server started on ${config.bindAddress}:${config.port}")
+            AppLogger.i(
+                TAG,
+                "WebSocket server started on ${config.bindAddress}:${config.port} " +
+                    "(maxFrameSize=${resolveWebSocketMaxFrameSizeBytes(config.maxFrameSizeKb)} bytes)",
+            )
         }
 
         // AP-016: Start single shared pump status broadcast coroutine
@@ -182,15 +207,22 @@ class OdooWebSocketServer(
     // Connection lifecycle
     // -------------------------------------------------------------------------
 
-    private suspend fun onClientConnected(session: WebSocketSession, remoteHost: String) {
+    private suspend fun onClientConnected(
+        session: WebSocketSession,
+        remoteHost: String,
+        isAuthenticated: Boolean,
+    ) {
         if (clients.size >= config.maxConnections) {
-            AppLogger.w(TAG, "Max connections (${config.maxConnections}) reached — rejecting $remoteHost")
+            AppLogger.w(TAG, "Max connections (${config.maxConnections}) reached - rejecting $remoteHost")
             session.close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Max connections reached"))
             return
         }
 
-        clients[session] = ClientEntry(remoteHost = remoteHost)
-        AppLogger.i(TAG, "Client connected from $remoteHost (total=${clients.size})")
+        clients[session] = ClientEntry(remoteHost = remoteHost, isAuthenticated = isAuthenticated)
+        AppLogger.i(
+            TAG,
+            "Client connected from $remoteHost (authenticated=$isAuthenticated, total=${clients.size})",
+        )
 
         try {
             for (frame in session.incoming) {
@@ -245,7 +277,15 @@ class OdooWebSocketServer(
             val mode = json["mode"]?.jsonPrimitive?.content?.lowercase() ?: ""
 
             // S-005(c): audit-log every inbound command with client IP
-            AppLogger.i(TAG, "WS cmd mode=$mode from=$remoteHost")
+            val client = clients[session]
+            val isAuthenticated = client?.isAuthenticated == true
+            AppLogger.i(TAG, "WS cmd mode=$mode from=$remoteHost authenticated=$isAuthenticated")
+
+            if (requiresAuthenticatedSession(mode) && !isAuthenticated) {
+                AppLogger.w(TAG, "Rejected unauthenticated sensitive WS mode=$mode from=$remoteHost")
+                sendToSession(session, WsErrorResponse(message = "Authentication required for mode '$mode'"))
+                return
+            }
 
             when (mode) {
                 "latest" -> messageHandler.handleLatest(session, json)
@@ -281,7 +321,11 @@ class OdooWebSocketServer(
      */
     private suspend fun sharedPumpStatusBroadcastLoop() {
         val intervalMs = (config.pumpStatusBroadcastIntervalSeconds * 1000L).coerceAtLeast(1000L)
-        while (serviceScope.isActive) {
+        // AT-044: Use `while (true)` — cancellation is handled by `delay()` throwing
+        // CancellationException when the coroutine's Job is cancelled. The previous
+        // `while (serviceScope.isActive)` checked the parent scope, not this coroutine's
+        // own cancellation state, which was misleading.
+        while (true) {
             delay(intervalMs)
             if (clients.isEmpty()) continue
             try {
@@ -302,6 +346,8 @@ class OdooWebSocketServer(
                     }
                 }
                 deadSessions.forEach { onClientDisconnected(it) }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.d(TAG, "Shared pump status broadcast failed: ${e.message}")
             }
@@ -348,3 +394,29 @@ class OdooWebSocketServer(
         }
     }
 }
+
+internal fun resolveWebSocketMaxFrameSizeBytes(maxFrameSizeKb: Int): Long =
+    maxFrameSizeKb.coerceAtLeast(1).toLong() * 1024L
+
+internal fun isLoopbackHost(host: String): Boolean {
+    val normalized = host.trim().lowercase()
+    if (normalized == "localhost" || normalized == "127.0.0.1" || normalized == "::1") {
+        return true
+    }
+    return try {
+        InetAddress.getByName(host).isLoopbackAddress
+    } catch (_: Exception) {
+        false
+    }
+}
+
+internal fun shouldRequireApiKeyForLan(config: WebSocketDto, remoteHost: String): Boolean =
+    config.requireApiKeyForLan && !isLoopbackHost(remoteHost)
+
+internal fun requiresAuthenticatedSession(mode: String): Boolean = mode in SENSITIVE_WS_MODES
+
+internal fun webSocketSharedSecretEquals(provided: String?, stored: String): Boolean =
+    MessageDigest.isEqual(
+        (provided ?: "").toByteArray(Charsets.UTF_8),
+        stored.toByteArray(Charsets.UTF_8),
+    )

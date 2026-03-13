@@ -189,7 +189,7 @@ class JplTcpClient(
 
     private suspend fun readLoop() {
         val buffer = ByteArray(READ_BUFFER_SIZE)
-        var accumulated = ByteArray(0)
+        val accumulator = java.io.ByteArrayOutputStream()
 
         try {
             while (currentCoroutineContext().isActive && connected.get()) {
@@ -203,8 +203,12 @@ class JplTcpClient(
                 }
 
                 if (bytesRead > 0) {
-                    accumulated = accumulated + buffer.copyOfRange(0, bytesRead)
-                    accumulated = processAccumulated(accumulated)
+                    accumulator.write(buffer, 0, bytesRead)
+                    val remaining = processAccumulated(accumulator.toByteArray())
+                    accumulator.reset()
+                    if (remaining.isNotEmpty()) {
+                        accumulator.write(remaining)
+                    }
                 }
             }
         } catch (e: CancellationException) {

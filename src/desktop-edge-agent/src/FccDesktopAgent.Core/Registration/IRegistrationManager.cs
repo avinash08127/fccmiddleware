@@ -6,6 +6,13 @@ namespace FccDesktopAgent.Core.Registration;
 public interface IRegistrationManager
 {
     /// <summary>
+    /// T-DSK-013: Returns whether the device is currently decommissioned.
+    /// Backed by the cached registration state — no disk I/O on each call.
+    /// Workers check this shared flag instead of maintaining independent volatile booleans.
+    /// </summary>
+    bool IsDecommissioned { get; }
+
+    /// <summary>
     /// Loads the current registration state from disk.
     /// Returns a default (unregistered) state if no file exists.
     /// </summary>

@@ -78,7 +78,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         await SeedTestDataAsync(db);
 
         _client = _factory.CreateClient();
-        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", TestLegalEntityId);
     }
 
     public async Task DisposeAsync()
@@ -114,19 +114,19 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
             new { siteCode = TestSiteCode, legalEntityId = TestLegalEntityId });
 
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", TestLegalEntityId);
     }
 
     [Fact]
     public async Task GenerateBootstrapToken_PortalUserWithoutAdminRole_Returns403()
     {
-        SetPortalAuth("SiteSupervisor", "portal-user", TestLegalEntityId);
+        SetPortalAuth("FccUser", "portal-user", TestLegalEntityId);
 
         var response = await _client.PostAsJsonAsync("/api/v1/admin/bootstrap-tokens",
             new { siteCode = TestSiteCode, legalEntityId = TestLegalEntityId });
 
         response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
-        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", TestLegalEntityId);
     }
 
     [Fact]
@@ -562,7 +562,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
             new { reason = "test decommission" });
 
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", TestLegalEntityId);
     }
 
     [Fact]
@@ -634,7 +634,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
 
     private async Task<string> GenerateBootstrapTokenAsync()
     {
-        SetPortalAuth("SystemAdmin", "portal-admin", TestLegalEntityId);
+        SetPortalAuth("FccAdmin", "portal-admin", TestLegalEntityId);
         var request = new { siteCode = TestSiteCode, legalEntityId = TestLegalEntityId };
         var response = await _client.PostAsJsonAsync("/api/v1/admin/bootstrap-tokens", request);
         response.StatusCode.Should().Be(HttpStatusCode.Created);

@@ -28,6 +28,7 @@ import com.fccmiddleware.edge.security.KeystoreManager
 class LocalOverrideManager(
     context: Context,
     private val keystoreManager: KeystoreManager,
+    masterKey: MasterKey,
 ) {
 
     companion object {
@@ -60,10 +61,8 @@ class LocalOverrideManager(
         fun isValidPort(port: Int): Boolean = port in 1..65535
     }
 
+    // AP-031: MasterKey is injected to avoid redundant Keystore IPC on startup.
     private val prefs: SharedPreferences = run {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
         EncryptedSharedPreferences.create(
             context,
             PREFS_FILE,

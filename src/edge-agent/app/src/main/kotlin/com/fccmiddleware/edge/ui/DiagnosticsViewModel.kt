@@ -11,6 +11,7 @@ import com.fccmiddleware.edge.buffer.entity.AuditLog
 import com.fccmiddleware.edge.buffer.entity.SiteInfo
 import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.config.ConfigManager
+import com.fccmiddleware.edge.config.LocalOverrideManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.logging.StructuredFileLogger
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +37,7 @@ class DiagnosticsViewModel(
     private val auditLogDao: AuditLogDao,
     private val configManager: ConfigManager,
     private val fileLogger: StructuredFileLogger,
+    private val localOverrideManager: LocalOverrideManager,
 ) : ViewModel() {
 
     data class DiagnosticsSnapshot(
@@ -52,7 +54,14 @@ class DiagnosticsViewModel(
         val nozzleCount: Int,
         val structuredEntries: List<String>,
         val logSizeBytes: Long,
+        // AF-052: Active local FCC overrides for diagnostics display
+        val activeOverrides: List<String>,
         val refreshedAt: String,
+    )
+
+    data class SharedLogArchive(
+        val file: File,
+        val fileCount: Int,
     )
 
     private val _snapshot = MutableStateFlow<DiagnosticsSnapshot?>(null)
@@ -91,6 +100,15 @@ class DiagnosticsViewModel(
             val structuredEntries = try { fileLogger.getRecentDiagnosticEntries(STRUCTURED_LOG_LIMIT) } catch (_: Exception) { emptyList() }
             val logSizeBytes = try { fileLogger.totalLogSizeBytes() } catch (_: Exception) { 0L }
 
+            // AF-052: Collect active local FCC overrides for diagnostics display
+            val activeOverrides = buildList {
+                localOverrideManager.fccHost?.let { add("FCC host: $it") }
+                localOverrideManager.fccPort?.let { add("FCC port: $it") }
+                localOverrideManager.jplPort?.let { add("JPL port: $it") }
+                localOverrideManager.fccCredential?.let { add("FCC credential: ***") }
+                localOverrideManager.wsPort?.let { add("WS port: $it") }
+            }
+
             val lastSyncUtc = syncState?.lastUploadAt
             val syncLagSeconds = if (lastSyncUtc != null) {
                 try {
@@ -113,6 +131,7 @@ class DiagnosticsViewModel(
                 nozzleCount = nozzleCount,
                 structuredEntries = structuredEntries,
                 logSizeBytes = logSizeBytes,
+                activeOverrides = activeOverrides,
                 refreshedAt = Instant.now().toString().take(19),
             )
         }
@@ -120,9 +139,11 @@ class DiagnosticsViewModel(
         _snapshot.value = data
     }
 
-    /** Returns log files for sharing (called from the Activity on Dispatchers.IO). */
-    suspend fun getLogFiles(): List<File> = withContext(Dispatchers.IO) {
-        fileLogger.getLogFiles()
+    /** Builds a sanitized ZIP archive for technician sharing. */
+    suspend fun exportRedactedLogArchive(cacheDir: File): SharedLogArchive? = withContext(Dispatchers.IO) {
+        val zip = File(cacheDir, "edge-agent-logs.zip")
+        val fileCount = fileLogger.exportRedactedLogs(zip)
+        if (fileCount == 0) null else SharedLogArchive(zip, fileCount)
     }
 
     companion object {

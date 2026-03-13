@@ -78,6 +78,26 @@ public sealed record FccDto
     public required int HeartbeatIntervalSeconds { get; init; }
     public required int HeartbeatTimeoutSeconds { get; init; }
     public required string[] PushSourceIpAllowList { get; init; }
+    public int? JplPort { get; init; }
+    public string? FcAccessCode { get; init; }
+    public string? DomsCountryCode { get; init; }
+    public string? PosVersionId { get; init; }
+    public string? ConfiguredPumps { get; init; }
+    public string? DppPorts { get; init; }
+    public int? ReconnectBackoffMaxSeconds { get; init; }
+    public string? SharedSecret { get; init; }
+    public int? UsnCode { get; init; }
+    public int? AuthPort { get; init; }
+    public string? FccPumpAddressMap { get; init; }
+    public string? ClientId { get; init; }
+    public string? ClientSecret { get; init; }
+    public string? WebhookSecret { get; init; }
+    public string? OAuthTokenEndpoint { get; init; }
+    public int? AdvatecDevicePort { get; init; }
+    public string? AdvatecWebhookToken { get; init; }
+    public string? AdvatecEfdSerialNumber { get; init; }
+    public int? AdvatecCustIdType { get; init; }
+    public string? AdvatecPumpMap { get; init; }
 }
 
 public sealed record SecretEnvelopeDto

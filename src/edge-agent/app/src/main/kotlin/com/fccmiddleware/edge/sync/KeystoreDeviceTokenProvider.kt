@@ -194,9 +194,13 @@ class KeystoreDeviceTokenProvider(
             return false
         }
 
-        // Both encryptions succeeded — persist both blobs
-        encryptedPrefs.storeDeviceTokenBlob(Base64.encodeToString(deviceEncrypted, Base64.NO_WRAP))
-        encryptedPrefs.storeRefreshTokenBlob(Base64.encodeToString(refreshEncrypted, Base64.NO_WRAP))
+        val deviceBlob = Base64.encodeToString(deviceEncrypted, Base64.NO_WRAP)
+        val refreshBlob = Base64.encodeToString(refreshEncrypted, Base64.NO_WRAP)
+
+        if (!encryptedPrefs.storeTokenBlobs(deviceBlob, refreshBlob)) {
+            AppLogger.e(TAG, "Failed to persist refreshed token blobs atomically")
+            return false
+        }
 
         return true
     }

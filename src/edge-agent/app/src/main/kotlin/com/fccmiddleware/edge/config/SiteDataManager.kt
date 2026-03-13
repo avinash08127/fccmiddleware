@@ -23,8 +23,21 @@ class SiteDataManager(
     }
 
     /**
+     * AP-039: In-memory hash of last synced mapping data.
+     * Skips the full DELETE+INSERT cycle when only non-mapping config fields changed
+     * (e.g., sync intervals, cloud base URL). Resets on process restart — first
+     * config fetch after restart always replaces (acceptable, same as before).
+     */
+    @Volatile
+    private var lastMappingHash: Int = 0
+
+    /**
      * Extract products, pumps, nozzles, and site info from [config] and
      * atomically replace all site data tables.
+     *
+     * AP-039: Computes a deterministic hash of the mapping section. If the hash
+     * matches the last sync, only SiteInfo is updated (non-mapping fields like
+     * timezone, operating model, etc.) and the full table replacement is skipped.
      */
     suspend fun syncFromConfig(config: EdgeAgentConfigDto) {
         val now = Instant.now().toString()
@@ -41,6 +54,15 @@ class SiteDataManager(
             ingestionMode = config.fcc.ingestionMode,
             syncedAt = now,
         )
+
+        // AP-039: Hash mapping data to detect changes
+        val mappingHash = computeMappingHash(config)
+        if (mappingHash == lastMappingHash && lastMappingHash != 0) {
+            // Mappings unchanged — update SiteInfo only (non-mapping fields may have changed)
+            siteDataDao.insertSiteInfo(siteInfo)
+            AppLogger.d(TAG, "AP-039: Mapping data unchanged, site info updated only")
+            return
+        }
 
         val products = config.mappings.products.map { p ->
             LocalProduct(
@@ -73,10 +95,33 @@ class SiteDataManager(
         }
 
         siteDataDao.replaceAllSiteData(siteInfo, products, pumps, nozzles)
+        lastMappingHash = mappingHash
 
         AppLogger.i(
             TAG,
             "Site data synced: ${products.size} products, ${pumps.size} pumps, ${nozzles.size} nozzles",
         )
+    }
+
+    /**
+     * AP-039: Deterministic hash of product and nozzle mapping data.
+     * Sorted to ensure order-independence.
+     */
+    private fun computeMappingHash(config: EdgeAgentConfigDto): Int {
+        var hash = 17
+        for (p in config.mappings.products.sortedBy { it.fccProductCode }) {
+            hash = 31 * hash + p.fccProductCode.hashCode()
+            hash = 31 * hash + p.canonicalProductCode.hashCode()
+            hash = 31 * hash + p.displayName.hashCode()
+            hash = 31 * hash + p.active.hashCode()
+        }
+        for (n in config.mappings.nozzles.sortedWith(compareBy({ it.odooPumpNumber }, { it.odooNozzleNumber }))) {
+            hash = 31 * hash + n.odooNozzleNumber
+            hash = 31 * hash + n.odooPumpNumber
+            hash = 31 * hash + n.fccNozzleNumber
+            hash = 31 * hash + n.fccPumpNumber
+            hash = 31 * hash + n.productCode.hashCode()
+        }
+        return hash
     }
 }

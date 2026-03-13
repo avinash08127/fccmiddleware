@@ -31,7 +31,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
 
     private readonly IFccAdapterFactory _adapterFactory;
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly IOptions<AgentConfiguration> _config;
+    private readonly IOptionsMonitor<AgentConfiguration> _config;
     private readonly IConfigManager? _configManager;
     private readonly ILogger<IngestionOrchestrator> _logger;
     private readonly ILoggerFactory? _loggerFactory;
@@ -50,7 +50,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
     public IngestionOrchestrator(
         IFccAdapterFactory adapterFactory,
         IServiceScopeFactory scopeFactory,
-        IOptions<AgentConfiguration> config,
+        IOptionsMonitor<AgentConfiguration> config,
         ILogger<IngestionOrchestrator> logger,
         IConfigManager? configManager = null,
         ILoggerFactory? loggerFactory = null)
@@ -97,7 +97,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
     /// <inheritdoc />
     public async Task EnsurePushListenersInitializedAsync(CancellationToken ct)
     {
-        var config = _config.Value;
+        var config = _config.CurrentValue;
 
         ResolvedFccRuntimeConfiguration resolvedConfig;
         try
@@ -144,7 +144,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
 
     private async Task<IngestionResult> DoPollAndBufferAsync(CancellationToken ct)
     {
-        var config = _config.Value;
+        var config = _config.CurrentValue;
         var siteConfig = _configManager?.CurrentSiteConfig;
 
         // Create a scope per poll cycle — TransactionBufferManager and AgentDbContext are scoped.

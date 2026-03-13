@@ -1,16 +1,21 @@
 package com.fccmiddleware.edge.ui
 
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.fccmiddleware.edge.R
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -79,6 +84,10 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
         setContentView(buildLayout())
 
         // AT-008: Read EncryptedSharedPreferences off the main thread to prevent ANRs.
@@ -93,7 +102,8 @@ class SettingsActivity : AppCompatActivity() {
                 fccIpInput.setText(state.getString(STATE_FCC_IP, fccIpInput.text.toString()))
                 fccPortInput.setText(state.getString(STATE_FCC_PORT, fccPortInput.text.toString()))
                 fccJplPortInput.setText(state.getString(STATE_FCC_JPL_PORT, fccJplPortInput.text.toString()))
-                fccAccessCodeInput.setText(state.getString(STATE_FCC_ACCESS_CODE, fccAccessCodeInput.text.toString()))
+                // LR-012: Access code is not restored from Bundle — re-entry required after
+                // process death, consistent with AF-001 security posture.
                 wsPortInput.setText(state.getString(STATE_WS_PORT, wsPortInput.text.toString()))
                 val statusMsg = state.getString(STATE_STATUS_TEXT)
                 if (!statusMsg.isNullOrEmpty()) {
@@ -110,7 +120,9 @@ class SettingsActivity : AppCompatActivity() {
         outState.putString(STATE_FCC_IP, fccIpInput.text.toString())
         outState.putString(STATE_FCC_PORT, fccPortInput.text.toString())
         outState.putString(STATE_FCC_JPL_PORT, fccJplPortInput.text.toString())
-        outState.putString(STATE_FCC_ACCESS_CODE, fccAccessCodeInput.text.toString())
+        // LR-012: Do NOT persist FCC access code in the Bundle. Bundles are serialized
+        // to the Binder transaction buffer and can survive process death in plaintext.
+        // Consistent with AF-001 which avoids saving the provisioning token.
         outState.putString(STATE_WS_PORT, wsPortInput.text.toString())
         if (statusText.visibility == View.VISIBLE) {
             outState.putString(STATE_STATUS_TEXT, statusText.text.toString())
@@ -334,6 +346,8 @@ class SettingsActivity : AppCompatActivity() {
                 // AT-008: Read field data while still on IO dispatcher
                 val fieldData = collectFieldData()
                 withContext(Dispatchers.Main) {
+                    // LR-003: Guard against UI updates on a finishing/destroyed Activity
+                    if (isFinishing || isDestroyed) return@withContext
                     statusText.text = "Settings saved. FCC reconnecting..."
                     statusText.setTextColor(COLOR_GREEN)
                     statusText.visibility = View.VISIBLE
@@ -343,6 +357,7 @@ class SettingsActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Failed to save overrides", e)
                 withContext(Dispatchers.Main) {
+                    if (isFinishing || isDestroyed) return@withContext
                     statusText.text = "Error: ${e.message}"
                     statusText.setTextColor(COLOR_RED)
                     statusText.visibility = View.VISIBLE
@@ -366,6 +381,8 @@ class SettingsActivity : AppCompatActivity() {
                     // AT-008: Read field data while still on IO dispatcher
                     val fieldData = collectFieldData()
                     withContext(Dispatchers.Main) {
+                        // LR-002: Guard against UI updates on a finishing/destroyed Activity
+                        if (isFinishing || isDestroyed) return@withContext
                         applyFieldData(fieldData)
                         statusText.text = "Overrides cleared. Using cloud defaults."
                         statusText.setTextColor(COLOR_GREEN)
@@ -389,15 +406,43 @@ class SettingsActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(padding, padding, padding, padding)
+            setBackgroundColor(Color.WHITE)
         }
+
+        // Puma Energy logo
+        root.addView(ImageView(this).apply {
+            setImageResource(R.drawable.puma_energy_logo)
+            adjustViewBounds = true
+            layoutParams = LinearLayout.LayoutParams(
+                dp(140),
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                gravity = Gravity.CENTER
+                topMargin = dp(32)
+                bottomMargin = halfPad
+            }
+        })
 
         // Title
         root.addView(TextView(this).apply {
             text = "FCC Connection Settings"
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
+            setTextColor(COLOR_TEXT)
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, padding)
+            setPadding(0, 0, 0, halfPad)
+        })
+
+        // Red accent divider
+        root.addView(View(this).apply {
+            setBackgroundColor(PUMA_RED)
+            layoutParams = LinearLayout.LayoutParams(
+                dp(60),
+                dp(3),
+            ).apply {
+                gravity = Gravity.CENTER
+                bottomMargin = padding
+            }
         })
 
         // ── Editable section ────────────────────────────────────────────
@@ -490,24 +535,52 @@ class SettingsActivity : AppCompatActivity() {
 
         root.addView(Button(this).apply {
             text = "Save & Reconnect"
+            textSize = 16f
             setOnClickListener { saveAndReconnect() }
+            background = GradientDrawable().apply {
+                setColor(PUMA_GREEN)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            setTextColor(Color.WHITE)
+            isAllCaps = true
+            setPadding(dp(32), halfPad, dp(32), halfPad)
         })
 
         root.addView(View(this).apply { minimumHeight = dp(8) })
 
         root.addView(Button(this).apply {
             text = "Reset to Cloud Defaults"
+            textSize = 16f
             setOnClickListener { resetToCloudDefaults() }
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(dp(2), PUMA_RED)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            setTextColor(PUMA_RED)
+            isAllCaps = true
+            setPadding(dp(32), halfPad, dp(32), halfPad)
         })
 
         root.addView(View(this).apply { minimumHeight = dp(8) })
 
         root.addView(Button(this).apply {
             text = "Back"
+            textSize = 16f
             setOnClickListener { finish() }
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(dp(2), PUMA_GREEN)
+                cornerRadius = 8 * resources.displayMetrics.density
+            }
+            setTextColor(PUMA_GREEN)
+            isAllCaps = true
+            setPadding(dp(32), halfPad, dp(32), halfPad)
         })
 
-        val scrollView = ScrollView(this)
+        val scrollView = ScrollView(this).apply {
+            setBackgroundColor(Color.WHITE)
+        }
         scrollView.addView(root)
         return scrollView
     }
@@ -520,7 +593,7 @@ class SettingsActivity : AppCompatActivity() {
             textSize = 15f
             setTypeface(null, Typeface.BOLD)
             setPadding(0, dp(12), 0, dp(4))
-            setTextColor(COLOR_TEXT)
+            setTextColor(PUMA_GREEN)
         }
     }
 
@@ -605,11 +678,13 @@ class SettingsActivity : AppCompatActivity() {
         private const val STATE_STATUS_TEXT = "state_status_text"
         private const val STATE_STATUS_COLOR = "state_status_color"
 
+        private const val PUMA_GREEN = 0xFF007A33.toInt()
+        private const val PUMA_RED = 0xFFE30613.toInt()
         private const val COLOR_GREEN = 0xFF2E7D32.toInt()
         private const val COLOR_RED = 0xFFC62828.toInt()
         private const val COLOR_GRAY = 0xFF9E9E9E.toInt()
-        private const val COLOR_TEXT = 0xFF212121.toInt()
-        private const val COLOR_LABEL = 0xFF616161.toInt()
+        private const val COLOR_TEXT = 0xFF1A1A1A.toInt()
+        private const val COLOR_LABEL = 0xFF4A4A4A.toInt()
         private const val COLOR_OVERRIDE = 0xFFFF6F00.toInt()
 
         private val CLOUD_API_ROUTES = listOf(

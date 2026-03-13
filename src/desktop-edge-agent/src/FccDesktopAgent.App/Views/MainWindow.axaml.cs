@@ -3,24 +3,23 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Styling;
-using Avalonia.Threading;
 using FccDesktopAgent.App.Services;
+using FccDesktopAgent.App.ViewModels;
 using FccDesktopAgent.App.Views.Pages;
-using FccDesktopAgent.Core.Buffer;
-using FccDesktopAgent.Core.Connectivity;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace FccDesktopAgent.App.Views;
 
+/// <summary>
+/// Main dashboard window. Status bar state and navigation commands are owned
+/// by <see cref="MainWindowViewModel"/> (T-DSK-001). Services are injected via
+/// constructor (T-DSK-002) instead of the static AgentAppContext service locator.
+/// </summary>
 public sealed partial class MainWindow : Window, IDisposable
 {
     private bool _forceClose;
     private bool _firstCloseNotified;
-    private string _currentNav = "Dashboard";
-    private readonly IConnectivityMonitor? _connectivity;
     private readonly IServiceProvider? _services;
-    private readonly Timer _statusTimer;
-    private readonly CancellationTokenSource _disposeCts = new();
+    private readonly MainWindowViewModel _viewModel;
 
     // Lazy-created pages — kept alive for the window's lifetime
     private DashboardPage? _dashboardPage;
@@ -30,22 +29,23 @@ public sealed partial class MainWindow : Window, IDisposable
     private LogsPage? _logsPage;
     private SettingsPanel? _settingsPanel;
 
-    public MainWindow()
+    public MainWindow(IServiceProvider? services)
     {
         InitializeComponent();
 
-        _services = AgentAppContext.ServiceProvider;
-        _connectivity = _services?.GetService<IConnectivityMonitor>();
+        _services = services;
+        _viewModel = new MainWindowViewModel(services);
+        DataContext = _viewModel;
 
-        // Subscribe to connectivity for status bar
-        if (_connectivity is not null)
+        // React to navigation changes from ViewModel
+        _viewModel.PropertyChanged += (_, e) =>
         {
-            _connectivity.StateChanged += OnConnectivityChanged;
-            UpdateStatusBarConnectivity(_connectivity.Current);
-        }
-
-        // Poll buffer stats for status bar every 5s
-        _statusTimer = new Timer(_ => _ = RefreshStatusBarAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+            if (e.PropertyName == nameof(MainWindowViewModel.CurrentNavTarget))
+            {
+                NavigateTo(_viewModel.CurrentNavTarget);
+                UpdateNavHighlight(_viewModel.CurrentNavTarget);
+            }
+        };
 
         // Default to Dashboard
         NavigateTo("Dashboard");
@@ -96,19 +96,8 @@ public sealed partial class MainWindow : Window, IDisposable
 
     // ── Navigation ──────────────────────────────────────────────────────────
 
-    private void OnNavClicked(object? sender, RoutedEventArgs e)
-    {
-        if (sender is Button btn && btn.Tag is string target)
-        {
-            NavigateTo(target);
-            UpdateNavHighlight(target);
-        }
-    }
-
     private void NavigateTo(string target)
     {
-        _currentNav = target;
-
         PageContent.Content = target switch
         {
             "Dashboard" => _dashboardPage ??= new DashboardPage(),
@@ -116,7 +105,7 @@ public sealed partial class MainWindow : Window, IDisposable
             "PreAuth" => _preAuthPage ??= new PreAuthPage(),
             "Configuration" => _configurationPage ??= new ConfigurationPage(),
             "Logs" => _logsPage ??= new LogsPage(),
-            "Settings" => _settingsPanel ??= new SettingsPanel(),
+            "Settings" => _settingsPanel ??= new SettingsPanel(_services),
             _ => _dashboardPage ??= new DashboardPage()
         };
     }
@@ -151,69 +140,6 @@ public sealed partial class MainWindow : Window, IDisposable
             current == ThemeVariant.Dark ? ThemeVariant.Light : ThemeVariant.Dark;
     }
 
-    // ── Status Bar ──────────────────────────────────────────────────────────
-
-    private void OnConnectivityChanged(object? sender, ConnectivitySnapshot snapshot)
-    {
-        Dispatcher.UIThread.Post(() => UpdateStatusBarConnectivity(snapshot));
-    }
-
-    private void UpdateStatusBarConnectivity(ConnectivitySnapshot snapshot)
-    {
-        var (text, color) = snapshot.State switch
-        {
-            ConnectivityState.FullyOnline => ("Online", "#22C55E"),
-            ConnectivityState.InternetDown => ("Internet Down", "#EAB308"),
-            ConnectivityState.FccUnreachable => ("FCC Unreachable", "#EAB308"),
-            ConnectivityState.FullyOffline => ("Offline", "#EF4444"),
-            _ => ("Unknown", "#888888")
-        };
-
-        StatusConnectivity.Text = text;
-        StatusDot.Foreground = new SolidColorBrush(Color.Parse(color));
-    }
-
-    private DateTimeOffset? _lastSyncTime;
-
-    private async Task RefreshStatusBarAsync()
-    {
-        // L-03: Guard against timer callbacks arriving after Dispose
-        if (_services is null || _disposeCts.IsCancellationRequested) return;
-
-        try
-        {
-            using var scope = _services.CreateScope();
-            var buffer = scope.ServiceProvider.GetService<TransactionBufferManager>();
-            if (buffer is null) return;
-
-            var stats = await buffer.GetBufferStatsAsync();
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                StatusBuffer.Text = $"{stats.Pending:N0} pending";
-
-                if (_connectivity?.Current.IsInternetUp == true)
-                {
-                    _lastSyncTime = DateTimeOffset.UtcNow;
-                    StatusLastSync.Text = "Last sync: Just now";
-                }
-                else if (_lastSyncTime.HasValue)
-                {
-                    var elapsed = DateTimeOffset.UtcNow - _lastSyncTime.Value;
-                    var ago = elapsed.TotalMinutes < 1 ? "Just now"
-                        : elapsed.TotalMinutes < 60 ? $"{(int)elapsed.TotalMinutes}m ago"
-                        : elapsed.TotalHours < 24 ? $"{(int)elapsed.TotalHours}h ago"
-                        : $"{(int)elapsed.TotalDays}d ago";
-                    StatusLastSync.Text = $"Last sync: {ago}";
-                }
-            });
-        }
-        catch
-        {
-            // Non-fatal
-        }
-    }
-
     // ── Window State Persistence ────────────────────────────────────────────
 
     private void RestoreWindowState()
@@ -228,8 +154,8 @@ public sealed partial class MainWindow : Window, IDisposable
             Height = state.Height;
         }
 
-        // Only restore position if it's on-screen (basic check)
-        if (state.X >= 0 && state.Y >= 0)
+        // F-DSK-005: Validate saved position against all connected screens.
+        if (state.X >= 0 && state.Y >= 0 && IsPositionOnAnyScreen((int)state.X, (int)state.Y))
         {
             Position = new PixelPoint((int)state.X, (int)state.Y);
             WindowStartupLocation = WindowStartupLocation.Manual;
@@ -239,6 +165,20 @@ public sealed partial class MainWindow : Window, IDisposable
         {
             WindowState = Avalonia.Controls.WindowState.Maximized;
         }
+    }
+
+    private bool IsPositionOnAnyScreen(int x, int y)
+    {
+        var screens = Screens;
+        if (screens is null) return true; // can't verify — allow restore
+        foreach (var screen in screens.All)
+        {
+            var bounds = screen.WorkingArea;
+            if (x >= bounds.X && x < bounds.X + bounds.Width &&
+                y >= bounds.Y && y < bounds.Y + bounds.Height)
+                return true;
+        }
+        return false;
     }
 
     private void SaveWindowState()
@@ -257,13 +197,7 @@ public sealed partial class MainWindow : Window, IDisposable
 
     public void Dispose()
     {
-        // L-03: Signal cancellation before disposing the timer so in-flight
-        // callbacks see the flag and bail out before touching disposed resources.
-        _disposeCts.Cancel();
-        if (_connectivity is not null)
-            _connectivity.StateChanged -= OnConnectivityChanged;
-        _statusTimer.Dispose();
-        _disposeCts.Dispose();
+        _viewModel.Dispose();
         (_dashboardPage as IDisposable)?.Dispose();
         (_transactionsPage as IDisposable)?.Dispose();
         (_configurationPage as IDisposable)?.Dispose();

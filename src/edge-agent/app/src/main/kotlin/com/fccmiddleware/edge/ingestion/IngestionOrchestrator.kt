@@ -3,14 +3,11 @@ package com.fccmiddleware.edge.ingestion
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import com.fccmiddleware.edge.adapter.common.CanonicalTransaction
-import com.fccmiddleware.edge.adapter.common.FccVendor
 import com.fccmiddleware.edge.adapter.common.FetchCursor
 import com.fccmiddleware.edge.adapter.common.FiscalizationContext
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
-import com.fccmiddleware.edge.adapter.common.IngestionSource
 import com.fccmiddleware.edge.adapter.common.IFiscalizationService
 import com.fccmiddleware.edge.adapter.common.IngestionMode
-import com.fccmiddleware.edge.adapter.common.TransactionStatus
 import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
@@ -20,6 +17,7 @@ import android.os.SystemClock
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Summary of a completed poll cycle — returned by [pollNow] for the manual pull API.
@@ -344,6 +342,8 @@ class IngestionOrchestrator(
                 "Poll complete: mode=${fccConfig.ingestionMode} manual=$isManual " +
                     "fetchCycles=$fetchCycles new=$newCount skipped=$skippedCount",
             )
+        } catch (e: CancellationException) {
+            throw e  // AT-024: Preserve structured concurrency — do not swallow cancellation
         } catch (e: Exception) {
             AppLogger.e(TAG, "FCC poll failed after $fetchCycles cycle(s)", e)
         }
@@ -387,6 +387,7 @@ class IngestionOrchestrator(
     internal suspend fun retryPendingFiscalization() {
         val fiscService = fiscalizationService ?: return
         val txDao = transactionDao ?: return
+        val bm = bufferManager ?: return
 
         // Calculate the backoff threshold — only retry records whose last attempt
         // is older than the minimum backoff (30s). The per-record backoff is checked
@@ -427,34 +428,9 @@ class IngestionOrchestrator(
                     customerIdType = tx.fiscalCustomerIdType,
                     paymentType = tx.paymentType,
                 )
-                val result = fiscService.submitForFiscalization(
-                    // Reconstruct a minimal CanonicalTransaction from buffered fields
-                    CanonicalTransaction(
-                        id = tx.id,
-                        fccTransactionId = tx.fccTransactionId,
-                        siteCode = tx.siteCode,
-                        pumpNumber = tx.pumpNumber,
-                        nozzleNumber = tx.nozzleNumber,
-                        productCode = tx.productCode,
-                        volumeMicrolitres = tx.volumeMicrolitres,
-                        amountMinorUnits = tx.amountMinorUnits,
-                        unitPriceMinorPerLitre = tx.unitPriceMinorPerLitre,
-                        currencyCode = tx.currencyCode,
-                        startedAt = tx.startedAt,
-                        completedAt = tx.completedAt,
-                        fccVendor = FccVendor.valueOf(tx.fccVendor),
-                        legalEntityId = "",  // Not stored in buffer; populated upstream on cloud upload
-                        status = TransactionStatus.valueOf(tx.status),
-                        ingestionSource = IngestionSource.valueOf(tx.ingestionSource),
-                        ingestedAt = tx.createdAt,
-                        updatedAt = tx.updatedAt,
-                        schemaVersion = tx.schemaVersion,
-                        isDuplicate = false,
-                        correlationId = tx.correlationId,
-                        rawPayloadJson = tx.rawPayloadJson,
-                    ),
-                    context,
-                )
+                // AT-023: Use shared reverse mapper instead of inline reconstruction
+                val canonical = with(bm) { tx.toCanonical() }
+                val result = fiscService.submitForFiscalization(canonical, context)
 
                 if (result.success && !result.receiptCode.isNullOrEmpty()) {
                     txDao.markFiscalSuccess(tx.id, result.receiptCode, now)

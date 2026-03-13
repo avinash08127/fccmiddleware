@@ -2,10 +2,11 @@ package com.fccmiddleware.edge.websocket
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
-import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
+import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -25,12 +26,12 @@ import java.time.Instant
 /**
  * Handles all WebSocket `mode` commands from Odoo POS.
  *
- * Each handler reads from / writes to [TransactionBufferDao] and calls
+ * Each handler reads from / writes to [TransactionBufferManager] and calls
  * the FCC adapter as needed. Response format matches the legacy
  * DOMSRealImplementation FleckWebSocketAdapter protocol exactly.
  */
 class OdooWsMessageHandler(
-    private val transactionDao: TransactionBufferDao,
+    private val bufferManager: TransactionBufferManager,
     private val wsJson: Json,
     private val broadcastToAll: suspend (String, Any?) -> Unit,
     private val getFccAdapter: () -> IFccAdapter?,
@@ -54,7 +55,7 @@ class OdooWsMessageHandler(
         val emp = data["emp"]?.jsonPrimitive?.content?.takeIf { it.isNotEmpty() }
         val createdDate = data["CreatedDate"]?.jsonPrimitive?.content
 
-        val transactions = transactionDao.getUnsyncedForWs(
+        val transactions = bufferManager.getUnsyncedForWs(
             pumpNumber = pumpId,
             nozzleNumber = nozzleId,
             attendant = emp,
@@ -73,7 +74,7 @@ class OdooWsMessageHandler(
      * Returns all transactions from the buffer.
      */
     suspend fun handleAll(session: WebSocketSession) {
-        val transactions = transactionDao.getAllForWs()
+        val transactions = bufferManager.getAllForWs()
         val dtos = transactions.map { it.toWsDto() }
         val response = buildJsonObject("all_transactions", wsJson.encodeToJsonElement(dtos))
         sendJson(session, response)
@@ -92,7 +93,7 @@ class OdooWsMessageHandler(
         val now = Instant.now().toString()
 
         // AF-045: Validate transaction exists before mutating
-        val existing = transactionDao.getByFccTransactionId(transactionId)
+        val existing = bufferManager.getByFccTransactionId(transactionId)
         if (existing == null) {
             val error = kotlinx.serialization.json.buildJsonObject {
                 put("type", JsonPrimitive("error"))
@@ -107,7 +108,7 @@ class OdooWsMessageHandler(
         val paymentId = update["payment_id"]?.jsonPrimitive?.content
 
         // Update Odoo fields
-        transactionDao.updateOdooFields(
+        bufferManager.updateOdooFields(
             transactionId = transactionId,
             orderUuid = orderUuid,
             odooOrderId = orderId,
@@ -118,7 +119,7 @@ class OdooWsMessageHandler(
         // Handle add_to_cart if present
         val addToCart = update["add_to_cart"]?.jsonPrimitive?.booleanOrNull
         if (addToCart != null) {
-            transactionDao.updateAddToCart(transactionId, addToCart, paymentId, now)
+            bufferManager.updateAddToCart(transactionId, addToCart, paymentId, now)
         }
 
         // Check if this is an add_to_cart-only update — if so, skip broadcast
@@ -127,7 +128,7 @@ class OdooWsMessageHandler(
         if (isOnlyAddToCart) return
 
         // Broadcast updated transaction to all clients
-        val updatedTx = transactionDao.getByFccTransactionId(transactionId)
+        val updatedTx = bufferManager.getByFccTransactionId(transactionId)
         if (updatedTx != null) {
             val dto = updatedTx.toWsDto()
             broadcastToAll("transaction_update", wsJson.encodeToJsonElement(dto))
@@ -148,7 +149,7 @@ class OdooWsMessageHandler(
         val now = Instant.now().toString()
 
         // AF-045: Validate transaction exists before mutating
-        val existing = transactionDao.getByFccTransactionId(transactionId)
+        val existing = bufferManager.getByFccTransactionId(transactionId)
         if (existing == null) {
             val error = kotlinx.serialization.json.buildJsonObject {
                 put("type", JsonPrimitive("error"))
@@ -168,12 +169,12 @@ class OdooWsMessageHandler(
         var changed = false
 
         if (addToCart != null) {
-            transactionDao.updateAddToCart(transactionId, addToCart, paymentId, now)
+            bufferManager.updateAddToCart(transactionId, addToCart, paymentId, now)
             changed = true
         }
 
         if (!orderUuid.isNullOrEmpty()) {
-            transactionDao.updateOdooFields(
+            bufferManager.updateOdooFields(
                 transactionId = transactionId,
                 orderUuid = orderUuid,
                 odooOrderId = orderId,
@@ -185,7 +186,7 @@ class OdooWsMessageHandler(
 
         // Single broadcast after all mutations are applied
         if (changed) {
-            val updatedTx = transactionDao.getByFccTransactionId(transactionId)
+            val updatedTx = bufferManager.getByFccTransactionId(transactionId)
             if (updatedTx != null) {
                 val dto = updatedTx.toWsDto()
                 broadcastToAll("transaction_update", wsJson.encodeToJsonElement(dto))
@@ -269,7 +270,7 @@ class OdooWsMessageHandler(
                 put("type", JsonPrimitive("fp_unblock"))
                 put("status", JsonPrimitive("error"))
                 put("fp_id", JsonPrimitive(fpId))
-                put("message", JsonPrimitive(e.message ?: "Unknown error"))
+                put("message", JsonPrimitive("Failed to unblock pump $fpId"))
             }
             sendJson(session, error)
         }
@@ -321,11 +322,11 @@ class OdooWsMessageHandler(
         val transactionId = data["transaction_id"]?.jsonPrimitive?.content ?: return
         val now = Instant.now().toString()
 
-        transactionDao.markDiscarded(transactionId, now)
+        bufferManager.markDiscarded(transactionId, now)
 
         // AF-047: Broadcast to ALL clients so multi-terminal setups see the discard immediately,
         // consistent with handleManagerUpdate and handleAttendantUpdate.
-        val updatedTx = transactionDao.getByFccTransactionId(transactionId)
+        val updatedTx = bufferManager.getByFccTransactionId(transactionId)
         if (updatedTx != null) {
             val dto = updatedTx.toWsDto()
             broadcastToAll("transaction_update", wsJson.encodeToJsonElement(dto))
@@ -380,9 +381,7 @@ class OdooWsMessageHandler(
         }
     }
 
-    /** Encode a serializable value to a JsonElement for embedding in response objects. */
-    private inline fun <reified T> Json.encodeToJsonElement(value: T): JsonElement {
-        val jsonString = encodeToString(value)
-        return parseToJsonElement(jsonString)
-    }
+    // AP-026: Removed custom encodeToJsonElement that double-serialized (DTO → String → JsonElement).
+    // Now uses the built-in kotlinx.serialization.json.encodeToJsonElement which serializes
+    // directly to a JsonElement tree without the intermediate string round-trip.
 }

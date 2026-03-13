@@ -78,6 +78,40 @@ class RadixAdapterTests {
         </FDC_RESP>
     """.trimIndent()
 
+    private fun authResponseXml(ackCode: Int, ackMsg: String, sharedSecret: String = "TestSecret"): String {
+        val ackContent = """
+            <FDCACK>
+                <DATE>2026-03-13</DATE>
+                <TIME>10:00:00</TIME>
+                <ACKCODE>$ackCode</ACKCODE>
+                <ACKMSG>$ackMsg</ACKMSG>
+            </FDCACK>
+        """.trimIndent()
+        val signature = RadixSignatureHelper.computeAuthSignature(ackContent, sharedSecret)
+        return """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <FDCMS>
+                $ackContent
+                <FDCSIGNATURE>$signature</FDCSIGNATURE>
+            </FDCMS>
+        """.trimIndent()
+    }
+
+    private fun createPreAuthCommand() = PreAuthCommand(
+        siteCode = "SITE-A",
+        pumpNumber = 1,
+        amountMinorUnits = 5_000L,
+        unitPrice = 100L,
+        currencyCode = "TZS",
+        odooOrderId = "ORD-001",
+    )
+
+    private fun createCancelCommand() = CancelPreAuthCommand(
+        siteCode = "SITE-A",
+        pumpNumber = 1,
+        fccCorrelationId = "RADIX-TOKEN-1",
+    )
+
     // -----------------------------------------------------------------------
     // Heartbeat — successful (RESP_CODE=201 → true)
     // -----------------------------------------------------------------------
@@ -223,5 +257,46 @@ class RadixAdapterTests {
     fun `getPumpStatus always returns empty list`() = runTest {
         val adapter = RadixAdapter(createConfig(), HttpClient(MockEngine { respond("") }))
         assertTrue(adapter.getPumpStatus().isEmpty())
+    }
+
+    @Test
+    fun `sendPreAuth returns error when auth response signature is invalid`() = runTest {
+        val tamperedXml = authResponseXml(0, "AUTHORIZED").replace("AUTHORIZED", "FORGED")
+        val mockEngine = MockEngine {
+            respond(
+                content = tamperedXml,
+                status = HttpStatusCode.OK,
+                headers = headersOf("Content-Type" to listOf("Application/xml")),
+            )
+        }
+        val adapter = RadixAdapter(
+            createConfig().copy(fccPumpAddressMap = """{"1":{"pumpAddr":0,"fp":0}}"""),
+            HttpClient(mockEngine),
+        )
+
+        val result = adapter.sendPreAuth(createPreAuthCommand())
+
+        assertEquals(PreAuthResultStatus.ERROR, result.status)
+        assertEquals("Auth response signature mismatch", result.message)
+    }
+
+    @Test
+    fun `cancelPreAuth returns false when auth response signature is invalid`() = runTest {
+        val tamperedXml = authResponseXml(0, "CANCELLED").replace("CANCELLED", "FORGED")
+        val mockEngine = MockEngine {
+            respond(
+                content = tamperedXml,
+                status = HttpStatusCode.OK,
+                headers = headersOf("Content-Type" to listOf("Application/xml")),
+            )
+        }
+        val adapter = RadixAdapter(
+            createConfig().copy(fccPumpAddressMap = """{"1":{"pumpAddr":0,"fp":0}}"""),
+            HttpClient(mockEngine),
+        )
+
+        val result = adapter.cancelPreAuth(createCancelCommand())
+
+        assertFalse(result)
     }
 }

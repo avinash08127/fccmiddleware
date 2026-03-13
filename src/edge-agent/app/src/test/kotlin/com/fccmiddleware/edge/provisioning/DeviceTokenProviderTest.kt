@@ -40,6 +40,7 @@ class DeviceTokenProviderTest {
     @Before
     fun setUp() {
         every { encryptedPrefs.isDecommissioned } returns false
+        every { encryptedPrefs.storeTokenBlobs(any(), any()) } returns true
         provider = KeystoreDeviceTokenProvider(keystoreManager, encryptedPrefs, cloudApiClient)
     }
 
@@ -135,8 +136,7 @@ class DeviceTokenProviderTest {
 
         verify { keystoreManager.storeSecret(KeystoreManager.ALIAS_DEVICE_JWT, "new-jwt") }
         verify { keystoreManager.storeSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, "new-refresh") }
-        verify { encryptedPrefs.storeDeviceTokenBlob(any()) }
-        verify { encryptedPrefs.storeRefreshTokenBlob(any()) }
+        verify { encryptedPrefs.storeTokenBlobs(any(), any()) }
     }
 
     @Test
@@ -245,8 +245,21 @@ class DeviceTokenProviderTest {
         val result = provider.storeTokens("jwt-value", "refresh-value")
 
         assert(result) { "storeTokens should return true on success" }
-        verify { encryptedPrefs.storeDeviceTokenBlob(any()) }
-        verify { encryptedPrefs.storeRefreshTokenBlob(any()) }
+        verify { encryptedPrefs.storeTokenBlobs(any(), any()) }
+    }
+
+    @Test
+    fun `storeTokens -- returns false when atomic token persistence fails`() {
+        every { keystoreManager.storeSecret(KeystoreManager.ALIAS_DEVICE_JWT, "jwt-value") } returns
+            byteArrayOf(10, 20, 30)
+        every { keystoreManager.storeSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, "refresh-value") } returns
+            byteArrayOf(40, 50, 60)
+        every { encryptedPrefs.storeTokenBlobs(any(), any()) } returns false
+
+        val result = provider.storeTokens("jwt-value", "refresh-value")
+
+        assertFalse(result)
+        verify { encryptedPrefs.storeTokenBlobs(any(), any()) }
     }
 
     @Test
@@ -256,7 +269,7 @@ class DeviceTokenProviderTest {
         val result = provider.storeTokens("jwt-value", "refresh-value")
 
         assert(!result) { "storeTokens should return false when device token encryption fails" }
-        verify(exactly = 0) { encryptedPrefs.storeDeviceTokenBlob(any()) }
+        verify(exactly = 0) { encryptedPrefs.storeTokenBlobs(any(), any()) }
     }
 
     @Test
@@ -268,7 +281,6 @@ class DeviceTokenProviderTest {
         val result = provider.storeTokens("jwt-value", "refresh-value")
 
         assert(!result) { "storeTokens should return false when refresh token encryption fails" }
-        verify { encryptedPrefs.storeDeviceTokenBlob(any()) }
-        verify(exactly = 0) { encryptedPrefs.storeRefreshTokenBlob(any()) }
+        verify(exactly = 0) { encryptedPrefs.storeTokenBlobs(any(), any()) }
     }
 }

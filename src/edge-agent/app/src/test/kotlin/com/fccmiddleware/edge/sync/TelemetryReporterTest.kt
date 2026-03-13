@@ -187,8 +187,8 @@ class TelemetryReporterTest {
         assertEquals(15, payload.fccHealth.heartbeatAgeSeconds)
         assertNotNull(payload.fccHealth.lastHeartbeatAtUtc)
         assertEquals("DOMS", payload.fccHealth.fccVendor)
-        assertEquals("192.168.1.100", payload.fccHealth.fccHost)
-        assertEquals(8080, payload.fccHealth.fccPort)
+        assertEquals(TelemetryReporter.REDACTED_FCC_HOST, payload.fccHealth.fccHost)
+        assertEquals(TelemetryReporter.REDACTED_FCC_PORT, payload.fccHealth.fccPort)
     }
 
     @Test
@@ -260,7 +260,7 @@ class TelemetryReporterTest {
     @Test
     fun `buildPayload increments sequence number from SyncState`() = runTest {
         val payload = reporter.buildPayload()!!
-        assertEquals(43L, payload.sequenceNumber) // 42 + 1
+        assertEquals(43, payload.sequenceNumber) // 42 + 1
 
         coVerify { syncStateDao.incrementAndGetTelemetrySequence(any()) }
     }
@@ -270,7 +270,7 @@ class TelemetryReporterTest {
         coEvery { syncStateDao.get() } returns null
         coEvery { syncStateDao.incrementAndGetTelemetrySequence(any()) } returns 1L
         val payload = reporter.buildPayload()!!
-        assertEquals(1L, payload.sequenceNumber)
+        assertEquals(1, payload.sequenceNumber)
     }
 
     // -------------------------------------------------------------------------

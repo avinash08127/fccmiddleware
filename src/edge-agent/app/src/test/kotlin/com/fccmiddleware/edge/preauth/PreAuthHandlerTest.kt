@@ -13,6 +13,8 @@ import com.fccmiddleware.edge.buffer.entity.AuditLog
 import com.fccmiddleware.edge.buffer.entity.Nozzle
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.security.KeystoreBackedStringCipher
+import com.fccmiddleware.edge.security.KeystoreManager
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -62,6 +64,7 @@ class PreAuthHandlerTest {
     private lateinit var connectivityManager: ConnectivityManager
     private lateinit var auditLogDao: AuditLogDao
     private lateinit var fccAdapter: IFccAdapter
+    private lateinit var keystoreManager: KeystoreManager
     private val connectivityState = MutableStateFlow(ConnectivityState.FULLY_ONLINE)
     private val handlerScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
@@ -78,9 +81,16 @@ class PreAuthHandlerTest {
         connectivityManager = mockk()
         auditLogDao = mockk()
         fccAdapter = mockk()
+        keystoreManager = mockk()
 
         every { connectivityManager.state } returns connectivityState
         coEvery { auditLogDao.insert(any()) } returns 1L
+        every { keystoreManager.storeSecret(any(), any()) } answers {
+            secondArg<String>().toByteArray(Charsets.UTF_8)
+        }
+        every { keystoreManager.retrieveSecret(any(), any()) } answers {
+            String(secondArg<ByteArray>(), Charsets.UTF_8)
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -115,6 +125,41 @@ class PreAuthHandlerTest {
 
         assertEquals(PreAuthResultStatus.AUTHORIZED, result.status)
         assertEquals(1_375L, insertSlot.captured.unitPrice)
+    }
+
+    @Test
+    fun `handle encrypts customerTaxId before persisting the Room record`() = runTest {
+        val handler = buildHandler(adapter = fccAdapter)
+        val insertSlot = slot<PreAuthRecord>()
+        coEvery { preAuthDao.getByOdooOrderId("order-1", "SITE-A") } returns null
+        coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
+        coEvery { preAuthDao.insert(capture(insertSlot)) } returns 1L
+        coEvery { preAuthDao.updateStatus(any(), any(), any(), any(), any(), any(), any()) } returns Unit
+        coEvery { fccAdapter.sendPreAuth(any()) } returns PreAuthResult(
+            status = PreAuthResultStatus.AUTHORIZED,
+            authorizationCode = "AUTH-TAX-ID",
+        )
+
+        val result = handler.handle(baseCommand().copy(customerTaxId = "TIN-123456789"))
+
+        assertEquals(PreAuthResultStatus.AUTHORIZED, result.status)
+        assertTrue(insertSlot.captured.customerTaxId!!.startsWith(KeystoreBackedStringCipher.ENCRYPTED_PREFIX_V1))
+        assertFalse(insertSlot.captured.customerTaxId!!.contains("TIN-123456789"))
+    }
+
+    @Test
+    fun `handle fails closed when customerTaxId encryption fails`() = runTest {
+        every { keystoreManager.storeSecret(any(), any()) } returns null
+        val handler = buildHandler(adapter = fccAdapter)
+        coEvery { preAuthDao.getByOdooOrderId("order-1", "SITE-A") } returns null
+        coEvery { nozzleDao.resolveForPreAuth("SITE-A", 1, 1) } returns stubNozzle()
+
+        val result = handler.handle(baseCommand().copy(customerTaxId = "TIN-123456789"))
+
+        assertEquals(PreAuthResultStatus.ERROR, result.status)
+        assertEquals("LOCAL_PII_ENCRYPTION_FAILED", result.message)
+        coVerify(exactly = 0) { preAuthDao.insert(any()) }
+        coVerify(exactly = 0) { fccAdapter.sendPreAuth(any()) }
     }
 
     // -------------------------------------------------------------------------
@@ -685,6 +730,7 @@ class PreAuthHandlerTest {
         connectivityManager = connectivityManager,
         auditLogDao = auditLogDao,
         scope = handlerScope,
+        keystoreManager = keystoreManager,
         fccAdapter = adapter,
         config = testConfig,
     )

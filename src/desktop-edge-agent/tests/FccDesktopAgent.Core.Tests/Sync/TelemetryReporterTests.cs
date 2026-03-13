@@ -98,13 +98,16 @@ public sealed class TelemetryReporterTests : IDisposable
             .GetRequiredService<IServiceScopeFactory>();
 
         var registrationManager = Substitute.For<IRegistrationManager>();
+        var authHandler = new AuthenticatedCloudRequestHandler(
+            _tokenProvider, registrationManager,
+            NullLogger<AuthenticatedCloudRequestHandler>.Instance);
 
         return new TelemetryReporter(
             scopeFactory,
             _httpFactory,
             Options.Create(_config),
             _connectivity,
-            _tokenProvider,
+            authHandler,
             registrationManager,
             _errorTracker,
             NullLogger<TelemetryReporter>.Instance);

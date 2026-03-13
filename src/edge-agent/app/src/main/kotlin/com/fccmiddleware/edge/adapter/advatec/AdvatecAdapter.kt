@@ -24,6 +24,8 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -455,8 +457,7 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter, java.io.
      * stores correlation entry for receipt matching.
      */
     override suspend fun sendPreAuth(command: PreAuthCommand): PreAuthResult {
-        val host = config.advatecDeviceAddress ?: "127.0.0.1"
-        val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
+        val deviceEndpoint = resolveDeviceEndpoint()
 
         // Dose = requested amount / unit price → litres
         val doseLitres = if (command.unitPrice > 0) {
@@ -482,12 +483,12 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter, java.io.
             ),
         )
 
-        val url = "http://$host:$port/api/v2/incoming"
+        val url = deviceEndpoint.resolve("/api/v2/incoming")
         val jsonBody = json.encodeToString(request)
 
         AppLogger.i(
             TAG,
-            "Submitting Customer data to $url (Pump=${command.pumpNumber}, " +
+            "Submitting Customer data to ${deviceEndpoint.scheme}://${deviceEndpoint.host}:${deviceEndpoint.port}/api/v2/incoming (Pump=${command.pumpNumber}, " +
                 "Dose=$doseLitres L, CustIdType=$custIdType)",
         )
 
@@ -583,22 +584,31 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter, java.io.
 
     override suspend fun heartbeat(): Boolean {
         purgeStalePreAuths()
-        val host = config.advatecDeviceAddress ?: "127.0.0.1"
-        val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
+        val deviceEndpoint = try {
+            resolveDeviceEndpoint()
+        } catch (e: IllegalArgumentException) {
+            AppLogger.w(TAG, e.message ?: "Advatec endpoint configuration is invalid")
+            return false
+        }
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), HEARTBEAT_TIMEOUT_MS)
+                socket.connect(InetSocketAddress(deviceEndpoint.host, deviceEndpoint.port), HEARTBEAT_TIMEOUT_MS)
                 true
             }
         } catch (e: Exception) {
-            AppLogger.d(TAG, "Heartbeat failed for Advatec at $host:$port — ${e.message}")
+            AppLogger.d(
+                TAG,
+                "Heartbeat failed for Advatec at ${deviceEndpoint.host}:${deviceEndpoint.port} — ${e.message}",
+            )
             false
         }
     }
 
     // ── Private: HTTP submission ─────────────────────────────────────────────
 
-    private fun submitCustomerData(url: String, jsonBody: String): SubmitResult {
+    // AT-019: Wrap blocking HttpURLConnection I/O in Dispatchers.IO to prevent
+    // Dispatchers.Default thread pool starvation during connect/read timeouts.
+    private suspend fun submitCustomerData(url: String, jsonBody: String): SubmitResult = withContext(Dispatchers.IO) {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = SUBMIT_TIMEOUT_MS
@@ -607,7 +617,7 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter, java.io.
             setRequestProperty("Content-Type", "application/json; charset=UTF-8")
         }
 
-        return try {
+        try {
             connection.outputStream.use { os ->
                 OutputStreamWriter(os, Charsets.UTF_8).use { writer ->
                     writer.write(jsonBody)
@@ -643,6 +653,12 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter, java.io.
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun resolveDeviceEndpoint(): FccTransportSecurity.HttpEndpoint {
+        val address = config.advatecDeviceAddress ?: "127.0.0.1"
+        val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
+        return FccTransportSecurity.resolveEndpoint(address, TAG, port)
     }
 
     // ── Private: pre-auth ↔ receipt correlation (ADV-4.4) ───────────────────
@@ -734,13 +750,8 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter, java.io.
         }
     }
 
-    private fun getCurrencyFactor(currencyCode: String): BigDecimal {
-        return when (currencyCode.uppercase()) {
-            "KWD", "BHD", "OMR" -> BigDecimal("1000")
-            "JPY", "KRW", "TZS", "UGX", "RWF" -> BigDecimal.ONE
-            else -> BigDecimal("100")
-        }
-    }
+    private fun getCurrencyFactor(currencyCode: String): BigDecimal =
+        CurrencyUtils.getFactorBigDecimal(currencyCode)
 }
 
 /**

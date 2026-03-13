@@ -86,6 +86,8 @@ internal sealed class OdooWsMessageHandler
     }
 
     // ── manager_update ──────────────────────────────────────────────────────
+    // T-DSK-014: Delegates DB mutation to ITransactionUpdateService so business
+    // logic is testable and reusable outside the WebSocket transport layer.
 
     public async Task HandleManagerUpdateAsync(
         System.Net.WebSockets.WebSocket ws,
@@ -95,22 +97,12 @@ internal sealed class OdooWsMessageHandler
         var txId = root.TryGetProperty("transaction_id", out var t) ? t.GetString() : null;
         if (txId is null || !root.TryGetProperty("update", out var update)) return;
 
+        var fields = ParseUpdateFields(update);
+
         using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
-
-        var tx = await db.Transactions
-            .FirstOrDefaultAsync(x => x.FccTransactionId == txId, ct);
+        var svc = scope.ServiceProvider.GetRequiredService<ITransactionUpdateService>();
+        var tx = await svc.ApplyManagerUpdateAsync(txId, fields, ct);
         if (tx is null) return;
-
-        if (update.TryGetProperty("order_uuid", out var ou)) tx.OrderUuid = ou.GetString();
-        if (update.TryGetProperty("order_id", out var oi)) tx.OdooOrderId = oi.ToString();
-        if (update.TryGetProperty("payment_id", out var pi)) tx.PaymentId = pi.GetString();
-        if (update.TryGetProperty("add_to_cart", out var ac) &&
-            (ac.ValueKind is JsonValueKind.True or JsonValueKind.False))
-            tx.AddToCart = ac.GetBoolean();
-
-        tx.UpdatedAt = DateTimeOffset.UtcNow;
-        await db.SaveChangesAsync(ct);
 
         // Skip broadcast for add_to_cart-only updates (legacy fix)
         var isOnlyAddToCart = update.EnumerateObject().Count() == 1 &&
@@ -130,42 +122,13 @@ internal sealed class OdooWsMessageHandler
         var txId = root.TryGetProperty("transaction_id", out var t) ? t.GetString() : null;
         if (txId is null || !root.TryGetProperty("update", out var update)) return;
 
+        var fields = ParseUpdateFields(update);
+
         using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
+        var svc = scope.ServiceProvider.GetRequiredService<ITransactionUpdateService>();
+        var (tx, shouldBroadcast) = await svc.ApplyAttendantUpdateAsync(txId, fields, ct);
 
-        var tx = await db.Transactions
-            .FirstOrDefaultAsync(x => x.FccTransactionId == txId, ct);
-        if (tx is null) return;
-
-        bool shouldBroadcast = false;
-
-        if (update.TryGetProperty("add_to_cart", out var ac) &&
-            (ac.ValueKind is JsonValueKind.True or JsonValueKind.False))
-        {
-            tx.AddToCart = ac.GetBoolean();
-            if (update.TryGetProperty("payment_id", out var pi))
-                tx.PaymentId = pi.GetString();
-            shouldBroadcast = true;
-        }
-
-        if (update.TryGetProperty("order_uuid", out var ou))
-        {
-            var orderUuid = ou.GetString();
-            if (!string.IsNullOrEmpty(orderUuid))
-            {
-                tx.OrderUuid = orderUuid;
-                if (update.TryGetProperty("order_id", out var oi))
-                    tx.OdooOrderId = oi.ToString();
-                if (update.TryGetProperty("payment_id", out var pi2))
-                    tx.PaymentId = pi2.GetString();
-                shouldBroadcast = true;
-            }
-        }
-
-        tx.UpdatedAt = DateTimeOffset.UtcNow;
-        await db.SaveChangesAsync(ct);
-
-        if (shouldBroadcast)
+        if (tx is not null && shouldBroadcast)
             await _broadcastToAll("transaction_update", tx.ToWsDto(), ct);
     }
 
@@ -245,16 +208,8 @@ internal sealed class OdooWsMessageHandler
         if (txId is null) return;
 
         using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
-
-        var tx = await db.Transactions
-            .FirstOrDefaultAsync(x => x.FccTransactionId == txId, ct);
-        if (tx is not null)
-        {
-            tx.IsDiscard = true;
-            tx.UpdatedAt = DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(ct);
-        }
+        var svc = scope.ServiceProvider.GetRequiredService<ITransactionUpdateService>();
+        await svc.DiscardTransactionAsync(txId, ct);
 
         await SendAsync(ws, new
         {
@@ -264,6 +219,17 @@ internal sealed class OdooWsMessageHandler
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static TransactionUpdateFields ParseUpdateFields(JsonElement update) => new()
+    {
+        OrderUuid = update.TryGetProperty("order_uuid", out var ou) ? ou.GetString() : null,
+        OdooOrderId = update.TryGetProperty("order_id", out var oi) ? oi.ToString() : null,
+        PaymentId = update.TryGetProperty("payment_id", out var pi) ? pi.GetString() : null,
+        AddToCart = update.TryGetProperty("add_to_cart", out var ac)
+            && (ac.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                ? ac.GetBoolean()
+                : null,
+    };
 
     private async Task SendAsync(
         System.Net.WebSockets.WebSocket ws,

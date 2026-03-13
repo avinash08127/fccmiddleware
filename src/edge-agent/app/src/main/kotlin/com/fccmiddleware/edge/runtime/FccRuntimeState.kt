@@ -2,7 +2,6 @@ package com.fccmiddleware.edge.runtime
 
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
-import java.io.Closeable
 
 /**
  * Shared runtime holder for the currently resolved FCC adapter and config.
@@ -32,8 +31,10 @@ class FccRuntimeState {
 
     fun isWired(): Boolean = adapter != null && config != null
 
+    // AT-018: Use IFccAdapter.close() directly instead of fragile (as? Closeable) cast.
+    // All adapters now inherit close() from the interface (default no-op) or override it.
     private fun closeCurrentAdapter() {
-        (adapter as? Closeable)?.close()
+        adapter?.close()
         adapter = null
     }
 }

@@ -8,10 +8,15 @@ import com.fccmiddleware.edge.adapter.common.IngestionSource
 import com.fccmiddleware.edge.adapter.common.SyncStatus
 import com.fccmiddleware.edge.adapter.common.TransactionStatus
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
+import com.fccmiddleware.edge.security.KeystoreBackedStringCipher
+import com.fccmiddleware.edge.security.KeystoreManager
+import io.mockk.every
+import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -137,7 +142,6 @@ class TransactionBufferManagerTest {
     fun `getPendingBatch does not include UPLOADED or SYNCED_TO_ODOO records`() = runBlocking {
         // Insert one PENDING and one UPLOADED directly via DAO
         val dao = db.transactionDao()
-        val now = Instant.now().toString()
         dao.insert(buildEntity(fccTransactionId = "FCC-P", syncStatus = "PENDING"))
         dao.insert(buildEntity(fccTransactionId = "FCC-U", syncStatus = "UPLOADED"))
         dao.insert(buildEntity(fccTransactionId = "FCC-S", syncStatus = "SYNCED_TO_ODOO"))
@@ -146,6 +150,40 @@ class TransactionBufferManagerTest {
 
         assertEquals(1, batch.size)
         assertEquals("FCC-P", batch[0].fccTransactionId)
+    }
+
+    @Test
+    fun `bufferTransaction encrypts raw payload and getPendingBatch decrypts it`() = runBlocking {
+        val keystoreManager = mockRawPayloadKeystore()
+        val secureManager = TransactionBufferManager(db.transactionDao(), keystoreManager = keystoreManager)
+        val rawPayload = """{"vendor":"RADIX","ackCode":0}"""
+        val tx = buildCanonical(fccTransactionId = "FCC-RAW-001").copy(rawPayloadJson = rawPayload)
+
+        secureManager.bufferTransaction(tx)
+
+        val stored = db.transactionDao().getById(tx.id)!!
+        assertNotEquals(rawPayload, stored.rawPayloadJson)
+        assertTrue(stored.rawPayloadJson!!.startsWith(KeystoreBackedStringCipher.ENCRYPTED_PREFIX_V1))
+
+        val batch = secureManager.getPendingBatch(10)
+        assertEquals(rawPayload, batch.single { it.id == tx.id }.rawPayloadJson)
+    }
+
+    @Test
+    fun `migrateLegacyRawPayloads encrypts existing plaintext rows`() = runBlocking {
+        val keystoreManager = mockRawPayloadKeystore()
+        val secureManager = TransactionBufferManager(db.transactionDao(), keystoreManager = keystoreManager)
+        val rawPayload = """{"vendor":"DOMS","bufferIndex":7}"""
+        val row = buildEntity(fccTransactionId = "FCC-LEGACY-RAW", rawPayloadJson = rawPayload)
+        db.transactionDao().insert(row)
+
+        val migrated = secureManager.migrateLegacyRawPayloads()
+        val stored = db.transactionDao().getById(row.id)!!
+
+        assertEquals(1, migrated)
+        assertNotEquals(rawPayload, stored.rawPayloadJson)
+        assertTrue(stored.rawPayloadJson!!.startsWith(KeystoreBackedStringCipher.ENCRYPTED_PREFIX_V1))
+        assertEquals(rawPayload, secureManager.getPendingBatch(10).single { it.id == row.id }.rawPayloadJson)
     }
 
     // -------------------------------------------------------------------------
@@ -332,6 +370,7 @@ class TransactionBufferManagerTest {
         schemaVersion = 1,
         isDuplicate = false,
         correlationId = UUID.randomUUID().toString(),
+        rawPayloadJson = null,
     )
 
     private fun buildEntity(
@@ -342,6 +381,7 @@ class TransactionBufferManagerTest {
         pumpNumber: Int = 1,
         createdAt: String = Instant.now().toString(),
         completedAt: String = Instant.now().toString(),
+        rawPayloadJson: String? = null,
     ) = BufferedTransaction(
         id = id,
         fccTransactionId = fccTransactionId,
@@ -361,7 +401,7 @@ class TransactionBufferManagerTest {
         status = "PENDING",
         syncStatus = syncStatus,
         ingestionSource = "RELAY",
-        rawPayloadJson = null,
+        rawPayloadJson = rawPayloadJson,
         correlationId = UUID.randomUUID().toString(),
         uploadAttempts = 0,
         lastUploadAttemptAt = null,
@@ -370,4 +410,19 @@ class TransactionBufferManagerTest {
         createdAt = createdAt,
         updatedAt = createdAt,
     )
+
+    private fun mockRawPayloadKeystore(): KeystoreManager {
+        val keystoreManager = mockk<KeystoreManager>()
+        every {
+            keystoreManager.storeSecret(KeystoreManager.ALIAS_BUFFER_RAW_PAYLOAD, any())
+        } answers {
+            secondArg<String>().toByteArray(Charsets.UTF_8)
+        }
+        every {
+            keystoreManager.retrieveSecret(KeystoreManager.ALIAS_BUFFER_RAW_PAYLOAD, any())
+        } answers {
+            String(secondArg<ByteArray>(), Charsets.UTF_8)
+        }
+        return keystoreManager
+    }
 }

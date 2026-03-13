@@ -5,6 +5,7 @@ import com.fccmiddleware.edge.logging.AppLogger
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.SocketFactory
 
 /**
@@ -24,6 +25,8 @@ class BoundSocketFactory(
     companion object {
         private const val TAG = "BoundSocketFactory"
     }
+
+    private val warnedAboutDefaultRouting = AtomicBoolean(false)
 
     override fun createSocket(): Socket {
         val socket = Socket()
@@ -69,12 +72,18 @@ class BoundSocketFactory(
 
     private fun bindIfAvailable(socket: Socket) {
         val network = networkProvider()
-        if (network != null) {
-            try {
-                network.bindSocket(socket)
-            } catch (e: Exception) {
-                AppLogger.w(TAG, "Failed to bind socket to network $network: ${e.message}")
+        if (network == null) {
+            if (warnedAboutDefaultRouting.compareAndSet(false, true)) {
+                AppLogger.w(TAG, "No bound network available - socket using default OS routing")
             }
+            return
+        }
+
+        warnedAboutDefaultRouting.set(false)
+        try {
+            network.bindSocket(socket)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Failed to bind socket to network $network: ${e.message}")
         }
     }
 }

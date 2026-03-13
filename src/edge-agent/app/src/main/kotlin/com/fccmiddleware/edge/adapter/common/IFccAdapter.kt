@@ -114,4 +114,16 @@ interface IFccAdapter {
      * @return true if acknowledgment succeeded or was not needed.
      */
     suspend fun acknowledgeTransactions(transactionIds: List<String>): Boolean
+
+    /**
+     * Release all resources held by this adapter (connections, thread pools, coroutine scopes).
+     *
+     * Called by [FccRuntimeState] before replacing with a new adapter instance and
+     * during service shutdown. Implementations should stop push listeners, close HTTP
+     * clients, cancel private coroutine scopes, and release TCP connections.
+     *
+     * Default implementation is a no-op for adapters with no persistent resources.
+     * Must be idempotent — safe to call multiple times.
+     */
+    fun close() {}
 }

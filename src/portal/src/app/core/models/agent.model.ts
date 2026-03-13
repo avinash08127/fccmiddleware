@@ -28,7 +28,6 @@ export interface AgentRegistration {
   status: AgentRegistrationStatus;
   registeredAt: string;
   lastSeenAt: string | null;
-  environment?: string;
 }
 
 export interface DeviceRegistrationRequest {
@@ -132,6 +131,7 @@ export interface AgentHealthSummary {
   legalEntityId: string;
   agentVersion: string;
   status: AgentRegistrationStatus;
+  hasTelemetry: boolean;
   connectivityState: ConnectivityState | null;
   batteryPercent: number | null;
   isCharging: boolean | null;
@@ -161,10 +161,8 @@ export interface VersionCheckResponse {
   minimumVersion: string;
   updateUrl: string | null;
   agentVersion: string;
-  minSupportedVersion: string;
   latestVersion: string;
   updateRequired: boolean;
   updateAvailable: boolean;
   releaseNotes: string | null;
-  downloadUrl: string | null;
 }

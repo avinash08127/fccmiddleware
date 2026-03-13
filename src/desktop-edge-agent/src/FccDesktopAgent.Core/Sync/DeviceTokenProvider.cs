@@ -125,11 +125,9 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         try
         {
             await MarkRefreshPendingAsync(ct);
-            response = await http.PostAsJsonAsync(url, new
-            {
-                refreshToken,
-                deviceToken = bundle?.DeviceToken ?? await _store.GetSecretAsync(TokenKey, ct)
-            }, ct);
+            // S-DSK-016: Send only the refresh token — the device token is not needed
+            // for server-side rotation and exposing both maximizes risk if TLS is compromised.
+            response = await http.PostAsJsonAsync(url, new { refreshToken }, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -213,6 +211,18 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         if (staged is null)
             return null;
 
+        // T-DSK-011: If active already matches staged, the process crashed after writing
+        // active but before cleaning up the staging key. Just clean up — no promotion needed.
+        var active = await TryReadTokenBundleAsync(TokenBundleKey, ct);
+        if (active is not null
+            && active.DeviceToken == staged.DeviceToken
+            && active.RefreshToken == staged.RefreshToken)
+        {
+            _logger.LogDebug("Staged token bundle matches active — cleaning up stale staging key");
+            await ClearRefreshMarkersBestEffortAsync(ct);
+            return active;
+        }
+
         try
         {
             await _store.SetSecretAsync(TokenBundleKey, SerializeTokenBundle(staged), ct);
@@ -248,8 +258,13 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         await _store.SetSecretAsync(TokenBundleStagingKey, serialized, ct);
         await _store.SetSecretAsync(TokenBundleKey, serialized, ct);
 
+        // T-DSK-011: Delete staging key immediately after active write succeeds.
+        // This prevents unnecessary recovery on next startup if the process
+        // crashes between writing active and the full cleanup phase.
+        await DeleteSecretBestEffortAsync(TokenBundleStagingKey, ct);
+
         await DeleteLegacyKeysBestEffortAsync(ct);
-        await ClearRefreshMarkersBestEffortAsync(ct);
+        await DeleteSecretBestEffortAsync(RefreshPendingKey, ct);
     }
 
     private async Task TryMigrateLegacyTokenBundleAsync(StoredTokenBundle bundle, CancellationToken ct)
@@ -289,11 +304,12 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         }
     }
 
+    // T-DSK-011: Unconditionally clean both markers. The old short-circuit
+    // (skip staging delete if pending delete fails) could leave a stale staging
+    // key that triggers unnecessary recovery on next startup.
     private async Task ClearRefreshMarkersBestEffortAsync(CancellationToken ct)
     {
-        if (!await TryDeleteSecretBestEffortAsync(RefreshPendingKey, ct))
-            return;
-
+        await DeleteSecretBestEffortAsync(RefreshPendingKey, ct);
         await DeleteSecretBestEffortAsync(TokenBundleStagingKey, ct);
     }
 

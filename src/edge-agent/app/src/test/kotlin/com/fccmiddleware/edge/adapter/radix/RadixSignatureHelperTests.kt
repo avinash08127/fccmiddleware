@@ -1,10 +1,20 @@
 package com.fccmiddleware.edge.adapter.radix
 
+import android.util.Log
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
+import io.mockk.verify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * Unit tests for [RadixSignatureHelper].
@@ -21,10 +31,29 @@ import org.junit.Test
  *
  * Test framework: JUnit 5 (AndroidJUnit4 runner compatible)
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [31])
 class RadixSignatureHelperTests {
 
     companion object {
         private const val SECRET = "MySecretPassword"
+    }
+
+    @Before
+    fun setUp() {
+        mockkStatic(Log::class)
+        every { Log.d(any(), any()) } returns 0
+        every { Log.i(any(), any()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.e(any(), any<String>()) } returns 0
+        every { Log.e(any(), any<String>(), any()) } returns 0
+        RadixSignatureHelper.resetWarningForTests()
+    }
+
+    @After
+    fun tearDown() {
+        RadixSignatureHelper.resetWarningForTests()
+        unmockkStatic(Log::class)
     }
 
     // -----------------------------------------------------------------------
@@ -201,5 +230,23 @@ class RadixSignatureHelperTests {
         val sig1 = RadixSignatureHelper.computeTransactionSignature(req, SECRET)
         val sig2 = RadixSignatureHelper.computeTransactionSignature(req, SECRET)
         assertEquals(sig1, sig2)
+    }
+
+    @Test
+    fun `runtime SHA-1 warning is logged only once`() {
+        val req = "<REQ><CMD_CODE>10</CMD_CODE></REQ>"
+        val authData = "<AUTH_DATA><PUMP>1</PUMP></AUTH_DATA>"
+        val table = """<TABLE VERSION="1.0"><ANS RESP_CODE="201" /></TABLE>"""
+
+        RadixSignatureHelper.computeTransactionSignature(req, SECRET)
+        RadixSignatureHelper.computeAuthSignature(authData, SECRET)
+        RadixSignatureHelper.validateSignature(table, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", SECRET)
+
+        verify(exactly = 1) {
+            Log.w(
+                "RadixSignatureHelper",
+                match { it.contains("SHA-1") && it.contains("vendor limitation") },
+            )
+        }
     }
 }

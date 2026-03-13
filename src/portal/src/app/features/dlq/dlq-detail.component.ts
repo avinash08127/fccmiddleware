@@ -255,7 +255,7 @@ function statusSeverity(status: DeadLetterStatus): PrimeSeverity {
           item()!.status !== DeadLetterStatus.DISCARDED &&
           item()!.status !== DeadLetterStatus.RESOLVED
         ) {
-          <ng-container *appRoleVisible="['SystemAdmin', 'OperationsManager']">
+          <ng-container *appRoleVisible="['FccAdmin', 'FccUser']">
             <p-card header="Actions" styleClass="detail-card">
               <div class="actions-row">
                 <div class="action-block">

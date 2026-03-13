@@ -1,9 +1,6 @@
 package com.fccmiddleware.edge.buffer
-
-import android.content.Context
 import androidx.room.migration.Migration
 import androidx.room.Database
-import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -40,8 +37,11 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
  *   - LocalPump           — Odoo ↔ FCC pump number mapping
  *   - LocalNozzle         — Odoo ↔ FCC nozzle mapping (site data layer)
  *
+ * The database is encrypted at rest with SQLCipher. A random SQLCipher passphrase
+ * is stored as Android-Keystore-encrypted bytes in app-private no-backup storage.
+ *
  * WAL mode is set via setJournalMode(JournalMode.WRITE_AHEAD_LOGGING) in the builder,
- * which persists across connections for the database file.
+ * which persists across connections for the database file once the encrypted store opens.
  *
  * Schema is exported to app/schemas/ for migration testing and CI validation.
  */
@@ -58,7 +58,7 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
         LocalPump::class,
         LocalNozzle::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 @TypeConverters(PreAuthStatusConverters::class)
@@ -81,6 +81,8 @@ abstract class BufferDatabase : RoomDatabase() {
     }
 
     companion object {
+        const val DATABASE_NAME = "fcc_buffer.db"
+
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
@@ -217,19 +219,18 @@ abstract class BufferDatabase : RoomDatabase() {
             }
         }
 
-        fun create(context: Context): BufferDatabase {
-            return Room.databaseBuilder(
-                context.applicationContext,
-                BufferDatabase::class.java,
-                "fcc_buffer.db"
-            )
-                .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
-                // Fallback for any database version gap not covered by explicit migrations.
-                // Transactions are re-uploaded from the buffer, so losing local rows is
-                // recoverable. Prevents a crash-loop on devices with an unexpected schema.
-                .fallbackToDestructiveMigration()
-                .build()
+        /**
+         * Migration 8 → 9: NET-008 — Add vehicleNumber and customerBusinessName to pre_auth_records.
+         *
+         * These fields are forwarded to cloud for reconciliation matching.
+         * Nullable so existing records are unaffected.
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE pre_auth_records ADD COLUMN vehicle_number TEXT")
+                db.execSQL("ALTER TABLE pre_auth_records ADD COLUMN customer_business_name TEXT")
+            }
         }
+
     }
 }

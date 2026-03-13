@@ -104,7 +104,7 @@ export class TransactionVolumeChartComponent implements OnChanges {
       datasets: [
         {
           label: 'FCC Push',
-          data: buckets.map((b) => b.bySource.FCC_PUSH),
+          data: buckets.map((b) => b.bySource.fccPush),
           borderColor: '#3B82F6',
           backgroundColor: 'rgba(59,130,246,0.1)',
           tension: 0.3,
@@ -113,7 +113,7 @@ export class TransactionVolumeChartComponent implements OnChanges {
         },
         {
           label: 'Edge Upload',
-          data: buckets.map((b) => b.bySource.EDGE_UPLOAD),
+          data: buckets.map((b) => b.bySource.edgeUpload),
           borderColor: '#10B981',
           backgroundColor: 'rgba(16,185,129,0.1)',
           tension: 0.3,
@@ -122,7 +122,7 @@ export class TransactionVolumeChartComponent implements OnChanges {
         },
         {
           label: 'Cloud Pull',
-          data: buckets.map((b) => b.bySource.CLOUD_PULL),
+          data: buckets.map((b) => b.bySource.cloudPull),
           borderColor: '#F59E0B',
           backgroundColor: 'rgba(245,158,11,0.1)',
           tension: 0.3,

@@ -1,25 +1,30 @@
-// ── Enum ──────────────────────────────────────────────────────────────────────
+export const KNOWN_AUDIT_EVENT_TYPES = [
+  'TransactionIngested',
+  'TransactionDeduplicated',
+  'TransactionSyncedToOdoo',
+  'PreAuthCreated',
+  'PreAuthAuthorized',
+  'PreAuthCompleted',
+  'PreAuthCancelled',
+  'PreAuthExpired',
+  'ReconciliationMatched',
+  'ReconciliationVarianceFlagged',
+  'ReconciliationApproved',
+  'AgentRegistered',
+  'AgentConfigUpdated',
+  'AgentHealthReported',
+  'ConnectivityChanged',
+  'BufferThresholdExceeded',
+  'MasterDataSynced',
+  'ConfigChanged',
+  'SITE_CONFIG_UPDATED',
+  'AdapterDefaultConfigUpdated',
+  'SiteAdapterOverrideSet',
+  'SiteAdapterOverrideCleared',
+  'SiteAdapterOverrideResetToDefault',
+] as const;
 
-export enum EventType {
-  TransactionIngested = 'TransactionIngested',
-  TransactionDeduplicated = 'TransactionDeduplicated',
-  TransactionSyncedToOdoo = 'TransactionSyncedToOdoo',
-  PreAuthCreated = 'PreAuthCreated',
-  PreAuthAuthorized = 'PreAuthAuthorized',
-  PreAuthCompleted = 'PreAuthCompleted',
-  PreAuthCancelled = 'PreAuthCancelled',
-  PreAuthExpired = 'PreAuthExpired',
-  ReconciliationMatched = 'ReconciliationMatched',
-  ReconciliationVarianceFlagged = 'ReconciliationVarianceFlagged',
-  ReconciliationApproved = 'ReconciliationApproved',
-  AgentRegistered = 'AgentRegistered',
-  AgentConfigUpdated = 'AgentConfigUpdated',
-  AgentHealthReported = 'AgentHealthReported',
-  ConnectivityChanged = 'ConnectivityChanged',
-  BufferThresholdExceeded = 'BufferThresholdExceeded',
-  MasterDataSynced = 'MasterDataSynced',
-  ConfigChanged = 'ConfigChanged',
-}
+export type EventType = string;
 
 // ── Core model ────────────────────────────────────────────────────────────────
 
@@ -50,6 +55,7 @@ export interface AuditEventQueryParams {
   /** Multi-select: send each value as a repeated `eventTypes` query param. */
   eventTypes?: EventType[];
   siteCode?: string;
+  adapterKey?: string;
   from?: string;
   to?: string;
 }

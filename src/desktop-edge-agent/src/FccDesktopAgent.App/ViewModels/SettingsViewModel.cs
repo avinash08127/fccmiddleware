@@ -95,11 +95,13 @@ public sealed class SettingsViewModel : ViewModelBase
 
     private void Save()
     {
+        // F-DSK-006: Validate port fields with TryParse and range check before saving.
+        if (!TryParsePort(FccPort, "FCC Port", out var fccPort)) return;
+        if (!TryParsePort(JplPort, "JPL Port", out var jplPort)) return;
+        if (!TryParsePort(WsPort, "WebSocket Port", out var wsPort)) return;
+
         try
         {
-            int? fccPort = string.IsNullOrWhiteSpace(FccPort) ? null : int.Parse(FccPort);
-            int? jplPort = string.IsNullOrWhiteSpace(JplPort) ? null : int.Parse(JplPort);
-            int? wsPort = string.IsNullOrWhiteSpace(WsPort) ? null : int.Parse(WsPort);
             string? fccHost = string.IsNullOrWhiteSpace(FccHost) ? null : FccHost.Trim();
 
             _overrideManager.SaveAll(fccHost, fccPort, jplPort, wsPort);
@@ -111,6 +113,28 @@ public sealed class SettingsViewModel : ViewModelBase
         {
             Feedback = $"Error: {ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// Validates a port string: blank is treated as null (no override), otherwise must be a number 1-65535.
+    /// </summary>
+    private bool TryParsePort(string? text, string fieldName, out int? result)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            result = null;
+            return true;
+        }
+
+        if (!int.TryParse(text, out var parsed) || parsed < 1 || parsed > 65535)
+        {
+            Feedback = $"{fieldName} must be a number between 1 and 65535.";
+            result = null;
+            return false;
+        }
+
+        result = parsed;
+        return true;
     }
 
     private void Reset()
@@ -140,14 +164,4 @@ public sealed class SettingsViewModel : ViewModelBase
         Feedback = string.Empty;
     }
 
-    // ── Minimal ICommand implementation ─────────────────────────────────────
-
-    private sealed class RelayCommand(Action execute) : ICommand
-    {
-#pragma warning disable CS0067 // Event is required by ICommand interface
-        public event EventHandler? CanExecuteChanged;
-#pragma warning restore CS0067
-        public bool CanExecute(object? parameter) => true;
-        public void Execute(object? parameter) => execute();
-    }
 }

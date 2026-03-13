@@ -1,31 +1,32 @@
-import { getAccountRoles, getPrimaryRoleLabel, hasAnyRequiredRole } from './auth-state';
+import {
+  getAccountRoles,
+  getPrimaryRoleLabel,
+  hasAnyRequiredRole,
+  currentUserRole,
+} from './auth-state';
 
 describe('auth-state', () => {
-  function createAccount(roles: unknown) {
-    return {
-      idTokenClaims: {
-        roles,
-      },
-    } as never;
-  }
-
-  it('should treat SystemAdministrator as equivalent to SystemAdmin', () => {
-    const account = createAccount(['SystemAdministrator']);
-
-    expect(getAccountRoles(account)).toEqual(['SystemAdministrator', 'SystemAdmin']);
-    expect(hasAnyRequiredRole(account, ['SystemAdmin'])).toBeTrue();
+  afterEach(() => {
+    currentUserRole.set(null);
   });
 
-  it('should split comma-delimited role claims', () => {
-    const account = createAccount('OperationsManager, SupportReadOnly');
-
-    expect(getAccountRoles(account)).toEqual(['OperationsManager', 'SupportReadOnly']);
-    expect(hasAnyRequiredRole(account, ['SupportReadOnly'])).toBeTrue();
+  it('should return role from signal for getAccountRoles', () => {
+    currentUserRole.set('FccAdmin');
+    expect(getAccountRoles(null)).toEqual(['FccAdmin']);
   });
 
-  it('should preserve the original primary role label for display', () => {
-    const account = createAccount(['SystemAdministrator', 'Auditor']);
+  it('should return empty array when no role is set', () => {
+    expect(getAccountRoles(null)).toEqual([]);
+  });
 
-    expect(getPrimaryRoleLabel(account)).toBe('SystemAdministrator');
+  it('should check required roles against signal', () => {
+    currentUserRole.set('FccUser');
+    expect(hasAnyRequiredRole(null, ['FccAdmin', 'FccUser'])).toBeTrue();
+    expect(hasAnyRequiredRole(null, ['FccAdmin'])).toBeFalse();
+  });
+
+  it('should return primary role label from signal', () => {
+    currentUserRole.set('FccViewer');
+    expect(getPrimaryRoleLabel(null)).toBe('FccViewer');
   });
 });

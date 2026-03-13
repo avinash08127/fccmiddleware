@@ -1,6 +1,8 @@
 package com.fccmiddleware.edge.adapter.radix
 
+import com.fccmiddleware.edge.logging.AppLogger
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Radix SHA-1 message signing utility.
@@ -44,6 +46,9 @@ import java.security.MessageDigest
  */
 object RadixSignatureHelper {
 
+    private const val TAG = "RadixSignatureHelper"
+    private val sha1WarningLogged = AtomicBoolean(false)
+
     /**
      * Computes the SHA-1 signature for a transaction management request (port P+1).
      *
@@ -57,6 +62,7 @@ object RadixSignatureHelper {
      * @return Lowercase hex SHA-1 hash (40 characters)
      */
     fun computeTransactionSignature(reqContent: String, sharedSecret: String): String {
+        logSha1ProtocolWarningOnce()
         val payload = reqContent + sharedSecret
         return sha1Hex(payload)
     }
@@ -74,6 +80,7 @@ object RadixSignatureHelper {
      * @return Lowercase hex SHA-1 hash (40 characters)
      */
     fun computeAuthSignature(authDataContent: String, sharedSecret: String): String {
+        logSha1ProtocolWarningOnce()
         val payload = authDataContent + sharedSecret
         return sha1Hex(payload)
     }
@@ -93,8 +100,22 @@ object RadixSignatureHelper {
      * @return `true` if the computed signature matches [expectedSignature], `false` otherwise
      */
     fun validateSignature(content: String, expectedSignature: String, sharedSecret: String): Boolean {
+        logSha1ProtocolWarningOnce()
         val computed = sha1Hex(content + sharedSecret)
         return computed.equals(expectedSignature, ignoreCase = true)
+    }
+
+    private fun logSha1ProtocolWarningOnce() {
+        if (sha1WarningLogged.compareAndSet(false, true)) {
+            AppLogger.w(
+                TAG,
+                "Radix protocol requires SHA-1 message signatures. This is a vendor limitation; keep the FCC LAN isolated and migrate to SHA-256 if Radix adds support.",
+            )
+        }
+    }
+
+    internal fun resetWarningForTests() {
+        sha1WarningLogged.set(false)
     }
 
     /**

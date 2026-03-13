@@ -8,3 +8,4 @@ export * from './dlq.service';
 export * from './settings.service';
 export * from './bootstrap-token.service';
 export * from './logging.service';
+export * from './adapter.service';

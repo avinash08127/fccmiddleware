@@ -60,19 +60,24 @@ public sealed class ManualPullTests : IDisposable
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private IngestionOrchestrator CreateOrchestrator() =>
-        new(
+    private IngestionOrchestrator CreateOrchestrator()
+    {
+        var monitor = Substitute.For<IOptionsMonitor<AgentConfiguration>>();
+        monitor.CurrentValue.Returns(new AgentConfiguration
+        {
+            FccBaseUrl = "http://192.168.1.100:8080",
+            FccApiKey = "test-key",
+            SiteId = "SITE-A",
+            FccVendor = FccVendor.Doms,
+            IngestionMode = IngestionMode.Relay,
+        });
+
+        return new IngestionOrchestrator(
             _adapterFactory,
             _serviceProvider.GetRequiredService<IServiceScopeFactory>(),
-            Options.Create(new AgentConfiguration
-            {
-                FccBaseUrl = "http://192.168.1.100:8080",
-                FccApiKey = "test-key",
-                SiteId = "SITE-A",
-                FccVendor = FccVendor.Doms,
-                IngestionMode = IngestionMode.Relay,
-            }),
+            monitor,
             NullLogger<IngestionOrchestrator>.Instance);
+    }
 
     private static RawPayloadEnvelope MakeRaw(string json = "{}") =>
         new("DOMS", "SITE-A", json, DateTimeOffset.UtcNow);

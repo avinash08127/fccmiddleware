@@ -49,3 +49,14 @@
 # ──────────────────────────────────────────────────────────────────────────────
 -keep class org.koin.** { *; }
 -dontwarn org.koin.**
+
+# ──────────────────────────────────────────────────────────────────────────────
+# android.util.Log
+# Strip verbose/debug/info logcat calls from release builds. WARN/ERROR remain
+# available for any non-AppLogger library code that still writes to logcat.
+# ──────────────────────────────────────────────────────────────────────────────
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}

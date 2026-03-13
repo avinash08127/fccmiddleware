@@ -71,12 +71,15 @@ public sealed class StatusPollWorkerTests : IDisposable
         });
 
         var registrationManager = Substitute.For<IRegistrationManager>();
+        var authHandler = new AuthenticatedCloudRequestHandler(
+            _tokenProvider, registrationManager,
+            NullLogger<AuthenticatedCloudRequestHandler>.Instance);
 
         return new StatusPollWorker(
             _serviceProvider.GetRequiredService<IServiceScopeFactory>(),
             factory,
             config,
-            _tokenProvider,
+            authHandler,
             registrationManager,
             NullLogger<StatusPollWorker>.Instance);
     }

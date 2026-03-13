@@ -6,6 +6,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import com.fccmiddleware.edge.logging.AppLogger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -42,7 +43,9 @@ class NetworkBinder(
         mobile ?: wifi
     }.stateIn(scope, SharingStarted.Eagerly, null)
 
-    private var started = false
+    // AT-050: AtomicBoolean prevents duplicate callback registration if start()
+    // is ever called concurrently (matches EdgeAgentForegroundService.serviceStarted pattern).
+    private val started = AtomicBoolean(false)
 
     companion object {
         private const val TAG = "NetworkBinder"
@@ -85,7 +88,7 @@ class NetworkBinder(
      * Safe to call multiple times — duplicate calls are ignored.
      */
     fun start() {
-        if (started) {
+        if (!started.compareAndSet(false, true)) {
             AppLogger.d(TAG, "Already started, ignoring duplicate start()")
             return
         }
@@ -101,7 +104,6 @@ class NetworkBinder(
 
         cm.registerNetworkCallback(wifiRequest, wifiCallback)
         cm.registerNetworkCallback(mobileRequest, mobileCallback)
-        started = true
 
         AppLogger.i(TAG, "NetworkBinder started — monitoring WiFi and mobile networks")
     }
@@ -111,7 +113,7 @@ class NetworkBinder(
      * Safe to call multiple times — duplicate calls are ignored.
      */
     fun stop() {
-        if (!started) {
+        if (!started.compareAndSet(true, false)) {
             AppLogger.d(TAG, "Not started, ignoring duplicate stop()")
             return
         }
@@ -130,7 +132,6 @@ class NetworkBinder(
 
         _wifiNetwork.value = null
         _mobileNetwork.value = null
-        started = false
 
         AppLogger.i(TAG, "NetworkBinder stopped")
     }

@@ -77,6 +77,7 @@ export interface ReconciliationRecord {
  */
 export interface ReconciliationException {
   id: string;
+  reconciliationId: string;
   preAuthId: string | null;
   transactionId: string | null;
   legalEntityId: string;
@@ -90,28 +91,31 @@ export interface ReconciliationException {
   amountVariance: number | null;
   /** Legacy compatibility field in basis points (1 bps = 0.01%). Prefer variancePercent for display. */
   varianceBps: number | null;
+  /** Authorized amount in minor currency units from pre-auth. */
+  authorizedAmountMinorUnits: number | null;
+  /** Actual dispensed amount in minor currency units. */
+  actualAmountMinorUnits: number | null;
+  /** Absolute variance in minor currency units. */
+  varianceMinorUnits: number | null;
   /** Variance as a percentage value (e.g. 2.5 means 2.5%). */
   variancePercent: number | null;
   /** Which matching step resolved this record (e.g. EXACT_CORRELATION_ID). */
   matchMethod: string | null;
   /** True when multiple candidates were found and a tie-break was applied. */
   ambiguityFlag: boolean;
-  reconciliationStatus: ReconciliationStatus;
+  /** Reconciliation status — JSON key from backend is "status". */
+  status: ReconciliationStatus;
   decision: ReconciliationDecision | null;
   decisionReason: string | null;
   decidedBy: string | null;
   decidedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** When matching was last attempted. */
+  lastMatchAttemptAt: string;
 }
 
 // ── Request / response ────────────────────────────────────────────────────────
-
-export interface ApproveRejectRequest {
-  decision: ReconciliationDecision;
-  /** Mandatory reason text required for both APPROVED and REJECTED decisions. */
-  reason: string;
-}
 
 /** Response from POST /reconciliation/:id/approve or /reject. */
 export interface ReconciliationReviewResponse {

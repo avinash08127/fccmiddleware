@@ -79,6 +79,20 @@ class CloudUploadWorker(
 
         /** Cloud API rejects batches larger than this. */
         private const val CLOUD_MAX_BATCH_SIZE = 500
+
+        /** NET-003: UUID format validation for identity fields sent to cloud. */
+        private val UUID_REGEX =
+            Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+        /**
+         * NET-009: Max estimated request payload size in bytes (2 MB).
+         * Proactively limits batch size before serialization to avoid OOM on
+         * constrained devices and timeouts on throttled mobile connections.
+         */
+        private const val MAX_ESTIMATED_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+        /** NET-009: Estimated base JSON size per transaction record (without rawPayloadJson). */
+        private const val ESTIMATED_BASE_RECORD_BYTES = 600
     }
 
     /**
@@ -128,14 +142,18 @@ class CloudUploadWorker(
         }
 
         val batchSize = effectiveBatchSize.coerceIn(1, CLOUD_MAX_BATCH_SIZE)
-        val batch = bufferManager.getPendingBatch(batchSize)
-        val batchWasFull = batch.size == batchSize
-        if (batch.isEmpty()) {
+        val queriedBatch = bufferManager.getPendingBatch(batchSize)
+        if (queriedBatch.isEmpty()) {
             // H-02 fix: reset backoff when buffer drains so new records upload immediately
             uploadCircuitBreaker.recordSuccess()
             AppLogger.d(TAG, "uploadPendingBatch() — no PENDING records, circuit breaker reset")
             return
         }
+
+        // NET-009: Proactively trim batch if estimated payload exceeds size limit.
+        // This prevents OOM on constrained devices and timeouts on throttled connections.
+        val batch = trimBatchByEstimatedSize(queriedBatch)
+        val batchWasFull = batch.size == batchSize
 
         AppLogger.i(TAG, "Starting upload batch: ${batch.size} records")
 
@@ -353,6 +371,14 @@ class CloudUploadWorker(
         val entries = logger.getRecentDiagnosticEntries(200)
         if (entries.isEmpty()) return
 
+        // NET-003: Validate UUID format before submission to avoid silent 400 from backend.
+        val deviceId = cfg.identity.deviceId
+        val legalEntityId = cfg.identity.legalEntityId
+        if (!UUID_REGEX.matches(deviceId) || !UUID_REGEX.matches(legalEntityId)) {
+            AppLogger.e(TAG, "reportDiagnosticLogs() — invalid UUID: deviceId=$deviceId, legalEntityId=$legalEntityId")
+            return
+        }
+
         val token = tokenProvider.getAccessToken() ?: return
 
         val request = DiagnosticLogUploadRequest(
@@ -367,8 +393,25 @@ class CloudUploadWorker(
             when (val result = cloudApiClient.submitDiagnosticLogs(request, token)) {
                 is CloudDiagnosticLogResult.Success ->
                     AppLogger.i(TAG, "Diagnostic logs uploaded: ${entries.size} entries")
-                is CloudDiagnosticLogResult.Unauthorized ->
-                    AppLogger.w(TAG, "Diagnostic log upload returned 401")
+                is CloudDiagnosticLogResult.Unauthorized -> {
+                    // NET-010: Attempt one token refresh and retry, consistent with
+                    // reportTelemetry(), uploadPendingBatch(), and all other workers.
+                    AppLogger.i(TAG, "Diagnostic log upload returned 401 — attempting token refresh")
+                    val refreshed = tokenProvider.refreshAccessToken()
+                    if (refreshed) {
+                        val freshToken = tokenProvider.getAccessToken()
+                        if (freshToken != null) {
+                            when (cloudApiClient.submitDiagnosticLogs(request, freshToken)) {
+                                is CloudDiagnosticLogResult.Success ->
+                                    AppLogger.i(TAG, "Diagnostic logs uploaded after token refresh: ${entries.size} entries")
+                                else ->
+                                    AppLogger.w(TAG, "Diagnostic log upload retry failed after token refresh")
+                            }
+                        }
+                    } else {
+                        AppLogger.w(TAG, "Diagnostic log upload token refresh failed")
+                    }
+                }
                 is CloudDiagnosticLogResult.Forbidden ->
                     AppLogger.w(TAG, "Diagnostic log upload forbidden: ${result.errorCode}")
                 is CloudDiagnosticLogResult.TransportError ->
@@ -522,20 +565,10 @@ class CloudUploadWorker(
         }
     }
 
-    /** Update [SyncState.lastStatusPollAt] after a successful status poll. Returns true on success. */
+    /** AT-035: Update [SyncState.lastStatusPollAt] atomically without read-modify-write. Returns true on success. */
     private suspend fun updateLastStatusPollAt(pollStartedAt: String): Boolean {
         return try {
-            val current = syncStateDao.get()
-            val updated = current?.copy(lastStatusPollAt = pollStartedAt, updatedAt = pollStartedAt)
-                ?: SyncState(
-                    lastFccCursor = null,
-                    lastUploadAt = null,
-                    lastStatusPollAt = pollStartedAt,
-                    lastConfigPullAt = null,
-                    lastConfigVersion = null,
-                    updatedAt = pollStartedAt,
-                )
-            syncStateDao.upsert(updated)
+            syncStateDao.updateStatusPollAt(pollStartedAt)
             true
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to update lastStatusPollAt in SyncState", e)
@@ -695,17 +728,15 @@ class CloudUploadWorker(
                         "state=${snap.state}); next retry after ${backoffMs}ms. " +
                         "Error: ${result.message}",
                 )
-                // Record the failure against every record in the batch so the diagnostics
-                // screen and telemetry can surface upload error details.
+                // AP-033: Record the failure against the entire batch in a single UPDATE
+                // instead of N individual UPDATEs. Reduces 50–250ms of sequential SQLite
+                // I/O to a single ~2–5ms batch operation.
                 val attemptAt = Instant.now().toString()
-                for (tx in batch) {
-                    bm.recordUploadFailure(
-                        id = tx.id,
-                        attempts = tx.uploadAttempts + 1,
-                        attemptAt = attemptAt,
-                        error = result.message,
-                    )
-                }
+                bm.recordBatchUploadFailure(
+                    ids = batch.map { it.id },
+                    attemptAt = attemptAt,
+                    error = result.message,
+                )
                 // H-11: Dead-letter records that have exhausted all upload retries after
                 // transport failures too, not just after cloud REJECTED responses.
                 bm.deadLetterExhausted()
@@ -866,50 +897,54 @@ class CloudUploadWorker(
         )
 
     /**
-     * AF-035: Update [SyncState.lastUploadAttemptAt] at the START of each upload attempt,
-     * before the HTTP call. This records when the agent last tried to upload, regardless
-     * of whether the attempt succeeded or failed.
+     * AF-035 / AT-035: Update [SyncState.lastUploadAttemptAt] atomically at the START
+     * of each upload attempt, without read-modify-write.
      */
     private suspend fun updateLastUploadAttemptAt() {
         val now = Instant.now().toString()
         try {
-            val current = syncStateDao.get()
-            val updated = current?.copy(lastUploadAttemptAt = now, updatedAt = now)
-                ?: SyncState(
-                    lastFccCursor = null,
-                    lastUploadAt = null,
-                    lastUploadAttemptAt = now,
-                    lastStatusPollAt = null,
-                    lastConfigPullAt = null,
-                    lastConfigVersion = null,
-                    updatedAt = now,
-                )
-            syncStateDao.upsert(updated)
+            syncStateDao.updateUploadAttemptAt(now)
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to update lastUploadAttemptAt in SyncState", e)
         }
     }
 
-    /** Update [SyncState.lastUploadAt] after a successful batch upload. Returns true on success. */
+    /** AT-035: Update [SyncState.lastUploadAt] atomically without read-modify-write. Returns true on success. */
     private suspend fun updateLastUploadAt(): Boolean {
         val now = Instant.now().toString()
         return try {
-            val current = syncStateDao.get()
-            val updated = current?.copy(lastUploadAt = now, updatedAt = now)
-                ?: SyncState(
-                    lastFccCursor = null,
-                    lastUploadAt = now,
-                    lastStatusPollAt = null,
-                    lastConfigPullAt = null,
-                    lastConfigVersion = null,
-                    updatedAt = now,
-                )
-            syncStateDao.upsert(updated)
+            syncStateDao.updateUploadAt(now)
             true
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to update lastUploadAt in SyncState", e)
             false
         }
+    }
+
+    /**
+     * NET-009: Trim the batch so the estimated serialized JSON payload stays under
+     * [MAX_ESTIMATED_PAYLOAD_BYTES]. Always returns at least one record (the first)
+     * so progress is never completely stalled.
+     */
+    private fun trimBatchByEstimatedSize(batch: List<BufferedTransaction>): List<BufferedTransaction> {
+        val includeRawPayload = configManager.config.value?.buffer?.persistRawPayloads ?: false
+        var cumulative = 0L
+        val trimmed = mutableListOf<BufferedTransaction>()
+        for (tx in batch) {
+            val recordSize = ESTIMATED_BASE_RECORD_BYTES +
+                (if (includeRawPayload) tx.rawPayloadJson?.length ?: 0 else 0)
+            if (trimmed.isNotEmpty() && cumulative + recordSize > MAX_ESTIMATED_PAYLOAD_BYTES) {
+                AppLogger.i(
+                    TAG,
+                    "NET-009: Proactively trimmed batch from ${batch.size} to ${trimmed.size} records " +
+                        "(estimated ${cumulative / 1024}KB, limit ${MAX_ESTIMATED_PAYLOAD_BYTES / 1024}KB)",
+                )
+                break
+            }
+            cumulative += recordSize
+            trimmed.add(tx)
+        }
+        return trimmed
     }
 
     // -------------------------------------------------------------------------

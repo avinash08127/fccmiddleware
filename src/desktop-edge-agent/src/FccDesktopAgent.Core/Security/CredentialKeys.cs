@@ -26,4 +26,16 @@ public static class CredentialKeys
 
     /// <summary>LAN API key used by Odoo POS / HHTs to authenticate against the local REST API.</summary>
     public const string LanApiKey = "lan:api_key";
+
+    /// <summary>WebSocket TLS certificate password (S-DSK-002).</summary>
+    public const string WsCertPassword = "ws:cert_password";
+
+    /// <summary>Petronite OAuth2 client secret (S-DSK-010).</summary>
+    public const string PetroniteClientSecret = "fcc:petronite_client_secret";
+
+    /// <summary>DOMS FcLogon access code credential (S-DSK-011).</summary>
+    public const string DomsFcAccessCode = "fcc:doms_access_code";
+
+    /// <summary>Radix SHA-1 signing shared secret (S-DSK-012).</summary>
+    public const string RadixSharedSecret = "fcc:radix_shared_secret";
 }

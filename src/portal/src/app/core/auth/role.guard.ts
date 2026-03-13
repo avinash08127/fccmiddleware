@@ -1,23 +1,22 @@
 import { inject } from '@angular/core';
 import { CanActivateFn, Router } from '@angular/router';
-import { MsalService } from '@azure/msal-angular';
-import { AppRole, getCurrentAccount, hasAnyRequiredRole } from './auth-state';
+import { AppRole, currentUserRole } from './auth-state';
 
 /**
- * Route guard that reads the `roles` claim from the Entra ID JWT.
- * Usage: canActivate: [roleGuard(['SystemAdmin', 'OperationsManager'])]
+ * Route guard that checks the user's locally-managed role
+ * (populated from the backend via PortalUserService).
+ * Usage: canActivate: [roleGuard(['FccAdmin', 'FccUser'])]
  */
 export function roleGuard(requiredRoles: AppRole[]): CanActivateFn {
   return () => {
-    const msal = inject(MsalService);
     const router = inject(Router);
+    const role = currentUserRole();
 
-    const account = getCurrentAccount(msal.instance);
-    if (!account) {
+    if (!role) {
       return router.parseUrl('/access-denied');
     }
 
-    if (!hasAnyRequiredRole(account, requiredRoles)) {
+    if (!requiredRoles.includes(role)) {
       return router.parseUrl('/access-denied');
     }
 

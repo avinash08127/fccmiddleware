@@ -41,12 +41,15 @@ public sealed class ConfigPollWorkerTests
         });
 
         var registrationManager = Substitute.For<IRegistrationManager>();
+        var authHandler = new AuthenticatedCloudRequestHandler(
+            _tokenProvider, registrationManager,
+            NullLogger<AuthenticatedCloudRequestHandler>.Instance);
 
         return new ConfigPollWorker(
             factory,
             config,
-            _tokenProvider,
             _configManager,
+            authHandler,
             registrationManager,
             NullLogger<ConfigPollWorker>.Instance);
     }

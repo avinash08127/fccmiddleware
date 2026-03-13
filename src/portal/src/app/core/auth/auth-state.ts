@@ -1,4 +1,4 @@
-import { inject, provideAppInitializer } from '@angular/core';
+import { inject, provideAppInitializer, signal, computed } from '@angular/core';
 import { MsalService } from '@azure/msal-angular';
 import {
   AccountInfo,
@@ -11,17 +11,31 @@ import {
 const registeredInstances = new WeakSet<IPublicClientApplication>();
 const initializationByInstance = new WeakMap<IPublicClientApplication, Promise<void>>();
 
-const APP_ROLES = [
-  'SystemAdmin',
-  /** @deprecated Use 'SystemAdmin'. Kept for backward-compatible JWT recognition. */
-  'SystemAdministrator',
-  'OperationsManager',
-  'SiteSupervisor',
-  'Auditor',
-  'SupportReadOnly',
-] as const;
+const APP_ROLES = ['FccAdmin', 'FccUser', 'FccViewer'] as const;
 
 export type AppRole = (typeof APP_ROLES)[number];
+
+/** Common role sets for route guards and directives */
+export const ALL_ROLES: AppRole[] = ['FccAdmin', 'FccUser', 'FccViewer'];
+export const WRITE_ROLES: AppRole[] = ['FccAdmin', 'FccUser'];
+export const ADMIN_ROLES: AppRole[] = ['FccAdmin'];
+
+/**
+ * Reactive store for the current user's role and legal entities,
+ * populated from the backend after MSAL login.
+ */
+export const currentUserRole = signal<AppRole | null>(null);
+export const currentUserLegalEntities = signal<Array<{ id: string; name: string; countryCode: string }>>([]);
+export const currentUserAllLegalEntities = signal<boolean>(false);
+export const currentUserDisplayName = signal<string>('');
+export const currentUserEmail = signal<string>('');
+export const isUserProvisioned = signal<boolean>(true);
+
+export const isAdmin = computed(() => currentUserRole() === 'FccAdmin');
+export const isWriter = computed(() => {
+  const role = currentUserRole();
+  return role === 'FccAdmin' || role === 'FccUser';
+});
 
 export function providePortalAuth() {
   return provideAppInitializer(() => initializePortalAuth(inject(MsalService).instance));
@@ -41,8 +55,12 @@ export function initializePortalAuth(instance: IPublicClientApplication): Promis
 
     registerActiveAccountSync(instance);
 
-    const result = await instance.handleRedirectPromise();
-    syncActiveAccount(instance, result?.account ?? undefined);
+    // Set active account from cache if available (returning user).
+    // Do NOT call handleRedirectPromise() here — that is handled by
+    // MsalService.handleRedirectObservable() in the App component.
+    // Calling it here would consume the redirect response before
+    // MsalGuard can observe it, causing a blank page.
+    syncActiveAccount(instance);
   })();
 
   initializationByInstance.set(instance, initialization);
@@ -53,55 +71,26 @@ export function getCurrentAccount(instance: IPublicClientApplication): AccountIn
   return instance.getActiveAccount() ?? instance.getAllAccounts()[0] ?? null;
 }
 
-export function getAccountRoles(account: AccountInfo | null | undefined): AppRole[] {
-  const roles = new Set<AppRole>();
-
-  for (const role of getRawRoles(account)) {
-    if (isAppRole(role)) {
-      roles.add(role);
-    }
-  }
-
-  if (roles.has('SystemAdmin') || roles.has('SystemAdministrator')) {
-    roles.add('SystemAdmin');
-    roles.add('SystemAdministrator');
-  }
-
-  return [...roles];
+/**
+ * Returns the user's role from the backend-populated signal.
+ * Falls back to empty array if not yet loaded.
+ */
+export function getAccountRoles(_account: AccountInfo | null | undefined): AppRole[] {
+  const role = currentUserRole();
+  return role ? [role] : [];
 }
 
-export function getPrimaryRoleLabel(account: AccountInfo | null | undefined): string {
-  const [primaryRole] = getRawRoles(account);
-  return primaryRole ?? getAccountRoles(account)[0] ?? '';
+export function getPrimaryRoleLabel(_account: AccountInfo | null | undefined): string {
+  return currentUserRole() ?? '';
 }
 
 export function hasAnyRequiredRole(
-  account: AccountInfo | null | undefined,
+  _account: AccountInfo | null | undefined,
   requiredRoles: readonly AppRole[],
 ): boolean {
-  const userRoles = new Set(getAccountRoles(account));
-  return requiredRoles.some((role) => userRoles.has(role));
-}
-
-function getRawRoles(account: AccountInfo | null | undefined): string[] {
-  const claims = account?.idTokenClaims as Record<string, unknown> | undefined;
-  const claimRoles = claims?.['roles'];
-
-  if (Array.isArray(claimRoles)) {
-    return claimRoles
-      .flatMap((role) => (typeof role === 'string' ? role.split(',') : []))
-      .map((role) => role.trim())
-      .filter((role) => role.length > 0);
-  }
-
-  if (typeof claimRoles === 'string') {
-    return claimRoles
-      .split(',')
-      .map((role) => role.trim())
-      .filter((role) => role.length > 0);
-  }
-
-  return [];
+  const role = currentUserRole();
+  if (!role) return false;
+  return requiredRoles.includes(role);
 }
 
 function isAppRole(role: string): role is AppRole {
@@ -125,6 +114,11 @@ function handleMsalEvent(instance: IPublicClientApplication, message: EventMessa
       break;
     case EventType.LOGOUT_SUCCESS:
       instance.setActiveAccount(null);
+      currentUserRole.set(null);
+      currentUserLegalEntities.set([]);
+      currentUserAllLegalEntities.set(false);
+      currentUserDisplayName.set('');
+      currentUserEmail.set('');
       break;
     default:
       break;

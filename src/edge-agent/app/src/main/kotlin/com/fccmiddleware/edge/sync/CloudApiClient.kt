@@ -4,6 +4,7 @@ import com.fccmiddleware.edge.config.CloudEnvironments
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.CancellationException
 import java.util.UUID
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
@@ -222,6 +223,15 @@ interface CloudApiClient {
     ): CloudDiagnosticLogResult
 
     /**
+     * AP-029: Lightweight connectivity probe — GET /health on the cloud host.
+     *
+     * Shares the existing Ktor/OkHttp connection pool with all other API calls,
+     * eliminating the separate OkHttpClient and its redundant TCP connection.
+     * Returns true on HTTP 2xx, false on any error or non-success status.
+     */
+    suspend fun healthCheck(): Boolean
+
+    /**
      * Update the cloud base URL at runtime.
      *
      * Called after device registration to replace the stub "not-yet-provisioned" URL
@@ -251,7 +261,11 @@ class HttpCloudApiClient(
     private val encryptedPrefsManager: EncryptedPrefsManager? = null,
     private val certificatePins: List<String> = emptyList(),
     private val socketFactory: javax.net.SocketFactory? = null,
+    private val registrationClientFactory: ((String, List<String>, javax.net.SocketFactory?) -> HttpClient)? = null,
 ) : CloudApiClient {
+
+    /** NET-007: Guards atomic update of cloudBaseUrl + httpClient in updateBaseUrl(). */
+    private val urlUpdateLock = Any()
 
     init {
         cloudBaseUrl = resolveBaseUrl(cloudBaseUrl)
@@ -272,6 +286,42 @@ class HttpCloudApiClient(
         return explicitUrl.trimEnd('/')
     }
 
+    override suspend fun healthCheck(): Boolean {
+        return try {
+            val response = httpClient.get("$cloudBaseUrl/health")
+            // NET-014: Explicitly consume the response body so the underlying
+            // OkHttp connection is returned to the pool and can be reused on
+            // subsequent probes (avoids a fresh TCP+TLS handshake every 30s).
+            response.bodyAsText()
+            response.status == HttpStatusCode.OK
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * NET-015: Try to parse the cloud error body for the backend's `retryable` hint
+     * and build an enhanced transport-error message.
+     */
+    private suspend fun buildTransportErrorMessage(
+        response: io.ktor.client.statement.HttpResponse,
+    ): String {
+        val statusMsg = "HTTP ${response.status.value}: ${response.status.description}"
+        return try {
+            val error = response.body<CloudErrorResponse>()
+            val retryHint = when (error.retryable) {
+                true -> " [retryable]"
+                false -> " [non-retryable]"
+                null -> ""
+            }
+            "$statusMsg (${error.errorCode}: ${error.message})$retryHint"
+        } catch (_: Exception) {
+            statusMsg
+        }
+    }
+
     override suspend fun checkVersion(
         agentVersion: String,
         bearerToken: String,
@@ -279,6 +329,9 @@ class HttpCloudApiClient(
         return try {
             val response = httpClient.get("$cloudBaseUrl/api/v1/agent/version-check") {
                 bearerAuth(bearerToken)
+                // NET-005: Send both appVersion (preferred by backend) and agentVersion
+                // for alignment with the cloud VersionCheckRequest contract.
+                parameter("appVersion", agentVersion)
                 parameter("agentVersion", agentVersion)
             }
             when (response.status) {
@@ -286,10 +339,12 @@ class HttpCloudApiClient(
                 HttpStatusCode.Unauthorized -> CloudVersionCheckResult.Unauthorized
                 else -> {
                     CloudVersionCheckResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
+                        buildTransportErrorMessage(response),
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudVersionCheckResult.TransportError(e.message ?: "Unknown network error")
         }
@@ -301,19 +356,24 @@ class HttpCloudApiClient(
      * causes SSL handshake failures because the pinner remains bound to the old hostname.
      */
     override fun updateBaseUrl(newBaseUrl: String) {
-        val resolved = resolveBaseUrl(newBaseUrl)
-        val oldHost = extractHostname(cloudBaseUrl)
-        val newHost = extractHostname(resolved)
+        // NET-007: Synchronized to ensure cloudBaseUrl and httpClient are updated atomically.
+        // Without this, a concurrent API call could read the new URL with the old client (stale pins)
+        // or vice versa.
+        synchronized(urlUpdateLock) {
+            val resolved = resolveBaseUrl(newBaseUrl)
+            val oldHost = extractHostname(cloudBaseUrl)
+            val newHost = extractHostname(resolved)
 
-        cloudBaseUrl = resolved
+            cloudBaseUrl = resolved
 
-        if (certificatePins.isNotEmpty() && oldHost != null && newHost != null && oldHost != newHost) {
-            AppLogger.i(TAG, "Hostname changed ($oldHost -> $newHost) — rebuilding HTTP client with new pins")
-            val oldClient = httpClient
-            httpClient = buildKtorClient(certificatePins, resolved, socketFactory)
-            oldClient.close()
-        } else {
-            AppLogger.i(TAG, "Updating cloud base URL (hostname unchanged or no pins)")
+            if (certificatePins.isNotEmpty() && oldHost != null && newHost != null && oldHost != newHost) {
+                AppLogger.i(TAG, "Hostname changed ($oldHost -> $newHost) — rebuilding HTTP client with new pins")
+                val oldClient = httpClient
+                httpClient = buildKtorClient(certificatePins, resolved, socketFactory)
+                oldClient.close()
+            } else {
+                AppLogger.i(TAG, "Updating cloud base URL (hostname unchanged or no pins)")
+            }
         }
     }
 
@@ -345,10 +405,12 @@ class HttpCloudApiClient(
                 HttpStatusCode.PayloadTooLarge -> CloudUploadResult.PayloadTooLarge
                 else -> {
                     CloudUploadResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
+                        buildTransportErrorMessage(response),
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudUploadResult.TransportError(e.message ?: "Unknown network error")
         }
@@ -380,10 +442,12 @@ class HttpCloudApiClient(
                 }
                 else -> {
                     CloudStatusPollResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
+                        buildTransportErrorMessage(response),
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudStatusPollResult.TransportError(e.message ?: "Unknown network error")
         }
@@ -422,10 +486,12 @@ class HttpCloudApiClient(
                 }
                 else -> {
                     CloudConfigPollResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
+                        buildTransportErrorMessage(response),
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudConfigPollResult.TransportError(e.message ?: "Unknown network error")
         }
@@ -458,10 +524,12 @@ class HttpCloudApiClient(
                 }
                 else -> {
                     CloudTelemetryResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
+                        buildTransportErrorMessage(response),
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudTelemetryResult.TransportError(e.message ?: "Unknown network error")
         }
@@ -503,10 +571,12 @@ class HttpCloudApiClient(
                 }
                 else -> {
                     CloudPreAuthForwardResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
+                        buildTransportErrorMessage(response),
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudPreAuthForwardResult.TransportError(e.message ?: "Unknown network error")
         }
@@ -516,29 +586,39 @@ class HttpCloudApiClient(
         cloudBaseUrl: String,
         request: DeviceRegistrationRequest,
     ): CloudRegistrationResult {
-        return try {
-            val response = httpClient.post("$cloudBaseUrl/api/v1/agent/register") {
-                contentType(ContentType.Application.Json)
-                setBody(request)
-            }
-            when (response.status) {
-                HttpStatusCode.Created -> CloudRegistrationResult.Success(response.body())
-                HttpStatusCode.BadRequest, HttpStatusCode.Conflict -> {
-                    val error = try {
-                        response.body<CloudErrorResponse>()
-                    } catch (_: Exception) {
-                        CloudErrorResponse("UNKNOWN", response.bodyAsText())
+        val registrationBaseUrl = cloudBaseUrl.trimEnd('/')
+        val registrationClient = createPinnedRegistrationClient(registrationBaseUrl)
+        val client = registrationClient ?: httpClient
+
+        try {
+            return try {
+                val response = client.post("$registrationBaseUrl/api/v1/agent/register") {
+                    contentType(ContentType.Application.Json)
+                    setBody(request)
+                }
+                when (response.status) {
+                    HttpStatusCode.Created -> CloudRegistrationResult.Success(response.body())
+                    HttpStatusCode.BadRequest, HttpStatusCode.Conflict -> {
+                        val error = try {
+                            response.body<CloudErrorResponse>()
+                        } catch (_: Exception) {
+                            CloudErrorResponse("UNKNOWN", response.bodyAsText())
+                        }
+                        CloudRegistrationResult.Rejected(error.errorCode, error.message)
                     }
-                    CloudRegistrationResult.Rejected(error.errorCode, error.message)
+                    else -> {
+                        CloudRegistrationResult.TransportError(
+                            buildTransportErrorMessage(response),
+                        )
+                    }
                 }
-                else -> {
-                    CloudRegistrationResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
-                    )
-                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                CloudRegistrationResult.TransportError(e.message ?: "Unknown network error")
             }
-        } catch (e: Exception) {
-            CloudRegistrationResult.TransportError(e.message ?: "Unknown network error")
+        } finally {
+            registrationClient?.close()
         }
     }
 
@@ -561,13 +641,32 @@ class HttpCloudApiClient(
                 }
                 else -> {
                     CloudTokenRefreshResult.TransportError(
-                        "HTTP ${response.status.value}: ${response.status.description}",
+                        buildTransportErrorMessage(response),
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudTokenRefreshResult.TransportError(e.message ?: "Unknown network error")
         }
+    }
+
+    private fun createPinnedRegistrationClient(registrationBaseUrl: String): HttpClient? {
+        if (certificatePins.isEmpty()) return null
+
+        val hostname = extractHostname(registrationBaseUrl)
+            ?: throw IllegalArgumentException(
+                "Cannot extract hostname from registration cloudBaseUrl '$registrationBaseUrl'",
+            )
+        if (isLoopbackHost(hostname)) {
+            AppLogger.i(TAG, "Registration host $hostname is loopback - skipping certificate pinning")
+            return null
+        }
+
+        AppLogger.i(TAG, "Using dedicated pinned registration client for $hostname")
+        return registrationClientFactory?.invoke(registrationBaseUrl, certificatePins, socketFactory)
+            ?: buildKtorClient(certificatePins, registrationBaseUrl, socketFactory)
     }
 
     override suspend fun submitDiagnosticLogs(
@@ -590,9 +689,11 @@ class HttpCloudApiClient(
                     CloudDiagnosticLogResult.Forbidden(errorCode)
                 }
                 else -> CloudDiagnosticLogResult.TransportError(
-                    "HTTP ${response.status.value}: ${response.status.description}",
+                    buildTransportErrorMessage(response),
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             CloudDiagnosticLogResult.TransportError(e.message ?: "Unknown network error")
         }
@@ -661,10 +762,10 @@ class HttpCloudApiClient(
         /**
          * AT-016: Create a lightweight stub client for pre-registration.
          *
-         * No certificate pinning is applied because the hostname is a placeholder.
-         * [certificatePins] are stored so that [updateBaseUrl] can apply them after
-         * registration provides a real hostname. Registration calls pass the URL
-         * from QR code explicitly via [registerDevice], so the stub URL is never hit.
+         * No certificate pinning is applied to the placeholder hostname itself.
+         * [certificatePins] are still stored so [registerDevice] can create a
+         * one-off pinned client for the QR hostname, and [updateBaseUrl] can
+         * rebuild the long-lived client after registration provides a real host.
          */
         fun createPreRegistration(
             certificatePins: List<String>,
@@ -740,6 +841,14 @@ class HttpCloudApiClient(
                         readTimeout(30_000, TimeUnit.MILLISECONDS)
                         writeTimeout(30_000, TimeUnit.MILLISECONDS)
 
+                        // NET-013: Explicitly document OkHttp's default retry behavior.
+                        // retryOnConnectionFailure(true) is the OkHttp default — transparent
+                        // retry on connection reset / stale socket. Safe because all current
+                        // endpoints are idempotent (upload has uploadBatchId, preauth has
+                        // dedup-key, token refresh is idempotent). If non-idempotent endpoints
+                        // are added in the future, set this to false or per-request.
+                        retryOnConnectionFailure(true)
+
                         if (socketFactory != null) {
                             socketFactory(socketFactory)
                         }
@@ -748,11 +857,13 @@ class HttpCloudApiClient(
                         }
                     }
                 }
+                // NET-011: isLenient removed — strict JSON parsing surfaces malformed
+                // server responses as errors instead of silently accepting them.
+                // ignoreUnknownKeys alone provides forward-compatibility.
                 install(ContentNegotiation) {
                     json(
                         Json {
                             ignoreUnknownKeys = true
-                            isLenient = true
                         },
                     )
                 }
@@ -780,6 +891,14 @@ class HttpCloudApiClient(
             } catch (_: Exception) {
                 null
             }
+        }
+
+        internal fun isLoopbackHost(host: String): Boolean {
+            val normalized = host.lowercase()
+            return normalized == "localhost" ||
+                normalized == "127.0.0.1" ||
+                normalized == "::1" ||
+                normalized == "0:0:0:0:0:0:0:1"
         }
     }
 }

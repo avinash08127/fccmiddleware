@@ -1,6 +1,7 @@
 package com.fccmiddleware.edge.adapter.common
 
 import com.fccmiddleware.edge.security.Sensitive
+import com.fccmiddleware.edge.security.SensitiveFieldFilter
 import kotlinx.serialization.Serializable
 
 // ---------------------------------------------------------------------------
@@ -115,7 +116,15 @@ data class PreAuthCommand(
 
     /** Radix: Customer phone — maps to MOBILENUM. */
     val customerPhone: String? = null,
-)
+
+    /** NET-008: Vehicle registration plate, if captured by POS. */
+    val vehicleNumber: String? = null,
+
+    /** NET-008: B2B customer business name for reconciliation. */
+    val customerBusinessName: String? = null,
+) {
+    override fun toString(): String = SensitiveFieldFilter.redactToString(this)
+}
 
 /**
  * Canonical outcome of a pre-auth command.
@@ -309,7 +318,9 @@ data class AgentFccConfig(
 
     /** Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL). */
     val advatecCustIdType: Int? = null,
-)
+) {
+    override fun toString(): String = SensitiveFieldFilter.redactToString(this)
+}
 
 // ---------------------------------------------------------------------------
 // Pre-auth matching contract (GAP-5) — standardized interface across adapters

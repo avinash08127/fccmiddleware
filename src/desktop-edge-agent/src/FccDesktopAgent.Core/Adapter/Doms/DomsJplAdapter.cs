@@ -4,6 +4,7 @@ using FccDesktopAgent.Core.Adapter.Doms.Jpl;
 using FccDesktopAgent.Core.Adapter.Doms.Mapping;
 using FccDesktopAgent.Core.Adapter.Doms.Model;
 using FccDesktopAgent.Core.Adapter.Doms.Protocol;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.Core.Adapter.Doms;
@@ -34,6 +35,7 @@ public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IAsyn
     private readonly string _timezone;
     private readonly int _pumpNumberOffset;
     private readonly IReadOnlyDictionary<string, string>? _productCodeMapping;
+    private readonly ICredentialStore? _credentialStore;
     private readonly ILogger<DomsJplAdapter> _logger;
     private readonly JplTcpClient _tcpClient;
     private readonly JplHeartbeatManager _heartbeatManager;
@@ -50,7 +52,8 @@ public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IAsyn
         string timezone,
         int pumpNumberOffset,
         IReadOnlyDictionary<string, string>? productCodeMapping,
-        ILogger<DomsJplAdapter> logger)
+        ILogger<DomsJplAdapter> logger,
+        ICredentialStore? credentialStore = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(logger);
@@ -63,6 +66,7 @@ public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IAsyn
         _pumpNumberOffset = pumpNumberOffset;
         _productCodeMapping = productCodeMapping;
         _logger = logger;
+        _credentialStore = credentialStore;
 
         var host = new Uri(config.BaseUrl).Host;
         var port = config.JplPort ?? config.AuthPort ?? 4711;
@@ -93,9 +97,15 @@ public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IAsyn
         // Connect TCP
         await _tcpClient.ConnectAsync(ct);
 
-        // FcLogon handshake
+        // S-DSK-011: Prefer credential store over plaintext config for FcAccessCode.
+        var fcAccessCode = (_credentialStore is not null
+                ? await _credentialStore.GetSecretAsync(CredentialKeys.DomsFcAccessCode, ct)
+                : null)
+            ?? _config.FcAccessCode
+            ?? string.Empty;
+
         var logonRequest = DomsLogonHandler.BuildLogonRequest(
-            fcAccessCode: _config.FcAccessCode ?? string.Empty,
+            fcAccessCode: fcAccessCode,
             posVersionId: _config.PosVersionId ?? "FccMiddleware/1.0",
             countryCode: _config.DomsCountryCode ?? "ZA");
 

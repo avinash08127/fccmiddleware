@@ -18,7 +18,8 @@ public sealed record ConfigApplyResult(
     ConfigApplyOutcome Outcome,
     int ConfigVersion,
     IReadOnlyList<string>? HotReloadedSections = null,
-    IReadOnlyList<string>? RestartRequiredSections = null);
+    IReadOnlyList<string>? RestartRequiredSections = null,
+    string? ErrorMessage = null);
 
 /// <summary>Raised by <see cref="IConfigManager"/> when config changes are applied.</summary>
 public sealed class ConfigChangedEventArgs : EventArgs

@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using FccDesktopAgent.Core.Adapter.Common;
+using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.Core.Adapter.Petronite;
@@ -25,6 +26,7 @@ public sealed class PetroniteOAuthClient : IDisposable
 
     private readonly IHttpClientFactory _httpFactory;
     private readonly FccConnectionConfig _config;
+    private readonly ICredentialStore? _credentialStore;
     private readonly ILogger<PetroniteOAuthClient> _logger;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
 
@@ -34,11 +36,13 @@ public sealed class PetroniteOAuthClient : IDisposable
     public PetroniteOAuthClient(
         IHttpClientFactory httpFactory,
         FccConnectionConfig config,
-        ILogger<PetroniteOAuthClient> logger)
+        ILogger<PetroniteOAuthClient> logger,
+        ICredentialStore? credentialStore = null)
     {
         _httpFactory = httpFactory;
         _config = config;
         _logger = logger;
+        _credentialStore = credentialStore;
     }
 
     /// <summary>
@@ -113,7 +117,11 @@ public sealed class PetroniteOAuthClient : IDisposable
                 "Petronite OAuth client ID is not configured",
                 isRecoverable: false);
 
-        var clientSecret = _config.ClientSecret
+        // S-DSK-010: Prefer credential store over plaintext config for client secret.
+        var clientSecret = (_credentialStore is not null
+                ? await _credentialStore.GetSecretAsync(CredentialKeys.PetroniteClientSecret, ct)
+                : null)
+            ?? _config.ClientSecret
             ?? throw new FccAdapterException(
                 "Petronite OAuth client secret is not configured",
                 isRecoverable: false);

@@ -2,12 +2,12 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:FccDesktopAgent.App.ViewModels"
         x:Class="FccDesktopAgent.App.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
         Title="Puma Energy — FCC Desktop Agent"
         Width="960"
         Height="640"
         MinWidth="700"
-        MinHeight="450"
-        x:DataType="vm:MainWindowViewModel">
+        MinHeight="450">
 
   <Grid RowDefinitions="*,Auto">
 
@@ -46,55 +46,55 @@
                     Click="OnThemeToggleClicked" />
           </Border>
 
-          <!-- Nav items -->
+          <!-- Nav items — bound to ViewModel NavigateCommand (T-DSK-001) -->
           <StackPanel Margin="8,12" Spacing="2">
             <Button x:Name="NavDashboard"
                     Content="   Dashboard"
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Left"
                     Padding="12,10"
-                    Tag="Dashboard"
-                    Click="OnNavClicked"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="Dashboard"
                     Classes="navButton" />
             <Button x:Name="NavTransactions"
                     Content="   Transactions"
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Left"
                     Padding="12,10"
-                    Tag="Transactions"
-                    Click="OnNavClicked"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="Transactions"
                     Classes="navButton" />
             <Button x:Name="NavPreAuth"
                     Content="   Pre-Auth"
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Left"
                     Padding="12,10"
-                    Tag="PreAuth"
-                    Click="OnNavClicked"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="PreAuth"
                     Classes="navButton" />
             <Button x:Name="NavConfiguration"
                     Content="   Configuration"
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Left"
                     Padding="12,10"
-                    Tag="Configuration"
-                    Click="OnNavClicked"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="Configuration"
                     Classes="navButton" />
             <Button x:Name="NavLogs"
                     Content="   Logs"
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Left"
                     Padding="12,10"
-                    Tag="Logs"
-                    Click="OnNavClicked"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="Logs"
                     Classes="navButton" />
             <Button x:Name="NavSettings"
                     Content="   Settings"
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Left"
                     Padding="12,10"
-                    Tag="Settings"
-                    Click="OnNavClicked"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="Settings"
                     Classes="navButton" />
           </StackPanel>
         </DockPanel>
@@ -105,7 +105,7 @@
 
     </Grid>
 
-    <!-- Status bar -->
+    <!-- Status bar — bound to ViewModel properties (T-DSK-001) -->
     <Border Grid.Row="1"
             Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}"
             BorderThickness="0,1,0,0"
@@ -114,14 +114,12 @@
       <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto">
         <!-- Connectivity indicator -->
         <TextBlock Grid.Column="0"
-                   x:Name="StatusDot"
                    Text="●"
                    FontSize="14"
                    VerticalAlignment="Center"
-                   Foreground="#22C55E" />
+                   Foreground="{Binding ConnectivityDotBrush}" />
         <TextBlock Grid.Column="1"
-                   x:Name="StatusConnectivity"
-                   Text="Online"
+                   Text="{Binding ConnectivityText}"
                    FontSize="12"
                    Margin="6,0,0,0"
                    VerticalAlignment="Center" />
@@ -131,23 +129,20 @@
 
         <!-- Buffer depth -->
         <TextBlock Grid.Column="3"
-                   x:Name="StatusBufferLabel"
                    Text="Buffer:"
                    FontSize="12"
                    Opacity="0.6"
                    VerticalAlignment="Center"
                    Margin="0,0,4,0" />
         <TextBlock Grid.Column="4"
-                   x:Name="StatusBuffer"
-                   Text="0 pending"
+                   Text="{Binding BufferText}"
                    FontSize="12"
                    VerticalAlignment="Center"
                    Margin="0,0,20,0" />
 
         <!-- Last sync -->
         <TextBlock Grid.Column="5"
-                   x:Name="StatusLastSync"
-                   Text="Last sync: Never"
+                   Text="{Binding LastSyncText}"
                    FontSize="12"
                    Opacity="0.6"
                    VerticalAlignment="Center" />

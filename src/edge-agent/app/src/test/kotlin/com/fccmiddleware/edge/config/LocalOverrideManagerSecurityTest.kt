@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.config
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.security.crypto.MasterKey
 import androidx.test.core.app.ApplicationProvider
 import com.fccmiddleware.edge.security.KeystoreManager
 import io.mockk.every
@@ -29,7 +30,10 @@ class LocalOverrideManagerSecurityTest {
         context = ApplicationProvider.getApplicationContext()
         context.deleteSharedPreferences("fcc_local_overrides")
         keystoreManager = mockk(relaxed = true)
-        manager = LocalOverrideManager(context, keystoreManager)
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        manager = LocalOverrideManager(context, keystoreManager, masterKey)
     }
 
     @After

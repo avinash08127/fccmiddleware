@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.adapter.common
 
+import java.math.BigDecimal
 import kotlin.math.pow
 
 /**
@@ -30,5 +31,14 @@ object CurrencyUtils {
      */
     fun getFactor(currencyCode: String): Double {
         return 10.0.pow(getDecimalPlaces(currencyCode))
+    }
+
+    /**
+     * Returns the currency factor as BigDecimal (10^decimalPlaces) — no floating-point.
+     *
+     * Examples: TZS -> 1, USD -> 100, KWD -> 1000
+     */
+    fun getFactorBigDecimal(currencyCode: String): BigDecimal {
+        return BigDecimal.TEN.pow(getDecimalPlaces(currencyCode))
     }
 }

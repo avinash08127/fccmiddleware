@@ -25,9 +25,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * ?token= query parameter), then enqueues valid payloads for the adapter to
  * drain and normalize.
  *
- * Returns HTTP 200 OK on success. Returns HTTP 429 Too Many Requests when
- * the queue is full (count-based or memory-based limit), signalling the
- * Advatec device to retry later.
+ * Returns HTTP 200 OK on success. Returns HTTP 400 for an empty body,
+ * HTTP 401 for a missing/invalid webhook token, and HTTP 429 when the queue
+ * is full (count-based or memory-based limit), signalling the device to retry later.
  *
  * Thread safety: The incoming queue is a lock-free [ConcurrentLinkedQueue].
  * The server runs on CIO (coroutine I/O) threads — no Android main thread blocking.
@@ -180,7 +180,7 @@ class AdvatecWebhookListener(
      * 1. Read raw JSON body
      * 2. Validate webhook token (X-Webhook-Token header or ?token= param)
      * 3. Enqueue the raw JSON for later normalization
-     * 4. Return HTTP 200 OK (or 429 if queue is full)
+     * 4. Return HTTP 200 OK (or the relevant error status)
      */
     private suspend fun handleWebhookRequest(call: io.ktor.server.application.ApplicationCall) {
         try {
@@ -188,7 +188,7 @@ class AdvatecWebhookListener(
             val rawJson = call.receiveText()
             if (rawJson.isBlank()) {
                 AppLogger.w(TAG, "Received empty body")
-                call.respondText("OK", ContentType.Text.Plain, HttpStatusCode.OK)
+                call.respondText("Bad Request", ContentType.Text.Plain, HttpStatusCode.BadRequest)
                 return
             }
 
@@ -199,8 +199,7 @@ class AdvatecWebhookListener(
 
                 if (providedToken.isNullOrBlank() || providedToken != webhookToken) {
                     AppLogger.w(TAG, "Rejected request with invalid or missing webhook token")
-                    // Still return 200 to avoid leaking token validation info
-                    call.respondText("OK", ContentType.Text.Plain, HttpStatusCode.OK)
+                    call.respondText("Unauthorized", ContentType.Text.Plain, HttpStatusCode.Unauthorized)
                     return
                 }
             }
@@ -240,7 +239,11 @@ class AdvatecWebhookListener(
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error handling webhook request: ${e::class.simpleName}: ${e.message}")
             try {
-                call.respondText("OK", ContentType.Text.Plain, HttpStatusCode.OK)
+                call.respondText(
+                    "Internal Server Error",
+                    ContentType.Text.Plain,
+                    HttpStatusCode.InternalServerError,
+                )
             } catch (_: Exception) {
                 // Response already sent or connection closed — ignore
             }

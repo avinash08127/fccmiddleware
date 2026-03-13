@@ -28,6 +28,15 @@ namespace FccDesktopAgent.Core.Adapter.Radix;
 /// the hash must match character-for-character. Do NOT trim, normalize, or reformat
 /// the XML before signing. The FDC validates signatures and returns RESP_CODE=251
 /// (SIGNATURE_ERR) on mismatch.
+///
+/// <b>SECURITY NOTICE — SHA-1 deprecation (F-DSK-017):</b>
+/// SHA-1 has known collision vulnerabilities (SHAttered attack, 2017) and is deprecated
+/// by NIST for digital signatures. This class uses SHA-1 <b>solely because the Radix FCC
+/// protocol mandates it</b> — the FDC firmware validates SHA-1 signatures and there is no
+/// SHA-256 alternative in the current protocol version. This is a known limitation
+/// confined to the station LAN segment. Do NOT reuse <c>Sha1Hex</c> or SHA-1 for any
+/// purpose outside Radix FCC message signing. If a future Radix protocol revision
+/// supports SHA-256, prefer it immediately.
 /// </summary>
 public static class RadixSignatureHelper
 {
@@ -84,7 +93,17 @@ public static class RadixSignatureHelper
     public static bool ValidateSignature(string content, string expectedSignature, string sharedSecret)
     {
         var computed = Sha1Hex(content + sharedSecret);
-        return string.Equals(computed, expectedSignature, StringComparison.OrdinalIgnoreCase);
+
+        // S-DSK-014: Use constant-time comparison to prevent timing side-channel attacks.
+        // Both values are lowercase hex (40 chars). Normalize expectedSignature to lower
+        // before comparison since the FDC may return uppercase hex.
+        var computedBytes = Encoding.UTF8.GetBytes(computed);
+        var expectedBytes = Encoding.UTF8.GetBytes(expectedSignature.ToLowerInvariant());
+
+        if (computedBytes.Length != expectedBytes.Length)
+            return false;
+
+        return CryptographicOperations.FixedTimeEquals(computedBytes, expectedBytes);
     }
 
     /// <summary>
@@ -93,9 +112,14 @@ public static class RadixSignatureHelper
     /// The input is encoded as UTF-8 bytes before hashing. No trimming or normalization
     /// is performed — the caller is responsible for providing the exact content.
     /// </summary>
+    /// <remarks>
+    /// SHA-1 is mandated by the Radix FCC protocol — do NOT replace with SHA-256
+    /// unless the FDC firmware supports it. See class-level security notice (F-DSK-017).
+    /// </remarks>
     private static string Sha1Hex(string input)
     {
         var inputBytes = Encoding.UTF8.GetBytes(input);
+        // SHA-1 required by Radix FCC protocol — not replaceable (F-DSK-017)
         var hashBytes = SHA1.HashData(inputBytes);
         return Convert.ToHexString(hashBytes).ToLowerInvariant();
     }

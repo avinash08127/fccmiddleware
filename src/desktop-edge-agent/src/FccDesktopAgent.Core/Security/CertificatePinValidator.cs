@@ -9,17 +9,42 @@ namespace FccDesktopAgent.Core.Security;
 /// certificate whose SPKI (Subject Public Key Info) SHA-256 hash matches a known pin.
 /// Mirrors the Android agent's OkHttp CertificatePinner behaviour.
 ///
-/// Bootstrap pins are the same intermediate CA hashes used in the Android APK.
-/// Update when rotating cloud TLS certificates.
+/// T-DSK-015: Bootstrap (compiled-in) pins serve as the baseline. Additional pins
+/// can be loaded from configuration via <see cref="LoadAdditionalPins"/> so that
+/// emergency certificate rotations do not require a software update.
 /// </summary>
 public static class CertificatePinValidator
 {
     // SHA-256 hashes of intermediate CA SubjectPublicKeyInfo — must match Android agent's AppModule.
-    private static readonly HashSet<string> PinnedHashes = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> BootstrapPins = new(StringComparer.Ordinal)
     {
         "YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=", // Primary intermediate CA
         "Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=", // Backup intermediate CA
     };
+
+    // T-DSK-015: Additional pins loaded from configuration at startup.
+    // Merged with bootstrap pins to form the effective pin set.
+    private static volatile HashSet<string> _effectivePins = BootstrapPins;
+
+    /// <summary>
+    /// T-DSK-015: Merges additional SPKI SHA-256 Base64 pin hashes (from cloud config or
+    /// appsettings) with the compiled-in bootstrap pins. Call once at startup or when
+    /// config changes. Thread-safe via volatile reference swap.
+    /// </summary>
+    public static void LoadAdditionalPins(IEnumerable<string>? additionalPins)
+    {
+        if (additionalPins is null)
+            return;
+
+        var merged = new HashSet<string>(BootstrapPins, StringComparer.Ordinal);
+        foreach (var pin in additionalPins)
+        {
+            if (!string.IsNullOrWhiteSpace(pin))
+                merged.Add(pin.Trim());
+        }
+
+        _effectivePins = merged;
+    }
 
     /// <summary>
     /// <see cref="HttpClientHandler.ServerCertificateCustomValidationCallback"/> delegate.
@@ -43,11 +68,14 @@ public static class CertificatePinValidator
         if (chain is null || certificate is null)
             return false;
 
+        // Snapshot the effective pins for consistent evaluation across the chain.
+        var pins = _effectivePins;
+
         // Check every certificate in the chain (leaf, intermediates, root) for a matching pin.
         foreach (var element in chain.ChainElements)
         {
             var spkiHash = ComputeSpkiSha256Base64(element.Certificate);
-            if (PinnedHashes.Contains(spkiHash))
+            if (pins.Contains(spkiHash))
                 return true;
         }
 

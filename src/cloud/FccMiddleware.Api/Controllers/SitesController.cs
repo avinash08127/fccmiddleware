@@ -917,26 +917,26 @@ public sealed class SitesController : PortalControllerBase
 
             // F10-01: DOMS TCP/JPL vendor-specific fields
             JplPort = config.JplPort,
-            FcAccessCode = config.FcAccessCode,
+            FcAccessCode = null,
             DomsCountryCode = config.DomsCountryCode,
             PosVersionId = config.PosVersionId,
             ConfiguredPumps = config.ConfiguredPumps,
 
             // F10-01: Radix vendor-specific fields
-            SharedSecret = config.SharedSecret,
+            SharedSecret = null,
             UsnCode = config.UsnCode,
             AuthPort = config.AuthPort,
             FccPumpAddressMap = config.FccPumpAddressMap,
 
             // F10-01: Petronite OAuth2 vendor-specific fields
             ClientId = config.ClientId,
-            ClientSecret = config.ClientSecret,
-            WebhookSecret = config.WebhookSecret,
+            ClientSecret = null,
+            WebhookSecret = null,
             OAuthTokenEndpoint = config.OAuthTokenEndpoint,
 
             // F10-01: Advatec EFD vendor-specific fields
             AdvatecDevicePort = config.AdvatecDevicePort,
-            AdvatecWebhookToken = config.AdvatecWebhookToken,
+            AdvatecWebhookToken = null,
             AdvatecEfdSerialNumber = config.AdvatecEfdSerialNumber,
             AdvatecCustIdType = config.AdvatecCustIdType,
             AdvatecPumpMap = config.AdvatecPumpMap,

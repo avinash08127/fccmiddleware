@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.api
 
+import com.fccmiddleware.edge.buffer.dao.LocalApiTransaction
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import kotlinx.serialization.Serializable
 
@@ -83,6 +84,27 @@ data class LocalTransaction(
             attendantId = entity.attendantId,
             syncStatus = entity.syncStatus,
             correlationId = entity.correlationId,
+        )
+
+        /** AP-035: Factory from lightweight projection (excludes rawPayloadJson). */
+        fun from(proj: LocalApiTransaction) = LocalTransaction(
+            id = proj.id,
+            fccTransactionId = proj.fccTransactionId,
+            siteCode = proj.siteCode,
+            pumpNumber = proj.pumpNumber,
+            nozzleNumber = proj.nozzleNumber,
+            productCode = proj.productCode,
+            volumeMicrolitres = proj.volumeMicrolitres,
+            amountMinorUnits = proj.amountMinorUnits,
+            unitPriceMinorPerLitre = proj.unitPriceMinorPerLitre,
+            currencyCode = proj.currencyCode,
+            startedAt = proj.startedAt,
+            completedAt = proj.completedAt,
+            fiscalReceiptNumber = proj.fiscalReceiptNumber,
+            fccVendor = proj.fccVendor,
+            attendantId = proj.attendantId,
+            syncStatus = proj.syncStatus,
+            correlationId = proj.correlationId,
         )
     }
 }

@@ -21,6 +21,47 @@ abstract class SyncStateDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun upsert(state: SyncState)
 
+    // -------------------------------------------------------------------------
+    // AT-035: Atomic column-level UPDATE queries — eliminate read-modify-write
+    // race conditions in CloudUploadWorker's SyncState updates.
+    // Each method ensures the row exists (INSERT OR IGNORE) and then updates
+    // only the target column, preventing concurrent workers from clobbering
+    // each other's fields.
+    // -------------------------------------------------------------------------
+
+    @Query("INSERT OR IGNORE INTO sync_state (id, updated_at) VALUES (1, :now)")
+    abstract suspend fun ensureRow(now: String)
+
+    @Query("UPDATE sync_state SET last_upload_at = :now, updated_at = :now WHERE id = 1")
+    protected abstract suspend fun setUploadAt(now: String)
+
+    @Query("UPDATE sync_state SET last_status_poll_at = :now, updated_at = :now WHERE id = 1")
+    protected abstract suspend fun setStatusPollAt(now: String)
+
+    @Query("UPDATE sync_state SET last_upload_attempt_at = :now, updated_at = :now WHERE id = 1")
+    protected abstract suspend fun setUploadAttemptAt(now: String)
+
+    /** Atomically ensure the row exists and update [last_upload_at]. */
+    @Transaction
+    open suspend fun updateUploadAt(now: String) {
+        ensureRow(now)
+        setUploadAt(now)
+    }
+
+    /** Atomically ensure the row exists and update [last_status_poll_at]. */
+    @Transaction
+    open suspend fun updateStatusPollAt(now: String) {
+        ensureRow(now)
+        setStatusPollAt(now)
+    }
+
+    /** Atomically ensure the row exists and update [last_upload_attempt_at]. */
+    @Transaction
+    open suspend fun updateUploadAttemptAt(now: String) {
+        ensureRow(now)
+        setUploadAttemptAt(now)
+    }
+
     /**
      * Atomically increment the telemetry sequence counter and return the new value.
      *

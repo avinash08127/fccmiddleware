@@ -18,19 +18,18 @@ public sealed class PortalAccessResolver
             .SelectMany(claim => claim.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        // "SystemAdministrator" is a legacy alias — kept for backward-compatible JWT recognition.
-        var allowAll = roles.Contains("SystemAdmin") || roles.Contains("SystemAdministrator");
+        var allowAll = roles.Contains("FccAdmin");
         var legalEntityClaims = user.FindAll("legal_entities")
             .Select(claim => claim.Value)
             .ToList();
 
         if (allowAll && (legalEntityClaims.Count == 0 || legalEntityClaims.Any(value => value.Trim() == "*")))
         {
-            // FM-S07: Log when a SystemAdmin is granted unrestricted cross-tenant access
+            // FM-S07: Log when an FccAdmin is granted unrestricted cross-tenant access
             // so that compromised admin sessions are traceable in audit logs.
             var userId = ResolveUserId(user) ?? "(unknown)";
             _logger.LogWarning(
-                "SystemAdmin granted AllowAllLegalEntities access. UserId={UserId}, HasLegalEntityClaims={HasClaims}",
+                "FccAdmin granted AllowAllLegalEntities access. UserId={UserId}, HasLegalEntityClaims={HasClaims}",
                 userId,
                 legalEntityClaims.Count > 0);
             return new PortalAccess(true, Array.Empty<Guid>(), true);
@@ -57,7 +56,7 @@ public sealed class PortalAccessResolver
     /// <summary>
     /// Returns true if the user has a role that grants access to sensitive operational
     /// payloads (raw DLQ payloads, full telemetry, audit event payloads).
-    /// SupportReadOnly users receive redacted/summary views only.
+    /// FccViewer users receive redacted/summary views only.
     /// </summary>
     public static bool HasSensitiveDataAccess(ClaimsPrincipal user)
     {
@@ -70,10 +69,8 @@ public sealed class PortalAccessResolver
 
     private static readonly HashSet<string> SensitiveDataRoles = new(StringComparer.OrdinalIgnoreCase)
     {
-        "OperationsManager",
-        "SystemAdmin",
-        "SystemAdministrator", // legacy alias — kept for backward-compatible JWT recognition
-        "Auditor"
+        "FccAdmin",
+        "FccUser",
     };
 }
 
