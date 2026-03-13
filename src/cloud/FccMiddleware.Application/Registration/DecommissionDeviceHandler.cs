@@ -64,7 +64,15 @@ public sealed class DecommissionDeviceHandler
             })
         });
 
-        await _db.SaveChangesAsync(cancellationToken);
+        var saved = await _db.TrySaveChangesAsync(cancellationToken);
+        if (!saved)
+        {
+            _logger.LogWarning(
+                "Concurrent decommission detected for device {DeviceId} at site {SiteCode}",
+                device.Id, device.SiteCode);
+            return Result<DecommissionDeviceResult>.Failure("DEVICE_ALREADY_DECOMMISSIONED",
+                "Device was already decommissioned by another request.");
+        }
 
         _logger.LogInformation("Device {DeviceId} decommissioned for site {SiteCode} by {DecommissionedBy}",
             device.Id, device.SiteCode, request.DecommissionedBy);

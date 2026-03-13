@@ -41,7 +41,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * internally. [fetchTransactions] drains that queue so the standard ingestion
  * pipeline buffers them.
  */
-class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
+class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter, java.io.Closeable {
 
     override val pumpStatusCapability = PumpStatusCapability.NOT_APPLICABLE
 
@@ -178,6 +178,12 @@ class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
         webhookListener?.stop()
         webhookListener = null
         initialized = false
+    }
+
+    // AT-006: Implement Closeable so FccRuntimeState.clear() can stop the
+    // embedded webhook listener when the service is destroyed.
+    override fun close() {
+        shutdown()
     }
 
     val isWebhookListening: Boolean

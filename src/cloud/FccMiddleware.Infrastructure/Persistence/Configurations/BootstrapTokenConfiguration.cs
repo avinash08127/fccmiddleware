@@ -38,6 +38,14 @@ internal sealed class BootstrapTokenConfiguration : IEntityTypeConfiguration<Boo
             .IsUnique()
             .HasDatabaseName("ix_bootstrap_token_hash");
 
+        // OB-P02: Filtered index on (site_code, legal_entity_id) WHERE status = 'ACTIVE'.
+        // CountActiveBootstrapTokensForSiteAsync queries this predicate twice per token
+        // generation (pre-check + TOCTOU re-check). Since only a small fraction of tokens
+        // are ACTIVE at any time, the filtered index stays compact and efficient.
+        builder.HasIndex(e => new { e.SiteCode, e.LegalEntityId })
+            .HasDatabaseName("ix_bootstrap_tokens_active")
+            .HasFilter("status = 'ACTIVE'");
+
         // BUG-007: Use PostgreSQL xmin as optimistic concurrency token to prevent
         // race condition where two concurrent registrations consume the same token.
         builder.Property<uint>("xmin")

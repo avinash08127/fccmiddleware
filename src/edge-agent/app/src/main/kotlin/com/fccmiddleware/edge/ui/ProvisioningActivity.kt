@@ -22,6 +22,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.fccmiddleware.edge.config.CloudEnvironments
 import com.fccmiddleware.edge.service.EdgeAgentForegroundService
+import com.fccmiddleware.edge.security.Sensitive
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanIntentResult
 import com.journeyapps.barcodescanner.ScanOptions
@@ -278,7 +279,6 @@ class ProvisioningActivity : AppCompatActivity() {
             return
         }
 
-        AppLogger.i(TAG, "QR code scanned, parsing payload")
         val qrData = parseQrPayload(contents)
         if (qrData == null) {
             showError("Invalid QR code format. Expected provisioning QR with v, sc, cu, pt fields.")
@@ -384,7 +384,7 @@ class ProvisioningActivity : AppCompatActivity() {
                 environment = env?.uppercase(),
             )
         } catch (e: Exception) {
-            AppLogger.e(TAG, "Failed to parse QR payload", e)
+            AppLogger.w(TAG, "Failed to parse QR payload")
             null
         }
     }
@@ -622,7 +622,7 @@ class ProvisioningActivity : AppCompatActivity() {
 data class QrBootstrapData(
     val siteCode: String,
     val cloudBaseUrl: String,
-    val provisioningToken: String,
+    @Sensitive val provisioningToken: String,
     val environment: String? = null,
 ) {
     // S-007: redact the token so it can never appear in a log line even if the

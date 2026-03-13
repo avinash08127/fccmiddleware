@@ -142,6 +142,25 @@ class CircuitBreaker(
         AppLogger.i(TAG, "[$name] Explicit backoff set: ${seconds}s (no failure count increment)")
     }
 
+    /**
+     * AT-007: Atomic snapshot of circuit breaker state for consistent diagnostics logging.
+     * Reads all fields under the mutex so combined state (e.g. consecutiveFailureCount + state)
+     * cannot represent different moments in time (TOCTOU).
+     */
+    data class Snapshot(
+        val state: State,
+        val consecutiveFailureCount: Int,
+        val nextRetryAt: Instant,
+    )
+
+    suspend fun snapshot(): Snapshot = mutex.withLock {
+        Snapshot(
+            state = state,
+            consecutiveFailureCount = consecutiveFailureCount,
+            nextRetryAt = nextRetryAt,
+        )
+    }
+
     /** Remaining backoff millis, or 0 if none. For logging/diagnostics. */
     suspend fun remainingBackoffMs(): Long = mutex.withLock {
         val now = Instant.now()

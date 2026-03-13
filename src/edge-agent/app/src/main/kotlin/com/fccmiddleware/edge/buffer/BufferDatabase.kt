@@ -58,7 +58,7 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
         LocalPump::class,
         LocalNozzle::class,
     ],
-    version = 6,
+    version = 8,
     exportSchema = true
 )
 @TypeConverters(PreAuthStatusConverters::class)
@@ -189,6 +189,34 @@ abstract class BufferDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration 6 → 7: AF-026 — Add fiscalization context columns.
+         *
+         * Stores payment_type, customer_tax_id, customer_name, and customer_id_type
+         * so that fiscalization retries use the correct values instead of hardcoding CASH.
+         * Existing records default to CASH for payment_type and NULL for customer fields.
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN payment_type TEXT NOT NULL DEFAULT 'CASH'")
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN fiscal_customer_tax_id TEXT")
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN fiscal_customer_name TEXT")
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN fiscal_customer_id_type INTEGER")
+            }
+        }
+
+        /**
+         * Migration 7 → 8: AF-035 — Add last_upload_attempt_at to sync_state.
+         *
+         * Tracks the timestamp of the most recent upload attempt (successful or failed),
+         * so telemetry can distinguish lastSyncAttemptUtc from lastSuccessfulSyncUtc.
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sync_state ADD COLUMN last_upload_attempt_at TEXT")
+            }
+        }
+
         fun create(context: Context): BufferDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
@@ -196,7 +224,7 @@ abstract class BufferDatabase : RoomDatabase() {
                 "fcc_buffer.db"
             )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 // Fallback for any database version gap not covered by explicit migrations.
                 // Transactions are re-uploaded from the buffer, so losing local rows is
                 // recoverable. Prevents a crash-loop on devices with an unexpected schema.

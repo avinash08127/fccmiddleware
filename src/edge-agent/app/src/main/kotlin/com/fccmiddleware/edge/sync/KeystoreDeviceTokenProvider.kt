@@ -179,21 +179,24 @@ class KeystoreDeviceTokenProvider(
      * Base64-encoded ciphertext in EncryptedSharedPreferences.
      */
     override fun storeTokens(deviceToken: String, refreshToken: String): Boolean {
+        // AF-051: Encrypt BOTH tokens first, then persist BOTH blobs.
+        // If either encryption fails, persist nothing — prevents split-token state
+        // where a new device token is stored with a stale refresh token.
         val deviceEncrypted = keystoreManager.storeSecret(KeystoreManager.ALIAS_DEVICE_JWT, deviceToken)
-        if (deviceEncrypted != null) {
-            encryptedPrefs.storeDeviceTokenBlob(Base64.encodeToString(deviceEncrypted, Base64.NO_WRAP))
-        } else {
+        if (deviceEncrypted == null) {
             AppLogger.e(TAG, "Failed to encrypt device token — Keystore may be unavailable")
             return false
         }
 
         val refreshEncrypted = keystoreManager.storeSecret(KeystoreManager.ALIAS_REFRESH_TOKEN, refreshToken)
-        if (refreshEncrypted != null) {
-            encryptedPrefs.storeRefreshTokenBlob(Base64.encodeToString(refreshEncrypted, Base64.NO_WRAP))
-        } else {
+        if (refreshEncrypted == null) {
             AppLogger.e(TAG, "Failed to encrypt refresh token — Keystore may be unavailable")
             return false
         }
+
+        // Both encryptions succeeded — persist both blobs
+        encryptedPrefs.storeDeviceTokenBlob(Base64.encodeToString(deviceEncrypted, Base64.NO_WRAP))
+        encryptedPrefs.storeRefreshTokenBlob(Base64.encodeToString(refreshEncrypted, Base64.NO_WRAP))
 
         return true
     }

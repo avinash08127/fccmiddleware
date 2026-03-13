@@ -7,9 +7,11 @@ import com.fccmiddleware.edge.adapter.common.IFccConnectionLifecycle
 import com.fccmiddleware.edge.adapter.common.IFccEventListener
 import com.fccmiddleware.edge.adapter.common.PumpState
 import com.fccmiddleware.edge.adapter.common.TransactionNotification
+import com.fccmiddleware.edge.buffer.CleanupWorker
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import com.fccmiddleware.edge.ingestion.IngestionOrchestrator
+import com.fccmiddleware.edge.logging.StructuredFileLogger
 import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudUploadWorker
@@ -64,6 +66,10 @@ class CadenceController(
     private val cloudApiClient: CloudApiClient? = null,
     /** Agent version in semantic format (e.g. "1.0.0"). Used for version check on startup. */
     private val agentVersion: String? = null,
+    /** AF-034: Cleanup worker — retention, quota enforcement, stale UPLOADED revert. */
+    private val cleanupWorker: CleanupWorker? = null,
+    /** AF-034: File logger — log rotation is triggered alongside cleanup. */
+    private val fileLogger: StructuredFileLogger? = null,
     fccAdapter: IFccAdapter? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) {
@@ -84,6 +90,11 @@ class CadenceController(
         val configPollTickFrequency: Int = 6,
         /** Run telemetry report every N ticks. */
         val telemetryTickFrequency: Int = 4,
+        /** AP-004: Run fiscalization retry every N ticks (~2 min at 30s base) to avoid
+         *  blocking the main cadence tick with sequential Advatec HTTP calls. */
+        val fiscalRetryTickFrequency: Int = 4,
+        /** AF-034: Run cleanup every N ticks. 2880 ticks * 30s ≈ 24 hours. */
+        val cleanupTickFrequency: Int = 2880,
     )
 
     /**
@@ -187,7 +198,9 @@ class CadenceController(
             val a = config.syncedToOdooTickFrequency.toLong().coerceAtLeast(1)
             val b = config.telemetryTickFrequency.toLong().coerceAtLeast(1)
             val c = config.configPollTickFrequency.toLong().coerceAtLeast(1)
-            return lcm(a, lcm(b, c))
+            val d = config.fiscalRetryTickFrequency.toLong().coerceAtLeast(1)
+            val e = config.cleanupTickFrequency.toLong().coerceAtLeast(1)
+            return lcm(a, lcm(b, lcm(c, lcm(d, e))))
         }
 
         private fun gcd(a: Long, b: Long): Long = if (b == 0L) a else gcd(b, a % b)
@@ -484,6 +497,12 @@ class CadenceController(
                     cloudUploadWorker.pollSyncedToOdooStatus()
                     if (isDecommissioned()) return
                 }
+                // AF-036: Send telemetry during FCC_UNREACHABLE — cloud needs visibility into
+                // FCC connection errors, heartbeat failures, and buffer backlog during outages.
+                if (tickCount % config.telemetryTickFrequency == 0L) {
+                    cloudUploadWorker.reportTelemetry()
+                    cloudUploadWorker.reportDiagnosticLogs()
+                }
                 if (tickCount % config.configPollTickFrequency == 0L) {
                     configPollWorker?.pollConfig()
                 }
@@ -496,6 +515,25 @@ class CadenceController(
         // Pre-auth expiry check runs every tick regardless of connectivity state.
         // Fast under normal conditions: index-backed query returns empty set immediately.
         preAuthHandler?.runExpiryCheck()
+
+        // AP-004: Fiscalization retry runs on its own cadence to avoid blocking the main
+        // tick with sequential Advatec HTTP calls. Only runs when FCC is reachable since
+        // the Advatec device is on the LAN.
+        if (state.canPollFcc() && tickCount % config.fiscalRetryTickFrequency == 0L) {
+            ingestionOrchestrator.retryPendingFiscalization()
+        }
+
+        // AF-034: Periodic cleanup — retention, quota enforcement, stale UPLOADED revert,
+        // and log file rotation. Runs regardless of connectivity state since all operations
+        // are local. Default: every 2880 ticks ≈ 24 hours at 30s base interval.
+        if (tickCount % config.cleanupTickFrequency == 0L) {
+            try {
+                cleanupWorker?.runCleanup()
+                fileLogger?.rotateOldFiles()
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Cleanup tick failed: ${e.message}", e)
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

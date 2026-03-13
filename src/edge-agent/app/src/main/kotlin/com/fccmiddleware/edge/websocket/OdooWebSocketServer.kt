@@ -82,12 +82,11 @@ class OdooWebSocketServer(
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
 
     /**
-     * Per-session tracking: broadcast job, remote host, and rate-limit counters.
+     * Per-session tracking: remote host and rate-limit counters.
      * Rate-limit fields are mutated only from that session's single reader coroutine,
      * so no additional synchronisation is needed beyond the ConcurrentHashMap itself.
      */
     private data class ClientEntry(
-        val broadcastJob: Job,
         val remoteHost: String,
         var commandCountInWindow: Int = 0,
         var windowStartMs: Long = System.currentTimeMillis(),
@@ -95,6 +94,9 @@ class OdooWebSocketServer(
 
     /** All connected sessions mapped to their [ClientEntry]. */
     private val clients = ConcurrentHashMap<WebSocketSession, ClientEntry>()
+
+    /** AP-016: Single shared pump status broadcast job instead of per-client coroutines. */
+    private var sharedBroadcastJob: Job? = null
 
     private val messageHandler = OdooWsMessageHandler(
         transactionDao = transactionDao,
@@ -157,11 +159,18 @@ class OdooWebSocketServer(
             it.start(wait = false)
             AppLogger.i(TAG, "WebSocket server started on ${config.bindAddress}:${config.port}")
         }
+
+        // AP-016: Start single shared pump status broadcast coroutine
+        sharedBroadcastJob?.cancel()
+        sharedBroadcastJob = serviceScope.launch {
+            sharedPumpStatusBroadcastLoop()
+        }
     }
 
     fun stop() {
-        // Cancel all pump-status broadcast jobs
-        clients.values.forEach { it.broadcastJob.cancel() }
+        // AP-016: Cancel shared pump status broadcast
+        sharedBroadcastJob?.cancel()
+        sharedBroadcastJob = null
         clients.clear()
 
         server?.stop(1_000, 2_000)
@@ -180,11 +189,7 @@ class OdooWebSocketServer(
             return
         }
 
-        // Start per-connection pump status broadcast timer
-        val broadcastJob = serviceScope.launch {
-            pumpStatusBroadcastLoop(session)
-        }
-        clients[session] = ClientEntry(broadcastJob = broadcastJob, remoteHost = remoteHost)
+        clients[session] = ClientEntry(remoteHost = remoteHost)
         AppLogger.i(TAG, "Client connected from $remoteHost (total=${clients.size})")
 
         try {
@@ -202,7 +207,7 @@ class OdooWebSocketServer(
     }
 
     private fun onClientDisconnected(session: WebSocketSession) {
-        clients.remove(session)?.broadcastJob?.cancel()
+        clients.remove(session)
         AppLogger.i(TAG, "Client disconnected (remaining=${clients.size})")
     }
 
@@ -266,24 +271,39 @@ class OdooWebSocketServer(
     }
 
     // -------------------------------------------------------------------------
-    // Pump status broadcast — per-connection timer (every 3s)
+    // Pump status broadcast — single shared coroutine (AP-016)
     // -------------------------------------------------------------------------
 
-    private suspend fun pumpStatusBroadcastLoop(session: WebSocketSession) {
+    /**
+     * AP-016: Single shared pump status broadcast loop.
+     * Fetches pump statuses once per interval and fans out to all connected clients,
+     * eliminating N duplicate FCC adapter queries when N clients are connected.
+     */
+    private suspend fun sharedPumpStatusBroadcastLoop() {
         val intervalMs = (config.pumpStatusBroadcastIntervalSeconds * 1000L).coerceAtLeast(1000L)
         while (serviceScope.isActive) {
             delay(intervalMs)
+            if (clients.isEmpty()) continue
             try {
                 val adapter = fccAdapter ?: continue
                 val statuses = adapter.getPumpStatus()
-                for (status in statuses) {
-                    val dto = status.toWsDto()
-                    val payload = wsJson.encodeToString(dto)
-                    session.send(Frame.Text(payload))
+                // Serialize each status DTO once, then reuse for all clients
+                val frames = statuses.map { status ->
+                    Frame.Text(wsJson.encodeToString(status.toWsDto()))
                 }
+                val deadSessions = mutableListOf<WebSocketSession>()
+                for (session in clients.keys) {
+                    try {
+                        for (frame in frames) {
+                            session.send(frame)
+                        }
+                    } catch (_: Exception) {
+                        deadSessions.add(session)
+                    }
+                }
+                deadSessions.forEach { onClientDisconnected(it) }
             } catch (e: Exception) {
-                AppLogger.d(TAG, "Pump status broadcast failed for session: ${e.message}")
-                break // session likely closed
+                AppLogger.d(TAG, "Shared pump status broadcast failed: ${e.message}")
             }
         }
     }

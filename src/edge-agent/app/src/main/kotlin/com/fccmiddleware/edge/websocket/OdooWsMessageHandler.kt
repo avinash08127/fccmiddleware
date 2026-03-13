@@ -91,6 +91,17 @@ class OdooWsMessageHandler(
         val update = data["update"]?.jsonObject ?: return
         val now = Instant.now().toString()
 
+        // AF-045: Validate transaction exists before mutating
+        val existing = transactionDao.getByFccTransactionId(transactionId)
+        if (existing == null) {
+            val error = kotlinx.serialization.json.buildJsonObject {
+                put("type", JsonPrimitive("error"))
+                put("data", wsJson.encodeToJsonElement(WsErrorResponse(message = "Transaction not found: $transactionId")))
+            }
+            sendJson(session, error)
+            return
+        }
+
         val orderUuid = update["order_uuid"]?.jsonPrimitive?.content
         val orderId = update["order_id"]?.jsonPrimitive?.content
         val paymentId = update["payment_id"]?.jsonPrimitive?.content
@@ -136,25 +147,31 @@ class OdooWsMessageHandler(
         val update = data["update"]?.jsonObject ?: return
         val now = Instant.now().toString()
 
+        // AF-045: Validate transaction exists before mutating
+        val existing = transactionDao.getByFccTransactionId(transactionId)
+        if (existing == null) {
+            val error = kotlinx.serialization.json.buildJsonObject {
+                put("type", JsonPrimitive("error"))
+                put("data", wsJson.encodeToJsonElement(WsErrorResponse(message = "Transaction not found: $transactionId")))
+            }
+            sendJson(session, error)
+            return
+        }
+
         val addToCart = update["add_to_cart"]?.jsonPrimitive?.booleanOrNull
         val paymentId = update["payment_id"]?.jsonPrimitive?.content
         val orderUuid = update["order_uuid"]?.jsonPrimitive?.content
         val orderId = update["order_id"]?.jsonPrimitive?.content
         val state = update["state"]?.jsonPrimitive?.content
 
-        // Update add_to_cart if present
+        // Perform all DB mutations first, then broadcast once
+        var changed = false
+
         if (addToCart != null) {
             transactionDao.updateAddToCart(transactionId, addToCart, paymentId, now)
-
-            // Broadcast the update
-            val updatedTx = transactionDao.getByFccTransactionId(transactionId)
-            if (updatedTx != null) {
-                val dto = updatedTx.toWsDto()
-                broadcastToAll("transaction_update", wsJson.encodeToJsonElement(dto))
-            }
+            changed = true
         }
 
-        // Update order_uuid if present
         if (!orderUuid.isNullOrEmpty()) {
             transactionDao.updateOdooFields(
                 transactionId = transactionId,
@@ -163,8 +180,11 @@ class OdooWsMessageHandler(
                 paymentId = paymentId,
                 now = now,
             )
+            changed = true
+        }
 
-            // Broadcast the update
+        // Single broadcast after all mutations are applied
+        if (changed) {
             val updatedTx = transactionDao.getByFccTransactionId(transactionId)
             if (updatedTx != null) {
                 val dto = updatedTx.toWsDto()
@@ -273,13 +293,13 @@ class OdooWsMessageHandler(
             val empTagNo = item["EmpTagNo"]?.jsonPrimitive?.content ?: continue
             val newMax = item["NewMaxTransaction"]?.jsonPrimitive?.intOrNull ?: continue
 
-            // In the legacy system, this updated an attendant pump count table.
-            // Send acknowledgment to match the legacy protocol.
+            // AF-046: The legacy system updated an attendant pump count table, but the
+            // new architecture has no equivalent. Send honest status instead of false "updated".
             val ack = WsAttendantPumpCountAck(
                 pumpNumber = pumpNumber,
                 empTagNo = empTagNo,
                 maxLimit = newMax,
-                status = "updated",
+                status = "not_supported",
             )
 
             val response = kotlinx.serialization.json.buildJsonObject {
@@ -303,15 +323,24 @@ class OdooWsMessageHandler(
 
         transactionDao.markDiscarded(transactionId, now)
 
-        val response = kotlinx.serialization.json.buildJsonObject {
-            put("type", JsonPrimitive("transaction_update"))
-            put("data", kotlinx.serialization.json.buildJsonObject {
-                put("transaction_id", JsonPrimitive(transactionId))
-                put("state", JsonPrimitive("approved"))
-                put("manual_approved", JsonPrimitive("yes"))
-            })
+        // AF-047: Broadcast to ALL clients so multi-terminal setups see the discard immediately,
+        // consistent with handleManagerUpdate and handleAttendantUpdate.
+        val updatedTx = transactionDao.getByFccTransactionId(transactionId)
+        if (updatedTx != null) {
+            val dto = updatedTx.toWsDto()
+            broadcastToAll("transaction_update", wsJson.encodeToJsonElement(dto))
+        } else {
+            // Transaction not found (possibly archived) — send response only to requesting session
+            val response = kotlinx.serialization.json.buildJsonObject {
+                put("type", JsonPrimitive("transaction_update"))
+                put("data", kotlinx.serialization.json.buildJsonObject {
+                    put("transaction_id", JsonPrimitive(transactionId))
+                    put("state", JsonPrimitive("approved"))
+                    put("manual_approved", JsonPrimitive("yes"))
+                })
+            }
+            sendJson(session, response)
         }
-        sendJson(session, response)
     }
 
     // ── add_transaction ─────────────────────────────────────────────────────
@@ -325,8 +354,13 @@ class OdooWsMessageHandler(
      */
     suspend fun handleAddTransaction(session: WebSocketSession, data: JsonObject) {
         AppLogger.d(TAG, "add_transaction received (no-op — FCC is source of truth)")
-        // Legacy compat: send acknowledgment but don't insert.
+        // Legacy compat: acknowledge the message but don't insert.
         // The new architecture gets transactions exclusively from the FCC adapter.
+        val ack = kotlinx.serialization.json.buildJsonObject {
+            put("type", JsonPrimitive("add_transaction_ack"))
+            put("data", JsonPrimitive("ok"))
+        }
+        sendJson(session, ack)
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────

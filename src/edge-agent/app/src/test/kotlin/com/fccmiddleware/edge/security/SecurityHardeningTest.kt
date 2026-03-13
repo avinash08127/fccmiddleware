@@ -9,6 +9,7 @@ import com.fccmiddleware.edge.sync.DeviceRegistrationResponse
 import com.fccmiddleware.edge.sync.HttpCloudApiClient
 import com.fccmiddleware.edge.sync.TokenRefreshRequest
 import com.fccmiddleware.edge.sync.TokenRefreshResponse
+import com.fccmiddleware.edge.ui.QrBootstrapData
 import kotlin.reflect.full.memberProperties
 import okhttp3.CertificatePinner
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -168,6 +169,14 @@ class SecurityHardeningTest {
         }
 
         @Test
+        fun `QrBootstrapData provisioningToken is @Sensitive`() {
+            assertTrue(
+                isSensitive<QrBootstrapData>("provisioningToken"),
+                "provisioningToken must be annotated with @Sensitive",
+            )
+        }
+
+        @Test
         fun `DeviceRegistrationRequest siteCode is NOT @Sensitive`() {
             assertFalse(
                 isSensitive<DeviceRegistrationRequest>("siteCode"),
@@ -321,6 +330,22 @@ class SecurityHardeningTest {
                 "Customer TIN must be fully redacted (PII)")
             assertEquals("ZM-LUSAKA-01", redacted["siteCode"])
         }
+
+        @Test
+        fun `real model — QrBootstrapData redacts provisioningToken`() {
+            val qrData = QrBootstrapData(
+                siteCode = "SITE-001",
+                cloudBaseUrl = "https://api.fccmiddleware.io",
+                provisioningToken = "bootstrap-token-secret",
+                environment = "PRODUCTION",
+            )
+
+            val redacted = SensitiveFieldFilter.redact(qrData)
+            val safe = SensitiveFieldFilter.redactToString(qrData)
+
+            assertEquals("[REDACTED]", redacted["provisioningToken"])
+            assertFalse(safe.contains("bootstrap-token-secret"))
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -330,6 +355,12 @@ class SecurityHardeningTest {
     @Nested
     @DisplayName("Certificate pinning — hostname extraction")
     inner class CertPinning {
+
+        @Test
+        fun `bundled pins are populated`() {
+            assertEquals(2, HttpCloudApiClient.BUNDLED_PINS.size)
+            assertTrue(HttpCloudApiClient.BUNDLED_PINS.all { it.startsWith("sha256/") })
+        }
 
         @Test
         fun `extracts hostname from https URL`() {
@@ -441,6 +472,7 @@ class SecurityHardeningTest {
             assertNotNull(EncryptedPrefsManager.KEY_CLOUD_BASE_URL)
             assertNotNull(EncryptedPrefsManager.KEY_FCC_HOST)
             assertNotNull(EncryptedPrefsManager.KEY_FCC_PORT)
+            assertNotNull(EncryptedPrefsManager.KEY_PROVISIONING_DEVICE_SERIAL_FALLBACK)
         }
 
         @Test
@@ -464,6 +496,7 @@ class SecurityHardeningTest {
                 EncryptedPrefsManager.KEY_CLOUD_BASE_URL,
                 EncryptedPrefsManager.KEY_FCC_HOST,
                 EncryptedPrefsManager.KEY_FCC_PORT,
+                EncryptedPrefsManager.KEY_PROVISIONING_DEVICE_SERIAL_FALLBACK,
                 EncryptedPrefsManager.KEY_IS_REGISTERED,
                 EncryptedPrefsManager.KEY_IS_DECOMMISSIONED,
                 EncryptedPrefsManager.KEY_DEVICE_TOKEN_ENCRYPTED,

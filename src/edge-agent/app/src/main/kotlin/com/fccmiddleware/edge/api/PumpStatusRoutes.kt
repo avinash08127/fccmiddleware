@@ -105,6 +105,21 @@ class PumpStatusCache(
         // Ensure only one live FCC call is in flight at a time (single-flight).
         // Concurrent callers queue behind the mutex instead of fanning out to the FCC.
         return mutex.withLock {
+            // AP-024: If cache was freshly populated by a preceding queued caller
+            // (within liveTimeoutMs), reuse it instead of making a redundant FCC call.
+            val now = System.currentTimeMillis()
+            if (cachedAtMs > 0L && (now - cachedAtMs) < liveTimeoutMs) {
+                val fetchedAt = Instant.ofEpochMilli(cachedAtMs).toString()
+                val ageSeconds = ((now - cachedAtMs) / 1_000L).toInt()
+                return@withLock Result(
+                    pumps = cached,
+                    stale = false,
+                    fetchedAtUtc = fetchedAt,
+                    dataAgeSeconds = ageSeconds,
+                    capability = adapter.pumpStatusCapability,
+                )
+            }
+
             val result = try {
                 withTimeoutOrNull(liveTimeoutMs) { adapter.getPumpStatus() }
             } catch (_: Exception) {

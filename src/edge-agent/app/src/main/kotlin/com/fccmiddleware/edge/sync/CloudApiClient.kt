@@ -622,10 +622,11 @@ class HttpCloudApiClient(
          *   3. Mirror the same values in res/xml/network_security_config.xml.
          *   4. Remove expired pins after the rotation window has closed.
          *
-         * TODO: Replace the empty list below with real pins once TLS certificates are
-         *       provisioned for the production and staging endpoints.
          */
-        val BUNDLED_PINS: List<String> = emptyList()
+        val BUNDLED_PINS: List<String> = listOf(
+            "sha256/YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=",
+            "sha256/Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=",
+        )
 
         /**
          * Factory for the production Ktor client.
@@ -644,6 +645,9 @@ class HttpCloudApiClient(
          *   When empty, [BUNDLED_PINS] are used as a fallback so that initial
          *   registration is never left completely unpinned (S-006).
          */
+        /** AT-016: Placeholder URL used before the device has registered. */
+        const val PRE_REGISTRATION_URL = "https://not-yet-provisioned"
+
         fun create(
             cloudBaseUrl: String,
             certificatePins: List<String> = emptyList(),
@@ -655,6 +659,24 @@ class HttpCloudApiClient(
         }
 
         /**
+         * AT-016: Create a lightweight stub client for pre-registration.
+         *
+         * No certificate pinning is applied because the hostname is a placeholder.
+         * [certificatePins] are stored so that [updateBaseUrl] can apply them after
+         * registration provides a real hostname. Registration calls pass the URL
+         * from QR code explicitly via [registerDevice], so the stub URL is never hit.
+         */
+        fun createPreRegistration(
+            certificatePins: List<String>,
+            encryptedPrefsManager: EncryptedPrefsManager? = null,
+            socketFactory: javax.net.SocketFactory? = null,
+        ): HttpCloudApiClient {
+            AppLogger.i(TAG, "Creating pre-registration stub client (cert pinning deferred)")
+            val client = buildKtorClient(emptyList(), PRE_REGISTRATION_URL, socketFactory, skipPinFallback = true)
+            return HttpCloudApiClient(PRE_REGISTRATION_URL, client, encryptedPrefsManager, certificatePins, socketFactory)
+        }
+
+        /**
          * M-02: Extracted so updateBaseUrl can rebuild the client with new pins
          * when the hostname changes at runtime.
          */
@@ -662,6 +684,7 @@ class HttpCloudApiClient(
             certificatePins: List<String>,
             cloudBaseUrl: String,
             socketFactory: javax.net.SocketFactory? = null,
+            skipPinFallback: Boolean = false,
         ): HttpClient {
             return HttpClient(OkHttp) {
                 engine {
@@ -676,7 +699,13 @@ class HttpCloudApiClient(
 
                     // S-006: merge runtime pins with APK-bundled fallback pins so that
                     // initial registration (before SiteConfig is available) is never unpinned.
-                    val effectivePins = if (certificatePins.isNotEmpty()) certificatePins else BUNDLED_PINS
+                    // AT-016: skipPinFallback=true suppresses the BUNDLED_PINS fallback for
+                    // the pre-registration stub client (no valid hostname to pin to).
+                    val effectivePins = when {
+                        certificatePins.isNotEmpty() -> certificatePins
+                        skipPinFallback -> emptyList()
+                        else -> BUNDLED_PINS
+                    }
 
                     // Build certificate pinner if pins are configured
                     val certPinner = if (effectivePins.isNotEmpty()) {

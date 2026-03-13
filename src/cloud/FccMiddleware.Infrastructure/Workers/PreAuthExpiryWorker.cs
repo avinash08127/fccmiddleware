@@ -1,5 +1,6 @@
 using FccMiddleware.Application.PreAuth;
 using FccMiddleware.Domain.Enums;
+using FccMiddleware.Domain.Interfaces;
 using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;

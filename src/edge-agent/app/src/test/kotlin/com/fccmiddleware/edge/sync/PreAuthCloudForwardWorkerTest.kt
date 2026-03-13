@@ -31,7 +31,8 @@ import java.util.UUID
  *   - No-ops when no unsynced records
  *   - No-ops when access token is unavailable
  *   - Success (201) → markCloudSynced(), failure count reset
- *   - Conflict (409) → markCloudSynced() (cloud already has it)
+ *   - Conflict (409 INVALID_TRANSITION) → markCloudSynced() with warning
+ *   - Conflict (409 RACE_CONDITION) → recordCloudSyncFailure(), backoff applied
  *   - 401 → token refresh → retry succeeds → markCloudSynced()
  *   - 401 → token refresh fails → recordCloudSyncFailure(), backoff applied
  *   - 403 DEVICE_DECOMMISSIONED → markDecommissioned(), stops processing
@@ -168,16 +169,31 @@ class PreAuthCloudForwardWorkerTest {
     }
 
     @Test
-    fun `conflict 409 marks record as cloud synced`() = runTest {
+    fun `conflict invalid transition 409 marks record as cloud synced`() = runTest {
         val record = makePreAuth()
         coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
         coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
-            CloudPreAuthForwardResult.Conflict("INVALID_TRANSITION", "Already in terminal state")
+            CloudPreAuthForwardResult.Conflict("CONFLICT.INVALID_TRANSITION", "Already in terminal state")
 
         worker.forwardUnsyncedPreAuths()
 
         coVerify { preAuthDao.markCloudSynced(record.id, any()) }
         assertEquals(0, worker.consecutiveFailureCount)
+    }
+
+    @Test
+    fun `conflict race condition 409 records failure and leaves record unsynced`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+        coEvery { cloudApiClient.forwardPreAuth(any(), any()) } returns
+            CloudPreAuthForwardResult.Conflict("CONFLICT.RACE_CONDITION", "Concurrent insert")
+
+        worker.forwardUnsyncedPreAuths()
+
+        coVerify(exactly = 0) { preAuthDao.markCloudSynced(any(), any()) }
+        coVerify { preAuthDao.recordCloudSyncFailure(record.id, any()) }
+        assertEquals(1, worker.consecutiveFailureCount)
+        assertTrue(worker.nextRetryAt.isAfter(Instant.EPOCH))
     }
 
     @Test

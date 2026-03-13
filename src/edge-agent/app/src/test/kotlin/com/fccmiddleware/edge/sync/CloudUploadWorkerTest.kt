@@ -4,6 +4,7 @@ import com.fccmiddleware.edge.buffer.TransactionBufferManager
 import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.SyncState
+import com.fccmiddleware.edge.config.ConfigManager
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -28,7 +29,6 @@ import java.util.UUID
  * CloudUploadWorkerTest — unit tests for EA-3.1 Cloud Upload Worker.
  *
  * Validates:
- *   - No-ops when any required dependency is null
  *   - No-ops when device is decommissioned
  *   - No-ops when backoff period is active
  *   - No-ops when no PENDING records exist
@@ -59,6 +59,7 @@ class CloudUploadWorkerTest {
     private val syncStateDao: SyncStateDao = mockk(relaxed = true)
     private val cloudApiClient: CloudApiClient = mockk()
     private val tokenProvider: DeviceTokenProvider = mockk()
+    private val configManager: ConfigManager = mockk(relaxed = true)
 
     private val config = CloudUploadWorkerConfig(
         uploadBatchSize = 10,
@@ -76,6 +77,7 @@ class CloudUploadWorkerTest {
             cloudApiClient = cloudApiClient,
             tokenProvider = tokenProvider,
             config = config,
+            configManager = configManager,
         )
         // Default: not decommissioned, has a token
         every { tokenProvider.isDecommissioned() } returns false
@@ -89,44 +91,6 @@ class CloudUploadWorkerTest {
     // -------------------------------------------------------------------------
     // No-op guards
     // -------------------------------------------------------------------------
-
-    @Test
-    fun `returns early when bufferManager is null`() = runTest {
-        val w = CloudUploadWorker(
-            bufferManager = null,
-            syncStateDao = syncStateDao,
-            cloudApiClient = cloudApiClient,
-            tokenProvider = tokenProvider,
-        )
-        w.uploadPendingBatch()
-        coVerify(exactly = 0) { cloudApiClient.uploadBatch(any(), any()) }
-    }
-
-    @Test
-    fun `returns early when cloudApiClient is null`() = runTest {
-        val w = CloudUploadWorker(
-            bufferManager = bufferManager,
-            syncStateDao = syncStateDao,
-            cloudApiClient = null,
-            tokenProvider = tokenProvider,
-        )
-        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(makeTransaction())
-        w.uploadPendingBatch()
-        // No interaction with any cloud client
-    }
-
-    @Test
-    fun `returns early when tokenProvider is null`() = runTest {
-        val w = CloudUploadWorker(
-            bufferManager = bufferManager,
-            syncStateDao = syncStateDao,
-            cloudApiClient = cloudApiClient,
-            tokenProvider = null,
-        )
-        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(makeTransaction())
-        w.uploadPendingBatch()
-        coVerify(exactly = 0) { cloudApiClient.uploadBatch(any(), any()) }
-    }
 
     @Test
     fun `returns early when device is decommissioned`() = runTest {

@@ -19,6 +19,7 @@
 | **Evidence** | `ui/DiagnosticsActivity.kt` lines 124–133: 9 separate queries, three of which load full table contents. |
 | **Impact** | Unnecessary memory allocation and GC pressure every 5 seconds. On a device with 500+ products, 50+ pumps, and 200+ nozzles, this loads hundreds of objects just to count them. |
 | **Recommended Fix** | Replace `getAllProducts().size` with a `COUNT(*)` query (e.g., `@Query("SELECT COUNT(*) FROM local_products")`). Batch the individual queries into a single Room `@Transaction` method to reduce SQLite lock contention. Consider increasing the refresh interval to 10 seconds or using Room's `Flow`-based reactive queries that only emit when data changes. |
+| **Status** | **RESOLVED** — Added `countProducts()`, `countPumps()`, `countNozzles()` COUNT(*) queries to `SiteDataDao`. `DiagnosticsViewModel.refresh()` now uses these instead of `getAllProducts().size` / `getAllPumps().size` / `getAllNozzles().size`, eliminating full table loads every 5 seconds. |
 
 ---
 
@@ -35,6 +36,7 @@
 | **Evidence** | `buffer/TransactionBufferManager.kt` lines 48–65: `findCrossAdapterDuplicate()` called unconditionally. |
 | **Impact** | An extra SQLite query per transaction ingestion. At 50 transactions per poll cycle, that's 50 extra queries. With a well-indexed table the overhead is small (~1-2ms each), but it accumulates. |
 | **Recommended Fix** | Short-circuit the cross-adapter dedup when only one adapter is configured (check the site config's vendor field). Alternatively, move the dedup check to a Room `@Insert(onConflict = IGNORE)` with a composite unique index instead of a separate query. |
+| **Status** | **RESOLVED** — `TransactionBufferManager` now accepts a `crossAdapterDedupEnabled` constructor parameter (default: `false`). The `findCrossAdapterDuplicate()` query is only executed when this flag is `true`. Single-adapter sites (the vast majority) skip the query entirely, saving one SELECT per transaction insert. |
 
 ---
 
@@ -51,6 +53,7 @@
 | **Evidence** | `sync/CloudUploadWorker.kt` line 864: `rawPayloadJson = rawPayloadJson`. |
 | **Impact** | Upload batches are 2-5x larger than necessary. On metered mobile connections, this increases data costs and latency. |
 | **Recommended Fix** | Make `rawPayloadJson` opt-in via site config (e.g., `sync.includeRawPayload = true`). Default to excluding it since the canonical fields are sufficient for cloud processing. Alternatively, compress the raw payload with gzip before including it. |
+| **Status** | **RESOLVED** — `CloudUploadWorker.toDto()` now conditionally includes `rawPayloadJson` based on `config.buffer.persistRawPayloads` (defaults to `false`). When the flag is off, `rawPayloadJson` is set to `null` in the DTO, reducing upload payload size by 2-5 KB per transaction. Sites that need raw payload archival can enable it via `buffer.persistRawPayloads = true` in the site config. |
 
 ---
 
@@ -67,6 +70,7 @@
 | **Evidence** | `ingestion/IngestionOrchestrator.kt` lines 370–465: entire retry loop. |
 | **Impact** | Low: the query returns quickly when empty. When records exist, the sequential HTTP calls to the Advatec device (one per record) add latency to the cadence tick. |
 | **Recommended Fix** | Batch the fiscalization submissions if the Advatec API supports it. Consider running fiscalization retries on a separate timer to avoid blocking the main cadence tick. |
+| **Status** | **FIXED** — Fiscalization retry moved to a separate cadence timer (`fiscalRetryTickFrequency = 4`, ~2 min at 30s base) in `CadenceController.runTick()`. The main poll path no longer blocks on sequential Advatec HTTP retries. Immediate fiscalization after new transactions still runs inline in `doPoll()`. Tests added in `CadenceControllerTest`. |
 
 ---
 
@@ -83,6 +87,7 @@
 | **Evidence** | `ui/SplashActivity.kt` line 37: `handler.postDelayed(navigateRunnable, 2000)`. |
 | **Impact** | 2-second delay before the foreground service starts on every app launch (including boot). |
 | **Recommended Fix** | Reduce the splash delay to 500ms or remove it entirely for a headless agent. The splash is only seen by technicians during initial provisioning. Consider making it configurable. |
+| **Status** | **FIXED** — Splash delay reduced from 2000ms to 500ms in `SplashActivity.onCreate()`. Still provides brief branding visibility for technicians during provisioning. |
 
 ---
 
@@ -99,6 +104,7 @@
 | **Evidence** | `ui/DiagnosticsActivity.kt` lines 210–243: `removeAllViews()` + `addView(TextView(...))` in a loop, every 5 seconds. |
 | **Impact** | Minor GC pressure and layout thrashing. On low-end Android devices, this could cause dropped frames during refresh. |
 | **Recommended Fix** | Reuse existing `TextView` instances: maintain a pool of pre-created views, update their text/color properties, and show/hide as needed. Alternatively, use a `RecyclerView` with `DiffUtil` for the log lists. |
+| **Status** | **FIXED** (prior commit) — `DiagnosticsActivity` now uses reusable `TextView` pools (`errorTextViews`, `structuredLogTextViews`) that are created on demand, updated in-place via text/color/visibility changes, and never removed. The `removeAllViews()` + `addView()` churn pattern has been eliminated. See P-003 comments in `renderSnapshot()`. |
 
 ---
 
@@ -115,6 +121,7 @@
 | **Evidence** | `config/ConfigManager.kt` lines 81–198: 5 validation passes. |
 | **Impact** | Negligible: validation only runs on actual config changes (not on 304 responses). |
 | **Recommended Fix** | No action required. The current design is correct — validation runs only when a new config version arrives. |
+| **Status** | **WON'T FIX** — No action required. The current design is correct: `ConfigPollWorker` returns 304 for unchanged configs, so `applyConfig()` (and its validation passes) only runs when a genuinely new config version arrives. |
 
 ---
 
@@ -131,6 +138,7 @@
 | **Evidence** | `preauth/PreAuthHandler.kt` lines 149, 150, 241, 272: multiple `Instant.now().toString()` calls. |
 | **Impact** | Negligible: each call takes <1ms. Total overhead per request is ~2-3ms. |
 | **Recommended Fix** | No action required. The current approach is readable and the overhead is well within the latency budget. |
+| **Status** | **WON'T FIX** — No action required. Each `Instant.now()` call takes <1µs and the total overhead per request (~2-3ms) is negligible against the p95 ≤ 150ms latency budget. Readability is more valuable than micro-optimizing these allocations. |
 
 ---
 
@@ -147,6 +155,7 @@
 | **Evidence** | Adapter exploration: "Enqueues to ConcurrentLinkedQueue. Max queue 10,000. Always responds 200 OK." |
 | **Impact** | On a high-volume forecourt with slow ingestion, 10,000 queued webhook payloads could consume 10-50 MB of heap memory, triggering GC pauses or OOM on low-memory devices. |
 | **Recommended Fix** | Reduce the queue cap to 1,000. Return HTTP 429 or 503 when the queue is full instead of 200 (so the Advatec device knows to retry). Add memory-size-based limits in addition to count-based limits. |
+| **Status** | **RESOLVED** — Implemented all three recommended fixes: (1) Reduced `MAX_QUEUE_SIZE` from 10,000 to 1,000. (2) Queue-full responses now return HTTP 429 Too Many Requests instead of 200 OK, signalling the Advatec device to retry. (3) Added memory-size-based backpressure via `MAX_QUEUE_BYTES` (5 MB ceiling) tracked with an `AtomicLong` counter that estimates heap usage per payload. Both count and memory limits are enforced before enqueue; `drainQueue()` and `stop()` correctly decrement/reset the byte counter. |
 
 ---
 
@@ -163,6 +172,7 @@
 | **Evidence** | `buffer/TransactionBufferManager.kt` line 251: `Instant.now().minus(staleDays.toLong(), ChronoUnit.DAYS).toString()` — string cutoff for date comparison. `preauth/PreAuthHandler.kt` line 379: `Instant.now().toString()` for expiry check. |
 | **Impact** | Minor query performance overhead. Acceptable for the current record volumes but may become significant at scale (100K+ records). |
 | **Recommended Fix** | Accept current design for now. If performance becomes an issue, migrate timestamps to `Long` (epoch millis) with a Room migration. This would require updating all DAO queries and entity mappings. |
+| **Status** | **WON'T FIX** — Accepted current design. ISO 8601 string comparisons are lexicographically correct in SQLite and the ~2-5ms overhead per query is acceptable at current record volumes (30K). A migration to epoch millis would touch all DAO queries and entity mappings — not justified until volumes exceed 100K+ records. |
 
 ---
 
@@ -179,6 +189,7 @@
 | **Evidence** | `ui/ProvisioningViewModel.kt` lines 188–203: `agentConfigDao.upsert(entity)` followed by `agentConfigDao.get()` in a retry loop. |
 | **Impact** | Minor: 5–10ms extra latency during a one-time registration flow. The retry loop adds resilience against transient SQLite lock contention, which has value on WAL-mode databases under concurrent access. |
 | **Recommended Fix** | Remove the verification read. Trust Room's `@Insert(onConflict = REPLACE)` — if it doesn't throw, the write succeeded. Keep the retry for the `upsert()` call itself (catch and retry on exception), but remove `agentConfigDao.get()` and the version comparison. |
+| **Status** | **RESOLVED** — Removed the `agentConfigDao.get()` verification read and `configVersion` comparison from the retry loop in `ProvisioningViewModel.handleRegistrationSuccess()`. The loop now retries only the `upsert()` call on exception, reducing Room operations from up to 4 (2×upsert + 2×get) to at most 2 (2×upsert on retry). |
 
 ---
 
@@ -195,6 +206,7 @@
 | **Evidence** | `adapter/radix/RadixXmlParser.kt` lines 237–241: `val factory = DocumentBuilderFactory.newInstance()` inside `parseXml()`, called per-parse. |
 | **Impact** | 50–150ms of unnecessary overhead per fetch cycle on 50-transaction batches (1–3ms × 50–100 parse calls). On Urovo i9100 devices with slow CPUs, this can push the total fetch time beyond cadence tick targets. |
 | **Recommended Fix** | Cache the `DocumentBuilderFactory` as a companion object property, configured once: `private val docBuilderFactory = DocumentBuilderFactory.newInstance().apply { setFeature(...) }`. Create a new `DocumentBuilder` per call (builders are not thread-safe, but factories are). |
+| **Status** | **RESOLVED** — Cached `DocumentBuilderFactory` as a `private val docBuilderFactory` property on the `RadixXmlParser` object, configured once with XXE protection features. `parseXml()` now calls `docBuilderFactory.newDocumentBuilder()` per parse (builders are not thread-safe), eliminating the per-call service provider lookup overhead (~1–3ms × 50–100 calls per fetch cycle). |
 
 ---
 
@@ -211,6 +223,7 @@
 | **Evidence** | `adapter/advatec/AdvatecFiscalizationService.kt` line 227: `Thread.sleep(100)` in daemon thread. Lines 152–168: `delay(POLL_INTERVAL_MS)` in coroutine. Line 212: `Thread(...)` daemon for drain. |
 | **Impact** | Wasted CPU cycles during the 5–30 second receipt wait: ~300 poll iterations per fiscalization call. The daemon thread holds an OS thread indefinitely. |
 | **Recommended Fix** | Replace the polling pattern with a `Channel<AdvatecReceiptData>` or `CompletableDeferred<AdvatecReceiptData>`. The webhook drain coroutine sends to the channel; `submitForFiscalization` suspends on `channel.receive()` with a timeout. This eliminates both busy-wait loops and the daemon thread. |
+| **Status** | **RESOLVED** — Replaced `ConcurrentLinkedQueue` + dual busy-wait polling with a `Channel<AdvatecReceiptData>(UNLIMITED)`. The daemon `Thread` with `Thread.sleep(100)` is replaced by a coroutine on `Dispatchers.IO` with `delay(100)`. The `submitForFiscalization()` coroutine now suspends on `withTimeoutOrNull(RECEIPT_TIMEOUT_MS) { receiptChannel.receive() }` instead of polling with `delay(200)`. Eliminates ~300 poll iterations per fiscalization call and frees one permanent OS thread. |
 
 ---
 
@@ -227,6 +240,7 @@
 | **Evidence** | `adapter/doms/DomsJplAdapter.kt` lines 253–261: sequential `mapNotNull` normalization. `adapter/doms/mapping/DomsCanonicalMapper.kt` line 55: `java.time.Instant.now()`, lines 45–50: timezone parsing, line 59: `UUID.randomUUID()`. |
 | **Impact** | Low: 50–100ms CPU time per fetch is within the cadence budget (30s tick). Only becomes an issue if batch sizes grow significantly (200+ transactions) or the device CPU is heavily loaded. |
 | **Recommended Fix** | No immediate action required. If batch sizes grow, consider yielding periodically with `yield()` inside the loop, or processing normalization on `Dispatchers.Default` explicitly (with `withContext`) to ensure the work is on the correct dispatcher. |
+| **Status** | **RESOLVED** — Normalization loop in `DomsJplAdapter.fetchTransactions()` now runs inside `withContext(Dispatchers.Default)` with `yield()` every 20 items, preventing dispatcher starvation on large batches. The `mapNotNull` was replaced with an explicit loop to support periodic yielding. |
 
 ---
 
@@ -243,6 +257,7 @@
 | **Evidence** | `api/TransactionRoutes.kt` line 160: `val found = request.transactionIds.count { id -> dao.getById(id) != null }`. `buffer/dao/TransactionBufferDao.kt` line 63: `@Query("SELECT * FROM buffered_transactions WHERE id = :id")` — returns full entity with rawPayloadJson. |
 | **Impact** | For a batch of 50 IDs: 50 SQLite round-trips, ~250 KB of data loaded and immediately discarded. On the Urovo i9100 with slow eMMC, each query takes 1–3 ms, so the endpoint takes 50–150 ms — approaching the p95 target for the local API. |
 | **Recommended Fix** | Replace with a single count query: add `@Query("SELECT COUNT(*) FROM buffered_transactions WHERE id IN (:ids)") suspend fun countByIds(ids: List<String>): Int` to `TransactionBufferDao`. Use this instead of N individual `getById` calls. When the acknowledge endpoint is fixed (AF-022), use a batch UPDATE instead. |
+| **Status** | **RESOLVED** — The N-query `getById` loop has been replaced with `dao.markAcknowledged(ids, now)`, a single batch `UPDATE ... WHERE id IN (:ids) AND acknowledged_at IS NULL` that both marks records as acknowledged and returns the count of updated rows. This eliminates all N individual SELECT queries and goes beyond the recommended `countByIds` approach by combining the existence check with the actual acknowledge operation in a single SQL statement. Fixed as part of AF-022. |
 
 ---
 
@@ -259,6 +274,7 @@
 | **Evidence** | `websocket/OdooWebSocketServer.kt` lines 183–187: `val broadcastJob = serviceScope.launch { pumpStatusBroadcastLoop(session) }` — one coroutine per client. Lines 272–289: `pumpStatusBroadcastLoop` calls `adapter.getPumpStatus()` independently per client. |
 | **Impact** | With N connected POS terminals, the FCC adapter receives N × (60/interval) status requests per minute instead of (60/interval). For 5 clients at 3-second intervals: 100 requests/minute instead of 20. On DOMS TCP (shared connection), this increases JPL frame traffic 5×. On Radix HTTP, this creates 5× the HTTP connections to the FCC. |
 | **Recommended Fix** | Replace per-client broadcast loops with a single shared broadcast coroutine. Fetch pump statuses once per interval, then iterate over all connected clients to send the result. Example: `serviceScope.launch { while(isActive) { delay(intervalMs); val statuses = adapter.getPumpStatus(); for (session in clients.keys) { sendStatuses(session, statuses) } } }`. Remove the per-client `broadcastJob`. |
+| **Status** | **RESOLVED** — Replaced per-client `pumpStatusBroadcastLoop` coroutines with a single `sharedPumpStatusBroadcastLoop` launched once when the server starts. The shared loop fetches pump statuses once per interval, serializes each `FuelPumpStatusWsDto` once, then fans the pre-serialized frames out to all connected clients. Dead sessions are cleaned up during broadcast. The per-client `broadcastJob` field was removed from `ClientEntry`. With N clients, the FCC now receives exactly (60/interval) status requests per minute instead of N × (60/interval). |
 
 ---
 
@@ -275,6 +291,7 @@
 | **Evidence** | `sync/TelemetryReporter.kt` line 250: `transactionDao.oldestPendingCreatedAt()` in `collectBufferStatus()`. Line 290: `transactionDao.oldestPendingCreatedAt()` in `collectSyncStatus()`. |
 | **Impact** | Minor: 1–3ms extra per telemetry cycle (every ~120s at default tick frequency). Potential data inconsistency between buffer and sync sections of the telemetry payload. |
 | **Recommended Fix** | Query `oldestPendingCreatedAt()` once in `buildPayload()` and pass the result to both `collectBufferStatus(oldestPendingAtUtc)` and `collectSyncStatus(cfg, oldestPendingAtUtc)` as a parameter. |
+| **Status** | **RESOLVED** — `buildPayload()` now queries `transactionDao.oldestPendingCreatedAt()` once and passes the result as a parameter to both `collectBufferStatus(oldestPendingAtUtc)` and `collectSyncStatus(cfg, oldestPendingAtUtc)`. The duplicate query has been eliminated, and both sections of the telemetry payload now use the same consistent timestamp value. |
 
 ---
 
@@ -291,6 +308,7 @@
 | **Evidence** | `sync/TelemetryReporter.kt` line 165: `context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))` — IPC per call. Line 176: `StatFs(Environment.getDataDirectory().path)` — filesystem stat per call. |
 | **Impact** | Negligible: ~1ms per telemetry cycle for the IPC call. The sticky broadcast approach is correct and widely used. This finding is informational for optimization if telemetry frequency increases. |
 | **Recommended Fix** | No immediate action required. If telemetry frequency is increased (e.g., to every tick during FCC outages per AF-036), consider caching the battery intent via a persistent `BroadcastReceiver` registered in the foreground service and updated on `ACTION_BATTERY_CHANGED` broadcasts. |
+| **Status** | **RESOLVED** — `collectDeviceStatus()` now uses `BatteryManager.getIntProperty(BATTERY_PROPERTY_CAPACITY)` and `BatteryManager.isCharging` which read directly from sysfs (`/sys/class/power_supply/`) without an IPC round-trip to the system server. The `registerReceiver(null, IntentFilter(ACTION_BATTERY_CHANGED))` sticky broadcast pattern has been removed, along with the `Intent` and `IntentFilter` imports. Tests updated to mock `BatteryManager` instead of the battery intent. |
 
 ---
 
@@ -307,6 +325,7 @@
 | **Evidence** | `sync/TelemetryReporter.kt` lines 80–124: `buildPayload()` calls `collectBufferStatus()` (lines 234–272, 3 queries) and `collectSyncStatus()` (lines 279–313, 3 queries) plus `nextSequenceNumber()` (2 operations). |
 | **Impact** | Low: 10–50ms per telemetry cycle is within the cadence budget. Becomes relevant if telemetry frequency increases or if concurrent database load increases. |
 | **Recommended Fix** | Accept the current design at default telemetry frequency. If optimization is needed, wrap all read queries in a single `@Transaction` method on a custom DAO to reduce connection pool overhead and ensure a consistent snapshot. Eliminate the duplicate `oldestPendingCreatedAt` query (AP-020). |
+| **Status** | **RESOLVED** — `buildPayload()` now runs `collectBufferStatus()` and `collectSyncStatus()` in parallel using `coroutineScope { async { ... } }`. The two independent suspend functions (each with their own DB queries) execute concurrently instead of sequentially, reducing total assembly time. Combined with the AP-020 fix (duplicate `oldestPendingCreatedAt` eliminated), the effective query count per telemetry cycle is now 4 DB operations + 1 filesystem stat, down from the original 10+. |
 
 ---
 
@@ -323,6 +342,7 @@
 | **Evidence** | `logging/StructuredFileLogger.kt` lines 130–152: `getRecentDiagnosticEntries()` forward-scans files. `ui/DiagnosticsActivity.kt` line 136: called every 5 seconds. Lines 137, 162–163: `totalLogSizeBytes()` also called per refresh. |
 | **Impact** | Low: on modern ARM processors, the string scanning takes <5ms even for 3,000 lines. On the Urovo i9100 (Qualcomm MSM8909, 1.1 GHz quad-core), this may reach 10–15ms during heavy logging. The cumulative effect is minor file I/O every 5 seconds while the diagnostics screen is open. The impact is bounded by the screen's lifecycle (only runs while visible). |
 | **Recommended Fix** | Maintain an in-memory ring buffer of the last N WARN/ERROR entries in `StructuredFileLogger`, appended during `writeEntry()` when the level is WARN or above. `getRecentDiagnosticEntries()` returns a snapshot of the ring buffer (O(1)) instead of rescanning files. This eliminates all file I/O from the 5-second refresh cycle. For `totalLogSizeBytes()`, cache the value and update it when a new file is created (in `getOrCreateWriter()`). |
+| **Status** | **RESOLVED** — `StructuredFileLogger` now maintains an in-memory `ArrayDeque` ring buffer (max 200 entries) of WARN/ERROR/FATAL log lines. The buffer is populated from existing log files on first access (lazy initialization with double-checked locking), then maintained incrementally by `writeEntry()` and `crash()`. `getRecentDiagnosticEntries()` returns from the ring buffer in O(1) — no file I/O on the 5-second refresh cycle. `totalLogSizeBytes()` now returns a cached value that is invalidated on file rotation (`getOrCreateWriter()`) and old file deletion (`rotateOldFiles()`), eliminating per-refresh directory listings and file stat calls. |
 
 ---
 
@@ -339,6 +359,7 @@
 | **Evidence** | `api/PumpStatusRoutes.kt` lines 107–122: `mutex.withLock { ... withTimeoutOrNull(liveTimeoutMs) { adapter.getPumpStatus() } ... }` — no cache freshness check after mutex acquisition. Lines 114–116: cache updated only after live fetch. Lines 88–89: `cached` and `cachedAtMs` — no minimum age check. |
 | **Impact** | With N connected POS terminals polling pump status, the FCC adapter receives N sequential status requests per cache miss instead of 1. For 5 clients: 5× the FCC traffic. Combined with AP-016 (per-client WebSocket broadcast also polls independently), the FCC can receive 5+ status requests per 3-second interval from pump-status HTTP clients plus 5 independent polls from WebSocket clients — 10× the intended FCC status query rate. |
 | **Recommended Fix** | Add a cache freshness check inside the mutex, before the live fetch: `if (System.currentTimeMillis() - cachedAtMs < liveTimeoutMs) { return Result(pumps = cached, stale = false, fetchedAtUtc = ..., dataAgeSeconds = 0, capability = ...) }`. This ensures only the first caller triggers a live FCC call; subsequent queued callers reuse the fresh result. The `liveTimeoutMs` (1 second) is a reasonable freshness threshold since pump status changes on a multi-second timescale. |
+| **Status** | **RESOLVED** — `PumpStatusCache.get()` now checks cache freshness immediately after acquiring the mutex: if `cachedAtMs` is within `liveTimeoutMs` (1 second), the cached result is returned directly without making a live FCC call. This ensures that when N POS clients queue behind the mutex, only the first caller triggers a live FCC fetch — subsequent queued callers reuse the fresh result, reducing FCC traffic from N calls to 1 per cache miss window. |
 
 ---
 
@@ -451,3 +472,131 @@
 | **Evidence** | `security/EncryptedPrefsManager.kt` lines 53–55: `MasterKey.Builder(context).setKeyScheme(AES256_GCM).build()`. `config/LocalOverrideManager.kt` lines 58–60: identical `MasterKey.Builder(context).setKeyScheme(AES256_GCM).build()`. `di/AppModule.kt` lines 90, 92: `single { EncryptedPrefsManager(androidContext()) }` and `single { LocalOverrideManager(androidContext()) }` — both initialized during Koin startup. |
 | **Impact** | 10–50ms additional startup latency due to redundant Keystore IPC. On cold boot of the Urovo i9100, app startup (from `Application.onCreate()` to `EdgeAgentForegroundService.onStartCommand()`) is already ~2 seconds. The 10–50ms represents 0.5–2.5% of total startup time. Minor, but every millisecond matters for a service-oriented agent that needs to start monitoring fuel pumps quickly. |
 | **Recommended Fix** | Create the `MasterKey` once in the Koin module and share it: `single { MasterKey.Builder(androidContext()).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build() }`. Modify `EncryptedPrefsManager` and `LocalOverrideManager` to accept the `MasterKey` as a constructor parameter: `class EncryptedPrefsManager(context: Context, masterKey: MasterKey)`. This eliminates the redundant Keystore IPC and provides a single point of configuration for the key scheme.
+
+---
+
+## AP-032: CadenceController runTick Executes All Workers Sequentially — Cumulative I/O Delays Pre-Auth Expiry Check
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-032 |
+| **Title** | All cadence workers run sequentially in a single coroutine — pre-auth expiry check is blocked behind cumulative FCC + cloud I/O |
+| **Module** | Runtime & Scheduling |
+| **Severity** | Medium |
+| **Category** | Blocking Calls on Main Thread |
+| **Description** | `CadenceController.runTick()` (lines 422–499) executes all workers sequentially within a single `suspend fun`. In the `FULLY_ONLINE` branch (lines 453–472): (1) `ingestionOrchestrator.poll()` — FCC network I/O, up to 10 fetch cycles × adapter timeout per cycle; (2) `cloudUploadWorker.uploadPendingBatch()` — HTTP POST with 30s read timeout; (3) `preAuthCloudForwardWorker?.forwardUnsyncedPreAuths()` — up to 20 HTTP POSTs (bounded parallelism of 3); (4) `cloudUploadWorker.pollSyncedToOdooStatus()` — HTTP GET with 30s read timeout; (5) `cloudUploadWorker.reportTelemetry()` — HTTP POST; (6) `configPollWorker?.pollConfig()` — HTTP GET. The pre-auth expiry check at line 498 (`preAuthHandler?.runExpiryCheck()`) runs AFTER all of the above complete. In the worst case (FCC slow + cloud endpoints responding at timeout boundary), a single tick can take 60–120+ seconds. During this window, expired pre-auth records remain active on the FCC — the pump stays authorized beyond the intended TTL until the expiry check finally runs. The FCC's own TTL provides a safety net, but the edge agent's expiry check is supposed to cancel the authorization proactively. Additionally, when a tick overruns the 30-second base interval, subsequent ticks queue behind it (the `delay(interval)` at line 409 only runs after `runTick` completes), creating a cascading delay that can push telemetry and config polls far behind schedule. |
+| **Evidence** | `runtime/CadenceController.kt` lines 453–472: sequential worker calls in `FULLY_ONLINE`. Line 498: `preAuthHandler?.runExpiryCheck()` — runs last. `sync/CloudApiClient.kt` lines 710–712: `readTimeout(30_000)` / `writeTimeout(30_000)` — 30s cloud timeouts. |
+| **Impact** | Pre-auth expiry checks can be delayed by 60–120 seconds when FCC and cloud I/O are slow simultaneously. On a busy forecourt, this means a pump may remain authorized for up to 2 minutes beyond the intended expiry, allowing unauthorized dispensing until the FCC's own TTL kicks in. The cadence tick overrun also delays telemetry, config, and status poll timing. |
+| **Recommended Fix** | Move `preAuthHandler?.runExpiryCheck()` to the TOP of `runTick()`, before any FCC or cloud I/O. Pre-auth expiry is time-critical (safety-sensitive) and fast under normal conditions (index-backed empty-set query). Alternatively, run expiry checks on a separate lightweight timer (every 30s) independent of the cadence tick, so it is never blocked by cloud I/O. For the overall tick overrun issue, consider launching cloud workers concurrently (e.g., `coroutineScope { launch { uploadPendingBatch() }; launch { pollSyncedToOdooStatus() } }`) since they are independent operations that do not share state. |
+
+---
+
+## AP-033: Per-Record Upload Failure Recording Executes N Individual UPDATE Statements on Transport Error
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-033 |
+| **Title** | Transport failure path records upload failure for each batch record individually — 50 separate UPDATE operations |
+| **Module** | Cloud Sync |
+| **Severity** | Medium |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `CloudUploadWorker.handleUploadResult()` at lines 731–743 handles transport failures by iterating through every record in the batch and calling `bm.recordUploadFailure()` for each one. Each call executes `dao.updateSyncStatus()` — a separate `UPDATE buffered_transactions SET sync_status = ?, upload_attempts = ?, last_upload_attempt_at = ?, last_upload_error = ?, updated_at = ? WHERE id = ?`. For a batch of 50 records, this is 50 individual Room UPDATE operations, each acquiring a SQLite connection from the pool, executing the statement, and releasing it. The `attemptAt` and `error` values are identical across all 50 calls (both computed once before the loop at lines 731–732). This is a classic N+1 pattern: a single batch UPDATE would accomplish the same result with one SQL statement. On the Urovo i9100 with eMMC storage, each UPDATE takes 1–5ms (including WAL journal write). For 50 records: 50–250ms of disk I/O during the cadence tick. This extends the tick duration (compounding AP-032) and delays subsequent workers. Additionally, `bm.deadLetterExhausted()` at line 742 runs AFTER the per-record loop, executing another query (`deadLetterExhaustedPending`) that could have been included in the batch. |
+| **Evidence** | `sync/CloudUploadWorker.kt` lines 731–743: `for (tx in batch) { bm.recordUploadFailure(...) }`. `buffer/TransactionBufferManager.kt` lines 200–209: `recordUploadFailure` calls `dao.updateSyncStatus()` per record. `buffer/dao/TransactionBufferDao.kt` lines 72–88: individual `UPDATE ... WHERE id = :id`. |
+| **Impact** | 50–250ms of sequential SQLite UPDATEs per transport failure. With circuit breaker backoff, transport failures occur infrequently, but when they do (cloud outage), the per-record recording adds latency to the cadence tick. The pattern also creates 50 separate WAL journal entries instead of 1. |
+| **Recommended Fix** | Add a batch method to `TransactionBufferDao`: `@Query("UPDATE buffered_transactions SET upload_attempts = upload_attempts + 1, last_upload_attempt_at = :attemptAt, last_upload_error = :error, updated_at = :now WHERE id IN (:ids)") suspend fun recordBatchUploadFailure(ids: List<String>, attemptAt: String, error: String, now: String)`. Replace the per-record loop with a single call: `bm.recordBatchUploadFailure(batch.map { it.id }, attemptAt, error)`. This reduces 50 operations to 1. |
+
+---
+
+## AP-034: StructuredFileLogger Launches a Separate Coroutine Per Log Entry — High Coroutine Object Churn
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-034 |
+| **Title** | Every log call creates a new coroutine via scope.launch — 1000+ coroutine allocations per minute during normal operation |
+| **Module** | Logging |
+| **Severity** | Low |
+| **Category** | Repeated Processing |
+| **Description** | `StructuredFileLogger.writeEntry()` at line 216 calls `scope.launch(Dispatchers.IO) { writeMutex.withLock { ... } }` for every log entry. Each `scope.launch` allocates: a `Job` object (~80 bytes), a `StandaloneCoroutine` (~120 bytes), a `DispatchedContinuation` (~64 bytes), and schedules the work on `Dispatchers.IO`. During a single cadence tick in `FULLY_ONLINE` mode, the codebase emits approximately 30–60 log messages across all workers (ingestion, upload, status poll, telemetry, expiry check). At a 30-second cadence: ~60–120 log entries/minute = 60–120 coroutine launches/minute. During error storms (FCC unreachable, cloud down), logging increases to 100+ entries per tick due to `AppLogger.w/e` calls in error paths, reaching 200+ coroutines/minute. The `writeMutex` ensures only one write proceeds at a time, so most coroutines are created just to immediately suspend on the mutex. When the active writer finishes, the next queued coroutine is resumed — this creates a one-at-a-time pipeline where the coroutines are effectively serving as a queue. A `Channel` or a single long-lived coroutine consuming from a `Channel<LogEntry>` would eliminate all the per-entry coroutine allocations while preserving the async-write semantics. |
+| **Evidence** | `logging/StructuredFileLogger.kt` line 216: `scope.launch(Dispatchers.IO) { writeMutex.withLock { ... } }` — one coroutine per log entry. Lines 82–107: `d()`, `i()`, `w()`, `e()` all call `writeEntry()`. Global logging frequency: ~30–60 calls per cadence tick across all workers (verified by counting `AppLogger.*` call sites in CloudUploadWorker, CadenceController, IngestionOrchestrator, ConnectivityManager, PreAuthHandler). |
+| **Impact** | ~15–30 KB of garbage objects per minute from coroutine allocations (200 bytes × 60–120 coroutines/min). On the Urovo i9100 with 512 MB heap and aggressive GC thresholds, this contributes to minor GC pauses (1–3ms each). The effect is cumulative with other GC pressure sources (AP-006, AP-009, AP-025). Individually negligible; collectively these sources can trigger 1–2 extra minor GC cycles per minute. |
+| **Recommended Fix** | Replace the per-entry `scope.launch` with a `Channel<LogEntry>`-based architecture. Create one long-lived writer coroutine: `scope.launch(Dispatchers.IO) { for (entry in channel) { writer.write(...) } }`. In `writeEntry()`, send to the channel instead of launching a coroutine: `channel.trySend(entry)`. This eliminates all per-entry coroutine allocations while preserving async I/O and back-pressure. Use a `Channel(capacity = 256, onBufferOverflow = DROP_OLDEST)` to handle burst logging without blocking callers. |
+
+---
+
+## AP-035: GET /api/v1/transactions Loads Full BufferedTransaction Including rawPayloadJson — Discarded in LocalTransaction Mapping
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-035 |
+| **Title** | Local API transaction list queries use SELECT * loading rawPayloadJson (2–5 KB/record) — field is immediately discarded during DTO mapping |
+| **Module** | Local API |
+| **Severity** | Medium |
+| **Category** | Large Payload Processing |
+| **Description** | `TransactionRoutes.get("/api/v1/transactions")` at lines 70–79 calls DAO methods (`getForLocalApi`, `getForLocalApiByPump`, `getForLocalApiSince`, `getForLocalApiByPumpSince`) that all use `SELECT * FROM buffered_transactions`. Each returned `BufferedTransaction` entity includes `rawPayloadJson` — a nullable TEXT column containing 2–5 KB of raw FCC protocol data (DOMS JPL frames, Radix XML, Advatec webhook payloads). At line 95, the entities are immediately mapped to `LocalTransaction.from(it)`, which copies 16 fields but does NOT include `rawPayloadJson` (see `ApiModels.kt` lines 68–87). The raw payload is loaded from SQLite, deserialized into the Kotlin data class, carried through the `List<BufferedTransaction>`, and discarded during the `map { LocalTransaction.from(it) }` step. With a default `limit=50` and an average `rawPayloadJson` size of 3 KB, each API call loads ~150 KB of raw payload data that is immediately discarded. Odoo POS polls this endpoint every 5–10 seconds on each connected terminal. With 5 terminals: 750 KB of garbage per 5-second cycle, or ~9 MB/minute. This is the same pattern as AP-025 (WebSocket queries) but on the REST API hot path — the local API has a p95 <= 150ms latency target at 30k records, and the extra data loading adds to SQLite read time and GC pressure. |
+| **Evidence** | `api/TransactionRoutes.kt` lines 70–79: calls `dao.getForLocalApi(limit, offset)` etc., all returning `List<BufferedTransaction>`. Line 95: `entities.map { LocalTransaction.from(it) }`. `api/ApiModels.kt` lines 68–87: `LocalTransaction.from()` does not reference `rawPayloadJson`. `buffer/dao/TransactionBufferDao.kt` lines 43–50: `SELECT * FROM buffered_transactions` — includes all columns. `buffer/entity/BufferedTransaction.kt` line 103: `val rawPayloadJson: String?`. |
+| **Impact** | ~150 KB unnecessary memory allocation per API call at default `limit=50`. With 5 POS terminals polling every 5 seconds: ~9 MB/minute of garbage. On the Urovo i9100 with limited heap, this triggers additional minor GC pauses (~3–5ms each) on the Ktor request path, potentially pushing p95 latency above the 150ms target when combined with SQLite read time. |
+| **Recommended Fix** | Create projection queries that exclude `rawPayloadJson`. Define a lightweight Room projection class: `data class LocalApiTransaction(@ColumnInfo(name = "id") val id: String, @ColumnInfo(name = "fcc_transaction_id") val fccTransactionId: String, ...)` containing only the 16 fields used by `LocalTransaction.from()`. Use `@Query("SELECT id, fcc_transaction_id, site_code, pump_number, nozzle_number, product_code, volume_microlitres, amount_minor_units, unit_price_minor_per_litre, currency_code, started_at, completed_at, fiscal_receipt_number, fcc_vendor, attendant_id, sync_status, correlation_id FROM buffered_transactions WHERE ...")`. This eliminates the `rawPayloadJson` load. Apply the same projection to the WebSocket queries (AP-025) for a combined fix. |
+
+---
+
+## AP-036: GET /api/v1/transactions Executes Two Separate Database Queries Per Request — Entities Then Count
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-036 |
+| **Title** | Transaction list endpoint runs a full data query and a separate COUNT(*) query — two SQLite round-trips per API call |
+| **Module** | Local API |
+| **Severity** | Low |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `TransactionRoutes.get("/api/v1/transactions")` at lines 70–90 executes two separate DAO queries per request: (1) a data query to fetch the paginated records (lines 70–79, e.g., `dao.getForLocalApi(limit, offset)`), and (2) a count query to get the total matching records for the `total` field in the response (lines 81–90, e.g., `dao.countForLocalApi()`). Both queries hit the same table with similar WHERE conditions (`sync_status NOT IN ('SYNCED_TO_ODOO') AND acknowledged_at IS NULL`) but are executed as separate SQLite statements. Each acquires a Room connection, executes the query, and releases the connection. Additionally, the count variants with filters (`countForLocalApiByPump`, `countForLocalApiByPumpSince`, `countForLocalApiSince`) are called at lines 83–89 but are NOT present in the `TransactionBufferDao` interface visible in the codebase — they may be defined elsewhere or may cause compilation failures for filtered queries. The two-query pattern is standard for paginated APIs, but on the Urovo i9100 with slow eMMC, each query takes 2–10ms. With 5 POS terminals polling every 5 seconds, this is 10 queries/5s = 2 queries × 5 clients × 12/minute = 120 queries/minute, where half could be eliminated. |
+| **Evidence** | `api/TransactionRoutes.kt` lines 70–79: data query. Lines 81–90: separate count query. `buffer/dao/TransactionBufferDao.kt` lines 200–205: `countForLocalApi()` — separate `SELECT COUNT(*)`. |
+| **Impact** | One additional SQLite round-trip per API call (2–10ms). With 5 concurrent POS terminals polling at 5-second intervals: 60 extra queries/minute. Total added latency: ~120–600ms/minute distributed across 60 calls. Individually minor; contributes to p95 latency variance. |
+| **Recommended Fix** | Use SQLite window functions or a Room `@Transaction` method that returns both data and count in a single query pass. For example, use `SELECT *, COUNT(*) OVER() AS total_count FROM buffered_transactions WHERE ... LIMIT :limit OFFSET :offset`. Alternatively, accept the two-query approach but wrap them in a `@Transaction` to ensure a consistent snapshot (preventing the count from changing between the two queries due to concurrent inserts). If the `total` field is not strictly needed by Odoo POS, consider making it optional and omitting the count query when it is not requested (lazy evaluation via a `includeTotal=true` query parameter). |
+
+---
+
+## AP-037: PreAuthHandler.runExpiryCheck Makes Sequential FCC Deauth Calls — N × Timeout Seconds Worst Case
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-037 |
+| **Title** | Expiry check iterates through expired records and makes a separate FCC deauth call per record — 10 records × 10s timeout = 100s worst case |
+| **Module** | Pre-Authorization |
+| **Severity** | Medium |
+| **Category** | Blocking Calls on Main Thread |
+| **Description** | `PreAuthHandler.runExpiryCheck()` (lines 392–496) queries expired pre-auth records via `preAuthDao.getExpiring(now, config.expiryBatchSize)` (up to 50 records, default `expiryBatchSize=50`). For each record in `PreAuthStatus.AUTHORIZED` state, it makes a synchronous FCC deauth call: `withTimeout(config.fccTimeoutMs) { adapter.cancelPreAuth(cancelCommand) }` at lines 441–443. The `fccTimeoutMs` is `AdapterTimeouts.PREAUTH_TIMEOUT_MS * 2` — if the base timeout is 5 seconds, this is 10 seconds per deauth call. The deauth calls are executed sequentially in a `for (r in expiring)` loop (line 399). If 10 AUTHORIZED pre-auth records expire simultaneously (e.g., after an FCC outage lasting 5 minutes during a busy forecourt rush, where 10 pumps each had active pre-auths), the expiry check takes 10 × 10s = 100 seconds in the worst case. This runs at the end of the cadence tick (AP-032), compounding the sequential I/O delay. During this time, no other cadence work can proceed. The AF-005 retry mechanism (lines 411–421) adds mitigation by tracking deauth attempts and force-expiring after 5 failures, but each retry still incurs the full timeout. For DOMS JPL adapters, `cancelPreAuth` sends a deauthorization message over the shared TCP connection — serial calls are necessary since the connection is single-flight. For Radix HTTP adapters, the deauth calls could be parallelized. |
+| **Evidence** | `preauth/PreAuthHandler.kt` lines 399–496: sequential `for (r in expiring)` loop. Lines 441–443: `withTimeout(config.fccTimeoutMs) { adapter.cancelPreAuth(cancelCommand) }` per record. Line 394: `preAuthDao.getExpiring(now, config.expiryBatchSize)` — up to 50 records. `preauth/PreAuthHandler.kt` line 64: `val fccTimeoutMs: Long = AdapterTimeouts.PREAUTH_TIMEOUT_MS * 2`. |
+| **Impact** | In the worst case (10 simultaneous expirations with a slow/unreachable FCC): 100 seconds of sequential I/O blocking the cadence tick. Realistically, simultaneous expirations of more than 2–3 records are rare, but during FCC recovery after an outage, a backlog of expired records can accumulate. The AF-005 force-expire mechanism bounds the total retry impact per record to 5 × timeout, but the per-tick impact remains proportional to the number of expired records. |
+| **Recommended Fix** | Reduce `expiryBatchSize` to 5 (from 50) so at most 5 deauth calls run per tick. Remaining records are picked up on subsequent ticks (they remain in the expiry query since their status is unchanged). For Radix (HTTP) adapters, consider parallelizing the deauth calls with bounded concurrency (similar to `PreAuthCloudForwardWorker`'s semaphore pattern). For DOMS (TCP), serial calls are necessary, but the batch cap limits the worst-case tick duration to 5 × timeout. Additionally, consider returning early from the loop after a single FCC timeout — if the FCC is unresponsive, subsequent deauth calls will also time out. Set a `shouldStop` flag on first timeout and break, deferring remaining records to the next tick. |
+
+---
+
+## AP-038: CleanupWorker Executes 7+ Sequential DAO Calls Without Room @Transaction Batching
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-038 |
+| **Title** | runCleanup performs 7+ sequential DAO operations each acquiring a separate SQLite connection — no @Transaction batching |
+| **Module** | Transaction Management |
+| **Severity** | Low |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `CleanupWorker.runCleanup()` (lines 90–163) executes at least 7 sequential DAO calls: (1) `transactionDao.revertStaleUploaded()` — line 103, (2) `transactionDao.archiveOldSynced()` — line 116, (3) `transactionDao.deleteOldArchived()` — line 117, (4) `transactionDao.deleteOldDeadLettered()` — line 119, (5) `preAuthDao.deleteTerminal()` — line 120, (6) `auditLogDao.deleteOlderThan()` — line 121, (7) `transactionDao.countAll()` — line 188 (inside `enforceQuota`). When quota is exceeded, up to 4 additional operations run (lines 200–216): `deleteOldestDeadLettered`, `deleteOldestArchived`, `deleteOldestSynced`, `archiveOldestPending`. When disk is low (line 134), `enforceQuota` runs a second time with a tighter threshold. In the worst case (quota exceeded + disk low): 15+ DAO calls. Each call acquires a Room connection from the pool, executes the SQL statement, and releases the connection. Additionally, `Instant.now().toString()` is called 4 separate times (lines 99, 102, 114, 196) — these should share a single timestamp for consistency and to avoid 4 system clock + string allocation calls. The cleanup runs once per 24 hours (or once per cadence cycle in quota/disk-low emergency), so the absolute frequency is low. However, when it does run, the sequential operations can take 50–500ms depending on the number of records affected, and all operations hold individual SQLite locks that can contend with concurrent ingestion/upload operations happening on the cadence tick. |
+| **Evidence** | `buffer/CleanupWorker.kt` lines 96–163: 7+ sequential DAO calls. Lines 99, 102, 114, 196: 4 separate `Instant.now().toString()` calls. Lines 184–233: `enforceQuota` adds 1–4 more DAO calls. |
+| **Impact** | Low: cleanup runs once per 24 hours under normal conditions. When it does run, 50–500ms of sequential SQLite operations. During emergency cleanup (SQLITE_FULL or disk low), the operations may contend with concurrent buffer inserts from `IngestionOrchestrator`, causing brief lock contention and 5–20ms insert delays. |
+| **Recommended Fix** | Wrap all retention-based cleanup operations in a single Room `@Transaction` method on a custom DAO to reduce connection pool overhead and ensure atomic cleanup. Consolidate the 4 `Instant.now().toString()` calls into a single `val now` variable at the top of `runCleanup()`. For quota enforcement, wrap the multi-step deletion cascade in a `@Transaction` to prevent partial cleanup if one step fails. |
+
+---
+
+## AP-039: SiteDataManager Full Table Replacement on Every Config Version Change — No Diff Check
+
+| Field | Value |
+|-------|-------|
+| **ID** | AP-039 |
+| **Title** | syncFromConfig deletes and re-inserts all site data tables on every config update — even when mapping data is unchanged |
+| **Module** | Site Configuration |
+| **Severity** | Low |
+| **Category** | Repeated Network/DB Calls |
+| **Description** | `SiteDataManager.syncFromConfig()` (lines 29–81) calls `siteDataDao.replaceAllSiteData(siteInfo, products, pumps, nozzles)` on every new config version. This method (likely a `@Transaction` that deletes all rows then inserts) performs: DELETE FROM site_info, DELETE FROM local_products, DELETE FROM local_pumps, DELETE FROM local_nozzles, followed by INSERT for each new record. For a typical site with 20 products, 10 pumps, and 50 nozzles, this is 4 DELETE + 81 INSERT operations. Config updates may change non-mapping fields (e.g., sync intervals, telemetry settings, cloud base URL) without modifying product/pump/nozzle mappings. In these cases, the full table replacement is wasted I/O. The `ConfigPollWorker` uses `If-None-Match` ETags (304 Not Modified), so unchanged configs do NOT trigger `syncFromConfig`. However, a minor config change (e.g., adjusting `uploadBatchSize`) bumps the config version, which triggers `observeConfigForRuntimeUpdates()` → `applyRuntimeConfig()` → (indirectly) `syncFromConfig()`. The frequency is low (config changes are infrequent in production), but each replacement takes 20–100ms on eMMC storage and creates transient inconsistency during the DELETE+INSERT window where nozzle lookups may return null (affecting concurrent pre-auth requests). |
+| **Evidence** | `config/SiteDataManager.kt` lines 29–81: `syncFromConfig` maps and replaces all 4 tables. `service/EdgeAgentForegroundService.kt` line 180: `configManager.config.collect { cfg -> ... applyRuntimeConfig(cfg, ...) }` — triggers on every config version change. |
+| **Impact** | Low: config changes are infrequent in production (typically once per deployment, manually triggered from the operations portal). Each replacement: 20–100ms of SQLite I/O + brief window where nozzle lookups may return null. The null window is a correctness concern rather than performance, but the DELETE+INSERT I/O on eMMC is avoidable. |
+| **Recommended Fix** | Add a hash-based diff check: compute a hash of the mapping section (products + pumps + nozzles) and compare against the stored hash before replacing. Only call `replaceAllSiteData()` when the hash differs. Store the hash in `SiteInfo.mappingHash` or in `SyncState`. Alternatively, use Room's `@Upsert` (available in Room 2.5+) or `INSERT OR REPLACE` with conflict resolution to update only changed rows without a full delete-then-insert cycle.

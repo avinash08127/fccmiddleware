@@ -338,10 +338,12 @@ class ConfigManager(
             violations += "$fieldName must not point to a private/reserved IP address"
         }
 
-        // Block non-standard ports (only 443 allowed for HTTPS)
+        // AT-012: Allow non-standard HTTPS ports for dev/staging environments
+        // (k8s port-forwards, local dev servers). HTTPS on any port is still
+        // encrypted and authenticated; the scheme check above is sufficient.
         val port = parsed.port
-        if (port != -1 && port != 443) {
-            violations += "$fieldName must use standard HTTPS port 443 (got: $port)"
+        if (port != -1 && port !in 1..65535) {
+            violations += "$fieldName has invalid port (got: $port)"
         }
     }
 

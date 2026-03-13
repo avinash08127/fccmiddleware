@@ -120,7 +120,7 @@ fun Routing.transactionRoutes(
             return@get
         }
 
-        val entity = dao.getById(id)
+        val entity = dao.getByIdForLocalApi(id)
         if (entity == null) {
             call.respond(
                 HttpStatusCode.NotFound,

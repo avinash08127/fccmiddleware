@@ -219,6 +219,9 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
 
         try
         {
+            await _credentialStore.DeleteSecretAsync(CredentialKeys.DeviceTokenBundle, ct);
+            await _credentialStore.DeleteSecretAsync(CredentialKeys.DeviceTokenBundleStaging, ct);
+            await _credentialStore.DeleteSecretAsync(CredentialKeys.DeviceTokenRefreshPending, ct);
             await _credentialStore.DeleteSecretAsync(CredentialKeys.DeviceToken, ct);
             await _credentialStore.DeleteSecretAsync(CredentialKeys.RefreshToken, ct);
             _logger.LogInformation("Device and refresh tokens purged from credential store");

@@ -19,8 +19,15 @@ import java.time.Instant
  *   - Providing per-status buffer statistics for telemetry
  *
  * All timestamps are ISO 8601 UTC strings. Money is Long minor units.
+ *
+ * @param crossAdapterDedupEnabled AP-002: When false (single-adapter sites), the
+ *   cross-adapter dedup query is skipped, saving one SELECT per transaction insert.
+ *   Default: false (the vast majority of sites run a single FCC vendor).
  */
-class TransactionBufferManager(private val dao: TransactionBufferDao) {
+class TransactionBufferManager(
+    private val dao: TransactionBufferDao,
+    private val crossAdapterDedupEnabled: Boolean = false,
+) {
 
     companion object {
         private const val TAG = "TransactionBufferMgr"
@@ -46,22 +53,25 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
      * @throws SQLiteFullException if the insert still fails after emergency cleanup.
      */
     suspend fun bufferTransaction(tx: CanonicalTransaction): Boolean {
-        // L-12: Cross-adapter dedup — detect same physical dispense from different adapter
-        val crossDupe = dao.findCrossAdapterDuplicate(
-            siteCode = tx.siteCode,
-            pumpNumber = tx.pumpNumber,
-            completedAt = tx.completedAt,
-            amountMinorUnits = tx.amountMinorUnits,
-            fccTransactionId = tx.fccTransactionId,
-        )
-        if (crossDupe != null) {
-            AppLogger.w(
-                TAG,
-                "Cross-adapter duplicate detected: fccTxId=${tx.fccTransactionId} " +
-                    "matches existing $crossDupe (site=${tx.siteCode}, pump=${tx.pumpNumber}, " +
-                    "completedAt=${tx.completedAt}, amount=${tx.amountMinorUnits})"
+        // L-12 / AP-002: Cross-adapter dedup — only runs when multiple adapters are active.
+        // Single-adapter sites (the vast majority) skip this query entirely.
+        if (crossAdapterDedupEnabled) {
+            val crossDupe = dao.findCrossAdapterDuplicate(
+                siteCode = tx.siteCode,
+                pumpNumber = tx.pumpNumber,
+                completedAt = tx.completedAt,
+                amountMinorUnits = tx.amountMinorUnits,
+                fccTransactionId = tx.fccTransactionId,
             )
-            return false
+            if (crossDupe != null) {
+                AppLogger.w(
+                    TAG,
+                    "Cross-adapter duplicate detected: fccTxId=${tx.fccTransactionId} " +
+                        "matches existing $crossDupe (site=${tx.siteCode}, pump=${tx.pumpNumber}, " +
+                        "completedAt=${tx.completedAt}, amount=${tx.amountMinorUnits})"
+                )
+                return false
+            }
         }
 
         val entity = tx.toEntity()

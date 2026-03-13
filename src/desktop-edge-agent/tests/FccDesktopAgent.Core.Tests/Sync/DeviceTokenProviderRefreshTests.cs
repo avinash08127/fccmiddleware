@@ -14,9 +14,9 @@ using Xunit;
 namespace FccDesktopAgent.Core.Tests.Sync;
 
 /// <summary>
-/// Tests for <see cref="DeviceTokenProvider"/> — specifically the corrected refresh flow
-/// that sends the refresh token in the request body (NOT as Bearer header) per spec,
-/// and rotates both tokens on success.
+/// Tests for <see cref="DeviceTokenProvider"/> — specifically the atomic token-bundle
+/// refresh flow that stages new tokens before promotion and can recover safely if the
+/// process is interrupted mid-write.
 /// </summary>
 public sealed class DeviceTokenProviderRefreshTests
 {
@@ -47,8 +47,8 @@ public sealed class DeviceTokenProviderRefreshTests
     [Fact]
     public async Task RefreshTokenAsync_SendsRefreshTokenInBody()
     {
-        _store.GetSecretAsync(DeviceTokenProvider.RefreshTokenKey, Arg.Any<CancellationToken>())
-            .Returns("stored-refresh-token");
+        _store.GetSecretAsync(DeviceTokenProvider.TokenBundleKey, Arg.Any<CancellationToken>())
+            .Returns(SerializeTokenBundle("current-device-token", "stored-refresh-token"));
 
         var refreshResponse = new TokenRefreshResponse
         {
@@ -63,15 +63,16 @@ public sealed class DeviceTokenProviderRefreshTests
 
         // Verify the request body contains the refresh token
         _httpHandler.LastRequestBody.Should().Contain("stored-refresh-token");
+        _httpHandler.LastRequestBody.Should().Contain("current-device-token");
         // Should NOT have Authorization header (no Bearer auth for refresh)
         _httpHandler.LastRequest!.Headers.Authorization.Should().BeNull();
     }
 
     [Fact]
-    public async Task RefreshTokenAsync_RotatesBothTokens()
+    public async Task RefreshTokenAsync_RotatesBothTokensAtomically()
     {
-        _store.GetSecretAsync(DeviceTokenProvider.RefreshTokenKey, Arg.Any<CancellationToken>())
-            .Returns("old-refresh");
+        _store.GetSecretAsync(DeviceTokenProvider.TokenBundleKey, Arg.Any<CancellationToken>())
+            .Returns(SerializeTokenBundle("old-device-token", "old-refresh"));
 
         var refreshResponse = new TokenRefreshResponse
         {
@@ -85,9 +86,27 @@ public sealed class DeviceTokenProviderRefreshTests
 
         result.Should().Be("new-device-token");
 
-        // Verify both tokens were stored
-        await _store.Received(1).SetSecretAsync(DeviceTokenProvider.TokenKey, "new-device-token", Arg.Any<CancellationToken>());
-        await _store.Received(1).SetSecretAsync(DeviceTokenProvider.RefreshTokenKey, "new-refresh-token", Arg.Any<CancellationToken>());
+        await _store.Received(1).SetSecretAsync(
+            DeviceTokenProvider.RefreshPendingKey,
+            Arg.Any<string>(),
+            Arg.Any<CancellationToken>());
+        await _store.Received(1).SetSecretAsync(
+            DeviceTokenProvider.TokenBundleStagingKey,
+            Arg.Is<string>(json => json.Contains("new-device-token") && json.Contains("new-refresh-token")),
+            Arg.Any<CancellationToken>());
+        await _store.Received(1).SetSecretAsync(
+            DeviceTokenProvider.TokenBundleKey,
+            Arg.Is<string>(json => json.Contains("new-device-token") && json.Contains("new-refresh-token")),
+            Arg.Any<CancellationToken>());
+
+        await _store.DidNotReceive().SetSecretAsync(
+            DeviceTokenProvider.TokenKey,
+            Arg.Any<string>(),
+            Arg.Any<CancellationToken>());
+        await _store.DidNotReceive().SetSecretAsync(
+            DeviceTokenProvider.RefreshTokenKey,
+            Arg.Any<string>(),
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -117,35 +136,41 @@ public sealed class DeviceTokenProviderRefreshTests
     }
 
     [Fact]
-    public async Task RefreshTokenAsync_401_ReturnsNull()
+    public async Task RefreshTokenAsync_401_ThrowsRefreshTokenExpiredException()
     {
-        _store.GetSecretAsync(DeviceTokenProvider.RefreshTokenKey, Arg.Any<CancellationToken>())
-            .Returns("some-refresh-token");
+        _store.GetSecretAsync(DeviceTokenProvider.TokenBundleKey, Arg.Any<CancellationToken>())
+            .Returns(SerializeTokenBundle("expired-device-token", "some-refresh-token"));
 
         _httpHandler.SetResponse(HttpStatusCode.Unauthorized, "{}");
 
         var provider = CreateProvider();
-        var result = await provider.RefreshTokenAsync();
+        var act = () => provider.RefreshTokenAsync();
 
-        result.Should().BeNull();
+        await act.Should().ThrowAsync<RefreshTokenExpiredException>();
     }
 
     [Fact]
-    public async Task StoreTokensAsync_StoresBothKeys()
+    public async Task StoreTokensAsync_StoresCombinedBundleViaStaging()
     {
         var provider = CreateProvider();
 
         await provider.StoreTokensAsync("device-jwt", "refresh-opaque");
 
-        await _store.Received(1).SetSecretAsync(DeviceTokenProvider.TokenKey, "device-jwt", Arg.Any<CancellationToken>());
-        await _store.Received(1).SetSecretAsync(DeviceTokenProvider.RefreshTokenKey, "refresh-opaque", Arg.Any<CancellationToken>());
+        await _store.Received(1).SetSecretAsync(
+            DeviceTokenProvider.TokenBundleStagingKey,
+            Arg.Is<string>(json => json.Contains("device-jwt") && json.Contains("refresh-opaque")),
+            Arg.Any<CancellationToken>());
+        await _store.Received(1).SetSecretAsync(
+            DeviceTokenProvider.TokenBundleKey,
+            Arg.Is<string>(json => json.Contains("device-jwt") && json.Contains("refresh-opaque")),
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task RefreshTokenAsync_EmptyCloudBaseUrl_ReturnsNull()
     {
-        _store.GetSecretAsync(DeviceTokenProvider.RefreshTokenKey, Arg.Any<CancellationToken>())
-            .Returns("some-token");
+        _store.GetSecretAsync(DeviceTokenProvider.TokenBundleKey, Arg.Any<CancellationToken>())
+            .Returns(SerializeTokenBundle("current-device-token", "some-token"));
 
         var config = Options.Create(new AgentConfiguration { CloudBaseUrl = "" });
         var httpFactory = Substitute.For<IHttpClientFactory>();
@@ -153,6 +178,38 @@ public sealed class DeviceTokenProviderRefreshTests
 
         var result = await provider.RefreshTokenAsync();
         result.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task RefreshTokenAsync_WithRecoverableStagedBundle_ReturnsRecoveredTokenWithoutCallingHttp()
+    {
+        _store.GetSecretAsync(DeviceTokenProvider.TokenBundleStagingKey, Arg.Any<CancellationToken>())
+            .Returns(SerializeTokenBundle("recovered-device-token", "recovered-refresh-token"));
+
+        var provider = CreateProvider();
+        var result = await provider.RefreshTokenAsync();
+
+        result.Should().Be("recovered-device-token");
+        _httpHandler.LastRequest.Should().BeNull();
+        await _store.Received(1).SetSecretAsync(
+            DeviceTokenProvider.TokenBundleKey,
+            Arg.Is<string>(json => json.Contains("recovered-device-token") && json.Contains("recovered-refresh-token")),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RefreshTokenAsync_WithPendingMarkerWithoutStaging_ThrowsRefreshTokenExpiredException()
+    {
+        _store.GetSecretAsync(DeviceTokenProvider.RefreshPendingKey, Arg.Any<CancellationToken>())
+            .Returns("2026-03-13T00:00:00.0000000+00:00");
+        _store.GetSecretAsync(DeviceTokenProvider.TokenBundleKey, Arg.Any<CancellationToken>())
+            .Returns(SerializeTokenBundle("old-device-token", "old-refresh-token"));
+
+        var provider = CreateProvider();
+        var act = () => provider.RefreshTokenAsync();
+
+        await act.Should().ThrowAsync<RefreshTokenExpiredException>();
+        _httpHandler.LastRequest.Should().BeNull();
     }
 
     private sealed class TestHttpHandler : HttpMessageHandler
@@ -188,4 +245,11 @@ public sealed class DeviceTokenProviderRefreshTests
             };
         }
     }
+
+    private static string SerializeTokenBundle(string deviceToken, string refreshToken) =>
+        JsonSerializer.Serialize(new
+        {
+            DeviceToken = deviceToken,
+            RefreshToken = refreshToken
+        });
 }

@@ -48,6 +48,8 @@ class StructuredFileLogger(
         private const val FILE_PREFIX = "edge-agent-"
         private const val FILE_SUFFIX = ".jsonl"
         private const val MAX_MESSAGE_LENGTH = 4000
+        /** AP-023: Maximum entries retained in the in-memory diagnostic ring buffer. */
+        private const val MAX_DIAGNOSTIC_BUFFER_SIZE = 200
     }
 
     private val logDir: File = File(context.filesDir, LOG_DIR).also { it.mkdirs() }
@@ -59,6 +61,18 @@ class StructuredFileLogger(
 
     @Volatile
     private var currentWriter: BufferedWriter? = null
+
+    // AP-023: In-memory ring buffer of recent WARN/ERROR/FATAL log entries.
+    // Populated from existing files on first access, then maintained incrementally
+    // by writeEntry() and crash(). Eliminates file I/O from the 5-second diagnostic refresh.
+    private val diagnosticBuffer = ArrayDeque<String>()
+    private val diagnosticBufferLock = Any()
+    @Volatile
+    private var diagnosticBufferInitialized = false
+
+    // AP-023: Cached total log size, invalidated on file rotation/deletion.
+    @Volatile
+    private var cachedLogSizeBytes: Long = -1L
 
     /**
      * Correlation ID attached to all log entries in the current context.
@@ -120,10 +134,20 @@ class StructuredFileLogger(
                 "stackTrace" to throwable.stackTraceToString().take(MAX_MESSAGE_LENGTH),
             )),
         )
+        val jsonLine = json.encodeToString(entry)
+
+        // AP-023: Add FATAL entry to diagnostic ring buffer
+        synchronized(diagnosticBufferLock) {
+            diagnosticBuffer.addLast(jsonLine)
+            while (diagnosticBuffer.size > MAX_DIAGNOSTIC_BUFFER_SIZE) {
+                diagnosticBuffer.removeFirst()
+            }
+        }
+
         // Synchronous write — we're about to die
         try {
             val writer = getOrCreateWriter()
-            writer.write(json.encodeToString(entry))
+            writer.write(jsonLine)
             writer.newLine()
             writer.flush()
         } catch (_: Exception) {
@@ -139,29 +163,57 @@ class StructuredFileLogger(
 
     // ── Log retrieval (for diagnostics + upload) ────────────────────────────
 
-    /** Returns recent WARN/ERROR entries for remote upload, capped at [maxEntries]. */
+    /**
+     * Returns the most recent WARN/ERROR/FATAL entries, capped at [maxEntries].
+     *
+     * AP-023: Returns from an in-memory ring buffer (O(1)) instead of scanning
+     * log files. The buffer is populated from existing files on first access,
+     * then maintained incrementally by [writeEntry] and [crash].
+     */
     fun getRecentDiagnosticEntries(maxEntries: Int = 200): List<String> {
-        val entries = mutableListOf<String>()
-        val files = logDir.listFiles { f -> f.name.startsWith(FILE_PREFIX) && f.name.endsWith(FILE_SUFFIX) }
-            ?.sortedByDescending { it.name }
-            ?: return entries
+        ensureDiagnosticBufferInitialized()
+        synchronized(diagnosticBufferLock) {
+            return diagnosticBuffer.takeLast(maxEntries)
+        }
+    }
 
-        for (file in files) {
-            if (entries.size >= maxEntries) break
+    /**
+     * AP-023: Lazily populate the diagnostic ring buffer from existing log files
+     * so entries written before this process started are available immediately.
+     * Uses double-checked locking to ensure one-time initialization.
+     */
+    private fun ensureDiagnosticBufferInitialized() {
+        if (diagnosticBufferInitialized) return
+        synchronized(diagnosticBufferLock) {
+            if (diagnosticBufferInitialized) return
             try {
-                file.bufferedReader().useLines { lines ->
-                    for (line in lines) {
-                        if (entries.size >= maxEntries) return@useLines
-                        if (line.contains("\"lvl\":\"WARN\"") || line.contains("\"lvl\":\"ERROR\"") || line.contains("\"lvl\":\"FATAL\"")) {
-                            entries.add(line)
-                        }
+                val files = logDir.listFiles { f ->
+                    f.name.startsWith(FILE_PREFIX) && f.name.endsWith(FILE_SUFFIX)
+                }?.sortedByDescending { it.name }
+                if (files != null) {
+                    val entries = mutableListOf<String>()
+                    for (file in files) {
+                        try {
+                            file.bufferedReader().useLines { lines ->
+                                for (line in lines) {
+                                    if (line.contains("\"lvl\":\"WARN\"") ||
+                                        line.contains("\"lvl\":\"ERROR\"") ||
+                                        line.contains("\"lvl\":\"FATAL\"")
+                                    ) {
+                                        entries.add(line)
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) { /* skip corrupted files */ }
+                    }
+                    val start = (entries.size - MAX_DIAGNOSTIC_BUFFER_SIZE).coerceAtLeast(0)
+                    for (i in start until entries.size) {
+                        diagnosticBuffer.addLast(entries[i])
                     }
                 }
-            } catch (_: Exception) {
-                // Skip corrupted files
-            }
+            } catch (_: Exception) { /* best effort */ }
+            diagnosticBufferInitialized = true
         }
-        return entries.takeLast(maxEntries)
     }
 
     /** Returns all log file paths for zip export. */
@@ -171,9 +223,19 @@ class StructuredFileLogger(
             ?.toList()
             ?: emptyList()
 
-    /** Total size of all log files in bytes. */
-    fun totalLogSizeBytes(): Long =
-        getLogFiles().sumOf { it.length() }
+    /**
+     * Total size of all log files in bytes.
+     *
+     * AP-023: Returns a cached value that is invalidated on file rotation and
+     * deletion, avoiding a directory listing + N file stats on every call.
+     */
+    fun totalLogSizeBytes(): Long {
+        val cached = cachedLogSizeBytes
+        if (cached >= 0L) return cached
+        val size = getLogFiles().sumOf { it.length() }
+        cachedLogSizeBytes = size
+        return size
+    }
 
     // ── Cleanup (called by CleanupWorker) ───────────────────────────────────
 
@@ -186,6 +248,8 @@ class StructuredFileLogger(
             files.drop(maxFiles).forEach { file ->
                 file.delete()
             }
+            // AP-023: Invalidate cached log size after deleting files
+            cachedLogSizeBytes = -1L
         }
     }
 
@@ -194,6 +258,22 @@ class StructuredFileLogger(
             currentWriter?.flush()
         } catch (_: Exception) {
             // Best effort
+        }
+    }
+
+    /**
+     * AT-004: Flush buffered entries and close the underlying writer.
+     * Called by the foreground service in onDestroy() before scope cancellation
+     * to ensure the last log entries are persisted to disk.
+     */
+    fun close() {
+        try {
+            currentWriter?.flush()
+            currentWriter?.close()
+            currentWriter = null
+            currentDate = null
+        } catch (_: Exception) {
+            // Best effort — process is shutting down
         }
     }
 
@@ -211,13 +291,26 @@ class StructuredFileLogger(
             extra = extra?.let { buildJsonObject(it) },
         )
 
+        val jsonLine = json.encodeToString(entry)
+
+        // AP-023: Append WARN/ERROR/FATAL entries to in-memory ring buffer so
+        // getRecentDiagnosticEntries() returns in O(1) without file I/O.
+        if (level.severity >= LogLevel.WARN.severity) {
+            synchronized(diagnosticBufferLock) {
+                diagnosticBuffer.addLast(jsonLine)
+                while (diagnosticBuffer.size > MAX_DIAGNOSTIC_BUFFER_SIZE) {
+                    diagnosticBuffer.removeFirst()
+                }
+            }
+        }
+
         val flushNow = level.severity >= LogLevel.ERROR.severity
 
         scope.launch(Dispatchers.IO) {
             writeMutex.withLock {
                 try {
                     val writer = getOrCreateWriter()
-                    writer.write(json.encodeToString(entry))
+                    writer.write(jsonLine)
                     writer.newLine()
                     if (flushNow) writer.flush()
                 } catch (e: Exception) {
@@ -238,6 +331,8 @@ class StructuredFileLogger(
             currentWriter = BufferedWriter(FileWriter(file, true))
             currentDate = today
             rotateOldFiles()
+            // AP-023: Invalidate cached log size on file rotation
+            cachedLogSizeBytes = -1L
         }
         return currentWriter!!
     }

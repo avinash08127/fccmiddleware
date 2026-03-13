@@ -27,16 +27,20 @@ import com.fccmiddleware.edge.sync.KeystoreDeviceTokenProvider
 import com.fccmiddleware.edge.adapter.common.FccAdapterFactory
 import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.logging.AppLogger
+import com.fccmiddleware.edge.registration.RegistrationHandler
 import com.fccmiddleware.edge.logging.LogLevel
 import com.fccmiddleware.edge.logging.StructuredFileLogger
 import com.fccmiddleware.edge.sync.TelemetryReporter
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
+import android.util.Log
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import com.fccmiddleware.edge.ui.DiagnosticsViewModel
 import com.fccmiddleware.edge.ui.ProvisioningViewModel
 import org.koin.android.ext.koin.androidApplication
 import org.koin.android.ext.koin.androidContext
@@ -49,26 +53,41 @@ import java.util.concurrent.TimeUnit
 val appModule = module {
 
     // -------------------------------------------------------------------------
-    // Structured file logger — persistent JSONL logging (Phase 1A)
-    // Registered before CoroutineScope so crash handler can use it immediately.
+    // Shared service scope — SupervisorJob so child failures don't cancel siblings.
+    // AT-003: Single authoritative scope for the entire service lifecycle. The
+    // foreground service injects this scope and cancels it in onDestroy(), so
+    // all coroutines (workers, handlers, logger) stop together.
+    // Exception handler logs to logcat directly; file logger is resolved lazily
+    // to avoid a circular dependency (the logger itself uses a child of this scope).
     // -------------------------------------------------------------------------
-    single {
-        StructuredFileLogger(
-            context = androidContext(),
-            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-        )
+    single<CoroutineScope> {
+        val koin = getKoin()
+        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+            Log.e("CoroutineScope", "Uncaught coroutine exception: ${throwable.message}", throwable)
+            try {
+                koin.get<StructuredFileLogger>().e(
+                    "CoroutineScope",
+                    "Uncaught coroutine exception: ${throwable.message}",
+                    throwable,
+                )
+            } catch (_: Exception) {
+                // File logger not yet initialized — logcat entry above is sufficient
+            }
+        }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     }
 
     // -------------------------------------------------------------------------
-    // Shared service scope — SupervisorJob so child failures don't cancel siblings.
-    // CoroutineExceptionHandler logs uncaught coroutine exceptions to the file logger.
+    // Structured file logger — persistent JSONL logging (Phase 1A)
+    // AT-004: Uses a child scope of the Koin-managed scope so it is cancelled
+    // together with the service lifecycle (no orphaned scope).
     // -------------------------------------------------------------------------
-    single<CoroutineScope> {
-        val logger = get<StructuredFileLogger>()
-        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
-            logger.e("CoroutineScope", "Uncaught coroutine exception: ${throwable.message}", throwable)
-        }
-        CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
+    single {
+        val parentScope = get<CoroutineScope>()
+        StructuredFileLogger(
+            context = androidContext(),
+            scope = CoroutineScope(SupervisorJob(parentScope.coroutineContext[Job]) + Dispatchers.IO),
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -89,30 +108,22 @@ val appModule = module {
     single { KeystoreManager() }
     single { EncryptedPrefsManager(androidContext()) }
     single { ConfigManager(agentConfigDao = get(), keystoreManager = get(), encryptedPrefsManager = get()) }
-    single { LocalOverrideManager(androidContext()) }
+    single { LocalOverrideManager(androidContext(), get()) }
     single { SiteDataManager(siteDataDao = get()) }
     single { FccRuntimeState() }
 
     // -------------------------------------------------------------------------
     // Cloud API Client
     //
-    // Created with the cloud base URL from EncryptedPrefs (set at registration).
-    // Before registration, a default stub URL is used — the client is only called
-    // after the device is provisioned. Registration calls pass the URL explicitly.
+    // AT-016: When registered, creates a full client with certificate pinning.
+    // Before registration, creates a lightweight stub client without pinning
+    // (no valid hostname to pin to). Certificate pins are stored so that
+    // updateBaseUrl() can apply them after registration provides a real hostname.
     // -------------------------------------------------------------------------
     single<CloudApiClient> {
         val encryptedPrefs = get<EncryptedPrefsManager>()
-        val baseUrl = encryptedPrefs.cloudBaseUrl ?: "https://not-yet-provisioned"
-        // Bootstrap pins bundled in the APK ensure certificate pinning is active
-        // during device registration (before SiteConfig delivers runtime pins).
-        // These are SHA-256 hashes of the intermediate CA public keys for the
-        // known cloud endpoint(s). Update when rotating cloud TLS certificates.
-        val bootstrapPins = listOf(
-            "sha256/YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=", // Primary intermediate CA
-            "sha256/Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=", // Backup intermediate CA
-        )
-        // Prefer runtime pins from SiteConfig (stored in EncryptedPrefs) over bootstrap pins.
-        // This enables certificate pin rotation without APK update per security spec §5.3.
+        val baseUrl = encryptedPrefs.cloudBaseUrl
+        val bootstrapPins = HttpCloudApiClient.BUNDLED_PINS
         val runtimePins = encryptedPrefs.runtimeCertificatePins
         val certificatePins = if (runtimePins.isNotEmpty()) {
             AppLogger.i("AppModule", "Using ${runtimePins.size} runtime certificate pin(s) from SiteConfig")
@@ -122,12 +133,16 @@ val appModule = module {
             bootstrapPins
         }
         val networkBinder = get<NetworkBinder>()
-        HttpCloudApiClient.create(
-            baseUrl,
-            certificatePins,
-            encryptedPrefs,
-            socketFactory = BoundSocketFactory { networkBinder.cloudNetwork.value },
-        )
+        val socketFactory = BoundSocketFactory { networkBinder.cloudNetwork.value }
+
+        if (baseUrl != null) {
+            HttpCloudApiClient.create(baseUrl, certificatePins, encryptedPrefs, socketFactory)
+        } else {
+            // AT-016: Pre-registration — no cert pinning for placeholder hostname.
+            // Registration passes URL from QR code explicitly; updateBaseUrl() after
+            // registration rebuilds the client with proper pins for the real hostname.
+            HttpCloudApiClient.createPreRegistration(certificatePins, encryptedPrefs, socketFactory)
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -240,6 +255,7 @@ val appModule = module {
         IngestionOrchestrator(
             bufferManager = get(),
             syncStateDao = get(),
+            transactionDao = get(),
         )
     }
     single {
@@ -298,6 +314,8 @@ val appModule = module {
             cloudApiClient = get(),
             agentVersion = androidContext().packageManager
                 .getPackageInfo(androidContext().packageName, 0).versionName ?: "1.0.0",
+            cleanupWorker = get(),
+            fileLogger = get(),
         )
     }
 
@@ -315,8 +333,20 @@ val appModule = module {
     // ViewModels (T-003)
     // -------------------------------------------------------------------------
     viewModel {
-        ProvisioningViewModel(
-            application = androidApplication(),
+        DiagnosticsViewModel(
+            connectivityManager = get(),
+            siteDataDao = get(),
+            transactionDao = get(),
+            syncStateDao = get(),
+            auditLogDao = get(),
+            configManager = get(),
+            fileLogger = get(),
+        )
+    }
+    // AT-014: RegistrationHandler owns credential storage, config encryption,
+    // and Room persistence — reusable outside the ViewModel context.
+    single {
+        RegistrationHandler(
             cloudApiClient = get(),
             keystoreManager = get(),
             encryptedPrefs = get(),
@@ -324,6 +354,14 @@ val appModule = module {
             tokenProvider = get(),
             siteDataManager = get(),
             bufferDatabase = get(),
+        )
+    }
+    viewModel {
+        ProvisioningViewModel(
+            application = androidApplication(),
+            cloudApiClient = get(),
+            encryptedPrefs = get(),
+            registrationHandler = get(),
         )
     }
 

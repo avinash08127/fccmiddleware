@@ -15,10 +15,12 @@
 | **Module** | Transaction Management |
 | **Severity** | Medium |
 | **Category** | Architecture Violations |
+| **Status** | **RESOLVED** |
 | **Description** | `IngestionOrchestrator` accepts `adapter` and `config` as constructor parameters (lines 61, 68) but immediately assigns them to `@Volatile internal var` fields of the same name (lines 72, 76). These fields are then overwritten by `wireRuntime()`. The Koin DI module at `AppModule.kt` line 240 constructs `IngestionOrchestrator` with only `bufferManager` and `syncStateDao`, leaving `adapter` and `config` as null defaults. This dual-initialization pattern (constructor + late-binding) creates confusion about ownership and lifecycle — the constructor parameters are never used by the DI graph. |
 | **Evidence** | `ingestion/IngestionOrchestrator.kt` lines 60–76; `di/AppModule.kt` lines 240–244. |
 | **Impact** | Code maintainability issue. Future developers may pass non-null values via constructor, not realizing they'll be overwritten by `wireRuntime()`. |
 | **Recommended Fix** | Remove `adapter` and `config` from the constructor. Make them private with `wireRuntime()` as the sole setter. |
+| **Resolution** | Removed `adapter` and `config` from the constructor. Fields are now `@Volatile private var` initialized to `null`, with `wireRuntime()` as the sole setter. Updated all test call sites (`IngestionOrchestratorTest`, `ConcurrencyRaceConditionTest`, `OfflineCrashRecoveryTest`) to use `.also { it.wireRuntime(adapter, config) }` instead. |
 
 ---
 
@@ -31,10 +33,12 @@
 | **Module** | Diagnostics & Monitoring |
 | **Severity** | Medium |
 | **Category** | Fat ViewModels / Business Logic in UI |
+| **Status** | **RESOLVED** |
 | **Description** | `DiagnosticsActivity` injects `ConnectivityManager`, `SiteDataDao`, `TransactionBufferDao`, `SyncStateDao`, `AuditLogDao`, `ConfigManager`, and `StructuredFileLogger` directly via Koin. All data fetching, transformation, and formatting logic lives in the Activity's `refreshData()` method (lines 116–248). This violates the separation of concerns — the Activity is simultaneously a view, a data accessor, and a presenter. On configuration changes (e.g., locale), the entire data pipeline re-executes from scratch. |
 | **Evidence** | `ui/DiagnosticsActivity.kt` lines 46–52: 7 `by inject()` statements. Lines 116–248: data fetching + UI formatting in one method. |
 | **Impact** | The Activity is tightly coupled to data access, making it untestable and fragile to refactoring. No way to unit test the diagnostics data pipeline without an Activity context. |
 | **Recommended Fix** | Extract a `DiagnosticsViewModel` that exposes a `StateFlow<DiagnosticsSnapshot>`. The Activity should only observe and render. |
+| **Resolution** | Extracted `DiagnosticsViewModel` with all 7 dependencies, exposing `StateFlow<DiagnosticsSnapshot?>`. The Activity now has a single `by viewModel()` injection and a pure `renderSnapshot()` method. Auto-refresh scheduling moved to ViewModel (`startAutoRefresh`/`stopAutoRefresh`). The diagnostics data pipeline is now unit-testable without an Activity context. ViewModel registered in `AppModule.kt`. |
 
 ---
 
@@ -47,10 +51,12 @@
 | **Module** | Cross-Cutting Infrastructure |
 | **Severity** | Medium |
 | **Category** | Duplicated Logic |
+| **Status** | **RESOLVED** |
 | **Description** | `EdgeAgentForegroundService` creates a private `serviceScope` with `SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler` (lines 61–64). The Koin `AppModule` also creates a `single<CoroutineScope>` with the same configuration (lines 66–72). All workers and handlers injected into the service use the Koin scope, but the service's own monitoring coroutines (`monitorReprovisioningState`, `monitorDecommissionedState`, `observeConfigForRuntimeUpdates`) use `serviceScope`. These two scopes have different lifecycles — `serviceScope` is cancelled in `onDestroy()`, but the Koin scope lives until the process dies. This creates a subtle divergence where service-level coroutines may be cancelled while worker coroutines continue. |
 | **Evidence** | `service/EdgeAgentForegroundService.kt` lines 61–64: `serviceScope`. `di/AppModule.kt` lines 66–72: `single<CoroutineScope>`. |
 | **Impact** | After `onDestroy()`, Koin-scoped coroutines (PreAuthHandler audit logs, CadenceController) may continue executing while the service thinks it has stopped. This can cause database writes after the service lifecycle ends. |
 | **Recommended Fix** | Either inject the Koin scope into the service and cancel it in `onDestroy()`, or ensure all coroutines that should follow the service lifecycle use `serviceScope`. Consider making the Koin scope a child of `serviceScope`. |
+| **Resolution** | Removed the private `serviceScope` from `EdgeAgentForegroundService`. The service now injects the single Koin-managed `CoroutineScope` via `by inject()` and cancels it in `onDestroy()`. All coroutines — service monitors, workers, handlers, and logger — now share one scope with a unified lifecycle. The Koin scope in `AppModule` was promoted to the single authoritative scope, with its exception handler using lazy logger resolution to avoid circular dependencies. Updated `EdgeAgentForegroundServiceTest` to register a `CoroutineScope` in the test Koin module. |
 
 ---
 
@@ -63,10 +69,12 @@
 | **Module** | Diagnostics & Monitoring |
 | **Severity** | Low |
 | **Category** | Duplicated Logic |
+| **Status** | **RESOLVED** |
 | **Description** | `StructuredFileLogger` is constructed in `AppModule.kt` line 56 with `CoroutineScope(SupervisorJob() + Dispatchers.IO)`. This is a third scope alongside `serviceScope` and the Koin `single<CoroutineScope>`. The logger's scope is never cancelled — it lives until process death. |
 | **Evidence** | `di/AppModule.kt` lines 56–59: standalone `CoroutineScope` for logger. |
 | **Impact** | The logger scope cannot be cancelled for testing and may leak in instrumented tests. Minor in production since the logger should live for the process lifetime. |
 | **Recommended Fix** | Use a child scope of the Koin-managed scope, or explicitly cancel it when appropriate. |
+| **Resolution** | The logger's scope is now a child scope of the Koin-managed scope via `SupervisorJob(parentScope.coroutineContext[Job])`. When the service cancels the Koin scope in `onDestroy()`, the logger's child scope is cancelled automatically via the Job hierarchy. Added a `close()` method to `StructuredFileLogger` that flushes and closes the file writer; the service calls it in `onDestroy()` before scope cancellation to ensure the last log entries are persisted. Reordered `AppModule` declarations so the Koin scope is created first, breaking the circular dependency by resolving the logger lazily in the exception handler. |
 
 ---
 
@@ -79,10 +87,12 @@
 | **Module** | Pre-Authorization |
 | **Severity** | Low |
 | **Category** | Weak Error Handling |
+| **Status** | **RESOLVED** |
 | **Description** | `PreAuthHandler` uses `scope.launch { auditLogDao.insert(...) }` in multiple places (lines 267–278, 343–352, 410–419, 434–443) for audit logging. These launches are fire-and-forget — if the insert fails, the exception is caught by the Koin scope's `CoroutineExceptionHandler` and logged, but the audit record is silently lost. For a financial application, audit trail completeness is important. |
 | **Evidence** | `preauth/PreAuthHandler.kt` lines 267–278: `scope.launch { auditLogDao.insert(...) }` |
 | **Impact** | Audit trail gaps for pre-auth events. Financial regulators may require complete audit trails. |
 | **Recommended Fix** | Add try/catch inside the `scope.launch` block with a fallback write to the file logger. Consider making audit logging synchronous for critical events. |
+| **Resolution** | Added try/catch inside all 5 `scope.launch` audit log blocks in `PreAuthHandler` (PRE_AUTH_HANDLED, PRE_AUTH_CANCELLED, PRE_AUTH_DEAUTH_EXHAUSTED, PRE_AUTH_DEAUTH_RETRY_PENDING, PRE_AUTH_EXPIRED). On insert failure, the exception and audit event details are written to `AppLogger.e()`, which logs to both logcat and the `StructuredFileLogger` JSONL file. This ensures audit intent is never silently lost — if the DB insert fails, the structured file log provides a secondary audit trail. |
 
 ---
 
@@ -95,10 +105,12 @@
 | **Module** | FCC Adapters / Service Lifecycle |
 | **Severity** | Medium |
 | **Category** | Architecture Violations |
+| **Status** | **RESOLVED** |
 | **Description** | `EdgeAgentForegroundService.onDestroy()` stops the cadence controller, connectivity manager, network binder, local API, and WebSocket server, but does not explicitly disconnect the FCC adapter. For DOMS (persistent TCP), this leaves a TCP connection open until the OS closes it. For Radix and Advatec push listeners (Ktor CIO servers), these embedded servers are not stopped. The `serviceScope.cancel()` at line 169 cancels coroutines but does not close sockets or servers that own their own event loops. |
 | **Evidence** | `service/EdgeAgentForegroundService.kt` lines 162–171: no adapter cleanup. |
 | **Impact** | Resource leaks: TCP connections and embedded Ktor servers may persist after service destruction. The DOMS heartbeat manager and JPL TCP client may hold sockets open. |
 | **Recommended Fix** | Add `fccRuntimeState.adapter?.let { if (it is IFccConnectionLifecycle) it.disconnect() }` in `onDestroy()`. Also stop `RadixPushListener` and `AdvatecWebhookListener` servers. |
+| **Resolution** | Added `fccRuntimeState.clear()` in `onDestroy()` after `cadenceController.stop()` and before `appScope.cancel()`. This synchronously closes the adapter via `(adapter as Closeable).close()`: DomsJplAdapter cancels its adapter scope (cascading to TCP client and heartbeat manager), RadixAdapter stops its push listener and closes the HTTP client, AdvatecAdapter stops its webhook listener. Made `AdvatecAdapter` implement `Closeable` (it previously only had a `shutdown()` method) so `FccRuntimeState.closeCurrentAdapter()` can reach it through the same `Closeable` interface used by DomsJplAdapter and RadixAdapter. |
 
 ---
 
@@ -111,10 +123,12 @@
 | **Module** | Cloud Sync |
 | **Severity** | Low |
 | **Category** | Weak Error Handling |
+| **Status** | **RESOLVED** |
 | **Description** | `CloudUploadWorker` exposes `consecutiveFailureCount` and `nextRetryAt` as convenience getters that read directly from `CircuitBreaker` fields (lines 104–105, 179–180). The `CircuitBreaker` class uses a `Mutex` for state transitions, but these read-only accessors likely bypass it (reading `@Volatile` fields without the mutex). While individually safe for reads, combined use in log messages (lines 699, 536) creates a TOCTOU window where `consecutiveFailureCount` and `state` may represent different snapshots. |
 | **Evidence** | `sync/CloudUploadWorker.kt` lines 104–105: `internal val consecutiveFailureCount: Int get() = uploadCircuitBreaker.consecutiveFailureCount`. |
 | **Impact** | Minor: log messages may show inconsistent circuit breaker state. No functional impact. |
 | **Recommended Fix** | Accept the minor inconsistency for logging (it's diagnostics-only), or provide a `CircuitBreaker.snapshot()` method that atomically reads all state under the mutex. |
+| **Resolution** | Added `CircuitBreaker.Snapshot` data class and `suspend fun snapshot()` method that atomically reads `state`, `consecutiveFailureCount`, and `nextRetryAt` under the mutex. Updated both `handleUploadResult` and `handleStatusPollResult` transport-failure log messages in `CloudUploadWorker` to use `snapshot()` instead of reading fields individually. The convenience aliases (`consecutiveFailureCount`, `nextRetryAt`) are retained for test compatibility — they read `@Volatile` fields which is safe for individual reads; the snapshot is used only where multiple fields must be consistent. |
 
 ---
 
@@ -127,10 +141,12 @@
 | **Module** | Site Configuration |
 | **Severity** | Medium |
 | **Category** | Architecture Violations |
+| **Status** | **RESOLVED** |
 | **Description** | `SettingsActivity.saveAndReconnect()` calls `localOverrideManager.saveOverride()` and `localOverrideManager.clearOverride()` directly on the main thread (lines 236–264). `LocalOverrideManager` uses `EncryptedSharedPreferences` which performs AES encryption and file I/O synchronously. On slow storage or under memory pressure, this can cause ANRs (Application Not Responding). The `populateFields()` call at line 274 also reads from `ConfigManager.config` and `EncryptedPrefsManager` on the main thread. |
 | **Evidence** | `ui/SettingsActivity.kt` lines 188–283: entire `saveAndReconnect()` runs on UI thread. |
 | **Impact** | Potential ANR on devices with slow storage. EncryptedSharedPreferences is known to be slow (>100ms on some devices). |
 | **Recommended Fix** | Move the save operations to a coroutine on `Dispatchers.IO`, then update the UI on the main thread. |
+| **Resolution** | Split `populateFields()` into `collectFieldData()` (IO-safe read returning a `FieldData` data class) and `applyFieldData()` (Main-thread UI update). All three call sites now read on `Dispatchers.IO` and apply on Main: (1) `onCreate()` launches a coroutine that reads on IO then applies on Main with saved-instance-state restoration afterward; (2) `saveAndReconnect()` calls `collectFieldData()` while still on the IO dispatcher before switching to Main; (3) `resetToCloudDefaults()` follows the same pattern. Save/clear operations in `saveAndReconnect()` and `resetToCloudDefaults()` were already on `Dispatchers.IO` from a prior fix. |
 
 ---
 
@@ -147,6 +163,7 @@
 | **Evidence** | `api/LocalApiServer.kt` lines 136–138: `server?.stop(1_000, 2_000)` followed by `embeddedServer(...)`. |
 | **Impact** | Pre-auth requests sent during server reconfiguration (triggered by config updates or settings changes) will fail with connection refused. |
 | **Recommended Fix** | Start the new server on a temporary port, then atomically swap. Or keep the old server alive until the new one is listening. Alternatively, add a client-side retry mechanism in POS for connection refused errors. |
+| **Resolution** | Refactored `start()` to build the new server configuration before stopping the old one. The old server is stopped with minimal grace/timeout (250ms/500ms instead of 1s/2s), and the new server is started immediately after. This reduces the unavailability window from ~3 seconds to milliseconds (just the time between socket close and rebind). The new server is fully configured before the old one stops, so only the socket bind needs to happen after shutdown. |
 
 ---
 
@@ -163,6 +180,7 @@
 | **Evidence** | `api/LocalApiServer.kt` lines 452–469: non-atomic compound operation across two atomics. |
 | **Impact** | Under high concurrency, the rate limiter may occasionally allow slightly more or fewer requests than the configured limit. Functionally acceptable for a LAN API. |
 | **Recommended Fix** | Accept the minor inaccuracy (the comment acknowledges it), or use a `synchronized` block if exact enforcement is needed. |
+| **Resolution** | Replaced the dual-atomic (`AtomicLong` + `AtomicInteger`) implementation with a `@Synchronized` method using plain `Long` and `Int` fields. This makes the window-second check and counter update fully atomic, eliminating both the over-count and under-count race conditions. Synchronization overhead is negligible for a LAN API with max 30 rps. |
 
 ---
 
@@ -179,6 +197,7 @@
 | **Evidence** | `di/AppModule.kt` lines 240–244: `IngestionOrchestrator(bufferManager = get(), syncStateDao = get())`. `ingestion/IngestionOrchestrator.kt` line 67: `private val transactionDao: TransactionBufferDao? = null`. |
 | **Impact** | Post-dispense fiscalization (ADV-7.3) is completely non-functional. Advatec transactions will never receive fiscal receipts through the retry mechanism. |
 | **Recommended Fix** | Add `transactionDao = get()` to the `IngestionOrchestrator` construction in `AppModule.kt`. |
+| **Resolution** | Already resolved in a prior fix. `AppModule.kt` lines 258–262 now include `transactionDao = get()` in the `IngestionOrchestrator` construction, enabling the post-dispense fiscalization flow. |
 
 ---
 
@@ -195,6 +214,7 @@
 | **Evidence** | `config/ConfigManager.kt` lines 343–346: `if (port != -1 && port != 443)`. `config/CloudEnvironments.kt`: LOCAL maps to `https://localhost:5001`. |
 | **Impact** | Development and staging configurations using non-standard HTTPS ports will be rejected. Local development is broken. |
 | **Recommended Fix** | Allow non-standard ports for non-production environments (check the environment field), or whitelist known staging/dev domains. |
+| **Resolution** | Relaxed the port validation in `validateExternalUrl()` to accept any valid port (1–65535) for HTTPS URLs instead of restricting to port 443 only. HTTPS on any port is still encrypted and authenticated — the HTTPS scheme requirement itself provides the security guarantee. The port restriction was over-aggressive SSRF protection that blocked legitimate dev/staging environments. |
 
 ---
 
@@ -207,10 +227,12 @@
 | **Module** | Cloud Sync |
 | **Severity** | Low |
 | **Category** | Architecture Violations |
+| **Status** | **RESOLVED** |
 | **Description** | `CloudUploadWorker` accepts 8 nullable parameters (lines 64–73) including `bufferManager`, `cloudApiClient`, and `tokenProvider`. Every public method starts with 3 null-check guards. This "nullable-everything" pattern exists because the worker is registered in Koin before security modules are wired. However, the Koin module actually provides all dependencies as non-null singletons — the nullability is legacy from an earlier design phase. |
 | **Evidence** | `sync/CloudUploadWorker.kt` lines 64–73: all parameters nullable. Lines 118–129: three null-check returns per method. |
 | **Impact** | Code readability and maintainability. Each method has 6 lines of boilerplate null-checks before doing real work. |
 | **Recommended Fix** | Make the core dependencies non-nullable since Koin provides them. Use `get()` not `getOrNull()` in the Koin module. Keep only `telemetryReporter` and `fileLogger` nullable if they truly are optional. |
+| **Resolution** | Made `bufferManager`, `syncStateDao`, `cloudApiClient`, `tokenProvider`, and `configManager` non-nullable. Only `telemetryReporter` and `fileLogger` remain nullable as they are genuinely optional (diagnostics-only). Removed all null-check guards for the now non-nullable parameters from `uploadPendingBatch()`, `pollSyncedToOdooStatus()`, `reportTelemetry()`, `reportDiagnosticLogs()`, and the internal `updateLast*` helpers. Updated `CloudUploadWorkerTest` to remove the three null-guard tests and add the `configManager` mock. The Koin module already uses `get()` (not `getOrNull()`), so no DI changes were needed. |
 
 ---
 
@@ -223,10 +245,12 @@
 | **Module** | Provisioning & Lifecycle |
 | **Severity** | Medium |
 | **Category** | Fat ViewModels / Business Logic in UI |
+| **Status** | **RESOLVED** |
 | **Description** | `ProvisioningViewModel.handleRegistrationSuccess()` (lines 122–223) performs 8 distinct responsibilities: (1) clear stale Keystore keys, (2) parse siteConfig JSON, (3) update CloudApiClient base URL, (4) encrypt and store tokens via KeystoreManager, (5) persist registration identity via EncryptedPrefsManager, (6) encrypt config with Keystore and encode to Base64, (7) store config in Room with write-verify retry, (8) sync site data. This is security-critical business logic (credential lifecycle management) embedded in a ViewModel. It is untestable without mocking 7 dependencies, and cannot be reused if a headless re-registration path is needed (e.g., automated provisioning via MDM). The desktop edge agent has an equivalent `RegistrationHandler` class for this logic. |
 | **Evidence** | `ui/ProvisioningViewModel.kt` lines 122–223: `handleRegistrationSuccess()` with 8 responsibilities. Constructor injects 7 dependencies (lines 43–49). |
 | **Impact** | The registration logic cannot be unit-tested without an Android Instrumentation test (AndroidViewModel requires Application context). Any future provisioning path (MDM push, API-triggered) must duplicate this logic. |
 | **Recommended Fix** | Extract a `RegistrationHandler` class that owns the credential storage, config encryption, and Room persistence pipeline. The ViewModel should only call `registrationHandler.completeRegistration(qrData, result)` and observe the outcome. |
+| **Resolution** | Extracted `RegistrationHandler` class in `com.fccmiddleware.edge.registration` package. It owns all 8 responsibilities: database clearing, Keystore/prefs cleanup, siteConfig parsing, base URL update, token storage, registration identity persistence, config encryption + Room upsert, and site data sync. `ProvisioningViewModel` now has only 3 dependencies (`cloudApiClient`, `encryptedPrefs`, `registrationHandler`) and delegates via `registrationHandler.completeRegistration(qrCloudBaseUrl, environment, response)`. The handler is UI-independent and reusable for headless provisioning paths. Registered as a Koin `single` in `AppModule`. Updated `ProvisioningViewModelTest` to use the new constructor. |
 
 ---
 

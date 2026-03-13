@@ -4,6 +4,7 @@ import android.app.Service
 import android.content.Intent
 import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.api.LocalApiServer
+import com.fccmiddleware.edge.buffer.IntegrityChecker
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.config.LocalOverrideManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
@@ -19,6 +20,9 @@ import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -67,6 +71,7 @@ class EdgeAgentForegroundServiceTest {
     private lateinit var localOverrideManager: LocalOverrideManager
     private lateinit var networkBinder: NetworkBinder
     private lateinit var odooWebSocketServer: OdooWebSocketServer
+    private lateinit var integrityChecker: IntegrityChecker
 
     @Before
     fun setUp() {
@@ -85,6 +90,10 @@ class EdgeAgentForegroundServiceTest {
         localOverrideManager = mockk(relaxed = true)
         networkBinder = mockk(relaxed = true)
         odooWebSocketServer = mockk(relaxed = true)
+        integrityChecker = mockk(relaxed = true)
+
+        // AF-038: Default IntegrityChecker.runCheck() to return Healthy so existing tests pass
+        io.mockk.coEvery { integrityChecker.runCheck() } returns IntegrityChecker.IntegrityCheckResult.Healthy
 
         // Wire ConfigManager.config to a MutableStateFlow so collect() does not hang
         val configFlow = MutableStateFlow<com.fccmiddleware.edge.config.EdgeAgentConfigDto?>(null)
@@ -92,6 +101,8 @@ class EdgeAgentForegroundServiceTest {
 
         startKoin {
             modules(module {
+                // AT-003: Service now injects the Koin-managed CoroutineScope
+                single<CoroutineScope> { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
                 single { localApiServer }
                 single { connectivityManager }
                 single { cadenceController }
@@ -107,6 +118,7 @@ class EdgeAgentForegroundServiceTest {
                 single { localOverrideManager }
                 single { networkBinder }
                 single { odooWebSocketServer }
+                single { integrityChecker }
             })
         }
     }

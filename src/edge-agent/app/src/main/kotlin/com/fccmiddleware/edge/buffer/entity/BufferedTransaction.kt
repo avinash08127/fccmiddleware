@@ -131,6 +131,23 @@ data class BufferedTransaction(
     @ColumnInfo(name = "is_discard", defaultValue = "0")
     val isDiscard: Boolean = false,
 
+    // ── AF-026: Fiscalization context fields ────────────────────────────────
+    /** Payment method for fiscal receipt (CASH, CCARD, EMONEY, INVOICE, CHEQUE). */
+    @ColumnInfo(name = "payment_type", defaultValue = "'CASH'")
+    val paymentType: String = "CASH",
+
+    /** Customer TIN for TRA fiscal receipts. Populated from pre-auth or POS. */
+    @ColumnInfo(name = "fiscal_customer_tax_id")
+    val fiscalCustomerTaxId: String? = null,
+
+    /** Customer display name on the fiscal receipt. */
+    @ColumnInfo(name = "fiscal_customer_name")
+    val fiscalCustomerName: String? = null,
+
+    /** TRA CustIdType (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL). */
+    @ColumnInfo(name = "fiscal_customer_id_type")
+    val fiscalCustomerIdType: Int? = null,
+
     // ── Fiscalization retry tracking (GAP-7) ──────────────────────────────
     @ColumnInfo(name = "fiscal_attempts", defaultValue = "0")
     val fiscalAttempts: Int = 0,

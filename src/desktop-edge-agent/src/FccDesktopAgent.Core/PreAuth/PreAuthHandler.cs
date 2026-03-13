@@ -327,36 +327,67 @@ public sealed class PreAuthHandler : IPreAuthHandler
 
         _logger.LogInformation("Pre-auth expiry check: found {Count} expired record(s)", expired.Count);
 
+        var expiredCount = 0;
+        var deferredAuthorizedCount = 0;
+
         foreach (var record in expired)
         {
             _logger.LogInformation(
                 "Expiring pre-auth {Id} (was {Status}, expired at {ExpiresAt}) for order {OrderId}",
                 record.Id, record.Status, record.ExpiresAt, record.OdooOrderId);
 
-            // Best-effort FCC deauthorization
-            await TryCancelAtFccAsync(record, ct);
+            if (record.Status == PreAuthStatus.Authorized)
+            {
+                var deauthorized = await TryCancelAtFccAsync(record, ct);
+                if (!deauthorized)
+                {
+                    deferredAuthorizedCount++;
+                    _logger.LogWarning(
+                        "Pre-auth {Id} remains {Status} after expiry because FCC deauthorization could not be confirmed; " +
+                        "the next expiry cycle will retry",
+                        record.Id,
+                        record.Status);
+                    continue;
+                }
+            }
 
             record.Status = PreAuthStatus.Expired;
             record.ExpiredAt = now;
             record.UpdatedAt = now;
             record.IsCloudSynced = false;
+            expiredCount++;
         }
 
-        await _db.SaveChangesAsync(CancellationToken.None);
-        _logger.LogInformation("Pre-auth expiry check: transitioned {Count} record(s) to Expired", expired.Count);
-        return expired.Count;
+        if (expiredCount > 0)
+            await _db.SaveChangesAsync(CancellationToken.None);
+
+        _logger.LogInformation(
+            "Pre-auth expiry check: transitioned {ExpiredCount} record(s) to Expired; deferred {DeferredCount} AUTHORIZED record(s) pending FCC deauthorization",
+            expiredCount,
+            deferredAuthorizedCount);
+
+        return expiredCount;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /// <summary>
     /// Attempts to notify the FCC to release the pump authorization.
-    /// Best-effort only — exceptions are caught and logged; local state transition proceeds regardless.
+    /// Returns true when deauthorization succeeded or is not required locally.
+    /// Returns false when the authorization still needs a retry (for example FCC outage).
     /// </summary>
-    private async Task TryCancelAtFccAsync(PreAuthEntity record, CancellationToken ct)
+    private async Task<bool> TryCancelAtFccAsync(PreAuthEntity record, CancellationToken ct)
     {
-        if (_adapterFactory is null || !_connectivity.Current.IsFccUp || record.FccCorrelationId is null)
-            return;
+        if (_adapterFactory is null || record.FccCorrelationId is null)
+            return true;
+
+        if (!_connectivity.Current.IsFccUp)
+        {
+            _logger.LogWarning(
+                "FCC deauthorization deferred for pre-auth {Id} because FCC connectivity is down",
+                record.Id);
+            return false;
+        }
 
         try
         {
@@ -368,13 +399,14 @@ public sealed class PreAuthHandler : IPreAuthHandler
                 record.SiteCode);
             var adapter = _adapterFactory.Create(resolvedConfig.Vendor, resolvedConfig.ConnectionConfig);
 
-            await adapter.CancelPreAuthAsync(record.FccCorrelationId, ct);
+            return await adapter.CancelPreAuthAsync(record.FccCorrelationId, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
-                ex, "Best-effort FCC deauthorization failed for pre-auth {Id} (correlationId={CorrelationId})",
+                ex, "FCC deauthorization failed for pre-auth {Id} (correlationId={CorrelationId})",
                 record.Id, record.FccCorrelationId);
+            return false;
         }
     }
 }

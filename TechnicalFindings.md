@@ -240,27 +240,33 @@
 
 ### PA-T04: Cloud PreAuthExpiryWorker deauthorizes FCC pumps AFTER marking records as EXPIRED — crash creates orphaned FCC authorizations
 - **Severity**: High
+- **Status**: ✅ Resolved
 - **Location**: `PreAuthExpiryWorker.cs:111-114`
 - **Trace**: ExpireBatchAsync → `db.SaveChangesAsync(ct)` (line 111) → `TryDeauthorizePumpAsync` (line 114) per DISPENSING record
 - **Description**: The worker first saves ALL records as EXPIRED in a single `SaveChangesAsync` call (line 111), then iterates over DISPENSING records to attempt FCC pump deauthorization (lines 113-114). If the worker crashes or the pod is recycled between the save and the deauth calls, the database shows EXPIRED but the FCC pump remains authorized — a "zombie" authorization. The Android edge agent takes the opposite approach (`PreAuthHandler.kt:390-421`): it deauthorizes BEFORE marking expired, and if deauth fails, leaves the record as AUTHORIZED for retry on the next cycle.
 - **Impact**: FCC pumps may remain authorized after the pre-auth has expired in the database, allowing unauthorized fuel dispensing until the FCC's own TTL expires.
 - **Fix**: Move deauthorization before the batch save, or process each DISPENSING record individually: deauth → transition → save → next record.
+- **Resolution**: The cloud worker no longer performs direct FCC pump deauthorization at all. `PreAuthExpiryWorker` now expires the record and publishes the `PreAuthExpired` outbox event, while FCC deauthorization is delegated to the edge agent's local expiry flow. This removes the cloud-side save-then-deauth crash window entirely. Integration coverage in `PreAuthExpiryWorkerTests` verifies that DISPENSING records now expire without any direct cloud → FCC call.
 
 ### PA-T05: Expiry deauthorization strategy diverges across three platforms — inconsistent "zombie auth" prevention
 - **Severity**: Medium
+- **Status**: ✅ Resolved
 - **Location**: Android `PreAuthHandler.kt:386-424`, Desktop `PreAuthHandler.cs:342-359`, Cloud `PreAuthExpiryWorker.cs:94-114`
 - **Trace**: Expiry check → FCC deauth attempt → mark EXPIRED
 - **Description**: Three different strategies for the same operation: (1) **Android**: For AUTHORIZED records, attempts deauth first; if deauth fails, does NOT mark as expired — retries next cycle. For PENDING/DISPENSING, marks expired directly. (2) **Desktop**: Attempts deauth for ALL expiring records (best-effort), then ALWAYS marks as expired regardless of deauth result. (3) **Cloud**: Marks ALL records as EXPIRED first, then attempts deauth only for previously-DISPENSING records.
 - **Impact**: Inconsistent "zombie authorization" prevention. Android is strictest (never expires without successful deauth for AUTHORIZED), desktop is most lenient (always expires), cloud is in between. An FCC pump authorized by one agent type may behave differently during expiry than the same scenario on another agent type.
 - **Fix**: Align all three platforms on a single strategy. The Android approach (deauth-then-expire with retry) is safest for preventing zombie authorizations.
+- **Resolution**: The expiry strategy is now aligned around edge-local zombie-auth prevention. Android already retried FCC deauthorization before expiring `AUTHORIZED` records; desktop `RunExpiryCheckAsync()` now matches that behavior and leaves `AUTHORIZED` records active for retry when FCC deauth is not confirmed, while still expiring `PENDING` and `DISPENSING` directly. Cloud no longer performs direct FCC deauth and instead delegates that responsibility to the edge agent, removing the third divergent strategy.
 
 ### PA-T06: Android cloud forward worker treats all HTTP 409 as successful sync — invalid transition conflicts silently dropped
 - **Severity**: High
+- **Status**: ✅ Resolved
 - **Location**: `PreAuthCloudForwardWorker.kt:198-200`
 - **Trace**: PreAuthCloudForwardWorker → `doForward()` → `CloudPreAuthForwardResult.Conflict` → `ForwardAttemptResult.Success` → `markCloudSynced`
 - **Description**: The worker maps any `CloudPreAuthForwardResult.Conflict` (HTTP 409) to `ForwardAttemptResult.Success` with the comment "409 means cloud already has this record — treat as synced." However, the cloud controller returns 409 for TWO distinct cases: `CONFLICT.INVALID_TRANSITION` (invalid state transition) and `CONFLICT.RACE_CONDITION` (concurrent insert, retryable). An invalid transition 409 means the cloud rejected the status update, but the worker marks the record as `is_cloud_synced = 1`, permanently losing the status change. This can happen when the cloud expiry worker transitions a record to EXPIRED while the edge agent tries to forward an AUTHORIZED update.
 - **Impact**: Pre-auth status changes (AUTHORIZED, CANCELLED, EXPIRED) can be silently lost when the cloud rejects them as invalid transitions. The edge believes the record is synced; the cloud has a different status.
 - **Fix**: Distinguish 409 error codes. Treat `CONFLICT.RACE_CONDITION` (retryable) as a transport failure for retry. Treat `CONFLICT.INVALID_TRANSITION` by logging a warning and marking synced (since the cloud has a more advanced state) or routing to a local DLQ.
+- **Resolution**: `PreAuthCloudForwardWorker` now inspects `CloudPreAuthForwardResult.Conflict.errorCode` instead of treating all 409 responses as success. `CONFLICT.INVALID_TRANSITION` is logged and marked synced because the cloud record is already ahead, while `CONFLICT.RACE_CONDITION` is treated as a retryable transport failure so the record stays unsynced and `recordCloudSyncFailure()` increments the retry state. Unknown 409 codes also fail closed for retry.
 
 ---
 
@@ -270,24 +276,30 @@
 
 ### OB-T01: Desktop DeviceTokenProvider stores device token and refresh token non-atomically — crash triggers server-side reuse detection
 - **Severity**: High
+- **Status**: ✅ Resolved
 - **Location**: `DeviceTokenProvider.cs:141-143` (`RefreshTokenCoreAsync`)
 - **Trace**: CloudUploadWorker/ConfigPollWorker → 401 → `RefreshTokenAsync()` → `RefreshTokenCoreAsync()` → `SetSecretAsync(TokenKey, ...)` (line 141) → `SetSecretAsync(RefreshTokenKey, ...)` (line 143)
 - **Description**: After a successful token refresh, the provider stores the new device token (line 141) and new refresh token (line 143) in two separate `SetSecretAsync` calls. On the cloud, both old tokens are revoked and new tokens are issued atomically in a single `SaveChangesAsync`. If the desktop agent process crashes, is killed, or the credential store write fails between lines 141 and 143: the new device JWT is stored locally, but the old refresh token remains. On next startup, the device uses the new JWT (valid for 24 hours). When it next needs to refresh, it sends the OLD refresh token. The cloud's `RefreshDeviceTokenHandler` (BUG-010) detects this as refresh token reuse — the old token has `RevokedAt is not null` and `ExpiresAt > now` — and revokes ALL active tokens for the device per RFC 6819 §5.2.2.3. The device becomes unable to authenticate. The same non-atomic pattern exists in `StoreTokensAsync` (lines 51-52) during initial registration, though that path is less susceptible since it's a one-time operation.
 - **Impact**: A process crash at the wrong moment during token refresh permanently locks the device out, requiring manual re-provisioning. The server interprets the stale refresh token as a compromise indicator and revokes all tokens.
 - **Fix**: Write both tokens to a single atomic credential entry (e.g., a JSON object with both tokens) or use a two-phase approach: write new tokens to a staging key, then atomically swap. Alternatively, persist a "pending refresh" marker before the HTTP call and reconcile on startup.
+- **Resolution**: Desktop token persistence now writes the JWT + refresh token as a single JSON credential bundle. Refreshes use a pending marker plus a staging bundle: new tokens are written to staging first, then promoted to the active bundle, and interrupted writes are recovered on the next access. If a refresh was interrupted before the new bundle reached local storage, the provider now fails closed on the next refresh attempt instead of reusing the stale refresh token that would trigger server-side reuse detection. Registration cleanup was also updated to purge the new bundle/staging/pending keys.
 
 ### OB-T02: Concurrent decommission requests produce duplicate audit events — no optimistic concurrency on AgentRegistration
 - **Severity**: Medium
+- **Status**: ✅ Resolved
 - **Location**: `DecommissionDeviceHandler.cs:30-70`
 - **Trace**: Portal Admin A → `POST /api/v1/admin/agent/{deviceId}/decommission` + Portal Admin B → same endpoint concurrently
 - **Description**: The `DecommissionDeviceHandler` loads the agent registration, checks `device.IsActive`, sets `IsActive = false`, revokes refresh tokens, creates an audit event, and calls `SaveChangesAsync`. The `AgentRegistration` entity has no `RowVersion` or concurrency token (unlike `BootstrapToken` which uses PostgreSQL `xmin` and `DeviceRefreshToken` which uses `RevokedAt`). If two admin users simultaneously decommission the same device: both load the device with `IsActive = true`, both pass the `!device.IsActive` check, both create `DEVICE_DECOMMISSIONED` audit events, and both save successfully. The second save silently overwrites the first (last-write-wins on `DeactivatedAt`, `UpdatedAt`). Two audit events are published for a single decommission.
 - **Impact**: Duplicate audit trail for a single decommission action. If downstream systems consume audit events for alerting or compliance, they may process the decommission twice.
 - **Fix**: Add a concurrency token to `AgentRegistration` (e.g., `xmin` like BootstrapToken) and use `TrySaveChangesAsync`. Return 409 Conflict on concurrent modification.
+- **Resolution**: `AgentRegistration` now uses PostgreSQL `xmin` as an EF Core row-version concurrency token. `DecommissionDeviceHandler` saves through `TrySaveChangesAsync()`, and a concurrent loser now returns `DEVICE_ALREADY_DECOMMISSIONED` instead of silently committing a second audit event.
 
 ### OB-T03: Android ANDROID_ID null fallback generates a random deviceSerialNumber on every attempt — inconsistent fleet records
 - **Severity**: Low
+- **Status**: ✅ Resolved
 - **Location**: `ProvisioningViewModel.kt:110-111`
 - **Trace**: Android provisioning → `buildRegistrationRequest()` → `Settings.Secure.getString(...) ?: "unknown-${UUID.randomUUID()...}"`
 - **Description**: If `Settings.Secure.ANDROID_ID` returns null (possible on some AOSP builds, emulators, or rooted devices), the fallback generates `"unknown-${UUID.randomUUID().toString().take(8)}"`. This random value changes on every registration attempt. If the first registration attempt fails (e.g., network error) and the user retries, the `deviceSerialNumber` in the cloud registration will differ between attempts. While the cloud uses bootstrap token hash (not serial number) for dedup, the `agent_registrations.device_serial_number` column stores whatever value was sent, leading to unpredictable fleet inventory records.
 - **Impact**: Fleet management portal may show random serial numbers for devices where ANDROID_ID is unavailable. Multiple failed-then-succeeded registration attempts could create confusion if serial numbers are used for device identification in support workflows.
 - **Fix**: Generate the random fallback once and persist it in `EncryptedPrefsManager` so it remains stable across registration attempts.
+- **Resolution**: The Android app now persists a single fallback serial in `EncryptedPrefsManager` and reuses it whenever `ANDROID_ID` is null or blank. `ProvisioningViewModel` resolves the registration serial through that persisted value, so retries now report a stable `deviceSerialNumber`.

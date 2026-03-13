@@ -392,10 +392,12 @@
 | **Module** | Transaction Management |
 | **Severity** | Medium |
 | **Category** | UI Not Reflecting Backend State |
+| **Status** | **FIXED** |
 | **Description** | In the `GET /api/v1/transactions` handler, the `entities` list is filtered by `pumpNumber` and/or `since` query parameters via 4 different DAO query variants (lines 70–79). However, the `total` field in the response is always `dao.countForLocalApi()` (line 81), which counts ALL non-SYNCED_TO_ODOO records regardless of any filters. When POS queries transactions for pump 3 with `since=2026-03-13T10:00:00Z`, the response might contain `transactions: [3 records], total: 500`. The POS uses `total` to calculate pagination (`totalPages = ceil(total / limit)`), so it will attempt to paginate through 10 pages when only 1 page of results exists, receiving empty pages for requests 2–10. |
 | **Evidence** | `api/TransactionRoutes.kt` lines 70–81: `entities` uses filtered queries but `total = dao.countForLocalApi()` is unfiltered. `buffer/dao/TransactionBufferDao.kt` lines 198–202: `countForLocalApi()` — `SELECT COUNT(*) FROM buffered_transactions WHERE sync_status NOT IN ('SYNCED_TO_ODOO')`. |
 | **Impact** | POS pagination logic is incorrect for filtered queries. The POS iterates through empty pages, creating unnecessary HTTP round-trips and confusing UI page counts. |
 | **Recommended Fix** | Add filtered count queries to `TransactionBufferDao` matching each filter variant (e.g., `countForLocalApiByPump(pumpNumber: Int)`, `countForLocalApiSince(since: String)`, `countForLocalApiByPumpSince(pumpNumber: Int, since: String)`). Use the matching count query based on the same filter combination applied to the entity query. |
+| **Fix Applied** | Added `countForLocalApiByPump`, `countForLocalApiSince`, and `countForLocalApiByPumpSince` to `TransactionBufferDao`. Updated `TransactionRoutes.kt` GET handler to use the matching filtered count query based on the same filter combination applied to the entity query. Tests updated to verify filtered counts. |
 
 ---
 
@@ -408,10 +410,12 @@
 | **Module** | Transaction Management |
 | **Severity** | Medium |
 | **Category** | Incorrect State Updates |
+| **Status** | **FIXED** |
 | **Description** | The `getForLocalApi()` DAO query filters with `WHERE sync_status NOT IN ('SYNCED_TO_ODOO')`. The transaction lifecycle is `PENDING → UPLOADED → SYNCED_TO_ODOO → ARCHIVED → (deleted)`. When a record transitions from SYNCED_TO_ODOO (excluded from the API) to ARCHIVED (NOT excluded), it reappears in the local API results. A POS that polls the API will see transactions it has already consumed via Odoo reappearing in the list. Additionally, `DEAD_LETTER` records (transactions permanently rejected by the cloud after 20 upload attempts) are visible to POS — the POS could process a transaction that the cloud will never have, creating a reconciliation discrepancy. The WebSocket endpoint correctly handles this: `getUnsyncedForWs()` excludes both `SYNCED_TO_ODOO` AND `ARCHIVED` (line 291), creating an inconsistency between the REST and WebSocket APIs for the same data. |
 | **Evidence** | `buffer/dao/TransactionBufferDao.kt` line 45: `WHERE sync_status NOT IN ('SYNCED_TO_ODOO')` — REST API. Line 291: `WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED')` — WebSocket API. `buffer/dao/TransactionBufferDao.kt` lines 105–110: `archiveOldSynced()` transitions SYNCED_TO_ODOO → ARCHIVED. |
 | **Impact** | ARCHIVED transactions reappear in POS API queries after the archive transition window, causing potential double-consumption. DEAD_LETTER transactions are exposed to POS despite being rejected by the cloud, creating POS-cloud data inconsistency. |
 | **Recommended Fix** | Update `getForLocalApi`, `getForLocalApiByPump`, `getForLocalApiSince`, `getForLocalApiByPumpSince`, and `countForLocalApi` to exclude ARCHIVED and DEAD_LETTER: `WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER')`. This aligns the REST API with the WebSocket API's filtering logic. |
+| **Fix Applied** | Updated all 5 REST API DAO queries (`getForLocalApi`, `getForLocalApiByPump`, `getForLocalApiSince`, `getForLocalApiByPumpSince`, `countForLocalApi`) to use `WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER')`. The new filtered count queries (AF-023) also use this exclusion set. REST API now aligns with WebSocket API filtering. `BufferDatabaseTest` updated to verify ARCHIVED and DEAD_LETTER exclusion. |
 
 ---
 
@@ -428,6 +432,7 @@
 | **Evidence** | `buffer/dao/TransactionBufferDao.kt` line 63: `@Query("SELECT * FROM buffered_transactions WHERE id = :id")` — no status filter. `api/TransactionRoutes.kt` line 114: `val entity = dao.getById(id)` — returns regardless of status. |
 | **Impact** | Minor inconsistency. POS could fetch details of transactions that no longer appear in the list. Low practical impact since POS would need the ID from a prior list response. |
 | **Recommended Fix** | Add a status filter to the detail query, or document that the detail endpoint intentionally returns all statuses for diagnostic purposes. If filtering, use the same exclusion set as the list endpoint. |
+| **Status** | **Fixed** — Added `getByIdForLocalApi()` DAO method with the same status exclusion (`SYNCED_TO_ODOO`, `ARCHIVED`, `DEAD_LETTER`) and `acknowledged_at IS NULL` filter as the list endpoint. `TransactionRoutes.kt` now uses this filtered method for `GET /api/v1/transactions/{id}`. The unfiltered `getById()` is retained for internal use (status updates, diagnostics). Tests updated to validate the filtered behavior. |
 
 ---
 
@@ -444,6 +449,7 @@
 | **Evidence** | `ingestion/IngestionOrchestrator.kt` lines 407–412: `FiscalizationContext(customerTaxId = null, customerName = null, customerIdType = null, paymentType = "CASH")`. `buffer/entity/BufferedTransaction.kt`: no `paymentType` column. |
 | **Impact** | All card-payment transactions that require fiscalization retry will receive fiscal receipts showing CASH as the payment type. This is a TRA compliance violation and could result in regulatory penalties. Customer identification data is also lost on retry. |
 | **Recommended Fix** | Add a `payment_type` column to `BufferedTransaction` (Room migration required). Populate it during initial buffering from the `CanonicalTransaction` or from the `FiscalizationContext` used in the first attempt. Use the stored value in `retryPendingFiscalization()` instead of hardcoding CASH. For customer fields, consider storing `customerTaxId` and `customerName` in the buffer as well (encrypted per AS-008). |
+| **Status** | **Fixed** — Added four columns to `BufferedTransaction`: `payment_type` (default `CASH`), `fiscal_customer_tax_id`, `fiscal_customer_name`, `fiscal_customer_id_type`. Room migration `MIGRATION_6_7` (v6→v7) adds these columns. `IngestionOrchestrator.retryPendingFiscalization()` now reads `tx.paymentType`, `tx.fiscalCustomerTaxId`, `tx.fiscalCustomerName`, `tx.fiscalCustomerIdType` from the buffer instead of hardcoding. Existing records default to `CASH`/`null` (preserving current behavior). Also wired `transactionDao` into `IngestionOrchestrator` in `AppModule.kt` (was missing). |
 
 ---
 
@@ -460,6 +466,7 @@
 | **Evidence** | `buffer/CleanupWorker.kt` line 37: class exists with full implementation. `di/AppModule.kt` line 148: registered in DI. `runtime/CadenceController.kt`: no import, no constructor param, no reference to CleanupWorker. Grep for `.runCleanup(` in `src/edge-agent/app/src/main/kotlin/`: 0 results. |
 | **Impact** | On a device running for weeks/months: (a) `buffered_transactions` table grows indefinitely — at 50 transactions/day, this is 1,500+ records/month with no deletion. (b) Pre-auth records accumulate, consuming storage and slowing index-backed queries. (c) Audit log table grows unbounded. (d) Log files fill device storage. (e) UPLOADED records stuck due to cloud-side delays are never reverted for retry, causing permanent sync gaps. On Urovo i9100 devices with limited eMMC storage (8–16 GB), unbounded database growth will eventually cause SQLite DISK_FULL errors, crashing the entire agent. |
 | **Recommended Fix** | Inject `CleanupWorker` into `CadenceController` and add a cleanup tick frequency (e.g., every 2880 ticks at 30s interval ≈ 24 hours): `private val cleanupWorker: CleanupWorker? = null`. In `runTick()`, add: `if (tickCount % config.cleanupTickFrequency == 0L) { cleanupWorker?.runCleanup(retentionDays = cfg.buffer.retentionDays) }`. Update `AppModule.kt` to pass `cleanupWorker = get()` to `CadenceController`. Also call `StructuredFileLogger.rotateOldFiles()` from the cleanup tick. |
+| **Status** | **Fixed** — Injected `CleanupWorker` and `StructuredFileLogger` into `CadenceController` constructor. Added `cleanupTickFrequency = 2880` to `CadenceConfig` (24h at 30s base interval). In `runTick()`, cleanup runs on the configured tick modulus: calls `cleanupWorker.runCleanup()` and `fileLogger.rotateOldFiles()` with error handling. Updated `computeTickModulus()` to include cleanup frequency in the LCM calculation. Wired both dependencies in `AppModule.kt`. All five CleanupWorker functions (retention, quota, terminal pre-auth, audit trim, stale UPLOADED revert) and log rotation are now operational. |
 
 ---
 
@@ -472,10 +479,12 @@
 | **Module** | Cloud Sync & Telemetry |
 | **Severity** | Medium |
 | **Category** | UI Not Reflecting Backend State |
+| **Status** | **FIXED** |
 | **Description** | `TelemetryReporter.collectSyncStatus()` at lines 306–307 maps both `lastSyncAttemptUtc` and `lastSuccessfulSyncUtc` to the same `SyncState` field: `lastSyncAttemptUtc = syncState?.lastUploadAt, lastSuccessfulSyncUtc = syncState?.lastUploadAt`. `SyncState.lastUploadAt` is only written by `CloudUploadWorker.updateLastUploadAt()` after a successful upload (line 651 in `handleUploadResult`, inside the `UploadAttemptResult.Success` branch). Failed upload attempts do not update this field. This means both telemetry fields always show the same value — the timestamp of the last *successful* upload. The cloud monitoring dashboard cannot determine when the last upload attempt occurred (successful or not), making it impossible to detect scenarios where the agent is repeatedly attempting uploads that all fail. A device stuck in a backoff loop for hours will show a stale `lastSyncAttemptUtc` from the last success, giving the false impression that no upload attempts are being made. |
 | **Evidence** | `sync/TelemetryReporter.kt` lines 306–307: both fields use `syncState?.lastUploadAt`. `sync/CloudUploadWorker.kt` line 651: `updateLastUploadAt()` only called inside `UploadAttemptResult.Success` handler. `buffer/entity/SyncState.kt`: no `lastUploadAttemptAt` field exists. |
 | **Impact** | Cloud monitoring cannot detect failed upload attempts. A device experiencing persistent upload failures (e.g., network issues, cloud outage, expired certificates) appears healthy in telemetry because the last attempt timestamp is indistinguishable from the last success timestamp. |
 | **Recommended Fix** | Add a `lastUploadAttemptAt` column to `SyncState` (Room migration required). Update `CloudUploadWorker` to write `lastUploadAttemptAt = Instant.now()` at the START of `uploadPendingBatch()` (before the HTTP call), regardless of outcome. Map `lastSyncAttemptUtc` to this new field and keep `lastSuccessfulSyncUtc` mapped to `lastUploadAt`. |
+| **Fix Details** | Added `lastUploadAttemptAt` column to `SyncState` entity with Room MIGRATION_7_8 (version 7→8). `CloudUploadWorker.uploadPendingBatch()` now calls `updateLastUploadAttemptAt()` before the HTTP call, recording the attempt timestamp regardless of outcome. `TelemetryReporter.collectSyncStatus()` maps `lastSyncAttemptUtc` to `syncState?.lastUploadAttemptAt` and `lastSuccessfulSyncUtc` to `syncState?.lastUploadAt`. Tests updated accordingly. |
 
 ---
 
@@ -488,10 +497,12 @@
 | **Module** | Cloud Sync & Telemetry |
 | **Severity** | Medium |
 | **Category** | UI Not Reflecting Backend State |
+| **Status** | **FIXED** |
 | **Description** | `CadenceController.runTick()` schedules telemetry reporting (`cloudUploadWorker.reportTelemetry()` and `reportDiagnosticLogs()`) only in the `FULLY_ONLINE` branch (lines 464–467) and the `versionCompatible == false` branch (lines 441–443). The `FCC_UNREACHABLE` branch (lines 477–489) performs cloud upload, pre-auth forwarding, status poll, and config poll — but NOT telemetry or diagnostic logs. In the `FCC_UNREACHABLE` state, the agent has internet connectivity (cloud is reachable) but the FCC controller is down. This is precisely the scenario where the cloud operator needs telemetry most — to detect and diagnose FCC connectivity issues. The `FccHealthStatusDto.isReachable` field, `consecutiveHeartbeatFailures`, and `fccConnectionErrors` counters contain critical diagnostic data about the FCC outage, but they are never transmitted to the cloud during the outage. Telemetry only resumes when FCC connectivity recovers (state transitions back to `FULLY_ONLINE`), by which time the real-time error counts may have been reset or aged out. The `onTransition()` handler for `FULLY_ONLINE` (line 354) does trigger telemetry on recovery, but this is a single snapshot — the history of the outage (duration, error patterns) is not captured. |
 | **Evidence** | `runtime/CadenceController.kt` lines 452–472: `FULLY_ONLINE` includes telemetry at lines 464–467. Lines 477–489: `FCC_UNREACHABLE` — no `reportTelemetry()` or `reportDiagnosticLogs()` call. |
 | **Impact** | During FCC outages, the cloud monitoring dashboard receives no health updates from the agent. The operator has no real-time visibility into FCC connection errors, heartbeat failures, or buffer backlog status. The outage is only reported retroactively when connectivity recovers. |
 | **Recommended Fix** | Add telemetry and diagnostic log reporting to the `FCC_UNREACHABLE` branch, using the same tick frequency as `FULLY_ONLINE`: `if (tickCount % config.telemetryTickFrequency == 0L) { cloudUploadWorker.reportTelemetry(); cloudUploadWorker.reportDiagnosticLogs() }`. |
+| **Fix Details** | Added `reportTelemetry()` and `reportDiagnosticLogs()` calls to the `FCC_UNREACHABLE` branch in `CadenceController.runTick()`, gated by `tickCount % config.telemetryTickFrequency == 0L` — same cadence as `FULLY_ONLINE`. Test added to verify telemetry is sent during FCC_UNREACHABLE state. |
 
 ---
 
@@ -504,10 +515,12 @@
 | **Module** | Cloud Sync & Telemetry |
 | **Severity** | Low |
 | **Category** | Incorrect State Updates |
+| **Status** | **FIXED** |
 | **Description** | The telemetry error reporting has a two-step process with a race window: (1) `TelemetryReporter.buildPayload()` at line 123 calls `snapshotErrorCounts()` which reads each `AtomicInteger` via `.get()` — a non-atomic multi-field snapshot. (2) After successful submission, `CloudUploadWorker.reportTelemetry()` at line 309 calls `reporter.snapshotAndResetErrorCounts()` which atomically reads+resets each counter via `.getAndSet(0)`. Between steps (1) and (2), the telemetry payload is serialized, transmitted over HTTP, and deserialized by the cloud (typically 100–500ms). During this window, other coroutines may increment error counters (e.g., FCC adapter errors, local API errors). At step (2), `getAndSet(0)` returns the counter value AT RESET TIME (which includes the new increments) but this return value is discarded — line 309 does not use the return. The counter is reset to 0. The increments that occurred between steps (1) and (2) were neither in the submitted payload (which used the earlier snapshot) nor will they be in the next payload (counters are now 0). The M-05 comment acknowledges this issue and claims `snapshotAndResetErrorCounts()` solves it, but the fix is incomplete because the return value is not used to patch the payload. |
 | **Evidence** | `sync/TelemetryReporter.kt` line 123: `errorCounts = snapshotErrorCounts()` — non-atomic read. `sync/CloudUploadWorker.kt` line 309: `reporter.snapshotAndResetErrorCounts()` — return value discarded. `sync/TelemetryReporter.kt` lines 150–158: `snapshotAndResetErrorCounts()` returns `ErrorCountsDto` but caller ignores it. |
 | **Impact** | Low: errors that occur during the ~100–500ms HTTP submission window are lost from telemetry. At typical error rates (1–5 errors per telemetry cycle), this loses at most 1 error per cycle. The error counts in telemetry are approximate indicators, not exact totals, so the practical impact is minimal. |
 | **Recommended Fix** | Use `snapshotAndResetErrorCounts()` in `buildPayload()` instead of `snapshotErrorCounts()`, and do NOT call `snapshotAndResetErrorCounts()` again on success. This atomically captures and resets in one step, eliminating the window. On submission failure, the counts are already zeroed, but since the payload was discarded, the errors are lost regardless — this is acceptable for fire-and-forget telemetry. Alternatively, accept the current minor inaccuracy and add a code comment documenting the known window. |
+| **Fix Details** | `TelemetryReporter.buildPayload()` now calls `snapshotAndResetErrorCounts()` instead of `snapshotErrorCounts()`, atomically capturing and resetting counters in one step. Removed the redundant `reporter.snapshotAndResetErrorCounts()` calls from `CloudUploadWorker.reportTelemetry()` after successful submission (both initial and post-refresh paths). The race window is eliminated. |
 
 ---
 
@@ -524,6 +537,7 @@
 | **Evidence** | `buffer/IntegrityChecker.kt` line 52: `suspend fun runCheck()` — never called. `di/AppModule.kt` line 149: `single { IntegrityChecker(get(), get(), androidContext()) }` — registered. `service/EdgeAgentForegroundService.kt`: no import or reference to `IntegrityChecker`. `FccEdgeApplication.kt`: no reference. Grep for `.runCheck(` in production code: 0 results. |
 | **Impact** | Database corruption from SQLite write errors, power loss during WAL commits, or eMMC hardware degradation goes completely undetected. On Urovo i9100 devices with limited-endurance eMMC storage, database corruption is a real risk over months of operation. A corrupt database causes unpredictable behavior: missing transactions, garbled audit logs, DAO exceptions that propagate as uncaught errors. Without the integrity check, the agent operates on a corrupt database until a crash forces a manual investigation. The backup-and-recreate recovery path — which is fully implemented — never executes. |
 | **Recommended Fix** | Call `integrityChecker.runCheck()` in `EdgeAgentForegroundService.onStartCommand()` before initializing the runtime. Add `private val integrityChecker: IntegrityChecker by inject()` to the service. After `runCheck()`, if the result is `Recovered`, log a warning, clear the Koin scope, and restart the service (or let START_STICKY handle it). Example: `val result = integrityChecker.runCheck(); if (result is IntegrityCheckResult.Recovered) { AppLogger.w(TAG, "Database recovered from corruption, restarting..."); stopSelf(); return START_STICKY }`. |
+| **Fix Details** | Added `private val integrityChecker: IntegrityChecker by inject()` to `EdgeAgentForegroundService`. In `onStartCommand()`, `integrityChecker.runCheck()` is called at the start of the main `appScope.launch` block — before `configManager.loadFromLocal()` or any other DB access. If the result is `IntegrityCheckResult.Recovered`, the service logs the backup path and calls `stopSelf()` (START_STICKY will restart it with a fresh database). Updated `EdgeAgentForegroundServiceTest` to register a mocked `IntegrityChecker` in the Koin test module, defaulting `runCheck()` to return `Healthy`. |
 
 ---
 
@@ -540,6 +554,7 @@
 | **Evidence** | `logging/StructuredFileLogger.kt` lines 130–152: forward iteration through files (lines 136–149), forward iteration through each file's lines (lines 139–145), break on `entries.size >= maxEntries` (lines 137, 141), and no-op `takeLast` (line 151). With `STRUCTURED_LOG_LIMIT = 30` (DiagnosticsActivity line 500) and a file with 100+ WARN/ERROR lines, only the first 30 from the top of the file are returned. |
 | **Impact** | During error storms, the diagnostics screen shows stale hours-old errors instead of current ongoing errors. The technician cannot see real-time error patterns, making on-site troubleshooting significantly harder. |
 | **Recommended Fix** | Read each file in reverse (bottom-to-top) to capture the newest entries first. Replace the forward `useLines` iteration with a reverse-read approach: read all matching lines into a temporary list, then take the last `maxEntries`. Alternatively, use `RandomAccessFile` to seek to the end of each file and read backwards, or maintain an in-memory ring buffer of the last N WARN/ERROR entries that avoids file I/O entirely. |
+| **Fix Details** | Removed the early-break `if (entries.size >= maxEntries)` guards from both the file loop and line loop in `getRecentDiagnosticEntries()`. The method now collects ALL matching WARN/ERROR/FATAL lines across all log files, then `takeLast(maxEntries)` returns the most recent entries from the tail of the collection. Since files are iterated newest-first and lines within each file run top-to-bottom, the tail of the collected list contains the newest entries from the newest file. |
 
 ---
 
@@ -556,6 +571,7 @@
 | **Evidence** | `ui/DiagnosticsActivity.kt` lines 240–241: `if (entry.eventType.contains("ERROR") || entry.eventType.contains("FAIL")) COLOR_RED else COLOR_TEXT`. `buffer/entity/AuditLog.kt`: no severity column. `connectivity/ConnectivityManager.kt` line 206: `eventType = "CONNECTIVITY_TRANSITION"` — not highlighted. `buffer/IntegrityChecker.kt` line 96: `eventType = "DB_CORRUPTION_DETECTED"` — not highlighted. |
 | **Impact** | Critical events (database corruption, full connectivity loss) appear in the default text color on the diagnostics screen, blending in with routine entries. A technician scanning the audit log may miss these events. |
 | **Recommended Fix** | Add a `severity` TEXT column to `AuditLog` (Room migration required) with values "INFO", "WARN", "ERROR". Update all `auditLogDao.insert()` callers to set the severity. In the diagnostics screen, color entries based on `entry.severity` instead of substring matching on `eventType`. As a quick fix without a migration, maintain a hardcoded set of error event types: `val errorEvents = setOf("DB_CORRUPTION_DETECTED", "PREAUTH_DEAUTH_FAILED", "UPLOAD_ERROR")` and check `eventType in errorEvents || eventType.contains("ERROR") || eventType.contains("FAIL")`. |
+| **Fix Details** | Applied the quick-fix approach (no Room migration required). Added a `CRITICAL_EVENT_TYPES` set to the `DiagnosticsActivity` companion object containing `DB_CORRUPTION_DETECTED`, `PREAUTH_EXPIRED`, and `CONNECTIVITY_TRANSITION`. Updated the coloring logic to check `entry.eventType in CRITICAL_EVENT_TYPES` first, then fall back to the existing `contains("ERROR")` / `contains("FAIL")` substring checks. Critical events that don't match the substring patterns are now highlighted in red. |
 
 ---
 
@@ -572,6 +588,7 @@
 | **Evidence** | `websocket/OdooWsModels.kt` lines 113–115: `val qty = volumeMicrolitres / 1_000_000.0; val price = unitPriceMinorPerLitre / 100.0; val total = amountMinorUnits / 100.0`. `adapter/advatec/AdvatecAdapter.kt` line 748: `"TZS" -> BigDecimal.ONE` (factor 1 for TZS). `buffer/entity/BufferedTransaction.kt` line 62: `amountMinorUnits: Long` — "Minor units (cents). NEVER floating point." |
 | **Impact** | All TZS-denominated transactions sent to Odoo POS via WebSocket have amounts 100× too small. A TZS 50,000 fuel purchase displays as TZS 500.00. Odoo creates sales orders, invoices, and journal entries with incorrect amounts. Reconciliation with bank statements and FCC Z-readings will show systematic 100× variances. This affects every site in Tanzania using the Odoo WebSocket integration. |
 | **Recommended Fix** | Add `currencyCode` to the conversion logic and use the appropriate factor: store a `getCurrencyDecimalPlaces(currencyCode)` utility in `adapter/common/` (shared with the existing `getCurrencyFactor` implementations per AT-021). Use `10.0.pow(decimalPlaces)` as the divisor instead of hardcoded 100. For TZS: `divisor = 10^0 = 1`, amounts pass through unchanged. For USD: `divisor = 10^2 = 100`, same as current behavior. The `BufferedTransaction` entity already stores `currencyCode` (line 70), so no schema change is needed — just pass it to the conversion. |
+| **Status** | **FIXED** — Created shared `CurrencyUtils.kt` in `adapter/common/` with `getDecimalPlaces()` and `getFactor()` covering ISO 4217 currency codes (0-decimal: TZS, JPY, KRW, UGX, RWF, etc.; 3-decimal: KWD, BHD, OMR, etc.; default 2). Updated `toWsDto()` in `OdooWsModels.kt` to use `CurrencyUtils.getFactor(currencyCode)` instead of hardcoded `100.0`. TZS amounts now pass through unchanged (factor=1); USD amounts still divide by 100. |
 
 ---
 
@@ -588,6 +605,7 @@
 | **Evidence** | `websocket/OdooWsMessageHandler.kt` lines 146–155: first broadcast after `updateAddToCart`. Lines 158–173: second broadcast after `updateOdooFields`. Both call `broadcastToAll("transaction_update", ...)` with re-fetched transaction data. |
 | **Impact** | POS terminals receive two rapid updates for a single attendant action. Race conditions in POS message handling could cause the stale first update to overwrite the correct second update. UI flickering on all connected terminals. |
 | **Recommended Fix** | Restructure the handler to perform ALL database mutations first, THEN broadcast once. Apply `updateAddToCart` and `updateOdooFields` sequentially, then re-fetch the transaction once and broadcast. Consider wrapping the two DAO calls in a Room `@Transaction` for atomicity. Example: `if (addToCart != null) transactionDao.updateAddToCart(...); if (!orderUuid.isNullOrEmpty()) transactionDao.updateOdooFields(...); val updated = transactionDao.getByFccTransactionId(transactionId); if (updated != null) broadcastToAll(...)`. |
+| **Status** | **FIXED** — Restructured `handleAttendantUpdate()` to perform all DB mutations (`updateAddToCart`, `updateOdooFields`) first, then issue a single `broadcastToAll("transaction_update", ...)` after all mutations are applied. POS terminals now receive one update per attendant action with the final consistent state. |
 
 ---
 
@@ -604,6 +622,7 @@
 | **Evidence** | `websocket/OdooWsMessageHandler.kt` lines 326–330: no `sendJson()` or `session.send()` call. Compare with every other handler in the class which sends a response. |
 | **Impact** | Odoo POS instances that send `add_transaction` may timeout waiting for a response, potentially triggering retry logic or displaying error messages to the operator. Low severity because the new architecture documents that FCC is the source of truth, but the missing response breaks the legacy protocol contract. |
 | **Recommended Fix** | Send a legacy-compatible acknowledgment response: `sendJson(session, buildJsonObject("add_transaction_ack", JsonPrimitive("ok")))`. Include a comment explaining that the transaction is not inserted (FCC is source of truth) but the ack satisfies the legacy protocol. |
+| **Status** | **FIXED** — `handleAddTransaction()` now sends a `{"type":"add_transaction_ack","data":"ok"}` response via `sendJson()`. The transaction is still not inserted (FCC remains source of truth), but the acknowledgment satisfies the legacy protocol contract. |
 
 ---
 
@@ -620,6 +639,8 @@
 | **Evidence** | `buffer/dao/TransactionBufferDao.kt` lines 309–313: `getAllForWs()` — `SELECT * FROM buffered_transactions ORDER BY completed_at DESC LIMIT 500` — no status filter. Lines 289–297: `getUnsyncedForWs()` — `WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED')` — missing DEAD_LETTER. |
 | **Impact** | POS "all" mode shows 500 records including already-processed, archived, and dead-letter transactions. Operators may re-enter already-synced transactions in Odoo. DEAD_LETTER records processed by POS but absent from cloud create financial discrepancies. |
 | **Recommended Fix** | Add sync_status filtering to `getAllForWs()`: `WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER')`. Add DEAD_LETTER to the `getUnsyncedForWs()` exclusion list as well: `WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER')`. This aligns both WebSocket query modes with the intended POS workflow: only show transactions that are active in the sync pipeline. |
+| **Status** | **FIXED** |
+| **Fix Applied** | Added `WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER')` to `getAllForWs()` and added `DEAD_LETTER` to the `getUnsyncedForWs()` exclusion list in `TransactionBufferDao.kt`. Both WebSocket query modes now consistently exclude terminal-state records. |
 
 ---
 
@@ -636,6 +657,8 @@
 | **Evidence** | `websocket/OdooWsMessageHandler.kt` lines 89–123: `handleManagerUpdate()` — no existence check before DAO calls. Lines 134–173: `handleAttendantUpdate()` — same pattern. `buffer/dao/TransactionBufferDao.kt` line 325: `UPDATE ... WHERE fcc_transaction_id = :transactionId` — returns 0 rows if not found, but return value is `Unit` (void). |
 | **Impact** | POS sends update commands for transactions that don't exist (stale IDs, typos, race conditions where the transaction was archived) and receives no feedback. The POS may display the transaction as "updated" in its local state while the edge agent never made any change. Multi-terminal workflows where one terminal archives a transaction while another tries to update it are particularly affected. |
 | **Recommended Fix** | Check existence before mutation: `val existing = transactionDao.getByFccTransactionId(transactionId); if (existing == null) { sendJson(session, WsErrorResponse(message = "Transaction not found: $transactionId")); return }`. Alternatively, change the DAO `UPDATE` queries to return `Int` (affected row count) and check the return value. |
+| **Status** | **FIXED** |
+| **Fix Applied** | Added existence check via `getByFccTransactionId()` at the top of both `handleManagerUpdate()` and `handleAttendantUpdate()` in `OdooWsMessageHandler.kt`. When the transaction is not found, a `WsErrorResponse` with `"Transaction not found: <id>"` is sent back to the requesting session. |
 
 ---
 
@@ -652,6 +675,8 @@
 | **Evidence** | `websocket/OdooWsMessageHandler.kt` lines 265–291: loop iterates items, constructs `WsAttendantPumpCountAck(status = "updated")`, sends ack. No DAO call, no state mutation. No attendant pump count entity or table exists in the Room database schema. |
 | **Impact** | Per-attendant transaction limits configured in Odoo POS are not enforced. Attendants can process unlimited transactions despite the POS displaying configured limits. This may violate operational policies where attendant limits prevent fraud or manage shift handovers. |
 | **Recommended Fix** | Either implement the attendant pump count tracking (add a Room entity, DAO, and enforce limits in transaction ingestion), or send an honest response: `status: "not_supported"` with a message explaining that the new architecture does not enforce attendant limits. If the limits are no longer part of the business requirements, document the deprecation and coordinate with the Odoo POS team. |
+| **Status** | **FIXED** |
+| **Fix Applied** | Changed `WsAttendantPumpCountAck` status from `"updated"` to `"not_supported"` in `handleAttendantPumpCountUpdate()` in `OdooWsMessageHandler.kt`. The POS now receives an honest response indicating the new architecture does not enforce attendant pump count limits. |
 
 ---
 
@@ -668,6 +693,8 @@
 | **Evidence** | `websocket/OdooWsMessageHandler.kt` lines 300–315: `sendJson(session, response)` — unicast only. No `broadcastToAll()` call. Compare with lines 118–123 (`handleManagerUpdate`): `broadcastToAll("transaction_update", ...)`. Compare with lines 149–154 (`handleAttendantUpdate`): `broadcastToAll("transaction_update", ...)`. |
 | **Impact** | Multi-terminal POS setups show stale transaction states after manual approvals. Operators may attempt to process discarded transactions, causing confusion and requiring manual correction. |
 | **Recommended Fix** | Add a `broadcastToAll` call after `markDiscarded`: `broadcastToAll("transaction_update", wsJson.encodeToJsonElement(response))` or re-fetch the updated transaction and broadcast its current state. This aligns with the broadcast pattern used by `handleManagerUpdate` and `handleAttendantUpdate`. |
+| **Status** | **FIXED** |
+| **Fix Applied** | Replaced unicast `sendJson(session, response)` with `broadcastToAll("transaction_update", ...)` in `handleManagerManualUpdate()` in `OdooWsMessageHandler.kt`. After `markDiscarded`, the handler re-fetches the updated transaction and broadcasts its current state to all connected clients, consistent with `handleManagerUpdate` and `handleAttendantUpdate`. Falls back to unicast only if the transaction is not found. |
 
 ---
 
@@ -680,10 +707,12 @@
 | **Module** | POS Integration (Odoo) |
 | **Severity** | Low |
 | **Category** | Incorrect State Updates |
+| **Status** | **FIXED** |
 | **Description** | `OdooWsModels.kt` line 104 defines `private val txIdCounter = AtomicInteger(0)`. This counter is used in `BufferedTransaction.toWsDto()` at line 126: `id = txIdCounter.incrementAndGet()`. The counter lives in process memory and resets to 0 on every process restart (service restart, device reboot, crash recovery). After a restart, the WebSocket server sends `id: 1, id: 2, id: 3, ...` which overlap with IDs from the previous session. The `id` field maps to the legacy `PumpTransactions.id` integer field which the Odoo POS parses by name (per the DTO comments). If the Odoo POS uses this `id` field for local dedup, ordering, or record identity (common for integer primary keys), it will incorrectly merge, overwrite, or skip transactions that share IDs with the previous session. The `transaction_id` field (string, FCC-assigned) is the actual unique identifier, but the legacy POS code may rely on the integer `id` for display ordering or selection. |
 | **Evidence** | `websocket/OdooWsModels.kt` line 104: `private val txIdCounter = AtomicInteger(0)` — process-scoped, resets on restart. Line 126: `id = txIdCounter.incrementAndGet()` — starts from 1 on every restart. |
 | **Impact** | After process restart, POS terminals that cache transaction data from the previous session may see ID collisions. If the POS uses the integer `id` for record identity, different transactions will appear to be the same record. Low severity because the `transaction_id` string field is the canonical identifier and most POS implementations use it for business logic. |
 | **Recommended Fix** | Initialize `txIdCounter` from the database at startup: `val maxId = transactionDao.getMaxWsId(); txIdCounter.set(maxId ?: 0)`. Alternatively, use a timestamp-based ID (e.g., `System.currentTimeMillis().toInt()`) or derive the integer from the database `rowId`. If the legacy POS only uses `transaction_id` for business logic, document that `id` is session-scoped and not stable across restarts. |
+| **Fix Applied** | Initialized `txIdCounter` from `(System.currentTimeMillis() / 1000).toInt()` (epoch seconds). Each process restart seeds the counter from a monotonically increasing time source, ensuring IDs never collide with previous sessions. File: `websocket/OdooWsModels.kt`. |
 
 ---
 
@@ -696,10 +725,12 @@
 | **Module** | Connectivity |
 | **Severity** | Medium |
 | **Category** | Incorrect State Updates |
+| **Status** | **FIXED** |
 | **Description** | `NetworkBinder.wifiCallback.onLost()` at line 58 sets `_wifiNetwork.value = null` unconditionally — it does not check whether the lost `Network` object is the same as the currently stored `_wifiNetwork.value`. The same applies to `mobileCallback.onLost()` at line 70. On Android, during WiFi roaming or when the device transitions between access points, the system may call `onAvailable(networkB)` for the new AP before calling `onLost(networkA)` for the old AP. The sequence is: (1) `onAvailable(networkA)` → `_wifiNetwork = A`; (2) WiFi roam begins; (3) `onAvailable(networkB)` → `_wifiNetwork = B`; (4) `onLost(networkA)` → `_wifiNetwork = null` (BUG: should only null if `A == current`). After step 4, `_wifiNetwork` is null even though WiFi network B is available. Downstream effects: `ConnectivityManager.logProbeNetwork` reports "no WiFi" for the FCC probe. `FccAdapterFactory.resolve()` for DOMS returns a `socketBinder` that reads `binder.wifiNetwork.value` — this returns null, so the DOMS TCP socket goes unbound and routes over default OS routing (potentially mobile data) instead of the station LAN. The FCC probe may succeed via default routing, so `ConnectivityState` shows `FULLY_ONLINE`, masking the fact that FCC traffic is on the wrong network. The WiFi state only recovers when a new `onAvailable` fires (WiFi toggles or reconnects) or when `onCapabilitiesChanged` (not implemented) fires for networkB. |
 | **Evidence** | `connectivity/NetworkBinder.kt` lines 57–60: `override fun onLost(network: Network) { _wifiNetwork.value = null }` — no check of `network == _wifiNetwork.value`. Lines 69–72: same pattern for mobile. Compare with Android documentation: "onLost is called for each network individually; the callback should only clear state if the lost network matches the currently tracked network." |
 | **Impact** | On devices that perform WiFi roaming (enterprise APs with multiple BSSIDs, common in fuel stations with large coverage areas), FCC adapter sockets may be incorrectly unbound from WiFi and route over mobile data. DOMS JPL TCP connections to FCC hardware on the station LAN would fail (FCC not reachable via mobile). The failure manifests as intermittent FCC_UNREACHABLE states during AP handoff, lasting until the next `onAvailable` callback. |
 | **Recommended Fix** | Guard `onLost` to only null the flow if the lost network matches the current value: `if (_wifiNetwork.value == network) { _wifiNetwork.value = null }`. Apply the same pattern to `mobileCallback.onLost`: `if (_mobileNetwork.value == network) { _mobileNetwork.value = null }`. |
+| **Fix Applied** | Added `if (_wifiNetwork.value == network)` guard in `wifiCallback.onLost()` and `if (_mobileNetwork.value == network)` guard in `mobileCallback.onLost()`. The flow is only nulled when the lost network matches the currently tracked network, preventing stale nulls during AP roaming. File: `connectivity/NetworkBinder.kt`. |
 
 ---
 
@@ -712,10 +743,12 @@
 | **Module** | Security |
 | **Severity** | Medium |
 | **Category** | Incorrect State Updates |
+| **Status** | **FIXED** |
 | **Description** | `KeystoreDeviceTokenProvider.storeTokens()` at lines 181–198 performs a two-step write: (1) encrypt device token via `keystoreManager.storeSecret(ALIAS_DEVICE_JWT, ...)`, then persist the blob via `encryptedPrefs.storeDeviceTokenBlob()` (line 184); (2) encrypt refresh token via `keystoreManager.storeSecret(ALIAS_REFRESH_TOKEN, ...)`, then persist (line 192). If step 1 succeeds but step 2 fails (Keystore temporarily unavailable between the two calls — e.g., due to a StrongBox timeout, concurrent key generation, or TEE resource exhaustion), the method returns `false` at line 195. However, the device token blob from step 1 was already written to `EncryptedSharedPreferences` via `apply()` (line 135 in `EncryptedPrefsManager`). The caller (`refreshAccessToken()` at line 113) sees `false`, logs an error, and returns `false` to the caller. No rollback of the device token blob occurs. The system is now in an inconsistent state: the NEW device token is stored, but the OLD refresh token remains. On the next cloud API call, `getAccessToken()` returns the new device token (valid). When the new token eventually expires (24h), `refreshAccessToken()` uses the old refresh token. If the cloud enforces single-use refresh tokens (standard OAuth practice), the old token was invalidated when the cloud issued the new pair — the refresh fails, and the device enters unnecessary re-provisioning. |
 | **Evidence** | `sync/KeystoreDeviceTokenProvider.kt` lines 181–198: `storeTokens()` — sequential write with no rollback. Line 184: `encryptedPrefs.storeDeviceTokenBlob(...)` writes before step 2 is attempted. Line 195: early return `false` without reverting the device token blob. `security/EncryptedPrefsManager.kt` line 135: `storeDeviceTokenBlob` uses `apply()` — already queued for async disk write. |
 | **Impact** | On Keystore transient failures during token refresh, the device enters a split-token state where the access token is valid but the refresh token is stale. After the access token expires (24h), the stale refresh token fails, forcing unnecessary re-provisioning. This requires a new bootstrap token from the portal — a manual process involving IT coordination. |
 | **Recommended Fix** | Make `storeTokens()` atomic: encrypt BOTH tokens first, then persist BOTH blobs. If either encryption fails, persist nothing. Pattern: `val devEnc = keystoreManager.storeSecret(...deviceToken); val refEnc = keystoreManager.storeSecret(...refreshToken); if (devEnc == null || refEnc == null) return false; encryptedPrefs.storeDeviceTokenBlob(...); encryptedPrefs.storeRefreshTokenBlob(...)`. This ensures either both blobs are written or neither is. |
+| **Fix Applied** | Restructured `storeTokens()` to encrypt both tokens first (without persisting), then persist both blobs only after both encryptions succeed. If either encryption fails, the method returns `false` without writing anything to EncryptedSharedPreferences. File: `sync/KeystoreDeviceTokenProvider.kt`. |
 
 ---
 

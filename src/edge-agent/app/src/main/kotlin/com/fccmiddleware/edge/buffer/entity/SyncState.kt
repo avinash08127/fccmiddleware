@@ -27,6 +27,10 @@ data class SyncState(
     @ColumnInfo(name = "last_upload_at")
     val lastUploadAt: String? = null,
 
+    /** AF-035: ISO 8601 UTC; null until first upload attempt (successful or failed) */
+    @ColumnInfo(name = "last_upload_attempt_at")
+    val lastUploadAttemptAt: String? = null,
+
     /** ISO 8601 UTC; null until first status poll */
     @ColumnInfo(name = "last_status_poll_at")
     val lastStatusPollAt: String? = null,

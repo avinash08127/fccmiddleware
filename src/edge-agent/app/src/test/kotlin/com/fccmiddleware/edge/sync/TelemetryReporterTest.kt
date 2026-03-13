@@ -1,7 +1,6 @@
 package com.fccmiddleware.edge.sync
 
 import android.content.Context
-import android.content.Intent
 import android.os.BatteryManager
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.buffer.dao.StatusCount
@@ -88,12 +87,11 @@ class TelemetryReporterTest {
 
         every { configManager.config } returns MutableStateFlow(testConfig)
 
-        // Battery intent mock
-        val batteryIntent = mockk<Intent>(relaxed = true)
-        every { batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) } returns 85
-        every { batteryIntent.getIntExtra(BatteryManager.EXTRA_SCALE, 100) } returns 100
-        every { batteryIntent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) } returns BatteryManager.BATTERY_PLUGGED_USB
-        every { context.registerReceiver(null, any()) } returns batteryIntent
+        // AP-021: Battery manager mock (replaces sticky broadcast receiver IPC approach)
+        val batteryManager = mockk<BatteryManager>(relaxed = true)
+        every { batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) } returns 85
+        every { batteryManager.isCharging } returns true
+        every { context.getSystemService(Context.BATTERY_SERVICE) } returns batteryManager
 
         // Database path mock
         val dbFile = mockk<java.io.File>(relaxed = true)
@@ -113,6 +111,7 @@ class TelemetryReporterTest {
         coEvery { syncStateDao.get() } returns SyncState(
             lastFccCursor = "cursor-1",
             lastUploadAt = "2026-03-11T10:00:00Z",
+            lastUploadAttemptAt = "2026-03-11T10:02:00Z",
             lastStatusPollAt = "2026-03-11T10:01:00Z",
             lastConfigPullAt = "2026-03-11T09:00:00Z",
             lastConfigVersion = 5,
@@ -213,7 +212,8 @@ class TelemetryReporterTest {
     @Test
     fun `buildPayload populates sync status from SyncState entity`() = runTest {
         val payload = reporter.buildPayload()!!
-        assertEquals("2026-03-11T10:00:00Z", payload.sync.lastSyncAttemptUtc)
+        // AF-035: lastSyncAttemptUtc now maps to lastUploadAttemptAt (attempt timestamp)
+        assertEquals("2026-03-11T10:02:00Z", payload.sync.lastSyncAttemptUtc)
         assertEquals("2026-03-11T10:00:00Z", payload.sync.lastSuccessfulSyncUtc)
         assertEquals("2026-03-11T10:01:00Z", payload.sync.lastStatusPollUtc)
         assertEquals("2026-03-11T09:00:00Z", payload.sync.lastConfigPullUtc)

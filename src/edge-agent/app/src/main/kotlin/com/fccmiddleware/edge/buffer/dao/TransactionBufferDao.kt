@@ -66,6 +66,18 @@ interface TransactionBufferDao {
     suspend fun getById(id: String): BufferedTransaction?
 
     /**
+     * AF-025: Detail endpoint query with the same visibility rules as [getForLocalApi].
+     * Excludes SYNCED_TO_ODOO, ARCHIVED, DEAD_LETTER, and acknowledged records.
+     */
+    @Query(
+        "SELECT * FROM buffered_transactions " +
+        "WHERE id = :id " +
+        "AND sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
+        "AND acknowledged_at IS NULL"
+    )
+    suspend fun getByIdForLocalApi(id: String): BufferedTransaction?
+
+    /**
      * Update sync state after an upload attempt.
      * Always updates updated_at to current ISO 8601 UTC string.
      */
@@ -338,11 +350,12 @@ interface TransactionBufferDao {
 
     /**
      * Unsynced transactions for the WebSocket "latest" mode.
-     * Returns records NOT marked as SYNCED_TO_ODOO, with optional filters.
+     * Returns records NOT marked as SYNCED_TO_ODOO, ARCHIVED, or DEAD_LETTER, with optional filters.
+     * AF-044: Added DEAD_LETTER to exclusion list.
      */
     @Query(
         "SELECT * FROM buffered_transactions " +
-        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED') " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "AND (:pumpNumber IS NULL OR pump_number = :pumpNumber) " +
         "AND (:nozzleNumber IS NULL OR nozzle_number = :nozzleNumber) " +
         "AND (:attendant IS NULL OR attendant_id = :attendant) " +
@@ -358,10 +371,12 @@ interface TransactionBufferDao {
     ): List<BufferedTransaction>
 
     /**
-     * All transactions for the WebSocket "all" mode.
+     * Active transactions for the WebSocket "all" mode.
+     * AF-044: Added sync_status filter to exclude terminal states.
      */
     @Query(
         "SELECT * FROM buffered_transactions " +
+        "WHERE sync_status NOT IN ('SYNCED_TO_ODOO', 'ARCHIVED', 'DEAD_LETTER') " +
         "ORDER BY completed_at DESC " +
         "LIMIT 500"
     )

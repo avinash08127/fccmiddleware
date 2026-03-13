@@ -25,8 +25,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * ?token= query parameter), then enqueues valid payloads for the adapter to
  * drain and normalize.
  *
- * Always returns HTTP 200 OK — Advatec retry behaviour is unknown (AQ-7),
- * so we avoid triggering potential retries on validation errors.
+ * Returns HTTP 200 OK on success. Returns HTTP 429 Too Many Requests when
+ * the queue is full (count-based or memory-based limit), signalling the
+ * Advatec device to retry later.
  *
  * Thread safety: The incoming queue is a lock-free [ConcurrentLinkedQueue].
  * The server runs on CIO (coroutine I/O) threads — no Android main thread blocking.
@@ -42,8 +43,14 @@ class AdvatecWebhookListener(
     companion object {
         private const val TAG = "AdvatecWebhookListener"
 
-        /** Maximum queued receipts before dropping (back-pressure safety). */
-        const val MAX_QUEUE_SIZE = 10_000
+        /** Maximum queued receipts before rejecting with 429 (back-pressure safety). */
+        const val MAX_QUEUE_SIZE = 1_000
+
+        /**
+         * Approximate memory ceiling for queued payloads (5 MB).
+         * Each payload's estimated size = rawJson.length * 2 (UTF-16) + 128 (object overhead).
+         */
+        const val MAX_QUEUE_BYTES = 5L * 1024 * 1024
     }
 
     /** Thread-safe queue of raw JSON payloads received from the Advatec EFD. */
@@ -51,6 +58,9 @@ class AdvatecWebhookListener(
 
     /** Atomic counter tracking queue size to avoid TOCTOU race. */
     private val queueCount = AtomicInteger(0)
+
+    /** Estimated total bytes of queued payloads (for memory-based back-pressure). */
+    private val queueBytes = java.util.concurrent.atomic.AtomicLong(0L)
 
     /** Whether the listener is currently running. */
     private val running = AtomicBoolean(false)
@@ -127,6 +137,7 @@ class AdvatecWebhookListener(
             server = null
             incomingQueue.clear()
             queueCount.set(0)
+            queueBytes.set(0L)
         }
     }
 
@@ -144,6 +155,7 @@ class AdvatecWebhookListener(
         repeat(maxCount) {
             val item = incomingQueue.poll() ?: return result
             queueCount.decrementAndGet()
+            queueBytes.addAndGet(-estimatePayloadBytes(item))
             result.add(item)
         }
         return result
@@ -153,6 +165,14 @@ class AdvatecWebhookListener(
     // Private — Request handling
     // -----------------------------------------------------------------------
 
+    /** Estimate heap bytes for a payload already deserialized. */
+    private fun estimatePayloadBytes(payload: ReceivedPayload): Long =
+        payload.rawJson.length.toLong() * 2 + payload.siteCode.length.toLong() * 2 + 128
+
+    /** Estimate heap bytes from raw JSON before constructing the payload. */
+    private fun estimatePayloadBytesFromJson(rawJson: String): Long =
+        rawJson.length.toLong() * 2 + siteCode.length.toLong() * 2 + 128
+
     /**
      * Handles an incoming HTTP POST from the Advatec EFD.
      *
@@ -160,9 +180,7 @@ class AdvatecWebhookListener(
      * 1. Read raw JSON body
      * 2. Validate webhook token (X-Webhook-Token header or ?token= param)
      * 3. Enqueue the raw JSON for later normalization
-     * 4. Return HTTP 200 OK
-     *
-     * Always returns 200 — Advatec retry behaviour is unknown (AQ-7).
+     * 4. Return HTTP 200 OK (or 429 if queue is full)
      */
     private suspend fun handleWebhookRequest(call: io.ktor.server.application.ApplicationCall) {
         try {
@@ -189,10 +207,21 @@ class AdvatecWebhookListener(
 
             // Step 3: Enqueue for adapter processing (with back-pressure guard)
             val newCount = queueCount.incrementAndGet()
-            if (newCount > MAX_QUEUE_SIZE) {
+            val payloadEstBytes = estimatePayloadBytesFromJson(rawJson)
+            val newBytes = queueBytes.addAndGet(payloadEstBytes)
+
+            if (newCount > MAX_QUEUE_SIZE || newBytes > MAX_QUEUE_BYTES) {
                 queueCount.decrementAndGet()
-                AppLogger.w(TAG, "Queue full ($MAX_QUEUE_SIZE) — dropping receipt")
-                call.respondText("OK", ContentType.Text.Plain, HttpStatusCode.OK)
+                queueBytes.addAndGet(-payloadEstBytes)
+                AppLogger.w(
+                    TAG,
+                    "Queue full (count=$newCount/$MAX_QUEUE_SIZE, bytes=$newBytes/$MAX_QUEUE_BYTES) — rejecting with 429"
+                )
+                call.respondText(
+                    "Too Many Requests — queue full",
+                    ContentType.Text.Plain,
+                    HttpStatusCode.TooManyRequests,
+                )
                 return
             }
 
@@ -202,7 +231,7 @@ class AdvatecWebhookListener(
                 receivedAt = Instant.now(),
             )
             incomingQueue.add(payload)
-            AppLogger.d(TAG, "Enqueued receipt webhook (queue size=$newCount, body=${rawJson.length} bytes)")
+            AppLogger.d(TAG, "Enqueued receipt webhook (queue size=$newCount, est bytes=$newBytes, body=${rawJson.length} bytes)")
 
             // Step 4: Return 200 OK
             call.respondText("OK", ContentType.Text.Plain, HttpStatusCode.OK)

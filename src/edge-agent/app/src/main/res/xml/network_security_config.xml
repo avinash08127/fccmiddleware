@@ -22,21 +22,11 @@
 -->
 <network-security-config>
 
-    <!--
-        Production and staging domains.
-        pin-set is intentionally absent here — pins are enforced at the OkHttp
-        layer via CloudApiClient (runtime pins from SiteConfig, falling back to
-        BUNDLED_PINS). When real pins are available, add them here as well so
-        Android's network stack enforces them independently of OkHttp.
-
-        To add pins once real certificates are available:
-
-        <pin-set expiration="2027-03-01">
-            <pin digest="SHA-256">PRIMARY_PIN_BASE64==</pin>
-            <pin digest="SHA-256">BACKUP_PIN_BASE64==</pin>
-        </pin-set>
-    -->
     <domain-config cleartextTrafficPermitted="false">
+        <pin-set expiration="2027-03-13">
+            <pin digest="SHA-256">YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=</pin>
+            <pin digest="SHA-256">Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=</pin>
+        </pin-set>
         <domain includeSubdomains="true">api.fccmiddleware.io</domain>
         <domain includeSubdomains="true">api-staging.fccmiddleware.io</domain>
         <domain includeSubdomains="true">api-dev.fccmiddleware.io</domain>

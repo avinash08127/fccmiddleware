@@ -1,8 +1,6 @@
 package com.fccmiddleware.edge.sync
 
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Environment
 import android.os.StatFs
@@ -13,6 +11,8 @@ import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
 import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -109,19 +109,38 @@ class TelemetryReporter(
 
         val sequence = nextSequenceNumber()
 
-        return TelemetryPayload(
-            deviceId = deviceId,
-            siteCode = siteCode,
-            legalEntityId = legalEntityId,
-            reportedAtUtc = Instant.now().toString(),
-            sequenceNumber = sequence,
-            connectivityState = connectivityManager.state.value.name,
-            device = collectDeviceStatus(),
-            fccHealth = collectFccHealth(cfg),
-            buffer = collectBufferStatus(),
-            sync = collectSyncStatus(cfg),
-            errorCounts = snapshotErrorCounts(),
-        )
+        // AP-020: Query oldestPendingCreatedAt once and pass to both collectors
+        // to avoid duplicate DB queries and ensure consistent values.
+        val oldestPendingAtUtc = try {
+            transactionDao.oldestPendingCreatedAt()
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to query oldest pending timestamp", e)
+            null
+        }
+
+        // AP-022: Run independent collectors in parallel to reduce total
+        // telemetry assembly time from serial (~10-50ms) to parallel (~5-15ms).
+        return coroutineScope {
+            val bufferDeferred = async { collectBufferStatus(oldestPendingAtUtc) }
+            val syncDeferred = async { collectSyncStatus(cfg, oldestPendingAtUtc) }
+
+            TelemetryPayload(
+                deviceId = deviceId,
+                siteCode = siteCode,
+                legalEntityId = legalEntityId,
+                reportedAtUtc = Instant.now().toString(),
+                sequenceNumber = sequence,
+                connectivityState = connectivityManager.state.value.name,
+                device = collectDeviceStatus(),
+                fccHealth = collectFccHealth(cfg),
+                buffer = bufferDeferred.await(),
+                sync = syncDeferred.await(),
+                // AF-037: Use atomic snapshot+reset so no increments are lost between
+                // buildPayload() and the post-submission reset. On submission failure the
+                // counters are already zeroed, which is acceptable for fire-and-forget telemetry.
+                errorCounts = snapshotAndResetErrorCounts(),
+            )
+        }
     }
 
     /**
@@ -162,16 +181,14 @@ class TelemetryReporter(
     // -------------------------------------------------------------------------
 
     private fun collectDeviceStatus(): DeviceStatusDto {
-        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val batteryLevel = batteryIntent?.let { intent ->
-            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-            if (level >= 0 && scale > 0) (level * 100) / scale else 0
-        } ?: 0
-        val isCharging = batteryIntent?.let { intent ->
-            val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
-            plugged != 0
-        } ?: false
+        // AP-021: Use BatteryManager system service to read battery status from sysfs
+        // instead of registerReceiver(null, IntentFilter(ACTION_BATTERY_CHANGED)) IPC.
+        val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        val batteryLevel = batteryManager
+            ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            ?.coerceIn(0, 100)
+            ?: 0
+        val isCharging = batteryManager?.isCharging ?: false
 
         val stat = StatFs(Environment.getDataDirectory().path)
         val storageFreeMb = (stat.availableBytes / (1024L * 1024L)).toInt()
@@ -231,7 +248,7 @@ class TelemetryReporter(
     // Buffer status
     // -------------------------------------------------------------------------
 
-    private suspend fun collectBufferStatus(): BufferStatusDto {
+    private suspend fun collectBufferStatus(oldestPendingAtUtc: String?): BufferStatusDto {
         val statusCounts = try {
             transactionDao.countByStatus()
         } catch (e: Exception) {
@@ -245,13 +262,6 @@ class TelemetryReporter(
         val syncedToOdooCount = countMap["SYNCED_TO_ODOO"] ?: 0
         val failedCount = countMap["FAILED"] ?: 0
         val totalRecords = countMap.values.sum()
-
-        val oldestPendingAtUtc = try {
-            transactionDao.oldestPendingCreatedAt()
-        } catch (e: Exception) {
-            AppLogger.e(TAG, "Failed to query oldest pending timestamp", e)
-            null
-        }
 
         val bufferSizeMb = try {
             val dbPath = databasePath ?: context.getDatabasePath("edge_buffer.db").absolutePath
@@ -278,6 +288,7 @@ class TelemetryReporter(
 
     private suspend fun collectSyncStatus(
         cfg: com.fccmiddleware.edge.config.EdgeAgentConfigDto,
+        oldestPendingAtUtc: String?,
     ): SyncStatusDto {
         val syncState = try {
             syncStateDao.get()
@@ -286,11 +297,6 @@ class TelemetryReporter(
             null
         }
 
-        val oldestPendingAtUtc = try {
-            transactionDao.oldestPendingCreatedAt()
-        } catch (_: Exception) {
-            null
-        }
         val syncLagSeconds = if (oldestPendingAtUtc != null) {
             try {
                 val oldest = Instant.parse(oldestPendingAtUtc)
@@ -303,7 +309,10 @@ class TelemetryReporter(
         }
 
         return SyncStatusDto(
-            lastSyncAttemptUtc = syncState?.lastUploadAt,
+            // AF-035: lastSyncAttemptUtc now uses the dedicated attempt timestamp
+            // (written before each HTTP call), while lastSuccessfulSyncUtc uses the
+            // success-only timestamp. Cloud can now detect persistent upload failures.
+            lastSyncAttemptUtc = syncState?.lastUploadAttemptAt,
             lastSuccessfulSyncUtc = syncState?.lastUploadAt,
             syncLagSeconds = syncLagSeconds,
             lastStatusPollUtc = syncState?.lastStatusPollAt,

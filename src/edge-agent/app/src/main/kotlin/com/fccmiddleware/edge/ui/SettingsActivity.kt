@@ -80,20 +80,27 @@ class SettingsActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
-        populateFields()
 
-        // Restore form state after rotation
-        savedInstanceState?.let { state ->
-            fccIpInput.setText(state.getString(STATE_FCC_IP, fccIpInput.text.toString()))
-            fccPortInput.setText(state.getString(STATE_FCC_PORT, fccPortInput.text.toString()))
-            fccJplPortInput.setText(state.getString(STATE_FCC_JPL_PORT, fccJplPortInput.text.toString()))
-            fccAccessCodeInput.setText(state.getString(STATE_FCC_ACCESS_CODE, fccAccessCodeInput.text.toString()))
-            wsPortInput.setText(state.getString(STATE_WS_PORT, wsPortInput.text.toString()))
-            val statusMsg = state.getString(STATE_STATUS_TEXT)
-            if (!statusMsg.isNullOrEmpty()) {
-                statusText.text = statusMsg
-                statusText.setTextColor(state.getInt(STATE_STATUS_COLOR, COLOR_GREEN))
-                statusText.visibility = View.VISIBLE
+        // AT-008: Read EncryptedSharedPreferences off the main thread to prevent ANRs.
+        // collectFieldData() reads from LocalOverrideManager and EncryptedPrefsManager
+        // (both backed by EncryptedSharedPreferences which can block >100ms on slow storage).
+        lifecycleScope.launch {
+            val data = withContext(Dispatchers.IO) { collectFieldData() }
+            applyFieldData(data)
+
+            // Restore form state after rotation (overrides the async-populated values)
+            savedInstanceState?.let { state ->
+                fccIpInput.setText(state.getString(STATE_FCC_IP, fccIpInput.text.toString()))
+                fccPortInput.setText(state.getString(STATE_FCC_PORT, fccPortInput.text.toString()))
+                fccJplPortInput.setText(state.getString(STATE_FCC_JPL_PORT, fccJplPortInput.text.toString()))
+                fccAccessCodeInput.setText(state.getString(STATE_FCC_ACCESS_CODE, fccAccessCodeInput.text.toString()))
+                wsPortInput.setText(state.getString(STATE_WS_PORT, wsPortInput.text.toString()))
+                val statusMsg = state.getString(STATE_STATUS_TEXT)
+                if (!statusMsg.isNullOrEmpty()) {
+                    statusText.text = statusMsg
+                    statusText.setTextColor(state.getInt(STATE_STATUS_COLOR, COLOR_GREEN))
+                    statusText.visibility = View.VISIBLE
+                }
             }
         }
     }
@@ -117,56 +124,93 @@ class SettingsActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // ── Field population ─────────────────────────────────────────────────────
+    // ── Field population (AT-008: split into IO-safe read + Main-thread apply) ─
 
-    private fun populateFields() {
+    /**
+     * AT-008: Holds all values read from EncryptedSharedPreferences and config.
+     * [collectFieldData] populates this on Dispatchers.IO; [applyFieldData] applies
+     * it to the UI on the Main thread.
+     */
+    private data class FieldData(
+        val fccIp: String,
+        val fccPort: String,
+        val fccJplPort: String,
+        val fccAccessCode: String,
+        val fccAccessCodeHint: String,
+        val wsPort: String,
+        val fccIpOverridden: Boolean,
+        val fccPortOverridden: Boolean,
+        val fccJplPortOverridden: Boolean,
+        val fccAccessCodeOverridden: Boolean,
+        val wsPortOverridden: Boolean,
+        val cloudBaseUrl: String,
+        val environment: String,
+        val deviceId: String,
+        val siteCode: String,
+        val routeBaseUrl: String,
+    )
+
+    /**
+     * Read all display values from config, LocalOverrideManager, and EncryptedPrefsManager.
+     * Safe to call on Dispatchers.IO — no UI access.
+     */
+    private fun collectFieldData(): FieldData {
         val config = configManager.config.value
-
-        // Editable fields: show override value if set, otherwise cloud value
         val cloudHost = config?.fcc?.hostAddress ?: encryptedPrefs.fccHost ?: ""
         val cloudPort = config?.fcc?.port
         val cloudJplPort: Int? = null // JPL port is override-only; no cloud field in FccDto
         val cloudCredential = config?.resolvedFccCredential() ?: ""
         val cloudWsPort: Int? = null // WS port is override-only
 
-        fccIpInput.setText(localOverrideManager.fccHost ?: cloudHost)
-        fccPortInput.setText(
-            (localOverrideManager.fccPort ?: cloudPort)?.toString() ?: ""
+        return FieldData(
+            fccIp = localOverrideManager.fccHost ?: cloudHost,
+            fccPort = (localOverrideManager.fccPort ?: cloudPort)?.toString() ?: "",
+            fccJplPort = (localOverrideManager.jplPort ?: cloudJplPort)?.toString() ?: "",
+            fccAccessCode = localOverrideManager.fccCredential ?: "",
+            fccAccessCodeHint = if (cloudCredential.isNotEmpty()) "Cloud credential set (hidden)" else "Access code",
+            wsPort = (localOverrideManager.wsPort ?: cloudWsPort)?.toString() ?: "",
+            fccIpOverridden = localOverrideManager.fccHost != null,
+            fccPortOverridden = localOverrideManager.fccPort != null,
+            fccJplPortOverridden = localOverrideManager.jplPort != null,
+            fccAccessCodeOverridden = localOverrideManager.fccCredential != null,
+            wsPortOverridden = localOverrideManager.wsPort != null,
+            cloudBaseUrl = config?.sync?.cloudBaseUrl ?: encryptedPrefs.cloudBaseUrl ?: "Not configured",
+            environment = deriveEnvironment(config?.sync?.cloudBaseUrl ?: encryptedPrefs.cloudBaseUrl),
+            deviceId = encryptedPrefs.deviceId ?: "Not provisioned",
+            siteCode = config?.identity?.siteCode ?: encryptedPrefs.siteCode ?: "Not provisioned",
+            routeBaseUrl = (config?.sync?.cloudBaseUrl ?: encryptedPrefs.cloudBaseUrl ?: "").trimEnd('/'),
         )
-        fccJplPortInput.setText(
-            (localOverrideManager.jplPort ?: cloudJplPort)?.toString() ?: ""
-        )
+    }
+
+    /**
+     * Apply pre-read field data to the UI. Must be called on the Main thread.
+     */
+    private fun applyFieldData(data: FieldData) {
+        fccIpInput.setText(data.fccIp)
+        fccPortInput.setText(data.fccPort)
+        fccJplPortInput.setText(data.fccJplPort)
         // Only populate credential field if there's a local override;
         // never pre-fill the cloud credential to avoid plaintext exposure.
-        fccAccessCodeInput.setText(localOverrideManager.fccCredential ?: "")
-        fccAccessCodeInput.hint = if (cloudCredential.isNotEmpty()) "Cloud credential set (hidden)" else "Access code"
-        wsPortInput.setText(
-            (localOverrideManager.wsPort ?: cloudWsPort)?.toString() ?: ""
-        )
+        fccAccessCodeInput.setText(data.fccAccessCode)
+        fccAccessCodeInput.hint = data.fccAccessCodeHint
+        wsPortInput.setText(data.wsPort)
 
         // Override indicators
-        fccIpOverrideLabel.visibility = if (localOverrideManager.fccHost != null) View.VISIBLE else View.GONE
-        fccPortOverrideLabel.visibility = if (localOverrideManager.fccPort != null) View.VISIBLE else View.GONE
-        fccJplPortOverrideLabel.visibility = if (localOverrideManager.jplPort != null) View.VISIBLE else View.GONE
-        fccAccessCodeOverrideLabel.visibility = if (localOverrideManager.fccCredential != null) View.VISIBLE else View.GONE
-        wsPortOverrideLabel.visibility = if (localOverrideManager.wsPort != null) View.VISIBLE else View.GONE
+        fccIpOverrideLabel.visibility = if (data.fccIpOverridden) View.VISIBLE else View.GONE
+        fccPortOverrideLabel.visibility = if (data.fccPortOverridden) View.VISIBLE else View.GONE
+        fccJplPortOverrideLabel.visibility = if (data.fccJplPortOverridden) View.VISIBLE else View.GONE
+        fccAccessCodeOverrideLabel.visibility = if (data.fccAccessCodeOverridden) View.VISIBLE else View.GONE
+        wsPortOverrideLabel.visibility = if (data.wsPortOverridden) View.VISIBLE else View.GONE
 
         // Read-only fields
-        cloudBaseUrlValue.text = config?.sync?.cloudBaseUrl
-            ?: encryptedPrefs.cloudBaseUrl
-            ?: "Not configured"
-        environmentValue.text = deriveEnvironment(
-            config?.sync?.cloudBaseUrl ?: encryptedPrefs.cloudBaseUrl
-        )
-        deviceIdValue.text = encryptedPrefs.deviceId ?: "Not provisioned"
-        siteCodeValue.text = config?.identity?.siteCode
-            ?: encryptedPrefs.siteCode
-            ?: "Not provisioned"
+        cloudBaseUrlValue.text = data.cloudBaseUrl
+        environmentValue.text = data.environment
+        deviceIdValue.text = data.deviceId
+        siteCodeValue.text = data.siteCode
 
         // Cloud API Routes
-        val baseUrl = (config?.sync?.cloudBaseUrl ?: encryptedPrefs.cloudBaseUrl ?: "").trimEnd('/')
         CLOUD_API_ROUTES.forEachIndexed { index, (_, path) ->
-            routeValueViews[index].text = if (baseUrl.isNotEmpty()) "$baseUrl$path" else "Not configured"
+            routeValueViews[index].text = if (data.routeBaseUrl.isNotEmpty()) "${data.routeBaseUrl}$path" else "Not configured"
         }
     }
 
@@ -287,11 +331,13 @@ class SettingsActivity : AppCompatActivity() {
                 AppLogger.i(TAG, "Overrides saved, requesting FCC reconnect")
                 cadenceController.requestFccReconnect()
 
+                // AT-008: Read field data while still on IO dispatcher
+                val fieldData = collectFieldData()
                 withContext(Dispatchers.Main) {
                     statusText.text = "Settings saved. FCC reconnecting..."
                     statusText.setTextColor(COLOR_GREEN)
                     statusText.visibility = View.VISIBLE
-                    populateFields()
+                    applyFieldData(fieldData)
                     Toast.makeText(this@SettingsActivity, "Settings saved & reconnecting", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
@@ -317,8 +363,10 @@ class SettingsActivity : AppCompatActivity() {
                     localOverrideManager.clearAllOverrides()
                     AppLogger.i(TAG, "All overrides cleared, requesting FCC reconnect")
                     cadenceController.requestFccReconnect()
+                    // AT-008: Read field data while still on IO dispatcher
+                    val fieldData = collectFieldData()
                     withContext(Dispatchers.Main) {
-                        populateFields()
+                        applyFieldData(fieldData)
                         statusText.text = "Overrides cleared. Using cloud defaults."
                         statusText.setTextColor(COLOR_GREEN)
                         statusText.visibility = View.VISIBLE
@@ -384,7 +432,7 @@ class SettingsActivity : AppCompatActivity() {
 
         fccAccessCodeOverrideLabel = makeOverrideIndicator()
         fccAccessCodeInput = EditText(this).apply {
-            hint = "Access code" // updated dynamically in populateFields()
+            hint = "Access code" // updated dynamically in applyFieldData()
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setSingleLine()
             setPadding(halfPad, halfPad, halfPad, halfPad)

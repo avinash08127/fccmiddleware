@@ -99,22 +99,47 @@ class BufferDatabaseTest {
     }
 
     @Test
-    fun `getForLocalApi excludes SYNCED_TO_ODOO records`() = runBlocking {
+    fun `getForLocalApi excludes terminal-state records`() = runBlocking {
         val dao = db.transactionDao()
-        val now = Instant.now().toString()
 
         dao.insert(buildTransaction(fccTransactionId = "FCC-P1", syncStatus = "PENDING"))
         dao.insert(buildTransaction(fccTransactionId = "FCC-U1", syncStatus = "UPLOADED"))
         dao.insert(buildTransaction(fccTransactionId = "FCC-S1", syncStatus = "SYNCED_TO_ODOO"))
         dao.insert(buildTransaction(fccTransactionId = "FCC-A1", syncStatus = "ARCHIVED"))
+        dao.insert(buildTransaction(fccTransactionId = "FCC-D1", syncStatus = "DEAD_LETTER"))
 
         val results = dao.getForLocalApi(limit = 50, offset = 0)
 
-        assertEquals(3, results.size)
+        assertEquals(2, results.size)
         assertTrue("SYNCED_TO_ODOO must not appear", results.none { it.syncStatus == "SYNCED_TO_ODOO" })
+        assertTrue("ARCHIVED must not appear", results.none { it.syncStatus == "ARCHIVED" })
+        assertTrue("DEAD_LETTER must not appear", results.none { it.syncStatus == "DEAD_LETTER" })
         assertTrue("PENDING must appear", results.any { it.fccTransactionId == "FCC-P1" })
         assertTrue("UPLOADED must appear", results.any { it.fccTransactionId == "FCC-U1" })
-        assertTrue("ARCHIVED must appear", results.any { it.fccTransactionId == "FCC-A1" })
+    }
+
+    @Test
+    fun `AF-025 getByIdForLocalApi excludes terminal-state records`() = runBlocking {
+        val dao = db.transactionDao()
+
+        val pendingTx = buildTransaction(fccTransactionId = "FCC-P-ID", syncStatus = "PENDING")
+        val syncedTx = buildTransaction(fccTransactionId = "FCC-S-ID", syncStatus = "SYNCED_TO_ODOO")
+        val archivedTx = buildTransaction(fccTransactionId = "FCC-A-ID", syncStatus = "ARCHIVED")
+        val deadLetterTx = buildTransaction(fccTransactionId = "FCC-D-ID", syncStatus = "DEAD_LETTER")
+
+        dao.insert(pendingTx)
+        dao.insert(syncedTx)
+        dao.insert(archivedTx)
+        dao.insert(deadLetterTx)
+
+        // getByIdForLocalApi should return PENDING
+        assertNotNull(dao.getByIdForLocalApi(pendingTx.id))
+        // getByIdForLocalApi should exclude terminal states
+        assertNull(dao.getByIdForLocalApi(syncedTx.id))
+        assertNull(dao.getByIdForLocalApi(archivedTx.id))
+        assertNull(dao.getByIdForLocalApi(deadLetterTx.id))
+        // getById (unfiltered) should still return all
+        assertNotNull(dao.getById(syncedTx.id))
     }
 
     @Test

@@ -46,5 +46,11 @@ internal sealed class AgentRegistrationConfiguration : IEntityTypeConfiguration<
 
         builder.HasIndex(e => new { e.LegalEntityId, e.IsActive, e.RegisteredAt })
             .HasDatabaseName("ix_agent_legal_entity_active_registered");
+
+        // OB-T02: Use PostgreSQL xmin to prevent concurrent decommission requests
+        // from both creating audit events against the same active registration.
+        builder.Property<uint>("xmin")
+            .HasColumnType("xid")
+            .IsRowVersion();
     }
 }

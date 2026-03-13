@@ -4,6 +4,7 @@ import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
 import java.time.Instant
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -37,8 +38,9 @@ data class PreAuthCloudForwardWorkerConfig(
  * ## Algorithm
  * 1. Query unsynced pre-auth records via [PreAuthDao.getUnsynced] (oldest first).
  * 2. For each record, POST to `/api/v1/preauth` with device JWT.
- * 3. On HTTP 200/201 (Success) or 409 (Conflict — record already exists on cloud):
- *    call [PreAuthDao.markCloudSynced] to set `is_cloud_synced = 1`.
+ * 3. On HTTP 200/201, or on 409 `CONFLICT.INVALID_TRANSITION` where the cloud is already
+ *    ahead of the edge state, call [PreAuthDao.markCloudSynced] to set `is_cloud_synced = 1`.
+ *    Retryable 409 race conditions are treated as failures so the record is retried.
  * 4. On failure: call [PreAuthDao.recordCloudSyncFailure] to increment
  *    `cloud_sync_attempts` — record stays eligible for retry on next cycle.
  *
@@ -68,6 +70,8 @@ class PreAuthCloudForwardWorker(
     companion object {
         private const val TAG = "PreAuthForwardWorker"
         private const val DECOMMISSIONED_ERROR_CODE = "DEVICE_DECOMMISSIONED"
+        private const val INVALID_TRANSITION_CONFLICT_CODE = "INVALID_TRANSITION"
+        private const val RACE_CONDITION_CONFLICT_CODE = "RACE_CONDITION"
     }
 
     /**
@@ -223,8 +227,7 @@ class PreAuthCloudForwardWorker(
                 ForwardAttemptResult.Success
 
             is CloudPreAuthForwardResult.Conflict ->
-                // 409 means cloud already has this record — treat as synced
-                ForwardAttemptResult.Success
+                resolveConflict(record, result)
 
             is CloudPreAuthForwardResult.Unauthorized -> {
                 AppLogger.i(TAG, "Pre-auth forward returned 401 — attempting token refresh")
@@ -248,7 +251,7 @@ class PreAuthCloudForwardWorker(
                         ForwardAttemptResult.Success
 
                     is CloudPreAuthForwardResult.Conflict ->
-                        ForwardAttemptResult.Success
+                        resolveConflict(record, retryResult)
 
                     is CloudPreAuthForwardResult.Unauthorized ->
                         ForwardAttemptResult.TransportFailure(
@@ -276,6 +279,36 @@ class PreAuthCloudForwardWorker(
                 ForwardAttemptResult.TransportFailure(result.message)
         }
     }
+
+    private fun resolveConflict(
+        record: PreAuthRecord,
+        result: CloudPreAuthForwardResult.Conflict,
+    ): ForwardAttemptResult =
+        when (normalizeConflictCode(result.errorCode)) {
+            INVALID_TRANSITION_CONFLICT_CODE -> {
+                AppLogger.w(
+                    TAG,
+                    "Pre-auth ${record.odooOrderId} returned 409 ${result.errorCode}; " +
+                        "treating as synced because the cloud record is already in a more advanced state.",
+                )
+                ForwardAttemptResult.Success
+            }
+
+            RACE_CONDITION_CONFLICT_CODE ->
+                ForwardAttemptResult.TransportFailure(
+                    "409 Conflict (retryable race condition): ${result.message ?: result.errorCode ?: "unknown"}",
+                )
+
+            else ->
+                ForwardAttemptResult.TransportFailure(
+                    "409 Conflict: ${listOfNotNull(result.errorCode, result.message).joinToString(" - ").ifBlank { "unknown conflict" }}",
+                )
+        }
+
+    private fun normalizeConflictCode(errorCode: String?): String? =
+        errorCode
+            ?.substringAfterLast('.')
+            ?.uppercase(Locale.ROOT)
 
     private fun resolveForbidden(errorCode: String?): ForwardAttemptResult =
         if (errorCode == DECOMMISSIONED_ERROR_CODE) {

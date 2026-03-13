@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import com.fccmiddleware.edge.logging.AppLogger
+import com.fccmiddleware.edge.buffer.IntegrityChecker
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
 import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.api.LocalApiServer
@@ -31,10 +32,7 @@ import com.fccmiddleware.edge.websocket.OdooWebSocketServer
 import com.fccmiddleware.edge.R
 import com.fccmiddleware.edge.ui.DecommissionedActivity
 import com.fccmiddleware.edge.ui.ProvisioningActivity
-import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -57,13 +55,11 @@ import org.koin.android.ext.android.inject
  */
 class EdgeAgentForegroundService : Service() {
 
-    // SupervisorJob ensures one failing child does not cancel siblings.
-    // CoroutineExceptionHandler logs uncaught exceptions to prevent silent service crashes (T-008).
-    private val serviceScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
-            AppLogger.e(TAG, "Uncaught exception in service coroutine: ${throwable.message}", throwable)
-        }
-    )
+    // AT-003: Inject the single Koin-managed CoroutineScope instead of creating a
+    // separate appScope. This eliminates lifecycle divergence — all coroutines
+    // (service monitors, workers, handlers, logger) share one scope and are cancelled
+    // together in onDestroy().
+    private val appScope: CoroutineScope by inject()
 
     // Guard against re-entrant onStartCommand (T-004): START_STICKY may deliver
     // multiple calls without an intervening onDestroy (e.g., ProvisioningActivity
@@ -85,6 +81,7 @@ class EdgeAgentForegroundService : Service() {
     private val localOverrideManager: LocalOverrideManager by inject()
     private val networkBinder: NetworkBinder by inject()
     private val odooWebSocketServer: OdooWebSocketServer by inject()
+    private val integrityChecker: IntegrityChecker by inject()
 
     @Volatile
     private var lastAppliedConfigVersion: Int? = null
@@ -120,7 +117,17 @@ class EdgeAgentForegroundService : Service() {
 
         // Start connectivity probes immediately (initializes in FULLY_OFFLINE per spec)
         connectivityManager.start()
-        serviceScope.launch {
+        appScope.launch {
+            // AF-038: Run database integrity check before any DB access.
+            // If corruption is detected and recovered, stop the service —
+            // START_STICKY will restart it with a fresh database.
+            val integrityResult = integrityChecker.runCheck()
+            if (integrityResult is IntegrityChecker.IntegrityCheckResult.Recovered) {
+                AppLogger.w(TAG, "Database recovered from corruption (backup: ${integrityResult.backupPath}), restarting service")
+                stopSelf()
+                return@launch
+            }
+
             configManager.loadFromLocal()
             val bootConfig = configManager.config.value
             if (bootConfig != null) {
@@ -149,13 +156,13 @@ class EdgeAgentForegroundService : Service() {
 
         // Monitor for re-provisioning requirement (refresh token expired).
         // Checks periodically and navigates to ProvisioningActivity if needed.
-        serviceScope.launch {
+        appScope.launch {
             monitorReprovisioningState()
         }
 
         // H-03: Monitor for decommissioned state so the running service stops
         // promptly instead of waiting for a full app relaunch.
-        serviceScope.launch {
+        appScope.launch {
             monitorDecommissionedState()
         }
 
@@ -165,11 +172,20 @@ class EdgeAgentForegroundService : Service() {
     override fun onDestroy() {
         serviceStarted.set(false)
         cadenceController.stop()
+        // AT-006: Synchronously close the FCC adapter to release TCP connections,
+        // embedded Ktor servers (RadixPushListener, AdvatecWebhookListener), and
+        // heartbeat managers before cancelling the app scope. cadenceController.stop()
+        // launches a disconnect coroutine, but appScope.cancel() below would cancel
+        // it before completion. FccRuntimeState.clear() uses (adapter as Closeable).close()
+        // which is synchronous — DomsJplAdapter cancels its scope, RadixAdapter stops its
+        // push listener, AdvatecAdapter stops its webhook listener.
+        fccRuntimeState.clear()
         connectivityManager.stop()
         networkBinder.stop()
         localApiServer.stop()
         odooWebSocketServer.stop()
-        serviceScope.cancel()
+        fileLogger.close()
+        appScope.cancel()
         AppLogger.i(TAG, "EdgeAgentForegroundService destroyed")
         super.onDestroy()
     }

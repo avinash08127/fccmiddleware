@@ -82,6 +82,11 @@ try
         builder.Configuration.GetSection(ArchiveWorkerOptions.SectionName));
     builder.Services.AddHostedService<ArchiveWorker>();
 
+    // ── OB-P03: Refresh Token Cleanup Worker ─────────────────────────────
+    builder.Services.Configure<RefreshTokenCleanupWorkerOptions>(
+        builder.Configuration.GetSection(RefreshTokenCleanupWorkerOptions.SectionName));
+    builder.Services.AddHostedService<RefreshTokenCleanupWorker>();
+
     var host = builder.Build();
     host.Run();
 }

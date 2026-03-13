@@ -11,6 +11,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import java.io.Closeable
 
@@ -256,15 +258,21 @@ class DomsJplAdapter(
                 return TransactionBatch(transactions = emptyList(), hasMore = false)
             }
 
-            // Step 3: Map to canonical
-            val canonicalTxns = domsTxns.mapNotNull { dto ->
-                when (val result = DomsCanonicalMapper.mapToCanonical(dto, config, siteCode, legalEntityId)) {
-                    is NormalizationResult.Success -> result.transaction
-                    is NormalizationResult.Failure -> {
-                        AppLogger.w(TAG, "Normalization failed for txn ${dto.transactionId}: ${result.message}")
-                        null
+            // AP-014: Normalize on Dispatchers.Default with periodic yield() so that
+            // large batches (50+ txns) don't starve other coroutines on the same dispatcher.
+            val canonicalTxns = withContext(Dispatchers.Default) {
+                val results = mutableListOf<CanonicalTransaction>()
+                for ((index, dto) in domsTxns.withIndex()) {
+                    when (val result = DomsCanonicalMapper.mapToCanonical(dto, config, siteCode, legalEntityId)) {
+                        is NormalizationResult.Success -> results.add(result.transaction)
+                        is NormalizationResult.Failure -> {
+                            AppLogger.w(TAG, "Normalization failed for txn ${dto.transactionId}: ${result.message}")
+                        }
                     }
+                    // Yield every 20 items to allow other coroutines to run
+                    if (index % 20 == 19) yield()
                 }
+                results
             }
 
             // AF-016: Only clear the number of successfully normalized transactions so that

@@ -849,7 +849,7 @@ public sealed class PreAuthHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task RunExpiryCheckAsync_FccDeauthFails_StillTransitionsToExpired()
+    public async Task RunExpiryCheckAsync_FccDeauthFails_LeavesAuthorizedForRetry()
     {
         var past = DateTimeOffset.UtcNow.AddMinutes(-10);
         _db.PreAuths.Add(new PreAuthEntity
@@ -872,10 +872,41 @@ public sealed class PreAuthHandlerTests : IDisposable
         _adapter.CancelPreAuthAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<bool>(new HttpRequestException("FCC unreachable")));
 
-        // Should not throw — best-effort deauth
+        var count = await _handler.RunExpiryCheckAsync(CancellationToken.None);
+
+        count.Should().Be(0);
+        var record = await _db.PreAuths.AsNoTracking().SingleAsync();
+        record.Status.Should().Be(PreAuthStatus.Authorized);
+        record.ExpiredAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task RunExpiryCheckAsync_DispensingRecord_ExpiresWithoutFccDeauth()
+    {
+        var past = DateTimeOffset.UtcNow.AddMinutes(-10);
+        _db.PreAuths.Add(new PreAuthEntity
+        {
+            Id = "PA-DISP-EXP",
+            OdooOrderId = "DISP-ORDER",
+            SiteCode = "SITE-A",
+            PumpNumber = 1,
+            NozzleNumber = 1,
+            ProductCode = "DIESEL",
+            RequestedAmount = 50_000,
+            UnitPrice = 1_500,
+            Currency = "ETB",
+            Status = PreAuthStatus.Dispensing,
+            FccCorrelationId = "FCC-CORR-DISP",
+            ExpiresAt = past,
+            RequestedAt = past,
+        });
+        await _db.SaveChangesAsync();
+
         var count = await _handler.RunExpiryCheckAsync(CancellationToken.None);
 
         count.Should().Be(1);
+        await _adapter.DidNotReceive().CancelPreAuthAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+
         var record = await _db.PreAuths.AsNoTracking().SingleAsync();
         record.Status.Should().Be(PreAuthStatus.Expired);
     }

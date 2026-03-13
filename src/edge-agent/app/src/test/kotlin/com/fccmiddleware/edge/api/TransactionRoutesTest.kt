@@ -52,11 +52,16 @@ class TransactionRoutesTest {
     fun setUp() {
         mockDao = mockk()
         coEvery { mockDao.countForLocalApi() } returns 0
+        coEvery { mockDao.countForLocalApiByPump(any()) } returns 0
+        coEvery { mockDao.countForLocalApiSince(any()) } returns 0
+        coEvery { mockDao.countForLocalApiByPumpSince(any(), any()) } returns 0
         coEvery { mockDao.getForLocalApi(any(), any()) } returns emptyList()
         coEvery { mockDao.getForLocalApiByPump(any(), any(), any()) } returns emptyList()
         coEvery { mockDao.getForLocalApiSince(any(), any(), any()) } returns emptyList()
         coEvery { mockDao.getForLocalApiByPumpSince(any(), any(), any(), any()) } returns emptyList()
         coEvery { mockDao.getById(any()) } returns null
+        coEvery { mockDao.getByIdForLocalApi(any()) } returns null
+        coEvery { mockDao.markAcknowledged(any(), any()) } returns 0
     }
 
     // -------------------------------------------------------------------------
@@ -98,26 +103,32 @@ class TransactionRoutesTest {
     }
 
     @Test
-    fun `GET transactions with pumpNumber filter calls pump DAO method`() = testApplication {
+    fun `GET transactions with pumpNumber filter calls pump DAO method and filtered count`() = testApplication {
         setupRouting()
         coEvery { mockDao.getForLocalApiByPump(2, 50, 0) } returns listOf(buildTransaction("TX-P2"))
+        coEvery { mockDao.countForLocalApiByPump(2) } returns 1
 
         val response = client.get("/api/v1/transactions?pumpNumber=2")
 
         assertEquals(HttpStatusCode.OK, response.status)
-        assertTrue(response.bodyAsText().contains("TX-P2"))
+        val body = response.bodyAsText()
+        assertTrue(body.contains("TX-P2"))
+        assertTrue("AF-023: total must reflect filtered count", body.contains("\"total\":1"))
     }
 
     @Test
-    fun `GET transactions with valid since parameter calls since DAO method`() = testApplication {
+    fun `GET transactions with valid since parameter calls since DAO method and filtered count`() = testApplication {
         setupRouting()
         val since = "2024-01-15T10:00:00Z"
         coEvery { mockDao.getForLocalApiSince(since, 50, 0) } returns listOf(buildTransaction("TX-SINCE"))
+        coEvery { mockDao.countForLocalApiSince(since) } returns 1
 
         val response = client.get("/api/v1/transactions?since=$since")
 
         assertEquals(HttpStatusCode.OK, response.status)
-        assertTrue(response.bodyAsText().contains("TX-SINCE"))
+        val body = response.bodyAsText()
+        assertTrue(body.contains("TX-SINCE"))
+        assertTrue("AF-023: total must reflect filtered count", body.contains("\"total\":1"))
     }
 
     @Test
@@ -161,7 +172,7 @@ class TransactionRoutesTest {
     fun `GET transaction by id returns 200 when found`() = testApplication {
         setupRouting()
         val tx = buildTransaction("TX-FOUND")
-        coEvery { mockDao.getById("TX-FOUND") } returns tx
+        coEvery { mockDao.getByIdForLocalApi("TX-FOUND") } returns tx
 
         val response = client.get("/api/v1/transactions/TX-FOUND")
 
@@ -172,13 +183,25 @@ class TransactionRoutesTest {
     @Test
     fun `GET transaction by id returns 404 when not found`() = testApplication {
         setupRouting()
-        coEvery { mockDao.getById("MISSING") } returns null
+        coEvery { mockDao.getByIdForLocalApi("MISSING") } returns null
 
         val response = client.get("/api/v1/transactions/MISSING")
 
         assertEquals(HttpStatusCode.NotFound, response.status)
         val body = response.bodyAsText()
         assertTrue(body.contains("NOT_FOUND"))
+    }
+
+    @Test
+    fun `AF-025 GET transaction by id returns 404 for SYNCED_TO_ODOO record`() = testApplication {
+        setupRouting()
+        // getByIdForLocalApi filters out SYNCED_TO_ODOO, so it returns null
+        coEvery { mockDao.getByIdForLocalApi("TX-SYNCED") } returns null
+
+        val response = client.get("/api/v1/transactions/TX-SYNCED")
+
+        assertEquals(HttpStatusCode.NotFound, response.status)
+        assertTrue(response.bodyAsText().contains("NOT_FOUND"))
     }
 
     // -------------------------------------------------------------------------
@@ -188,11 +211,7 @@ class TransactionRoutesTest {
     @Test
     fun `POST acknowledge returns 200 with count of found IDs`() = testApplication {
         setupRouting()
-        val tx1 = buildTransaction("TX-ACK-1")
-        val tx2 = buildTransaction("TX-ACK-2")
-        coEvery { mockDao.getById("TX-ACK-1") } returns tx1
-        coEvery { mockDao.getById("TX-ACK-2") } returns tx2
-        coEvery { mockDao.getById("TX-MISSING") } returns null
+        coEvery { mockDao.markAcknowledged(listOf("TX-ACK-1", "TX-ACK-2", "TX-MISSING"), any()) } returns 2
 
         val response = client.post("/api/v1/transactions/acknowledge") {
             contentType(ContentType.Application.Json)

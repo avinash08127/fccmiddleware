@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 6,
-    "identityHash": "552220362a6185f3b70fa53ecca8466f",
+    "identityHash": "b2c33768c36def2384a36fcd3de53652",
     "entities": [
       {
         "tableName": "buffered_transactions",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `fcc_transaction_id` TEXT NOT NULL, `site_code` TEXT NOT NULL, `pump_number` INTEGER NOT NULL, `nozzle_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, `volume_microlitres` INTEGER NOT NULL, `amount_minor_units` INTEGER NOT NULL, `unit_price_minor_per_litre` INTEGER NOT NULL, `currency_code` TEXT NOT NULL, `started_at` TEXT NOT NULL, `completed_at` TEXT NOT NULL, `fiscal_receipt_number` TEXT, `fcc_vendor` TEXT NOT NULL, `attendant_id` TEXT, `status` TEXT NOT NULL, `sync_status` TEXT NOT NULL, `ingestion_source` TEXT NOT NULL, `raw_payload_json` TEXT, `correlation_id` TEXT NOT NULL, `upload_attempts` INTEGER NOT NULL, `last_upload_attempt_at` TEXT, `last_upload_error` TEXT, `order_uuid` TEXT, `odoo_order_id` TEXT, `add_to_cart` INTEGER NOT NULL DEFAULT 0, `payment_id` TEXT, `is_discard` INTEGER NOT NULL DEFAULT 0, `fiscal_attempts` INTEGER NOT NULL DEFAULT 0, `last_fiscal_attempt_at` TEXT, `fiscal_status` TEXT NOT NULL DEFAULT 'NONE', `schema_version` INTEGER NOT NULL, `created_at` TEXT NOT NULL, `updated_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `fcc_transaction_id` TEXT NOT NULL, `site_code` TEXT NOT NULL, `pump_number` INTEGER NOT NULL, `nozzle_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, `volume_microlitres` INTEGER NOT NULL, `amount_minor_units` INTEGER NOT NULL, `unit_price_minor_per_litre` INTEGER NOT NULL, `currency_code` TEXT NOT NULL, `started_at` TEXT NOT NULL, `completed_at` TEXT NOT NULL, `fiscal_receipt_number` TEXT, `fcc_vendor` TEXT NOT NULL, `attendant_id` TEXT, `status` TEXT NOT NULL, `sync_status` TEXT NOT NULL, `ingestion_source` TEXT NOT NULL, `raw_payload_json` TEXT, `correlation_id` TEXT NOT NULL, `upload_attempts` INTEGER NOT NULL, `last_upload_attempt_at` TEXT, `last_upload_error` TEXT, `order_uuid` TEXT, `odoo_order_id` TEXT, `add_to_cart` INTEGER NOT NULL DEFAULT 0, `payment_id` TEXT, `is_discard` INTEGER NOT NULL DEFAULT 0, `fiscal_attempts` INTEGER NOT NULL DEFAULT 0, `last_fiscal_attempt_at` TEXT, `fiscal_status` TEXT NOT NULL DEFAULT 'NONE', `acknowledged_at` TEXT, `schema_version` INTEGER NOT NULL, `created_at` TEXT NOT NULL, `updated_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -199,6 +199,12 @@
             "defaultValue": "'NONE'"
           },
           {
+            "fieldPath": "acknowledgedAt",
+            "columnName": "acknowledged_at",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
             "fieldPath": "schemaVersion",
             "columnName": "schema_version",
             "affinity": "INTEGER",
@@ -274,7 +280,7 @@
       },
       {
         "tableName": "pre_auth_records",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `site_code` TEXT NOT NULL, `odoo_order_id` TEXT NOT NULL, `pump_number` INTEGER NOT NULL, `nozzle_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, `currency_code` TEXT NOT NULL, `requested_amount_minor_units` INTEGER NOT NULL, `unit_price_minor_per_litre` INTEGER, `authorized_amount_minor_units` INTEGER, `status` TEXT NOT NULL, `fcc_correlation_id` TEXT, `fcc_authorization_code` TEXT, `failure_reason` TEXT, `customer_name` TEXT, `customer_tax_id` TEXT, `vehicle_number` TEXT, `customer_business_name` TEXT, `attendant_id` TEXT, `raw_fcc_response` TEXT, `requested_at` TEXT NOT NULL, `authorized_at` TEXT, `completed_at` TEXT, `expires_at` TEXT NOT NULL, `is_cloud_synced` INTEGER NOT NULL, `cloud_sync_attempts` INTEGER NOT NULL, `last_cloud_sync_attempt_at` TEXT, `schema_version` INTEGER NOT NULL, `created_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `site_code` TEXT NOT NULL, `odoo_order_id` TEXT NOT NULL, `pump_number` INTEGER NOT NULL, `nozzle_number` INTEGER NOT NULL, `product_code` TEXT NOT NULL, `currency_code` TEXT NOT NULL, `requested_amount_minor_units` INTEGER NOT NULL, `unit_price_minor_per_litre` INTEGER, `authorized_amount_minor_units` INTEGER, `status` TEXT NOT NULL, `fcc_correlation_id` TEXT, `fcc_authorization_code` TEXT, `failure_reason` TEXT, `customer_name` TEXT, `customer_tax_id` TEXT, `raw_fcc_response` TEXT, `requested_at` TEXT NOT NULL, `authorized_at` TEXT, `completed_at` TEXT, `expires_at` TEXT NOT NULL, `is_cloud_synced` INTEGER NOT NULL, `cloud_sync_attempts` INTEGER NOT NULL, `last_cloud_sync_attempt_at` TEXT, `schema_version` INTEGER NOT NULL, `created_at` TEXT NOT NULL, PRIMARY KEY(`id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -369,24 +375,6 @@
           {
             "fieldPath": "customerTaxId",
             "columnName": "customer_tax_id",
-            "affinity": "TEXT",
-            "notNull": false
-          },
-          {
-            "fieldPath": "vehicleNumber",
-            "columnName": "vehicle_number",
-            "affinity": "TEXT",
-            "notNull": false
-          },
-          {
-            "fieldPath": "customerBusinessName",
-            "columnName": "customer_business_name",
-            "affinity": "TEXT",
-            "notNull": false
-          },
-          {
-            "fieldPath": "attendantId",
-            "columnName": "attendant_id",
             "affinity": "TEXT",
             "notNull": false
           },
@@ -947,7 +935,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '552220362a6185f3b70fa53ecca8466f')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b2c33768c36def2384a36fcd3de53652')"
     ]
   }
 }

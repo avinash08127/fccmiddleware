@@ -78,6 +78,7 @@ class CadenceControllerTest {
             syncedToOdooTickFrequency = 2,
             configPollTickFrequency = 6,
             telemetryTickFrequency = 4,
+            fiscalRetryTickFrequency = 4,
         ),
     ): CadenceController = CadenceController(
         connectivityManager = connectivityManager,
@@ -98,11 +99,12 @@ class CadenceControllerTest {
 
     @Test
     fun `L-07 computeTickModulus returns LCM of all tick frequencies`() {
-        // LCM(2, 4, 6) = 12
+        // LCM(2, 4, 6, 4) = 12
         val config = CadenceController.CadenceConfig(
             syncedToOdooTickFrequency = 2,
             telemetryTickFrequency = 4,
             configPollTickFrequency = 6,
+            fiscalRetryTickFrequency = 4,
         )
         assertEquals(12L, CadenceController.computeTickModulus(config))
     }
@@ -189,6 +191,25 @@ class CadenceControllerTest {
         coVerify(exactly = 0) { ingestionOrchestrator.poll() }
         coVerify(atLeast = 1) { cloudUploadWorker.uploadPendingBatch() }
         coVerify(atLeast = 1) { preAuthHandler.runExpiryCheck() }
+    }
+
+    @Test
+    fun `AF-036 FCC_UNREACHABLE tick sends telemetry on telemetry tick`() = testScope.runTest {
+        stateFlow.value = ConnectivityState.FCC_UNREACHABLE
+        val c = makeController(
+            config = CadenceController.CadenceConfig(
+                baseIntervalMs = 100L,
+                jitterRangeMs = 0L,
+                telemetryTickFrequency = 1, // every tick for test
+            ),
+        )
+        c.start()
+        advanceTimeBy(150)
+        c.stop()
+
+        // Telemetry should be sent during FCC_UNREACHABLE (cloud is reachable)
+        coVerify(atLeast = 1) { cloudUploadWorker.reportTelemetry() }
+        coVerify(atLeast = 1) { cloudUploadWorker.reportDiagnosticLogs() }
     }
 
     @Test
@@ -313,5 +334,51 @@ class CadenceControllerTest {
 
         // Should not crash or produce double-fire
         assertTrue(true)
+    }
+
+    // -------------------------------------------------------------------------
+    // AP-004: Fiscalization retry on separate timer
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `AP-004 fiscal retry runs on its own cadence when FCC reachable`() = testScope.runTest {
+        stateFlow.value = ConnectivityState.FULLY_ONLINE
+        // fiscal retry every 2nd tick for easier testing
+        val c = makeController(
+            config = CadenceController.CadenceConfig(
+                baseIntervalMs = 100L,
+                jitterRangeMs = 0L,
+                highBacklogIntervalMs = 50L,
+                highBacklogThreshold = 500,
+                offlineIntervalMs = 200L,
+                syncedToOdooTickFrequency = 2,
+                configPollTickFrequency = 6,
+                telemetryTickFrequency = 4,
+                fiscalRetryTickFrequency = 2,
+            ),
+        )
+        c.start()
+        // Advance enough for 3 ticks (tick 0, 1, 2) — fiscal retry on ticks 0 and 2
+        advanceTimeBy(350)
+        c.stop()
+
+        coVerify(atLeast = 2) { ingestionOrchestrator.retryPendingFiscalization() }
+    }
+
+    @Test
+    fun `AP-004 fiscal retry does not run when FCC unreachable`() = testScope.runTest {
+        stateFlow.value = ConnectivityState.FCC_UNREACHABLE
+        val c = makeController(
+            config = CadenceController.CadenceConfig(
+                baseIntervalMs = 100L,
+                jitterRangeMs = 0L,
+                fiscalRetryTickFrequency = 1, // every tick
+            ),
+        )
+        c.start()
+        advanceTimeBy(150)
+        c.stop()
+
+        coVerify(exactly = 0) { ingestionOrchestrator.retryPendingFiscalization() }
     }
 }

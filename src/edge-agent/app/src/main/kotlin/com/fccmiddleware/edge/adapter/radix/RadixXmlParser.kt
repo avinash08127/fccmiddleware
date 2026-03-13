@@ -34,6 +34,14 @@ sealed class RadixParseResult<out T> {
  */
 object RadixXmlParser {
 
+    // AP-012: Cache the DocumentBuilderFactory — it is thread-safe and its
+    // service-provider lookup (1–3ms on Android) only needs to happen once.
+    // A new DocumentBuilder is still created per parse call (builders are NOT thread-safe).
+    private val docBuilderFactory: DocumentBuilderFactory = DocumentBuilderFactory.newInstance().apply {
+        setFeature("http://xml.org/sax/features/external-general-entities", false)
+        setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+    }
+
     // -----------------------------------------------------------------------
     // Public — Response parsing
     // -----------------------------------------------------------------------
@@ -234,10 +242,7 @@ object RadixXmlParser {
      * Disables external entity resolution to prevent XXE attacks.
      */
     private fun parseXml(xml: String): Document {
-        val factory = DocumentBuilderFactory.newInstance()
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
-        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-        val builder = factory.newDocumentBuilder()
+        val builder = docBuilderFactory.newDocumentBuilder()
         return builder.parse(ByteArrayInputStream(xml.toByteArray(Charsets.UTF_8)))
     }
 

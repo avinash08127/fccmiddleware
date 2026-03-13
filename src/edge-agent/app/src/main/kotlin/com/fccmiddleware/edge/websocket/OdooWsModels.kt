@@ -1,6 +1,7 @@
 package com.fccmiddleware.edge.websocket
 
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
+import com.fccmiddleware.edge.adapter.common.CurrencyUtils
 import com.fccmiddleware.edge.adapter.common.PumpStatus
 import com.fccmiddleware.edge.adapter.common.PumpState
 import kotlinx.serialization.SerialName
@@ -100,19 +101,26 @@ data class AttendantPumpCountUpdateItem(
 // Mapping helpers
 // ---------------------------------------------------------------------------
 
-/** Auto-incrementing counter for legacy integer `id` field. */
-private val txIdCounter = java.util.concurrent.atomic.AtomicInteger(0)
+/**
+ * Auto-incrementing counter for legacy integer `id` field.
+ * AF-048: Initialized from epoch seconds so IDs never collide with a previous session
+ * after process restart. Monotonically increments within a session.
+ */
+private val txIdCounter = java.util.concurrent.atomic.AtomicInteger(
+    (System.currentTimeMillis() / 1000).toInt()
+)
 
 /**
  * Map a [BufferedTransaction] to the legacy [PumpTransactionWsDto] format.
  *
- * Monetary conversion: minor units → major units (divide by 100).
+ * Monetary conversion: minor units → major units (divide by currency factor).
  * Volume conversion: microlitres → litres (divide by 1,000,000).
  */
 fun BufferedTransaction.toWsDto(): PumpTransactionWsDto {
     val qty = volumeMicrolitres / 1_000_000.0
-    val price = unitPriceMinorPerLitre / 100.0
-    val total = amountMinorUnits / 100.0
+    val currencyFactor = CurrencyUtils.getFactor(currencyCode)
+    val price = unitPriceMinorPerLitre / currencyFactor
+    val total = amountMinorUnits / currencyFactor
 
     val wsState = when {
         isDiscard -> "discard"

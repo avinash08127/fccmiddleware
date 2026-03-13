@@ -379,7 +379,10 @@ class IngestionOrchestrator(
     /**
      * Retries pending fiscalization for transactions that have not exceeded max attempts.
      * Uses exponential backoff: 30s, 60s, 120s, 240s, 480s.
-     * Called on each cadence tick and after new transactions are queued.
+     *
+     * AP-004: Called on a separate cadence timer (every Nth tick via CadenceController)
+     * and immediately after new transactions are queued in [doPoll]. The separate timer
+     * avoids blocking the main cadence tick with sequential Advatec HTTP calls.
      */
     internal suspend fun retryPendingFiscalization() {
         val fiscService = fiscalizationService ?: return
@@ -419,10 +422,10 @@ class IngestionOrchestrator(
 
             try {
                 val context = FiscalizationContext(
-                    customerTaxId = null,
-                    customerName = null,
-                    customerIdType = null,
-                    paymentType = "CASH",
+                    customerTaxId = tx.fiscalCustomerTaxId,
+                    customerName = tx.fiscalCustomerName,
+                    customerIdType = tx.fiscalCustomerIdType,
+                    paymentType = tx.paymentType,
                 )
                 val result = fiscService.submitForFiscalization(
                     // Reconstruct a minimal CanonicalTransaction from buffered fields

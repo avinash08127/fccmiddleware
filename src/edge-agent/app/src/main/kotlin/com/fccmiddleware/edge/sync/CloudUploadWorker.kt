@@ -57,19 +57,19 @@ data class CloudUploadWorkerConfig(
  * Called by [CadenceController] when connectivity state is FULLY_ONLINE or FCC_UNREACHABLE.
  * Never uses WorkManager — runs under the foreground service scope.
  *
- * All constructor parameters are nullable so the worker can be registered in DI before
- * the security and config modules are wired (EA-2.x). Upload calls are no-ops until all
- * required dependencies are non-null.
+ * AT-013: Core dependencies are non-nullable — Koin provides all of them as
+ * non-null singletons. Only [telemetryReporter] and [fileLogger] remain nullable
+ * as they are genuinely optional (diagnostics-only).
  */
 class CloudUploadWorker(
-    private val bufferManager: TransactionBufferManager? = null,
-    private val syncStateDao: SyncStateDao? = null,
-    private val cloudApiClient: CloudApiClient? = null,
-    private val tokenProvider: DeviceTokenProvider? = null,
+    private val bufferManager: TransactionBufferManager,
+    private val syncStateDao: SyncStateDao,
+    private val cloudApiClient: CloudApiClient,
+    private val tokenProvider: DeviceTokenProvider,
     val config: CloudUploadWorkerConfig = CloudUploadWorkerConfig(),
     private val telemetryReporter: TelemetryReporter? = null,
     private val fileLogger: StructuredFileLogger? = null,
-    private val configManager: ConfigManager? = null,
+    private val configManager: ConfigManager,
 ) {
 
     companion object {
@@ -115,20 +115,7 @@ class CloudUploadWorker(
      * See class-level KDoc for the full algorithm.
      */
     suspend fun uploadPendingBatch() {
-        val bm = bufferManager ?: run {
-            AppLogger.d(TAG, "uploadPendingBatch() skipped — bufferManager not wired")
-            return
-        }
-        val client = cloudApiClient ?: run {
-            AppLogger.d(TAG, "uploadPendingBatch() skipped — cloudApiClient not wired")
-            return
-        }
-        val provider = tokenProvider ?: run {
-            AppLogger.d(TAG, "uploadPendingBatch() skipped — tokenProvider not wired")
-            return
-        }
-
-        if (provider.isDecommissioned()) {
+        if (tokenProvider.isDecommissioned()) {
             AppLogger.w(TAG, "uploadPendingBatch() skipped — device decommissioned; no further sync")
             return
         }
@@ -141,7 +128,7 @@ class CloudUploadWorker(
         }
 
         val batchSize = effectiveBatchSize.coerceIn(1, CLOUD_MAX_BATCH_SIZE)
-        val batch = bm.getPendingBatch(batchSize)
+        val batch = bufferManager.getPendingBatch(batchSize)
         val batchWasFull = batch.size == batchSize
         if (batch.isEmpty()) {
             // H-02 fix: reset backoff when buffer drains so new records upload immediately
@@ -152,10 +139,10 @@ class CloudUploadWorker(
 
         AppLogger.i(TAG, "Starting upload batch: ${batch.size} records")
 
-        val token = provider.getAccessToken() ?: run {
+        val token = tokenProvider.getAccessToken() ?: run {
             // H-05: Re-check decommission status — if device was decommissioned between
             // the initial check and getAccessToken(), a null token is expected and permanent.
-            if (provider.isDecommissioned()) {
+            if (tokenProvider.isDecommissioned()) {
                 AppLogger.w(TAG, "uploadPendingBatch() skipped — device decommissioned (detected on token fetch)")
             } else {
                 AppLogger.w(TAG, "uploadPendingBatch() skipped — no access token available (not provisioned)")
@@ -166,7 +153,7 @@ class CloudUploadWorker(
         // AF-008: Skip upload when legalEntityId is unavailable to prevent
         // needless REJECTED responses that increment uploadAttempts and eventually
         // dead-letter all records.
-        val legalEntityId = provider.getLegalEntityId()
+        val legalEntityId = tokenProvider.getLegalEntityId()
         if (legalEntityId.isNullOrEmpty()) {
             AppLogger.w(
                 TAG,
@@ -176,8 +163,12 @@ class CloudUploadWorker(
             return
         }
 
-        val result = doUpload(client, provider, batch, token)
-        handleUploadResult(bm, batch, result, batchWasFull)
+        // AF-035: Record the upload attempt timestamp BEFORE the HTTP call, regardless of outcome.
+        // This allows telemetry to report when the last attempt was made, even if it failed.
+        updateLastUploadAttemptAt()
+
+        val result = doUpload(cloudApiClient, tokenProvider, batch, token)
+        handleUploadResult(bufferManager, batch, result, batchWasFull)
     }
 
     /**
@@ -216,20 +207,7 @@ class CloudUploadWorker(
      * On transport failure: apply exponential backoff, retry on next cadence tick.
      */
     suspend fun pollSyncedToOdooStatus() {
-        val bm = bufferManager ?: run {
-            AppLogger.d(TAG, "pollSyncedToOdooStatus() skipped — bufferManager not wired")
-            return
-        }
-        val client = cloudApiClient ?: run {
-            AppLogger.d(TAG, "pollSyncedToOdooStatus() skipped — cloudApiClient not wired")
-            return
-        }
-        val provider = tokenProvider ?: run {
-            AppLogger.d(TAG, "pollSyncedToOdooStatus() skipped — tokenProvider not wired")
-            return
-        }
-
-        if (provider.isDecommissioned()) {
+        if (tokenProvider.isDecommissioned()) {
             AppLogger.w(TAG, "pollSyncedToOdooStatus() skipped — device decommissioned")
             return
         }
@@ -241,14 +219,14 @@ class CloudUploadWorker(
             return
         }
 
-        val uploadedIds = bm.getUploadedFccTransactionIds(CLOUD_MAX_BATCH_SIZE)
+        val uploadedIds = bufferManager.getUploadedFccTransactionIds(CLOUD_MAX_BATCH_SIZE)
         if (uploadedIds.isEmpty()) {
             AppLogger.d(TAG, "pollSyncedToOdooStatus() — no UPLOADED records to check")
             return
         }
 
-        val token = provider.getAccessToken() ?: run {
-            if (provider.isDecommissioned()) {
+        val token = tokenProvider.getAccessToken() ?: run {
+            if (tokenProvider.isDecommissioned()) {
                 AppLogger.w(TAG, "pollSyncedToOdooStatus() skipped — device decommissioned (detected on token fetch)")
             } else {
                 AppLogger.w(TAG, "pollSyncedToOdooStatus() skipped — no access token available")
@@ -263,9 +241,9 @@ class CloudUploadWorker(
             "Polling synced-to-Odoo status for ${uploadedIds.size} UPLOADED records since $since",
         )
 
-        val result = doStatusPoll(client, provider, since, token)
+        val result = doStatusPoll(cloudApiClient, tokenProvider, since, token)
         handleStatusPollResult(
-            bm = bm,
+            bm = bufferManager,
             uploadedIds = uploadedIds,
             pollStartedAt = pollStartedAt,
             result = result,
@@ -284,16 +262,8 @@ class CloudUploadWorker(
             AppLogger.d(TAG, "reportTelemetry() skipped — telemetryReporter not wired")
             return
         }
-        val client = cloudApiClient ?: run {
-            AppLogger.d(TAG, "reportTelemetry() skipped — cloudApiClient not wired")
-            return
-        }
-        val provider = tokenProvider ?: run {
-            AppLogger.d(TAG, "reportTelemetry() skipped — tokenProvider not wired")
-            return
-        }
 
-        if (provider.isDecommissioned()) {
+        if (tokenProvider.isDecommissioned()) {
             AppLogger.w(TAG, "reportTelemetry() skipped — device decommissioned")
             return
         }
@@ -303,8 +273,8 @@ class CloudUploadWorker(
             return
         }
 
-        val token = provider.getAccessToken() ?: run {
-            if (provider.isDecommissioned()) {
+        val token = tokenProvider.getAccessToken() ?: run {
+            if (tokenProvider.isDecommissioned()) {
                 AppLogger.w(TAG, "reportTelemetry() skipped — device decommissioned (detected on token fetch)")
             } else {
                 AppLogger.w(TAG, "reportTelemetry() skipped — no access token available")
@@ -315,24 +285,22 @@ class CloudUploadWorker(
         AppLogger.d(TAG, "Submitting telemetry (seq=${payload.sequenceNumber})")
 
         try {
-            when (val result = client.submitTelemetry(payload, token)) {
+            when (val result = cloudApiClient.submitTelemetry(payload, token)) {
                 is CloudTelemetryResult.Success -> {
-                    // M-05: Use atomic snapshot+reset so no increments are lost between
-                    // the read in buildPayload() and the reset here.
-                    reporter.snapshotAndResetErrorCounts()
+                    // AF-037: Error counters are now atomically reset inside buildPayload()
+                    // via snapshotAndResetErrorCounts(), eliminating the race window.
                     AppLogger.i(TAG, "Telemetry submitted (seq=${payload.sequenceNumber})")
                 }
 
                 is CloudTelemetryResult.Unauthorized -> {
                     // Attempt one token refresh and retry
                     AppLogger.i(TAG, "Telemetry returned 401 — attempting token refresh")
-                    val refreshed = provider.refreshAccessToken()
+                    val refreshed = tokenProvider.refreshAccessToken()
                     if (refreshed) {
-                        val freshToken = provider.getAccessToken()
+                        val freshToken = tokenProvider.getAccessToken()
                         if (freshToken != null) {
-                            when (client.submitTelemetry(payload, freshToken)) {
+                            when (cloudApiClient.submitTelemetry(payload, freshToken)) {
                                 is CloudTelemetryResult.Success -> {
-                                    reporter.snapshotAndResetErrorCounts()
                                     AppLogger.i(TAG, "Telemetry submitted after token refresh (seq=${payload.sequenceNumber})")
                                 }
                                 else -> {
@@ -377,17 +345,15 @@ class CloudUploadWorker(
      */
     suspend fun reportDiagnosticLogs() {
         val logger = fileLogger ?: return
-        val client = cloudApiClient ?: return
-        val provider = tokenProvider ?: return
-        val cfg = configManager?.config?.value ?: return
+        val cfg = configManager.config.value ?: return
 
         if (!cfg.telemetry.includeDiagnosticsLogs) return
-        if (provider.isDecommissioned()) return
+        if (tokenProvider.isDecommissioned()) return
 
         val entries = logger.getRecentDiagnosticEntries(200)
         if (entries.isEmpty()) return
 
-        val token = provider.getAccessToken() ?: return
+        val token = tokenProvider.getAccessToken() ?: return
 
         val request = DiagnosticLogUploadRequest(
             deviceId = cfg.identity.deviceId,
@@ -398,7 +364,7 @@ class CloudUploadWorker(
         )
 
         try {
-            when (val result = client.submitDiagnosticLogs(request, token)) {
+            when (val result = cloudApiClient.submitDiagnosticLogs(request, token)) {
                 is CloudDiagnosticLogResult.Success ->
                     AppLogger.i(TAG, "Diagnostic logs uploaded: ${entries.size} entries")
                 is CloudDiagnosticLogResult.Unauthorized ->
@@ -539,15 +505,17 @@ class CloudUploadWorker(
                     TAG,
                     "DEVICE DECOMMISSIONED during status poll. All cloud sync permanently stopped.",
                 )
-                tokenProvider?.markDecommissioned()
+                tokenProvider.markDecommissioned()
             }
 
             is StatusPollAttemptResult.TransportFailure -> {
                 val backoffMs = statusPollCircuitBreaker.recordFailure()
+                // AT-007: Use snapshot() to read state atomically under the mutex
+                val snap = statusPollCircuitBreaker.snapshot()
                 AppLogger.w(
                     TAG,
-                    "Status poll failed (failure #${statusPollCircuitBreaker.consecutiveFailureCount}, " +
-                        "state=${statusPollCircuitBreaker.state}); next retry after ${backoffMs}ms. " +
+                    "Status poll failed (failure #${snap.consecutiveFailureCount}, " +
+                        "state=${snap.state}); next retry after ${backoffMs}ms. " +
                         "Error: ${result.message}",
                 )
             }
@@ -556,9 +524,8 @@ class CloudUploadWorker(
 
     /** Update [SyncState.lastStatusPollAt] after a successful status poll. Returns true on success. */
     private suspend fun updateLastStatusPollAt(pollStartedAt: String): Boolean {
-        val dao = syncStateDao ?: return false
         return try {
-            val current = dao.get()
+            val current = syncStateDao.get()
             val updated = current?.copy(lastStatusPollAt = pollStartedAt, updatedAt = pollStartedAt)
                 ?: SyncState(
                     lastFccCursor = null,
@@ -568,7 +535,7 @@ class CloudUploadWorker(
                     lastConfigVersion = null,
                     updatedAt = pollStartedAt,
                 )
-            dao.upsert(updated)
+            syncStateDao.upsert(updated)
             true
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to update lastStatusPollAt in SyncState", e)
@@ -577,7 +544,7 @@ class CloudUploadWorker(
     }
 
     private suspend fun getStatusPollSince(): String =
-        syncStateDao?.get()?.lastStatusPollAt ?: DEFAULT_STATUS_POLL_SINCE
+        syncStateDao.get()?.lastStatusPollAt ?: DEFAULT_STATUS_POLL_SINCE
 
     // -------------------------------------------------------------------------
     // Upload helpers
@@ -714,16 +681,18 @@ class CloudUploadWorker(
                     "DEVICE DECOMMISSIONED by cloud. All cloud sync permanently stopped. " +
                         "Re-provisioning is required.",
                 )
-                tokenProvider?.markDecommissioned()
+                tokenProvider.markDecommissioned()
                 // Do not apply retry backoff — decommission is permanent
             }
 
             is UploadAttemptResult.TransportFailure -> {
                 val backoffMs = uploadCircuitBreaker.recordFailure()
+                // AT-007: Use snapshot() to read state atomically under the mutex
+                val snap = uploadCircuitBreaker.snapshot()
                 AppLogger.w(
                     TAG,
-                    "Batch upload failed (failure #${uploadCircuitBreaker.consecutiveFailureCount}, " +
-                        "state=${uploadCircuitBreaker.state}); next retry after ${backoffMs}ms. " +
+                    "Batch upload failed (failure #${snap.consecutiveFailureCount}, " +
+                        "state=${snap.state}); next retry after ${backoffMs}ms. " +
                         "Error: ${result.message}",
                 )
                 // Record the failure against every record in the batch so the diagnostics
@@ -857,14 +826,16 @@ class CloudUploadWorker(
         // The fallback to empty string is retained only as a defensive measure.
         val legalEntityId = provider.getLegalEntityId() ?: ""
         val batchId = java.util.UUID.randomUUID().toString()
+        // AP-003: Only include raw payloads when config opts in via buffer.persistRawPayloads.
+        val includeRawPayload = configManager.config.value?.buffer?.persistRawPayloads ?: false
         AppLogger.i(TAG, "Upload batch: batchId=$batchId records=${batch.size}")
         return CloudUploadRequest(
-            transactions = batch.map { tx -> tx.toDto(legalEntityId) },
+            transactions = batch.map { tx -> tx.toDto(legalEntityId, includeRawPayload) },
             uploadBatchId = batchId,
         )
     }
 
-    private fun BufferedTransaction.toDto(legalEntityId: String): CloudTransactionDto =
+    private fun BufferedTransaction.toDto(legalEntityId: String, includeRawPayload: Boolean): CloudTransactionDto =
         CloudTransactionDto(
             id = id,
             fccTransactionId = fccTransactionId,
@@ -889,15 +860,41 @@ class CloudUploadWorker(
             correlationId = correlationId,
             fiscalReceiptNumber = fiscalReceiptNumber,
             attendantId = attendantId,
-            rawPayloadJson = rawPayloadJson,
+            // AP-003: Only include raw payload when config opts in (buffer.persistRawPayloads).
+            // Canonical fields are sufficient for cloud processing; raw payloads add 2-5 KB per record.
+            rawPayloadJson = if (includeRawPayload) rawPayloadJson else null,
         )
+
+    /**
+     * AF-035: Update [SyncState.lastUploadAttemptAt] at the START of each upload attempt,
+     * before the HTTP call. This records when the agent last tried to upload, regardless
+     * of whether the attempt succeeded or failed.
+     */
+    private suspend fun updateLastUploadAttemptAt() {
+        val now = Instant.now().toString()
+        try {
+            val current = syncStateDao.get()
+            val updated = current?.copy(lastUploadAttemptAt = now, updatedAt = now)
+                ?: SyncState(
+                    lastFccCursor = null,
+                    lastUploadAt = null,
+                    lastUploadAttemptAt = now,
+                    lastStatusPollAt = null,
+                    lastConfigPullAt = null,
+                    lastConfigVersion = null,
+                    updatedAt = now,
+                )
+            syncStateDao.upsert(updated)
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to update lastUploadAttemptAt in SyncState", e)
+        }
+    }
 
     /** Update [SyncState.lastUploadAt] after a successful batch upload. Returns true on success. */
     private suspend fun updateLastUploadAt(): Boolean {
-        val dao = syncStateDao ?: return false
         val now = Instant.now().toString()
         return try {
-            val current = dao.get()
+            val current = syncStateDao.get()
             val updated = current?.copy(lastUploadAt = now, updatedAt = now)
                 ?: SyncState(
                     lastFccCursor = null,
@@ -907,7 +904,7 @@ class CloudUploadWorker(
                     lastConfigVersion = null,
                     updatedAt = now,
                 )
-            dao.upsert(updated)
+            syncStateDao.upsert(updated)
             true
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to update lastUploadAt in SyncState", e)

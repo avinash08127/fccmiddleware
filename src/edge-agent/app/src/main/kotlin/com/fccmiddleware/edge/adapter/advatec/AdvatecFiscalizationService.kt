@@ -2,7 +2,8 @@ package com.fccmiddleware.edge.adapter.advatec
 
 import com.fccmiddleware.edge.adapter.common.*
 import com.fccmiddleware.edge.logging.AppLogger
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -13,7 +14,6 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
-import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -40,7 +40,7 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
         /** AF-021: Uses port 8092 by default to avoid conflict with AdvatecAdapter (8091). */
         private const val DEFAULT_FISCAL_WEBHOOK_LISTENER_PORT = 8092
         private const val SUBMIT_TIMEOUT_MS = 10_000
-        private const val POLL_INTERVAL_MS = 200L
+        private const val DRAIN_INTERVAL_MS = 100L
 
         private val json = Json {
             ignoreUnknownKeys = true
@@ -57,11 +57,12 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
     @Volatile
     private var initialized = false
 
-    // ── Receipt queue ────────────────────────────────────────────────────────
-    // Receipts parsed from webhook payloads. The fiscalization call polls this queue
-    // after submitting Customer data.
+    // AP-013: Channel replaces ConcurrentLinkedQueue + busy-wait polling.
+    // The drain coroutine sends receipts here; submitForFiscalization suspends on receive.
+    private val receiptChannel = Channel<AdvatecReceiptData>(Channel.UNLIMITED)
 
-    private val receiptQueue = ConcurrentLinkedQueue<AdvatecReceiptData>()
+    // Coroutine scope for the webhook drain coroutine (replaces daemon thread)
+    private var drainScope: CoroutineScope? = null
 
     // ── Serialize fiscalization ──────────────────────────────────────────────
 
@@ -77,7 +78,7 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
 
         return fiscalizeMutex.withLock {
             // Drain any stale receipts from prior calls
-            while (receiptQueue.poll() != null) { /* drain */ }
+            while (receiptChannel.tryReceive().isSuccess) { /* drain */ }
 
             val host = config.advatecDeviceAddress ?: "127.0.0.1"
             val port = config.advatecDevicePort ?: DEFAULT_DEVICE_PORT
@@ -146,33 +147,32 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
                 )
             }
 
-            // Wait for receipt webhook with timeout (poll-based)
+            // AP-013: Suspend on channel receive instead of busy-wait polling
             AppLogger.d(TAG, "Fiscalization: waiting for receipt (timeout=${RECEIPT_TIMEOUT_MS}ms)")
 
-            val deadline = System.currentTimeMillis() + RECEIPT_TIMEOUT_MS
-            while (System.currentTimeMillis() < deadline) {
-                val receipt = receiptQueue.poll()
-                if (receipt != null) {
-                    AppLogger.i(
-                        TAG,
-                        "Fiscalization: receipt received — ReceiptCode=${receipt.receiptCode}, " +
-                            "TxId=${receipt.transactionId}",
-                    )
-                    return@withLock FiscalizationResult(
-                        success = true,
-                        receiptCode = receipt.receiptCode,
-                        receiptVCodeUrl = receipt.receiptVCodeUrl,
-                        totalTaxAmount = receipt.totalTaxAmount,
-                    )
-                }
-                delay(POLL_INTERVAL_MS)
+            val receipt = withTimeoutOrNull(RECEIPT_TIMEOUT_MS) {
+                receiptChannel.receive()
             }
 
-            AppLogger.w(TAG, "Fiscalization: timed out waiting for receipt (${RECEIPT_TIMEOUT_MS / 1000}s)")
-            FiscalizationResult(
-                success = false,
-                errorMessage = "Timed out waiting for fiscal receipt (${RECEIPT_TIMEOUT_MS / 1000}s)",
-            )
+            if (receipt != null) {
+                AppLogger.i(
+                    TAG,
+                    "Fiscalization: receipt received — ReceiptCode=${receipt.receiptCode}, " +
+                        "TxId=${receipt.transactionId}",
+                )
+                FiscalizationResult(
+                    success = true,
+                    receiptCode = receipt.receiptCode,
+                    receiptVCodeUrl = receipt.receiptVCodeUrl,
+                    totalTaxAmount = receipt.totalTaxAmount,
+                )
+            } else {
+                AppLogger.w(TAG, "Fiscalization: timed out waiting for receipt (${RECEIPT_TIMEOUT_MS / 1000}s)")
+                FiscalizationResult(
+                    success = false,
+                    errorMessage = "Timed out waiting for fiscal receipt (${RECEIPT_TIMEOUT_MS / 1000}s)",
+                )
+            }
         }
     }
 
@@ -210,33 +210,33 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
                 if (listener.start()) {
                     webhookListener = listener
 
-                    // Start a background thread to drain raw payloads and parse receipts.
-                    // The webhook listener enqueues raw JSON; we parse and re-enqueue as typed receipts.
-                    Thread({
-                        while (initialized) {
+                    // AP-013: Use a coroutine instead of a daemon thread to drain
+                    // webhook payloads. Sends parsed receipts to the Channel so
+                    // submitForFiscalization can suspend-receive instead of busy-wait.
+                    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+                    drainScope = scope
+                    scope.launch {
+                        while (isActive) {
                             try {
                                 val payloads = listener.drainQueue(maxCount = 50)
                                 for (payload in payloads) {
                                     try {
                                         val envelope = json.decodeFromString<AdvatecWebhookEnvelope>(payload.rawJson)
                                         if (envelope.dataType.equals("Receipt", ignoreCase = true) && envelope.data != null) {
-                                            receiptQueue.add(envelope.data)
+                                            receiptChannel.send(envelope.data)
                                             AppLogger.d(TAG, "Fiscalization: receipt enqueued from webhook")
                                         }
                                     } catch (e: Exception) {
                                         AppLogger.w(TAG, "Fiscalization: failed to parse webhook: ${e.message}")
                                     }
                                 }
-                                Thread.sleep(100)
-                            } catch (_: InterruptedException) {
+                                delay(DRAIN_INTERVAL_MS)
+                            } catch (_: CancellationException) {
                                 break
                             } catch (e: Exception) {
                                 AppLogger.w(TAG, "Fiscalization drain loop error: ${e.message}")
                             }
                         }
-                    }, "advatec-fiscal-drain").apply {
-                        isDaemon = true
-                        start()
                     }
 
                     AppLogger.i(TAG, "Fiscalization webhook listener started on port $port")
@@ -253,9 +253,12 @@ class AdvatecFiscalizationService(private val config: AgentFccConfig) : IFiscali
 
     override fun shutdown() {
         initialized = false
+        drainScope?.cancel()
+        drainScope = null
         webhookListener?.stop()
         webhookListener = null
-        receiptQueue.clear()
+        // Drain any remaining receipts from the channel
+        while (receiptChannel.tryReceive().isSuccess) { /* drain */ }
     }
 
     // ── HTTP submission ─────────────────────────────────────────────────────

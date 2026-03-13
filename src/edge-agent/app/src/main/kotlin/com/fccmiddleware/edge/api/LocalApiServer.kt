@@ -33,26 +33,24 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Embedded Ktor CIO server exposing the Edge Agent local REST API.
  *
  * Default: binds to 127.0.0.1:8585 (localhost only — same-device Odoo POS).
- * LAN mode: binds to 0.0.0.0:8585 when [config.enableLanApi] = true, allowing
- *   secondary HHTs to query the same buffer. LAN requests require [config.lanApiKey].
+ * LAN mode: may expose 0.0.0.0:8585 only when secure transport is implemented.
+ *   Until then, [config.enableLanApi] is treated as a request and the server
+ *   remains localhost-only.
  *
  * Authentication:
  *   - Requests from 127.0.0.1 / ::1 bypass API key check (same-device Odoo POS).
- *   - LAN requests require `X-Api-Key: <key>` header (constant-time comparison).
+ *   - Any future LAN requests require `X-Api-Key: <key>` header (constant-time comparison).
  *   - Optionally, [LocalApiServerConfig.lanApiIpAllowlist] restricts LAN access to a
  *     specific set of source IPs (defense-in-depth on top of the API key).
  *
- * Security note: LAN mode traffic is plain HTTP (no TLS). It must only be used on
- *   physically isolated or trusted networks (e.g., dedicated POS LAN segment). Do NOT
- *   enable LAN mode on open or shared WiFi networks — API key material and transaction
- *   data would be visible to any device on the same network segment.
+ * Security note: AS-003 hardens Android by refusing LAN exposure until TLS-backed
+ *   transport is implemented. If config.enableLanApi=true, the server stays bound to
+ *   localhost and logs a fail-closed error instead of exposing cleartext HTTP on LAN.
  *
  * Architecture rule: localhost mode must never regress when LAN mode is enabled.
  */
@@ -71,6 +69,14 @@ class LocalApiServer(
     siteCode: String = "UNPROVISIONED",
     agentVersion: String = "1.0.0",
 ) {
+    companion object {
+        /**
+         * AS-003: Do not expose the Android local API over cleartext LAN HTTP.
+         * Flip this only when the embedded server actually serves TLS.
+         */
+        private const val SECURE_LAN_TRANSPORT_IMPLEMENTED = false
+    }
+
     /** Late-bound: wired via [wireFccAdapter] when FCC config becomes available after startup. */
     private var fccAdapter: IFccAdapter? = fccAdapter
     @Volatile
@@ -85,7 +91,7 @@ class LocalApiServer(
 
     data class LocalApiServerConfig(
         val port: Int = 8585,
-        /** true: bind to 0.0.0.0 for primary-HHT LAN multi-device mode. */
+        /** true: request primary-HHT LAN multi-device mode when secure transport exists. */
         val enableLanApi: Boolean = false,
         /** Required when [enableLanApi] = true. Validated with constant-time comparison. */
         val lanApiKey: String? = null,
@@ -103,7 +109,11 @@ class LocalApiServer(
         /** Max requests per second for read endpoints (transactions, status, pump-status). */
         val rateLimitReadRps: Int = 30,
     ) {
-        val bindAddress: String get() = if (enableLanApi) "0.0.0.0" else "127.0.0.1"
+        val lanExposureEnabled: Boolean
+            get() = enableLanApi && SECURE_LAN_TRANSPORT_IMPLEMENTED
+
+        val bindAddress: String
+            get() = if (lanExposureEnabled) "0.0.0.0" else "127.0.0.1"
     }
 
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
@@ -137,23 +147,37 @@ class LocalApiServer(
     }
 
     fun start() {
-        server?.stop(1_000, 2_000)
-        server = embeddedServer(CIO, port = config.port, host = config.bindAddress) {
+        val oldServer = server
+        // AT-009: Build the new server configuration before stopping the old one.
+        // This minimizes the unavailability window to just the time between
+        // stop() completing and the new socket bind — typically milliseconds.
+        val newServer = embeddedServer(CIO, port = config.port, host = config.bindAddress) {
             configureCorrelationId()
             configureContentNegotiation()
             configureLanApiKeyAuth()
             configureRateLimiting()
             configureStatusPages()
             configureRouting()
-        }.also {
-            it.start(wait = false)
-            AppLogger.i(tag, "Local API server started on ${config.bindAddress}:${config.port} (lanApi=${config.enableLanApi})")
-            if (config.enableLanApi) {
-                AppLogger.w(tag, "LAN API mode is active — traffic is plain HTTP (no TLS). " +
-                    "Ensure this device is on a physically isolated or trusted network segment.")
-                if (!config.lanApiIpAllowlist.isNullOrEmpty()) {
-                    AppLogger.i(tag, "LAN API IP allowlist active: ${config.lanApiIpAllowlist}")
-                }
+        }
+        // Use short grace/timeout during hot-swap to minimize the listening gap.
+        // The old server's in-flight responses complete within 250ms or are dropped.
+        oldServer?.stop(250, 500)
+        newServer.start(wait = false)
+        server = newServer
+        AppLogger.i(
+            tag,
+            "Local API server started on ${config.bindAddress}:${config.port} " +
+                "(lanApiRequested=${config.enableLanApi}, lanApiExposed=${config.lanExposureEnabled})",
+        )
+        if (config.enableLanApi && !config.lanExposureEnabled) {
+            AppLogger.e(
+                tag,
+                "LAN API was requested but secure transport is not implemented on Android. " +
+                    "Refusing LAN exposure; server remains bound to localhost only.",
+            )
+        } else if (config.lanExposureEnabled) {
+            if (!config.lanApiIpAllowlist.isNullOrEmpty()) {
+                AppLogger.i(tag, "LAN API IP allowlist active: ${config.lanApiIpAllowlist}")
             }
         }
     }
@@ -198,7 +222,7 @@ class LocalApiServer(
     }
 
     private fun Application.configureLanApiKeyAuth() {
-        if (!config.enableLanApi) return
+        if (!config.lanExposureEnabled) return
         val storedKey = config.lanApiKey
         if (storedKey == null) {
             // LAN mode requested but no API key configured — reject ALL non-localhost
@@ -244,14 +268,14 @@ class LocalApiServer(
                 ingestionOrchestrator = ingestionOrchestrator,
                 connectivityManager = connectivityManager,
                 lanApiKey = config.lanApiKey,
-                enableLanApi = config.enableLanApi,
+                enableLanApi = config.lanExposureEnabled,
                 lanApiIpAllowlist = config.lanApiIpAllowlist,
             )
             preAuthRoutes(
                 handler = preAuthHandler,
                 connectivityManager = connectivityManager,
                 lanApiKey = config.lanApiKey,
-                enableLanApi = config.enableLanApi,
+                enableLanApi = config.lanExposureEnabled,
                 lanApiIpAllowlist = config.lanApiIpAllowlist,
             )
             pumpStatusRoutes(pumpStatusCache)
@@ -459,22 +483,22 @@ private fun lanApiKeyEquals(provided: String, stored: String): Boolean =
  * Thread-safe via AtomicLong (window epoch-second) + AtomicInteger (counter).
  */
 private class SlidingWindowCounter(private val maxPerSecond: Int) {
-    private val windowSecond = AtomicLong(0)
-    private val counter = AtomicInteger(0)
+    private var windowSecond: Long = 0
+    private var counter: Int = 0
 
-    /** Returns true if the request is allowed, false if rate-limited. */
+    /** Returns true if the request is allowed, false if rate-limited.
+     *  AT-010: Uses synchronized to make window check + counter update atomic,
+     *  eliminating the race where concurrent threads could double-count across
+     *  window boundaries. Synchronization overhead is negligible for a LAN API. */
+    @Synchronized
     fun tryAcquire(): Boolean {
         val nowSecond = System.currentTimeMillis() / 1000L
-        val currentWindow = windowSecond.get()
-        if (nowSecond != currentWindow) {
-            // New window — reset. Race is benign: worst case two threads both reset,
-            // which slightly under-counts for one second (safe direction).
-            if (windowSecond.compareAndSet(currentWindow, nowSecond)) {
-                counter.set(1)
-                return true
-            }
+        if (nowSecond != windowSecond) {
+            windowSecond = nowSecond
+            counter = 1
+            return true
         }
-        return counter.incrementAndGet() <= maxPerSecond
+        return ++counter <= maxPerSecond
     }
 }
 

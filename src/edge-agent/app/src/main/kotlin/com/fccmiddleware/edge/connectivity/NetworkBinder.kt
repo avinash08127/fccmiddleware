@@ -56,7 +56,12 @@ class NetworkBinder(
 
         override fun onLost(network: Network) {
             AppLogger.i(TAG, "WiFi network lost: $network")
-            _wifiNetwork.value = null
+            // AF-049: Only null the flow if the lost network matches the current value.
+            // During WiFi roaming, onAvailable(newAP) fires before onLost(oldAP) —
+            // unconditional null would clear the already-updated new network reference.
+            if (_wifiNetwork.value == network) {
+                _wifiNetwork.value = null
+            }
         }
     }
 
@@ -68,7 +73,10 @@ class NetworkBinder(
 
         override fun onLost(network: Network) {
             AppLogger.i(TAG, "Mobile network lost: $network")
-            _mobileNetwork.value = null
+            // AF-049: Same guard as wifiCallback — only null if the lost network is current.
+            if (_mobileNetwork.value == network) {
+                _mobileNetwork.value = null
+            }
         }
     }
 

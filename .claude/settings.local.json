@@ -297,7 +297,22 @@
       "Bash(grep -r \"Retrofit\\\\|okhttp3\\\\|HttpClient\\\\|@GET\\\\|@POST\\\\|@PUT\\\\|@DELETE\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin --include=\"*.kt\" 2>/dev/null | head -30)",
       "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\\\\app\\\\src\\\\test\" -name \"*Advatec*\" -o -name \"*advatec*\" 2>/dev/null | head -20)",
       "Bash(grep -r \"extends Worker\\\\|: Worker\\\\|RxWorker\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin --include=\"*.kt\" 2>/dev/null | cut -d: -f1 | sort -u)",
-      "Bash(grep -l \"WebSocket\\\\|ServerSocket\\\\|Socket\\\\|@Dao\\\\|@Entity\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/**/*.kt 2>/dev/null | head -20)"
+      "Bash(grep -l \"WebSocket\\\\|ServerSocket\\\\|Socket\\\\|@Dao\\\\|@Entity\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin/com/fccmiddleware/edge/**/*.kt 2>/dev/null | head -20)",
+      "Bash(grep -r \"Log\\\\.\\\\|AppLogger\\\\.\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin --include=\"*.kt\" 2>/dev/null | head -50)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\edge-agent\\\\app\\\\src\\\\main\" -name \"*.kt\" -o -name \"*.xml\" | xargs grep -l \"http://\" | head -20)",
+      "Bash(grep -r \"BuildConfig\\\\|crashlytics\\\\|FirebaseAnalytics\\\\|Sentry\\\\|DEBUG\\\\|VERBOSE\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main --include=\"*.kt\" --include=\"*.xml\" 2>/dev/null | head -40)",
+      "Bash(grep -r \"password\\\\|secret\\\\|token\\\\|apiKey\\\\|API_KEY\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main --include=\"*.kt\" 2>/dev/null | head -30)",
+      "Bash(grep -r \"stackTrace\\\\|stack trace\\\\|exception\\\\|crash\\\\|FATAL\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin --include=\"*.kt\" 2>/dev/null | head -20)",
+      "Bash(grep -n \"redact\\\\|SensitiveFieldFilter\" /c/Users/a0812/fccmiddleware/src/edge-agent/app/src/main/kotlin/**/*.kt 2>/dev/null | head -20)",
+      "Bash(find \"/c/Users/a0812/fccmiddleware/src/desktop-edge-agent/src/FccDesktopAgent.App\" -type f -name \"*.cs\" -o -name \"*.xaml\" -o -name \"*.axaml\" 2>/dev/null | head -50)",
+      "Bash(ls -la \"/c/Users/a0812/fccmiddleware/src/desktop-edge-agent/src/FccDesktopAgent.App/\" | grep -E \"\\\\.cs$|\\\\.axaml$|\\\\.csproj$\")",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\" -type d -name \"*ViewModel*\" -o -type d -name \"*Model*\" -o -type d -name \"*Service*\" 2>/dev/null | head -20)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\\\\src\\\\FccDesktopAgent.Api\" -type f -name \"*.cs\" 2>/dev/null | grep -iE \"\\(provision|register|registration|token|device\\)\" 2>/dev/null)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\\\\src\\\\FccDesktopAgent.Core\" -path \"*/bin\" -prune -o -type f -name \"*.cs\" -print 2>/dev/null | sort)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\\\\src\\\\FccDesktopAgent.App\" -path \"*/bin\" -prune -o -type f -name \"*.cs\" -print 2>/dev/null | sort)",
+      "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\\\\src\\\\FccDesktopAgent.Api\" -path \"*/bin\" -prune -o -type f -name \"*.cs\" -print 2>/dev/null | sort)",
+      "Bash(grep -r \"DeviceRegistration\\\\|RegistrationManager\\\\|ProvisioningWindow\" \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\" --include=\"*.cs\" --include=\"*.axaml.cs\" 2>/dev/null | cut -d: -f1 | sort -u | head -30)",
+      "Bash(grep -r \"HttpClient\\\\|ApiClient\\\\|ICloudSync\" \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\desktop-edge-agent\\\\src\\\\FccDesktopAgent.Core\" --include=\"*.cs\" -l 2>/dev/null | grep -iE \"\\(sync|registration|registration|cloud\\)\" | head -20)"
     ]
   }
 }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.Sync.Models;
@@ -10,17 +11,23 @@ namespace FccDesktopAgent.Core.Sync;
 
 /// <summary>
 /// Retrieves and refreshes the device JWT used for cloud API authentication.
-/// Device token stored under key <see cref="TokenKey"/>.
-/// Refresh token stored under key <see cref="RefreshTokenKey"/>.
+/// The active JWT + refresh token pair is stored atomically under
+/// <see cref="TokenBundleKey"/>, with staging/pending markers used to recover
+/// safely from interrupted refresh writes. Legacy per-token keys are still read
+/// for backward-compatible migration.
 ///
-/// Refresh sends the refresh token in the JSON body (NOT as Bearer header) per spec.
+/// Refresh sends the tokens in the JSON body (NOT as Bearer header) per spec.
 /// Both tokens are rotated on every successful refresh (token rotation).
 /// </summary>
 public sealed class DeviceTokenProvider : IDeviceTokenProvider
 {
     internal const string TokenKey = CredentialKeys.DeviceToken;
     internal const string RefreshTokenKey = CredentialKeys.RefreshToken;
+    internal const string TokenBundleKey = CredentialKeys.DeviceTokenBundle;
+    internal const string TokenBundleStagingKey = CredentialKeys.DeviceTokenBundleStaging;
+    internal const string RefreshPendingKey = CredentialKeys.DeviceTokenRefreshPending;
     private const string RefreshPath = "/api/v1/agent/token/refresh";
+    private static readonly JsonSerializerOptions TokenBundleJson = new(JsonSerializerDefaults.Web);
 
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly ICredentialStore _store;
@@ -40,16 +47,25 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         _logger = logger;
     }
 
-    public Task<string?> GetTokenAsync(CancellationToken ct = default)
-        => _store.GetSecretAsync(TokenKey, ct);
+    public async Task<string?> GetTokenAsync(CancellationToken ct = default)
+    {
+        var recovered = await TryRecoverStagedTokenBundleAsync(ct);
+        if (recovered is not null)
+            return recovered.DeviceToken;
+
+        var bundle = await TryLoadActiveTokenBundleAsync(ct);
+        if (bundle is not null)
+            return bundle.DeviceToken;
+
+        return await _store.GetSecretAsync(TokenKey, ct);
+    }
 
     public async Task StoreTokensAsync(string deviceToken, string refreshToken, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceToken);
         ArgumentException.ThrowIfNullOrWhiteSpace(refreshToken);
 
-        await _store.SetSecretAsync(TokenKey, deviceToken, ct);
-        await _store.SetSecretAsync(RefreshTokenKey, refreshToken, ct);
+        await CommitTokenBundleAsync(new StoredTokenBundle(deviceToken, refreshToken), ct);
     }
 
     public async Task<string?> RefreshTokenAsync(CancellationToken ct = default)
@@ -70,9 +86,25 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
 
     private async Task<string?> RefreshTokenCoreAsync(CancellationToken ct)
     {
-        // Per spec: send refresh token in JSON body, not as Bearer header
-        var refreshToken = await _store.GetSecretAsync(RefreshTokenKey, ct);
-        if (refreshToken is null)
+        var recovered = await TryRecoverStagedTokenBundleAsync(ct);
+        if (recovered is not null)
+        {
+            _logger.LogWarning("Recovered staged device token bundle after interrupted refresh write");
+            return recovered.DeviceToken;
+        }
+
+        if (await HasUnrecoverablePendingRefreshAsync(ct))
+        {
+            _logger.LogCritical(
+                "Detected an interrupted token refresh without recoverable staged tokens. " +
+                "The previous refresh may have completed on the server, so the stored refresh token is no longer safe to reuse.");
+            throw new RefreshTokenExpiredException(
+                "Previous token refresh did not complete locally; re-provisioning is required.");
+        }
+
+        var bundle = await TryLoadActiveTokenBundleAsync(ct);
+        var refreshToken = bundle?.RefreshToken ?? await _store.GetSecretAsync(RefreshTokenKey, ct);
+        if (string.IsNullOrWhiteSpace(refreshToken))
         {
             _logger.LogWarning("Token refresh skipped: no refresh token in credential store");
             return null;
@@ -92,7 +124,12 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         HttpResponseMessage response;
         try
         {
-            response = await http.PostAsJsonAsync(url, new { refreshToken }, ct);
+            await MarkRefreshPendingAsync(ct);
+            response = await http.PostAsJsonAsync(url, new
+            {
+                refreshToken,
+                deviceToken = bundle?.DeviceToken ?? await _store.GetSecretAsync(TokenKey, ct)
+            }, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -103,6 +140,7 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         // Handle 403 DEVICE_DECOMMISSIONED
         if (response.StatusCode == HttpStatusCode.Forbidden)
         {
+            await DeleteSecretBestEffortAsync(RefreshPendingKey, ct);
             _logger.LogWarning("Token refresh returned 403 Forbidden — device may be decommissioned");
             throw new DeviceDecommissionedException("Token refresh returned 403 Forbidden");
         }
@@ -110,12 +148,15 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         // Handle 401 — refresh token expired or revoked
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
+            await DeleteSecretBestEffortAsync(RefreshPendingKey, ct);
             _logger.LogWarning("Token refresh returned 401 Unauthorized — refresh token expired or revoked, re-provisioning required");
             throw new RefreshTokenExpiredException("Token refresh returned 401 Unauthorized");
         }
 
         if (!response.IsSuccessStatusCode)
         {
+            if ((int)response.StatusCode < 500)
+                await DeleteSecretBestEffortAsync(RefreshPendingKey, ct);
             _logger.LogWarning("Token refresh returned {StatusCode}", response.StatusCode);
             return null;
         }
@@ -137,12 +178,152 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
             return null;
         }
 
-        // Store both tokens (rotation per spec)
-        await _store.SetSecretAsync(TokenKey, result.DeviceToken, ct);
-        if (result.RefreshToken is not null)
-            await _store.SetSecretAsync(RefreshTokenKey, result.RefreshToken, ct);
+        if (string.IsNullOrWhiteSpace(result.RefreshToken))
+        {
+            _logger.LogWarning("Token refresh response contained no refresh token");
+            return null;
+        }
+
+        await CommitTokenBundleAsync(new StoredTokenBundle(result.DeviceToken, result.RefreshToken), ct);
 
         _logger.LogInformation("Device token refreshed successfully");
         return result.DeviceToken;
     }
+
+    private async Task<StoredTokenBundle?> TryLoadActiveTokenBundleAsync(CancellationToken ct)
+    {
+        var bundle = await TryReadTokenBundleAsync(TokenBundleKey, ct);
+        if (bundle is not null)
+            return bundle;
+
+        var legacyDeviceToken = await _store.GetSecretAsync(TokenKey, ct);
+        var legacyRefreshToken = await _store.GetSecretAsync(RefreshTokenKey, ct);
+
+        if (string.IsNullOrWhiteSpace(legacyDeviceToken) || string.IsNullOrWhiteSpace(legacyRefreshToken))
+            return null;
+
+        var legacyBundle = new StoredTokenBundle(legacyDeviceToken, legacyRefreshToken);
+        await TryMigrateLegacyTokenBundleAsync(legacyBundle, ct);
+        return legacyBundle;
+    }
+
+    private async Task<StoredTokenBundle?> TryRecoverStagedTokenBundleAsync(CancellationToken ct)
+    {
+        var staged = await TryReadTokenBundleAsync(TokenBundleStagingKey, ct);
+        if (staged is null)
+            return null;
+
+        try
+        {
+            await _store.SetSecretAsync(TokenBundleKey, SerializeTokenBundle(staged), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to promote staged device token bundle into the active credential entry");
+            return staged;
+        }
+
+        await DeleteLegacyKeysBestEffortAsync(ct);
+        await ClearRefreshMarkersBestEffortAsync(ct);
+        return staged;
+    }
+
+    private async Task<bool> HasUnrecoverablePendingRefreshAsync(CancellationToken ct)
+    {
+        var pending = await _store.GetSecretAsync(RefreshPendingKey, ct);
+        if (string.IsNullOrWhiteSpace(pending))
+            return false;
+
+        var staged = await TryReadTokenBundleAsync(TokenBundleStagingKey, ct);
+        return staged is null;
+    }
+
+    private Task MarkRefreshPendingAsync(CancellationToken ct) =>
+        _store.SetSecretAsync(RefreshPendingKey, DateTimeOffset.UtcNow.ToString("O"), ct);
+
+    private async Task CommitTokenBundleAsync(StoredTokenBundle bundle, CancellationToken ct)
+    {
+        var serialized = SerializeTokenBundle(bundle);
+
+        await _store.SetSecretAsync(TokenBundleStagingKey, serialized, ct);
+        await _store.SetSecretAsync(TokenBundleKey, serialized, ct);
+
+        await DeleteLegacyKeysBestEffortAsync(ct);
+        await ClearRefreshMarkersBestEffortAsync(ct);
+    }
+
+    private async Task TryMigrateLegacyTokenBundleAsync(StoredTokenBundle bundle, CancellationToken ct)
+    {
+        try
+        {
+            await _store.SetSecretAsync(TokenBundleKey, SerializeTokenBundle(bundle), ct);
+            await DeleteLegacyKeysBestEffortAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to migrate legacy token credentials into the atomic token bundle entry");
+        }
+    }
+
+    private async Task<StoredTokenBundle?> TryReadTokenBundleAsync(string key, CancellationToken ct)
+    {
+        var json = await _store.GetSecretAsync(key, ct);
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        try
+        {
+            var bundle = JsonSerializer.Deserialize<StoredTokenBundle>(json, TokenBundleJson);
+            if (string.IsNullOrWhiteSpace(bundle?.DeviceToken) || string.IsNullOrWhiteSpace(bundle.RefreshToken))
+            {
+                _logger.LogWarning("Credential entry {Key} contains an incomplete token bundle", key);
+                return null;
+            }
+
+            return bundle;
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Credential entry {Key} contains invalid token bundle JSON", key);
+            return null;
+        }
+    }
+
+    private async Task ClearRefreshMarkersBestEffortAsync(CancellationToken ct)
+    {
+        if (!await TryDeleteSecretBestEffortAsync(RefreshPendingKey, ct))
+            return;
+
+        await DeleteSecretBestEffortAsync(TokenBundleStagingKey, ct);
+    }
+
+    private async Task DeleteLegacyKeysBestEffortAsync(CancellationToken ct)
+    {
+        await DeleteSecretBestEffortAsync(TokenKey, ct);
+        await DeleteSecretBestEffortAsync(RefreshTokenKey, ct);
+    }
+
+    private async Task DeleteSecretBestEffortAsync(string key, CancellationToken ct)
+    {
+        await TryDeleteSecretBestEffortAsync(key, ct);
+    }
+
+    private async Task<bool> TryDeleteSecretBestEffortAsync(string key, CancellationToken ct)
+    {
+        try
+        {
+            await _store.DeleteSecretAsync(key, ct);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to delete credential entry {Key} during token bundle cleanup", key);
+            return false;
+        }
+    }
+
+    private static string SerializeTokenBundle(StoredTokenBundle bundle) =>
+        JsonSerializer.Serialize(bundle, TokenBundleJson);
+
+    private sealed record StoredTokenBundle(string DeviceToken, string RefreshToken);
 }

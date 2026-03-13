@@ -32,7 +32,9 @@ class SplashActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
-        handler.postDelayed(navigateRunnable, 2000)
+        // AP-005: Reduced from 2000ms — headless agent should start monitoring ASAP.
+        // 500ms is enough for technicians to see the branding during provisioning.
+        handler.postDelayed(navigateRunnable, 500)
     }
 
     override fun onDestroy() {

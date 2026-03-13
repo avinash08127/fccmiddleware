@@ -278,14 +278,19 @@ class PreAuthHandler(
         // Async audit log + cloud forward signal — never on the hot path
         // ------------------------------------------------------------------
         scope.launch {
-            auditLogDao.insert(
-                AuditLog(
-                    eventType = "PRE_AUTH_HANDLED",
-                    message = "id=${activeRecord.id} orderId=$odooOrderId pump=${nozzle.fccPumpNumber} status=$newStatus",
-                    correlationId = activeRecord.id,
-                    createdAt = Instant.now().toString(),
+            try {
+                auditLogDao.insert(
+                    AuditLog(
+                        eventType = "PRE_AUTH_HANDLED",
+                        message = "id=${activeRecord.id} orderId=$odooOrderId pump=${nozzle.fccPumpNumber} status=$newStatus",
+                        correlationId = activeRecord.id,
+                        createdAt = Instant.now().toString(),
+                    )
                 )
-            )
+            } catch (e: Exception) {
+                // AT-005: Fallback to file logger so audit intent is not silently lost
+                AppLogger.e(TAG, "Audit log insert failed for PRE_AUTH_HANDLED id=${activeRecord.id}: ${e.message}", e)
+            }
             // Record is already isCloudSynced=0; CloudUploadWorker (EA-2.x) will pick it
             // up on its next cycle without any explicit signal needed here.
         }
@@ -355,14 +360,18 @@ class PreAuthHandler(
                 )
 
                 scope.launch {
-                    auditLogDao.insert(
-                        AuditLog(
-                            eventType = "PRE_AUTH_CANCELLED",
-                            message = "id=${record.id} orderId=$odooOrderId cancelled from ${record.status}",
-                            correlationId = record.id,
-                            createdAt = Instant.now().toString(),
+                    try {
+                        auditLogDao.insert(
+                            AuditLog(
+                                eventType = "PRE_AUTH_CANCELLED",
+                                message = "id=${record.id} orderId=$odooOrderId cancelled from ${record.status}",
+                                correlationId = record.id,
+                                createdAt = Instant.now().toString(),
+                            )
                         )
-                    )
+                    } catch (e: Exception) {
+                        AppLogger.e(TAG, "Audit log insert failed for PRE_AUTH_CANCELLED id=${record.id}: ${e.message}", e)
+                    }
                 }
 
                 CancelPreAuthResult(success = true)
@@ -420,14 +429,18 @@ class PreAuthHandler(
                         deauthExhausted = true
                         deauthAttemptCounts.remove(r.id)
                         scope.launch {
-                            auditLogDao.insert(
-                                AuditLog(
-                                    eventType = "PRE_AUTH_DEAUTH_EXHAUSTED",
-                                    message = "id=${r.id} orderId=${r.odooOrderId} deauth failed after $attempts attempts, force-expired",
-                                    correlationId = r.id,
-                                    createdAt = Instant.now().toString(),
+                            try {
+                                auditLogDao.insert(
+                                    AuditLog(
+                                        eventType = "PRE_AUTH_DEAUTH_EXHAUSTED",
+                                        message = "id=${r.id} orderId=${r.odooOrderId} deauth failed after $attempts attempts, force-expired",
+                                        correlationId = r.id,
+                                        createdAt = Instant.now().toString(),
+                                    )
                                 )
-                            )
+                            } catch (e: Exception) {
+                                AppLogger.e(TAG, "Audit log insert failed for PRE_AUTH_DEAUTH_EXHAUSTED id=${r.id}: ${e.message}", e)
+                            }
                         }
                         // Fall through to mark EXPIRED below
                     } else {
@@ -450,14 +463,18 @@ class PreAuthHandler(
                             // AF-005: Increment deauth attempt counter
                             deauthAttemptCounts[r.id] = attempts + 1
                             scope.launch {
-                                auditLogDao.insert(
-                                    AuditLog(
-                                        eventType = "PRE_AUTH_DEAUTH_RETRY_PENDING",
-                                        message = "id=${r.id} orderId=${r.odooOrderId} FCC deauth failed (attempt ${attempts + 1}/$MAX_DEAUTH_RETRIES), will retry",
-                                        correlationId = r.id,
-                                        createdAt = Instant.now().toString(),
+                                try {
+                                    auditLogDao.insert(
+                                        AuditLog(
+                                            eventType = "PRE_AUTH_DEAUTH_RETRY_PENDING",
+                                            message = "id=${r.id} orderId=${r.odooOrderId} FCC deauth failed (attempt ${attempts + 1}/$MAX_DEAUTH_RETRIES), will retry",
+                                            correlationId = r.id,
+                                            createdAt = Instant.now().toString(),
+                                        )
                                     )
-                                )
+                                } catch (e: Exception) {
+                                    AppLogger.e(TAG, "Audit log insert failed for PRE_AUTH_DEAUTH_RETRY_PENDING id=${r.id}: ${e.message}", e)
+                                }
                             }
                             continue
                         }
@@ -483,14 +500,18 @@ class PreAuthHandler(
             )
 
             scope.launch {
-                auditLogDao.insert(
-                    AuditLog(
-                        eventType = "PRE_AUTH_EXPIRED",
-                        message = "id=${r.id} orderId=${r.odooOrderId} expired at ${r.expiresAt}",
-                        correlationId = r.id,
-                        createdAt = Instant.now().toString(),
+                try {
+                    auditLogDao.insert(
+                        AuditLog(
+                            eventType = "PRE_AUTH_EXPIRED",
+                            message = "id=${r.id} orderId=${r.odooOrderId} expired at ${r.expiresAt}",
+                            correlationId = r.id,
+                            createdAt = Instant.now().toString(),
+                        )
                     )
-                )
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Audit log insert failed for PRE_AUTH_EXPIRED id=${r.id}: ${e.message}", e)
+                }
             }
         }
     }

@@ -2,9 +2,11 @@ package com.fccmiddleware.edge.config
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.fccmiddleware.edge.logging.AppLogger
+import com.fccmiddleware.edge.security.KeystoreManager
 
 /**
  * Manages local FCC connection configuration overrides stored in
@@ -23,11 +25,15 @@ import com.fccmiddleware.edge.logging.AppLogger
  *
  * NEVER log credential values.
  */
-class LocalOverrideManager(context: Context) {
+class LocalOverrideManager(
+    context: Context,
+    private val keystoreManager: KeystoreManager,
+) {
 
     companion object {
         private const val TAG = "LocalOverrideManager"
         private const val PREFS_FILE = "fcc_local_overrides"
+        private const val KEY_FCC_CREDENTIAL_ENCRYPTED = "override_fcc_credential_enc"
 
         const val KEY_FCC_HOST = "override_fcc_host"
         const val KEY_FCC_PORT = "override_fcc_port"
@@ -85,7 +91,31 @@ class LocalOverrideManager(context: Context) {
         }
 
     val fccCredential: String?
-        get() = prefs.getString(KEY_FCC_CREDENTIAL, null)
+        get() {
+            val encrypted = prefs.getString(KEY_FCC_CREDENTIAL_ENCRYPTED, null)
+            if (!encrypted.isNullOrBlank()) {
+                val encryptedBytes = try {
+                    Base64.decode(encrypted, Base64.NO_WRAP)
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to decode stored FCC credential override", e)
+                    return null
+                }
+                return keystoreManager.retrieveSecret(KeystoreManager.ALIAS_FCC_CRED, encryptedBytes)
+            }
+
+            val legacyPlaintext = prefs.getString(KEY_FCC_CREDENTIAL, null)
+            if (legacyPlaintext.isNullOrBlank()) return null
+
+            return try {
+                persistEncryptedCredential(legacyPlaintext)
+                prefs.edit().remove(KEY_FCC_CREDENTIAL).apply()
+                AppLogger.i(TAG, "Migrated legacy FCC credential override to Keystore-backed storage")
+                legacyPlaintext
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to migrate legacy FCC credential override", e)
+                legacyPlaintext
+            }
+        }
 
     val wsPort: Int?
         get() {
@@ -118,7 +148,7 @@ class LocalOverrideManager(context: Context) {
                 prefs.edit().putInt(key, port).apply()
             }
             key == KEY_FCC_CREDENTIAL -> {
-                prefs.edit().putString(key, value).apply()
+                persistEncryptedCredential(value)
             }
         }
         AppLogger.i(TAG, "Override saved: $key")
@@ -128,7 +158,15 @@ class LocalOverrideManager(context: Context) {
      * Clears a single override, reverting to the cloud-delivered value.
      */
     fun clearOverride(key: String) {
-        prefs.edit().remove(key).apply()
+        if (key == KEY_FCC_CREDENTIAL) {
+            prefs.edit()
+                .remove(KEY_FCC_CREDENTIAL)
+                .remove(KEY_FCC_CREDENTIAL_ENCRYPTED)
+                .apply()
+            keystoreManager.deleteKey(KeystoreManager.ALIAS_FCC_CRED)
+        } else {
+            prefs.edit().remove(key).apply()
+        }
         AppLogger.i(TAG, "Override cleared: $key")
     }
 
@@ -137,6 +175,7 @@ class LocalOverrideManager(context: Context) {
      */
     fun clearAllOverrides() {
         prefs.edit().clear().apply()
+        keystoreManager.deleteKey(KeystoreManager.ALIAS_FCC_CRED)
         AppLogger.i(TAG, "All overrides cleared")
     }
 
@@ -161,5 +200,17 @@ class LocalOverrideManager(context: Context) {
             port = fccPort ?: cloudConfig.port,
             credentialRef = fccCredential ?: cloudConfig.credentialRef,
         )
+    }
+
+    private fun persistEncryptedCredential(value: String) {
+        val encrypted = keystoreManager.storeSecret(KeystoreManager.ALIAS_FCC_CRED, value)
+            ?: throw IllegalStateException("Failed to encrypt FCC credential override")
+        prefs.edit()
+            .remove(KEY_FCC_CREDENTIAL)
+            .putString(
+                KEY_FCC_CREDENTIAL_ENCRYPTED,
+                Base64.encodeToString(encrypted, Base64.NO_WRAP),
+            )
+            .apply()
     }
 }

@@ -84,6 +84,17 @@ abstract class SiteDataDao {
         insertNozzles(nozzles)
     }
 
+    // ── Count queries (AP-001: avoid loading full tables just to count) ────
+
+    @Query("SELECT COUNT(*) FROM local_products")
+    abstract suspend fun countProducts(): Int
+
+    @Query("SELECT COUNT(*) FROM local_pumps")
+    abstract suspend fun countPumps(): Int
+
+    @Query("SELECT COUNT(*) FROM local_nozzles")
+    abstract suspend fun countNozzles(): Int
+
     // ── Bulk operations ─────────────────────────────────────────
 
     /** Delete all site data tables (used before full re-sync). */

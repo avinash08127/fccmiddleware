@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.fccmiddleware.edge.logging.AppLogger
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.util.UUID
 
 /**
  * EncryptedPrefsManager — wraps EncryptedSharedPreferences for secure storage
@@ -44,6 +45,7 @@ class EncryptedPrefsManager(context: Context) {
         const val KEY_RUNTIME_CERTIFICATE_PINS = "runtime_certificate_pins"
         const val KEY_REPROVISIONING_REQUIRED = "reprovisioning_required"
         const val KEY_ENVIRONMENT = "environment"
+        const val KEY_PROVISIONING_DEVICE_SERIAL_FALLBACK = "provisioning_device_serial_fallback"
     }
 
     // No fallback to regular SharedPreferences — storing sensitive identity data
@@ -145,6 +147,20 @@ class EncryptedPrefsManager(context: Context) {
 
     fun getRefreshTokenBlob(): String? {
         return prefs.getString(KEY_REFRESH_TOKEN_ENCRYPTED, null)
+    }
+
+    /**
+     * Returns a stable fallback serial for devices where ANDROID_ID is unavailable.
+     * Uses commit() so the generated value survives an app/process crash before the
+     * next registration retry.
+     */
+    fun getOrCreateProvisioningDeviceSerialFallback(): String {
+        val existing = prefs.getString(KEY_PROVISIONING_DEVICE_SERIAL_FALLBACK, null)
+        if (!existing.isNullOrBlank()) return existing
+
+        val generated = "unknown-${UUID.randomUUID().toString().take(8)}"
+        prefs.edit().putString(KEY_PROVISIONING_DEVICE_SERIAL_FALLBACK, generated).commit()
+        return generated
     }
 
     /**

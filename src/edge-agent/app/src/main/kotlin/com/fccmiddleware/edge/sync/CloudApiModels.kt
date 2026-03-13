@@ -418,7 +418,7 @@ sealed class CloudPreAuthForwardResult {
     /** M-15: HTTP 429 — rate limited by cloud. */
     data class RateLimited(val retryAfterSeconds: Long?) : CloudPreAuthForwardResult()
 
-    /** HTTP 409 — invalid state transition on cloud. Treated as success (record exists). */
+    /** HTTP 409 — caller must inspect [errorCode] to distinguish terminal vs retryable conflicts. */
     data class Conflict(val errorCode: String?, val message: String?) : CloudPreAuthForwardResult()
 
     /** Network or non-2xx/401/403/409 failure. */

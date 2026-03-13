@@ -12,24 +12,16 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
-import com.fccmiddleware.edge.buffer.dao.AuditLogDao
-import com.fccmiddleware.edge.buffer.dao.SiteDataDao
-import com.fccmiddleware.edge.buffer.dao.SyncStateDao
-import com.fccmiddleware.edge.buffer.dao.TransactionBufferDao
-import com.fccmiddleware.edge.config.ConfigManager
-import com.fccmiddleware.edge.connectivity.ConnectivityManager
+import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.logging.AppLogger
-import com.fccmiddleware.edge.logging.StructuredFileLogger
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.koin.android.ext.android.inject
+import org.koin.androidx.viewmodel.ext.android.viewModel
 import java.io.File
 import java.io.FileOutputStream
-import java.time.Instant
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -39,17 +31,12 @@ import java.util.zip.ZipOutputStream
  * Shows: connectivity state, buffer depth, last sync timestamp,
  * FCC heartbeat status, config version, and recent audit log entries.
  *
- * Auto-refreshes every 5 seconds while visible.
+ * Data fetching and refresh scheduling are delegated to [DiagnosticsViewModel].
+ * This Activity only observes [DiagnosticsViewModel.snapshot] and renders.
  */
 class DiagnosticsActivity : AppCompatActivity() {
 
-    private val connectivityManager: ConnectivityManager by inject()
-    private val siteDataDao: SiteDataDao by inject()
-    private val transactionDao: TransactionBufferDao by inject()
-    private val syncStateDao: SyncStateDao by inject()
-    private val auditLogDao: AuditLogDao by inject()
-    private val configManager: ConfigManager by inject()
-    private val fileLogger: StructuredFileLogger by inject()
+    private val viewModel: DiagnosticsViewModel by viewModel()
 
     private var isShareInProgress = false
 
@@ -75,214 +62,166 @@ class DiagnosticsActivity : AppCompatActivity() {
     private lateinit var siteLastSyncValue: TextView
     private lateinit var lastRefreshValue: TextView
 
-    // Constants moved to bottom companion object
-
-    private var refreshJob: kotlinx.coroutines.Job? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
-        refreshData()
+
+        lifecycleScope.launch {
+            viewModel.snapshot.filterNotNull().collect { snapshot ->
+                if (isFinishing || isDestroyed) return@collect
+                renderSnapshot(snapshot)
+            }
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        startAutoRefresh()
+        viewModel.startAutoRefresh()
     }
 
     override fun onPause() {
         super.onPause()
-        refreshJob?.cancel()
-        refreshJob = null
+        viewModel.stopAutoRefresh()
     }
 
-    private fun startAutoRefresh() {
-        refreshJob?.cancel()
-        refreshJob = lifecycleScope.launch {
-            while (isActive) {
-                refreshData()
-                delay(REFRESH_INTERVAL_MS)
+    // -------------------------------------------------------------------------
+    // Rendering — pure UI updates from ViewModel snapshot
+    // -------------------------------------------------------------------------
+
+    private fun renderSnapshot(snapshot: DiagnosticsViewModel.DiagnosticsSnapshot) {
+        connectivityValue.text = snapshot.connectivityState.name
+        connectivityValue.setTextColor(
+            when (snapshot.connectivityState) {
+                ConnectivityState.FULLY_ONLINE -> COLOR_GREEN
+                ConnectivityState.INTERNET_DOWN -> COLOR_YELLOW
+                else -> COLOR_RED
             }
+        )
+
+        fccHeartbeatValue.text = if (snapshot.heartbeatAge != null) "${snapshot.heartbeatAge}s ago" else "No probe yet"
+        fccHeartbeatValue.setTextColor(
+            when {
+                snapshot.heartbeatAge == null -> COLOR_GRAY
+                snapshot.heartbeatAge <= 60 -> COLOR_GREEN
+                snapshot.heartbeatAge <= 300 -> COLOR_YELLOW
+                else -> COLOR_RED
+            }
+        )
+
+        bufferDepthValue.text = snapshot.bufferDepth.toString()
+        bufferDepthValue.setTextColor(
+            when {
+                snapshot.bufferDepth == 0 -> COLOR_GREEN
+                snapshot.bufferDepth < 100 -> COLOR_YELLOW
+                else -> COLOR_RED
+            }
+        )
+
+        syncLagValue.text = if (snapshot.syncLagSeconds != null) "${snapshot.syncLagSeconds}s" else "N/A"
+        syncLagValue.setTextColor(
+            when {
+                snapshot.syncLagSeconds == null -> COLOR_GRAY
+                snapshot.syncLagSeconds < 60 -> COLOR_GREEN
+                snapshot.syncLagSeconds < 300 -> COLOR_YELLOW
+                else -> COLOR_RED
+            }
+        )
+
+        val lastSyncUtc = snapshot.syncState?.lastUploadAt
+        lastSyncValue.text = lastSyncUtc ?: "Never"
+        configVersionValue.text = snapshot.configVersion?.toString() ?: "None"
+
+        // Site data
+        if (snapshot.siteInfo != null) {
+            val vendor = snapshot.siteInfo.fccVendor ?: "Unknown"
+            val model = snapshot.siteInfo.fccModel ?: ""
+            fccTypeValue.text = if (model.isNotEmpty()) "$vendor / $model" else vendor
+            fccTypeValue.setTextColor(COLOR_TEXT)
+            productCountValue.text = snapshot.productCount.toString()
+            pumpCountValue.text = snapshot.pumpCount.toString()
+            nozzleCountValue.text = snapshot.nozzleCount.toString()
+            siteLastSyncValue.text = snapshot.siteInfo.syncedAt.take(19)
+        } else {
+            fccTypeValue.text = "No site data"
+            fccTypeValue.setTextColor(COLOR_GRAY)
+            productCountValue.text = "-"
+            pumpCountValue.text = "-"
+            nozzleCountValue.text = "-"
+            siteLastSyncValue.text = "-"
         }
-    }
 
-    private data class DiagnosticsSnapshot(
-        val bufferDepth: Int,
-        val syncState: com.fccmiddleware.edge.buffer.entity.SyncState?,
-        val recentLogs: List<com.fccmiddleware.edge.buffer.entity.AuditLog>,
-        val siteInfo: com.fccmiddleware.edge.buffer.entity.SiteInfo?,
-        val productCount: Int,
-        val pumpCount: Int,
-        val nozzleCount: Int,
-        val structuredEntries: List<String>,
-        val logSizeBytes: Long,
-    )
-
-    private fun refreshData() {
-        lifecycleScope.launch {
-            val connState = connectivityManager.state.value
-            val heartbeatAge = connectivityManager.fccHeartbeatAgeSeconds()
-            val configVersion = configManager.currentConfigVersion
-
-            // Batch all IO/DAO calls into a single context switch
-            val snapshot = withContext(Dispatchers.IO) {
-                val bufferDepth = try { transactionDao.countForLocalApi() } catch (_: Exception) { 0 }
-                val syncState = try { syncStateDao.get() } catch (_: Exception) { null }
-                val recentLogs = try { auditLogDao.getRecent(RECENT_LOG_LIMIT) } catch (_: Exception) { emptyList() }
-                val siteInfo = try { siteDataDao.getSiteInfo() } catch (_: Exception) { null }
-                val productCount = try { siteDataDao.getAllProducts().size } catch (_: Exception) { 0 }
-                val pumpCount = try { siteDataDao.getAllPumps().size } catch (_: Exception) { 0 }
-                val nozzleCount = try { siteDataDao.getAllNozzles().size } catch (_: Exception) { 0 }
-                val structuredEntries = try { fileLogger.getRecentDiagnosticEntries(STRUCTURED_LOG_LIMIT) } catch (_: Exception) { emptyList() }
-                val logSizeBytes = try { fileLogger.totalLogSizeBytes() } catch (_: Exception) { 0L }
-                DiagnosticsSnapshot(bufferDepth, syncState, recentLogs, siteInfo, productCount, pumpCount, nozzleCount, structuredEntries, logSizeBytes)
+        // Recent audit log entries — update in-place (P-003: avoid removeAllViews churn)
+        val errorEntries = snapshot.recentLogs
+        val errorNeeded = errorEntries.size.coerceAtLeast(1)
+        while (errorTextViews.size < errorNeeded) {
+            val tv = TextView(this@DiagnosticsActivity)
+            errorTextViews.add(tv)
+            recentErrorsContainer.addView(tv)
+        }
+        if (errorEntries.isEmpty()) {
+            errorTextViews[0].apply {
+                text = "No recent audit entries"
+                textSize = 12f
+                setTypeface(null, Typeface.NORMAL)
+                setTextColor(COLOR_GRAY)
+                setPadding(0, dp(4), 0, dp(4))
+                visibility = View.VISIBLE
             }
-
-            // Guard against updating a destroyed activity
-            if (isFinishing || isDestroyed) return@launch
-
-            val lastSyncUtc = snapshot.syncState?.lastUploadAt
-
-            val syncLagSeconds = if (lastSyncUtc != null) {
-                try {
-                    val lastSync = Instant.parse(lastSyncUtc)
-                    ((System.currentTimeMillis() - lastSync.toEpochMilli()) / 1_000L).toInt()
-                } catch (_: Exception) { null }
-            } else null
-
-            // Update UI on main thread
-            connectivityValue.text = connState.name
-            connectivityValue.setTextColor(
-                when (connState) {
-                    com.fccmiddleware.edge.adapter.common.ConnectivityState.FULLY_ONLINE -> COLOR_GREEN
-                    com.fccmiddleware.edge.adapter.common.ConnectivityState.INTERNET_DOWN -> COLOR_YELLOW
-                    else -> COLOR_RED
-                }
-            )
-
-            fccHeartbeatValue.text = if (heartbeatAge != null) "${heartbeatAge}s ago" else "No probe yet"
-            fccHeartbeatValue.setTextColor(
-                when {
-                    heartbeatAge == null -> COLOR_GRAY
-                    heartbeatAge <= 60 -> COLOR_GREEN
-                    heartbeatAge <= 300 -> COLOR_YELLOW
-                    else -> COLOR_RED
-                }
-            )
-
-            bufferDepthValue.text = snapshot.bufferDepth.toString()
-            bufferDepthValue.setTextColor(
-                when {
-                    snapshot.bufferDepth == 0 -> COLOR_GREEN
-                    snapshot.bufferDepth < 100 -> COLOR_YELLOW
-                    else -> COLOR_RED
-                }
-            )
-
-            syncLagValue.text = if (syncLagSeconds != null) "${syncLagSeconds}s" else "N/A"
-            syncLagValue.setTextColor(
-                when {
-                    syncLagSeconds == null -> COLOR_GRAY
-                    syncLagSeconds < 60 -> COLOR_GREEN
-                    syncLagSeconds < 300 -> COLOR_YELLOW
-                    else -> COLOR_RED
-                }
-            )
-
-            lastSyncValue.text = lastSyncUtc ?: "Never"
-            configVersionValue.text = configVersion?.toString() ?: "None"
-
-            // Site data
-            if (snapshot.siteInfo != null) {
-                val vendor = snapshot.siteInfo.fccVendor ?: "Unknown"
-                val model = snapshot.siteInfo.fccModel ?: ""
-                fccTypeValue.text = if (model.isNotEmpty()) "$vendor / $model" else vendor
-                fccTypeValue.setTextColor(COLOR_TEXT)
-                productCountValue.text = snapshot.productCount.toString()
-                pumpCountValue.text = snapshot.pumpCount.toString()
-                nozzleCountValue.text = snapshot.nozzleCount.toString()
-                siteLastSyncValue.text = snapshot.siteInfo.syncedAt.take(19)
-            } else {
-                fccTypeValue.text = "No site data"
-                fccTypeValue.setTextColor(COLOR_GRAY)
-                productCountValue.text = "-"
-                pumpCountValue.text = "-"
-                nozzleCountValue.text = "-"
-                siteLastSyncValue.text = "-"
-            }
-
-            // Recent audit log entries — update in-place (P-003: avoid removeAllViews churn)
-            val errorEntries = snapshot.recentLogs
-            val errorNeeded = errorEntries.size.coerceAtLeast(1)
-            while (errorTextViews.size < errorNeeded) {
-                val tv = TextView(this@DiagnosticsActivity)
-                errorTextViews.add(tv)
-                recentErrorsContainer.addView(tv)
-            }
-            if (errorEntries.isEmpty()) {
-                errorTextViews[0].apply {
-                    text = "No recent audit entries"
-                    textSize = 12f
+            for (i in 1 until errorTextViews.size) errorTextViews[i].visibility = View.GONE
+        } else {
+            for (i in errorEntries.indices) {
+                val entry = errorEntries[i]
+                errorTextViews[i].apply {
+                    text = "${entry.createdAt.take(19)} [${entry.eventType}] ${entry.message}"
+                    textSize = 11f
                     setTypeface(null, Typeface.NORMAL)
-                    setTextColor(COLOR_GRAY)
-                    setPadding(0, dp(4), 0, dp(4))
+                    setTextColor(
+                        if (entry.eventType in CRITICAL_EVENT_TYPES ||
+                            entry.eventType.contains("ERROR") ||
+                            entry.eventType.contains("FAIL")) COLOR_RED else COLOR_TEXT
+                    )
+                    setPadding(0, dp(2), 0, dp(2))
                     visibility = View.VISIBLE
                 }
-                for (i in 1 until errorTextViews.size) errorTextViews[i].visibility = View.GONE
-            } else {
-                for (i in errorEntries.indices) {
-                    val entry = errorEntries[i]
-                    errorTextViews[i].apply {
-                        text = "${entry.createdAt.take(19)} [${entry.eventType}] ${entry.message}"
-                        textSize = 11f
-                        setTypeface(null, Typeface.NORMAL)
-                        setTextColor(
-                            if (entry.eventType.contains("ERROR") ||
-                                entry.eventType.contains("FAIL")) COLOR_RED else COLOR_TEXT
-                        )
-                        setPadding(0, dp(2), 0, dp(2))
-                        visibility = View.VISIBLE
-                    }
-                }
-                for (i in errorEntries.size until errorTextViews.size) errorTextViews[i].visibility = View.GONE
             }
+            for (i in errorEntries.size until errorTextViews.size) errorTextViews[i].visibility = View.GONE
+        }
 
-            // Structured file logs (WARN/ERROR) — update in-place (P-003)
-            val structuredEntries = snapshot.structuredEntries
-            val structuredNeeded = structuredEntries.size.coerceAtLeast(1)
-            while (structuredLogTextViews.size < structuredNeeded) {
-                val tv = TextView(this@DiagnosticsActivity)
-                structuredLogTextViews.add(tv)
-                structuredLogsContainer.addView(tv)
+        // Structured file logs (WARN/ERROR) — update in-place (P-003)
+        val structuredEntries = snapshot.structuredEntries
+        val structuredNeeded = structuredEntries.size.coerceAtLeast(1)
+        while (structuredLogTextViews.size < structuredNeeded) {
+            val tv = TextView(this@DiagnosticsActivity)
+            structuredLogTextViews.add(tv)
+            structuredLogsContainer.addView(tv)
+        }
+        if (structuredEntries.isEmpty()) {
+            structuredLogTextViews[0].apply {
+                text = "No recent WARN/ERROR file log entries"
+                textSize = 12f
+                setTypeface(null, Typeface.NORMAL)
+                setTextColor(COLOR_GRAY)
+                setPadding(0, dp(4), 0, dp(4))
+                visibility = View.VISIBLE
             }
-            if (structuredEntries.isEmpty()) {
-                structuredLogTextViews[0].apply {
-                    text = "No recent WARN/ERROR file log entries"
-                    textSize = 12f
-                    setTypeface(null, Typeface.NORMAL)
-                    setTextColor(COLOR_GRAY)
-                    setPadding(0, dp(4), 0, dp(4))
+            for (i in 1 until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
+        } else {
+            for (i in structuredEntries.indices) {
+                val entry = structuredEntries[i]
+                structuredLogTextViews[i].apply {
+                    text = entry.take(200)
+                    textSize = 10f
+                    setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+                    setTextColor(if (entry.contains("\"lvl\":\"ERROR\"") || entry.contains("\"lvl\":\"FATAL\"")) COLOR_RED else COLOR_YELLOW)
+                    setPadding(0, dp(1), 0, dp(1))
                     visibility = View.VISIBLE
                 }
-                for (i in 1 until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
-            } else {
-                for (i in structuredEntries.indices) {
-                    val entry = structuredEntries[i]
-                    structuredLogTextViews[i].apply {
-                        text = entry.take(200)
-                        textSize = 10f
-                        setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
-                        setTextColor(if (entry.contains("\"lvl\":\"ERROR\"") || entry.contains("\"lvl\":\"FATAL\"")) COLOR_RED else COLOR_YELLOW)
-                        setPadding(0, dp(1), 0, dp(1))
-                        visibility = View.VISIBLE
-                    }
-                }
-                for (i in structuredEntries.size until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
             }
-
-            logFileSizeValue.text = "${snapshot.logSizeBytes / 1024} KB"
-            lastRefreshValue.text = "Last refresh: ${Instant.now().toString().take(19)}"
+            for (i in structuredEntries.size until structuredLogTextViews.size) structuredLogTextViews[i].visibility = View.GONE
         }
+
+        logFileSizeValue.text = "${snapshot.logSizeBytes / 1024} KB"
+        lastRefreshValue.text = "Last refresh: ${snapshot.refreshedAt}"
     }
 
     // -------------------------------------------------------------------------
@@ -432,15 +371,6 @@ class DiagnosticsActivity : AppCompatActivity() {
         }
     }
 
-    private fun makeSecondary(text: String): TextView {
-        return TextView(this).apply {
-            this.text = text
-            textSize = 12f
-            setTextColor(COLOR_GRAY)
-            setPadding(0, dp(4), 0, dp(4))
-        }
-    }
-
     // ── Phase 2B: Share Logs ────────────────────────────────────────────────
 
     private fun shareLogs() {
@@ -449,7 +379,7 @@ class DiagnosticsActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                val logFiles = withContext(Dispatchers.IO) { fileLogger.getLogFiles() }
+                val logFiles = viewModel.getLogFiles()
                 if (logFiles.isEmpty()) {
                     AppLogger.i(TAG, "No log files to share")
                     Toast.makeText(this@DiagnosticsActivity, "No log files to share", Toast.LENGTH_SHORT).show()
@@ -495,14 +425,19 @@ class DiagnosticsActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "DiagnosticsActivity"
-        private const val REFRESH_INTERVAL_MS = 5_000L
-        private const val RECENT_LOG_LIMIT = 15
-        private const val STRUCTURED_LOG_LIMIT = 30
         private const val COLOR_GREEN = 0xFF2E7D32.toInt()
         private const val COLOR_YELLOW = 0xFFF9A825.toInt()
         private const val COLOR_RED = 0xFFC62828.toInt()
         private const val COLOR_GRAY = 0xFF9E9E9E.toInt()
         private const val COLOR_TEXT = 0xFF212121.toInt()
         private const val COLOR_LABEL = 0xFF616161.toInt()
+
+        // AF-040: Critical event types that should be highlighted in red even though
+        // they don't contain "ERROR" or "FAIL" in their name.
+        private val CRITICAL_EVENT_TYPES = setOf(
+            "DB_CORRUPTION_DETECTED",
+            "PREAUTH_EXPIRED",
+            "CONNECTIVITY_TRANSITION",
+        )
     }
 }

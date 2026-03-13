@@ -85,9 +85,9 @@ class DiagnosticsViewModel(
             val syncState = try { syncStateDao.get() } catch (_: Exception) { null }
             val recentLogs = try { auditLogDao.getRecent(RECENT_LOG_LIMIT) } catch (_: Exception) { emptyList() }
             val siteInfo = try { siteDataDao.getSiteInfo() } catch (_: Exception) { null }
-            val productCount = try { siteDataDao.getAllProducts().size } catch (_: Exception) { 0 }
-            val pumpCount = try { siteDataDao.getAllPumps().size } catch (_: Exception) { 0 }
-            val nozzleCount = try { siteDataDao.getAllNozzles().size } catch (_: Exception) { 0 }
+            val productCount = try { siteDataDao.countProducts() } catch (_: Exception) { 0 }
+            val pumpCount = try { siteDataDao.countPumps() } catch (_: Exception) { 0 }
+            val nozzleCount = try { siteDataDao.countNozzles() } catch (_: Exception) { 0 }
             val structuredEntries = try { fileLogger.getRecentDiagnosticEntries(STRUCTURED_LOG_LIMIT) } catch (_: Exception) { emptyList() }
             val logSizeBytes = try { fileLogger.totalLogSizeBytes() } catch (_: Exception) { 0L }
 
