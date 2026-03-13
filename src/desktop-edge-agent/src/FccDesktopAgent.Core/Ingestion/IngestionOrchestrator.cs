@@ -25,6 +25,10 @@ namespace FccDesktopAgent.Core.Ingestion;
 /// </summary>
 public sealed class IngestionOrchestrator : IIngestionOrchestrator
 {
+    private const int MaxFiscalAttempts = 5;
+    private const long FiscalBaseBackoffMs = 30_000;
+    private const long FiscalMaxBackoffMs = 480_000;
+
     private readonly IFccAdapterFactory _adapterFactory;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IOptions<AgentConfiguration> _config;
@@ -266,61 +270,150 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
             _logger.LogDebug("FCC cursor advanced to {Cursor}", advancedSequence);
         }
 
-        // ── ADV-7.3: Post-dispense fiscalization ──────────────────────────────
-        // After all transactions are safely buffered, attempt fiscalization for each.
-        // Non-blocking: fiscalization failure does NOT block transaction ingestion.
-        if (txsToFiscalize is { Count: > 0 } && fiscalizationService is not null)
+        // ── ADV-7.3 / GAP-7: Mark newly buffered transactions for fiscalization ─
+        if (txsToFiscalize is { Count: > 0 })
         {
-            _logger.LogInformation(
-                "Fiscalization: processing {Count} newly buffered transaction(s)",
-                txsToFiscalize.Count);
-
             foreach (var tx in txsToFiscalize)
             {
-                if (ct.IsCancellationRequested) break;
-
-                try
+                var btx = await db.Transactions
+                    .FirstOrDefaultAsync(t => t.Id == tx.Id && t.FiscalStatus == "NONE", ct);
+                if (btx is not null)
                 {
-                    var context = BuildFiscalizationContext(siteConfig);
-                    var result = await fiscalizationService.SubmitForFiscalizationAsync(tx, context, ct);
+                    btx.FiscalStatus = "PENDING";
+                    btx.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+            }
+            await db.SaveChangesAsync(ct);
 
-                    if (result.Success && !string.IsNullOrEmpty(result.ReceiptCode))
+            // Attempt immediate retry for newly queued transactions
+            await RetryPendingFiscalizationAsync(db, fiscalizationService, siteConfig, ct);
+        }
+
+        return new IngestionResult(newCount, dupCount, advancedSequence, fetchCycles);
+    }
+
+    /// <summary>
+    /// Retries pending fiscalization with exponential backoff (GAP-7).
+    /// Dead-letters transactions after MaxFiscalAttempts failures.
+    /// </summary>
+    private async Task RetryPendingFiscalizationAsync(
+        AgentDbContext db,
+        IFiscalizationService? fiscalizationService,
+        SiteConfig? siteConfig,
+        CancellationToken ct)
+    {
+        if (fiscalizationService is null) return;
+
+        var backoffThreshold = DateTimeOffset.UtcNow.AddMilliseconds(-FiscalBaseBackoffMs);
+
+        var pending = await db.Transactions
+            .Where(t => t.FiscalStatus == "PENDING"
+                && t.FiscalAttempts < MaxFiscalAttempts
+                && (t.LastFiscalAttemptAt == null || t.LastFiscalAttemptAt < backoffThreshold))
+            .OrderBy(t => t.CreatedAt)
+            .Take(10)
+            .ToListAsync(ct);
+
+        if (pending.Count == 0) return;
+
+        _logger.LogInformation("Fiscalization retry: {Count} transaction(s) pending", pending.Count);
+
+        foreach (var btx in pending)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            // Per-record exponential backoff check
+            var requiredBackoffMs = Math.Min(
+                FiscalBaseBackoffMs * (1L << Math.Min(btx.FiscalAttempts, 10)),
+                FiscalMaxBackoffMs);
+
+            if (btx.LastFiscalAttemptAt.HasValue)
+            {
+                var elapsed = (DateTimeOffset.UtcNow - btx.LastFiscalAttemptAt.Value).TotalMilliseconds;
+                if (elapsed < requiredBackoffMs) continue;
+            }
+
+            try
+            {
+                var tx = new CanonicalTransaction
+                {
+                    Id = btx.Id,
+                    FccTransactionId = btx.FccTransactionId,
+                    SiteCode = btx.SiteCode,
+                    PumpNumber = btx.PumpNumber,
+                    NozzleNumber = btx.NozzleNumber,
+                    ProductCode = btx.ProductCode,
+                    VolumeMicrolitres = btx.VolumeMicrolitres,
+                    AmountMinorUnits = btx.AmountMinorUnits,
+                    UnitPriceMinorPerLitre = btx.UnitPriceMinorPerLitre,
+                    CurrencyCode = btx.CurrencyCode,
+                    StartedAt = btx.StartedAt,
+                    CompletedAt = btx.CompletedAt,
+                    FccVendor = btx.FccVendor,
+                };
+
+                var context = BuildFiscalizationContext(siteConfig);
+                var result = await fiscalizationService.SubmitForFiscalizationAsync(tx, context, ct);
+
+                if (result.Success && !string.IsNullOrEmpty(result.ReceiptCode))
+                {
+                    btx.FiscalStatus = "SUCCESS";
+                    btx.FiscalReceiptNumber = result.ReceiptCode;
+                    btx.FiscalAttempts++;
+                    btx.LastFiscalAttemptAt = DateTimeOffset.UtcNow;
+                    btx.UpdatedAt = DateTimeOffset.UtcNow;
+                    _logger.LogInformation(
+                        "Fiscalization retry: receipt attached to tx {TxId} — attempt={Attempt}",
+                        btx.Id, btx.FiscalAttempts);
+                }
+                else
+                {
+                    btx.FiscalAttempts++;
+                    btx.LastFiscalAttemptAt = DateTimeOffset.UtcNow;
+                    btx.UpdatedAt = DateTimeOffset.UtcNow;
+
+                    if (btx.FiscalAttempts >= MaxFiscalAttempts)
                     {
-                        // Update the buffered transaction with the fiscal receipt number.
-                        var btx = await db.Transactions
-                            .FirstOrDefaultAsync(t => t.Id == tx.Id, ct);
-
-                        if (btx is not null)
-                        {
-                            btx.FiscalReceiptNumber = result.ReceiptCode;
-                            btx.UpdatedAt = DateTimeOffset.UtcNow;
-                            await db.SaveChangesAsync(ct);
-
-                            _logger.LogInformation(
-                                "Fiscalization: receipt attached to tx {TxId} — ReceiptCode={ReceiptCode}",
-                                tx.Id, result.ReceiptCode);
-                        }
+                        btx.FiscalStatus = "DEAD_LETTER";
+                        _logger.LogError(
+                            "Fiscalization dead-letter: tx {TxId} exceeded {Max} attempts — {Error}",
+                            btx.Id, MaxFiscalAttempts, result.ErrorMessage);
                     }
                     else
                     {
                         _logger.LogWarning(
-                            "Fiscalization: failed for tx {TxId} — {Error} (non-fatal)",
-                            tx.Id, result.ErrorMessage);
+                            "Fiscalization retry failed: tx {TxId} attempt={Attempt} — {Error}",
+                            btx.Id, btx.FiscalAttempts, result.ErrorMessage);
                     }
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                btx.FiscalAttempts++;
+                btx.LastFiscalAttemptAt = DateTimeOffset.UtcNow;
+                btx.UpdatedAt = DateTimeOffset.UtcNow;
+
+                if (btx.FiscalAttempts >= MaxFiscalAttempts)
                 {
-                    break;
+                    btx.FiscalStatus = "DEAD_LETTER";
+                    _logger.LogError(ex,
+                        "Fiscalization dead-letter: tx {TxId} exceeded {Max} attempts",
+                        btx.Id, MaxFiscalAttempts);
                 }
-                catch (Exception ex)
+                else
                 {
                     _logger.LogWarning(ex,
-                        "Fiscalization: error for tx {TxId} (non-fatal)", tx.Id);
+                        "Fiscalization retry error: tx {TxId} attempt={Attempt}",
+                        btx.Id, btx.FiscalAttempts);
                 }
             }
         }
 
-        return new IngestionResult(newCount, dupCount, advancedSequence, fetchCycles);
+        await db.SaveChangesAsync(ct);
     }
 
     // ── Fiscalization helpers (ADV-7.3) ───────────────────────────────────────

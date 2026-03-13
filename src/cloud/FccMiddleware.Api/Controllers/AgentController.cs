@@ -18,6 +18,7 @@ using FccMiddleware.Infrastructure.Persistence;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using System.Security.Claims;
@@ -163,6 +164,8 @@ public sealed class AgentController : ControllerBase
     /// </summary>
     [HttpPost("api/v1/agent/register")]
     [AllowAnonymous] // Authenticated via bootstrap token in header, not JWT
+    [RequestSizeLimit(65_536)] // S-3: 64 KB max for registration payloads
+    [EnableRateLimiting("registration")]
     [ProducesResponseType(typeof(DeviceRegistrationApiResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
@@ -268,6 +271,8 @@ public sealed class AgentController : ControllerBase
     /// </summary>
     [HttpPost("api/v1/agent/token/refresh")]
     [AllowAnonymous] // Authenticated via refresh token in body, not JWT
+    [RequestSizeLimit(16_384)] // S-3: 16 KB max for token refresh payloads
+    [EnableRateLimiting("token-refresh")]
     [ProducesResponseType(typeof(RefreshTokenResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]

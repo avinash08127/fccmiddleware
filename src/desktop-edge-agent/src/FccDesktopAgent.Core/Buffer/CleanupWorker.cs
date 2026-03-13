@@ -53,6 +53,9 @@ public sealed class CleanupWorker : BackgroundService
         }
     }
 
+    /// <summary>GAP-2: Days after which Uploaded records are considered stale and reverted to Pending.</summary>
+    private const int DefaultStalePendingDays = 3;
+
     public async Task RunCleanupAsync(CancellationToken ct)
     {
         var retentionDays = _config.CurrentValue.RetentionDays;
@@ -60,6 +63,12 @@ public sealed class CleanupWorker : BackgroundService
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
+        var bufferManager = scope.ServiceProvider.GetRequiredService<TransactionBufferManager>();
+
+        // GAP-2: Revert stale Uploaded records back to Pending before retention cleanup.
+        // Records stuck at Uploaded for >3 days are likely due to a cloud-side processing delay.
+        // Re-uploading is safe because the cloud deduplicates by FccTransactionId.
+        var staleReverted = await bufferManager.RevertStaleUploadedAsync(DefaultStalePendingDays, ct);
 
         // 1. Delete SyncedToOdoo transactions older than retention period
         var txDeleted = await db.Transactions
@@ -69,6 +78,11 @@ public sealed class CleanupWorker : BackgroundService
         // Also delete DuplicateConfirmed past retention
         var dupDeleted = await db.Transactions
             .Where(t => t.SyncStatus == SyncStatus.DuplicateConfirmed && t.UpdatedAt < cutoff)
+            .ExecuteDeleteAsync(ct);
+
+        // GAP-1: Delete DeadLetter records past retention
+        var deadLetterDeleted = await db.Transactions
+            .Where(t => t.SyncStatus == SyncStatus.DeadLetter && t.UpdatedAt < cutoff)
             .ExecuteDeleteAsync(ct);
 
         // 2. Delete terminal pre-auth records older than retention period
@@ -89,8 +103,9 @@ public sealed class CleanupWorker : BackgroundService
             .ExecuteDeleteAsync(ct);
 
         _logger.LogInformation(
-            "Cleanup completed: {TxDeleted} synced transactions, {DupDeleted} duplicate transactions, " +
-            "{PreAuthDeleted} terminal pre-auths, {AuditDeleted} audit entries deleted (retention={RetentionDays}d)",
-            txDeleted, dupDeleted, preAuthDeleted, auditDeleted, retentionDays);
+            "Cleanup completed: {TxDeleted} synced, {DupDeleted} duplicate, {DeadLetterDeleted} dead-lettered transactions, " +
+            "{PreAuthDeleted} terminal pre-auths, {AuditDeleted} audit entries deleted, " +
+            "{StaleReverted} stale uploaded reverted to pending (retention={RetentionDays}d)",
+            txDeleted, dupDeleted, deadLetterDeleted, preAuthDeleted, auditDeleted, staleReverted, retentionDays);
     }
 }

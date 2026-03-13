@@ -331,14 +331,12 @@ class PreAuthHandler(
                     }
                 }
 
-                preAuthDao.updateStatus(
+                // GAP-3: Use atomic cancel+unsync so the cancellation is forwarded to cloud
+                // even if the record was already synced as AUTHORIZED (is_cloud_synced = 1).
+                preAuthDao.markCancelledAndUnsync(
                     id = record.id,
-                    status = PreAuthStatus.CANCELLED.name,
-                    fccCorrelationId = record.fccCorrelationId,
-                    fccAuthorizationCode = record.fccAuthorizationCode,
+                    cancelledAt = Instant.now().toString(),
                     failureReason = null,
-                    authorizedAt = record.authorizedAt,
-                    completedAt = Instant.now().toString(),
                 )
 
                 scope.launch {
@@ -424,14 +422,12 @@ class PreAuthHandler(
                 // adapter == null: no FCC to deauthorize, safe to mark EXPIRED
             }
 
-            preAuthDao.updateStatus(
+            // GAP-3: Use atomic expire+unsync so the expiry is forwarded to cloud
+            // even if the record was already synced as AUTHORIZED (is_cloud_synced = 1).
+            preAuthDao.markExpiredAndUnsync(
                 id = r.id,
-                status = PreAuthStatus.EXPIRED.name,
-                fccCorrelationId = r.fccCorrelationId,
-                fccAuthorizationCode = r.fccAuthorizationCode,
+                expiredAt = Instant.now().toString(),
                 failureReason = "Pre-auth expired at ${r.expiresAt}",
-                authorizedAt = r.authorizedAt,
-                completedAt = Instant.now().toString(),
             )
 
             scope.launch {

@@ -202,6 +202,7 @@ public sealed class TransactionBufferManager
             DuplicateConfirmed = counts.FirstOrDefault(c => c.Status == SyncStatus.DuplicateConfirmed)?.Count ?? 0,
             SyncedToOdoo = counts.FirstOrDefault(c => c.Status == SyncStatus.SyncedToOdoo)?.Count ?? 0,
             Archived = counts.FirstOrDefault(c => c.Status == SyncStatus.Archived)?.Count ?? 0,
+            DeadLetter = counts.FirstOrDefault(c => c.Status == SyncStatus.DeadLetter)?.Count ?? 0,
             OldestPendingAtUtc = oldestPending,
         };
     }
@@ -290,6 +291,51 @@ public sealed class TransactionBufferManager
         return AcknowledgeResult.Success;
     }
 
+    /// <summary>Maximum upload attempts before a record is dead-lettered (GAP-1).</summary>
+    public const int MaxUploadAttempts = 20;
+
+    /// <summary>
+    /// GAP-1: Transitions Pending records that have exhausted upload retries to DeadLetter.
+    /// Dead-lettered records are excluded from upload batches but remain queryable for diagnostics.
+    /// </summary>
+    public async Task<int> DeadLetterExhaustedAsync(CancellationToken ct = default)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var count = await _db.Transactions
+            .Where(t => t.SyncStatus == SyncStatus.Pending && t.UploadAttempts >= MaxUploadAttempts)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.SyncStatus, SyncStatus.DeadLetter)
+                .SetProperty(t => t.UpdatedAt, now), ct);
+
+        if (count > 0)
+            _logger.LogWarning("Dead-lettered {Count} records that exceeded {Max} upload attempts", count, MaxUploadAttempts);
+
+        return count;
+    }
+
+    /// <summary>
+    /// GAP-2: Reverts Uploaded records older than <paramref name="staleDays"/> back to Pending for re-upload.
+    /// Handles the case where cloud accepted the upload but the Odoo sync poll never confirmed it.
+    /// Re-uploading is safe because the cloud deduplicates by FccTransactionId.
+    /// </summary>
+    public async Task<int> RevertStaleUploadedAsync(int staleDays = 3, CancellationToken ct = default)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-staleDays);
+        var now = DateTimeOffset.UtcNow;
+
+        var count = await _db.Transactions
+            .Where(t => t.SyncStatus == SyncStatus.Uploaded && t.UpdatedAt < cutoff)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.SyncStatus, SyncStatus.Pending)
+                .SetProperty(t => t.UploadAttempts, 0)
+                .SetProperty(t => t.UpdatedAt, now), ct);
+
+        if (count > 0)
+            _logger.LogWarning("Reverted {Count} stale Uploaded records (older than {Days}d) back to Pending", count, staleDays);
+
+        return count;
+    }
+
     private static bool IsDuplicateKeyException(DbUpdateException ex)
     {
         // SQLite unique constraint violation message
@@ -315,7 +361,8 @@ public sealed class BufferStats
     public int DuplicateConfirmed { get; init; }
     public int SyncedToOdoo { get; init; }
     public int Archived { get; init; }
-    public int Total => Pending + Uploaded + DuplicateConfirmed + SyncedToOdoo + Archived;
+    public int DeadLetter { get; init; }
+    public int Total => Pending + Uploaded + DuplicateConfirmed + SyncedToOdoo + Archived + DeadLetter;
 
     /// <summary>CreatedAt of the oldest Pending record. Null if no pending records.</summary>
     public DateTimeOffset? OldestPendingAtUtc { get; init; }

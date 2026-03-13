@@ -118,6 +118,9 @@ public sealed class CloudUploadWorker : ICloudSyncService
 
         _logger.LogDebug("Cloud upload: attempting batch of {Count} transaction(s)", batch.Count);
 
+        var request = BuildUploadRequest(batch, config);
+        _logger.LogDebug("Upload batch: batchId={BatchId} records={Count}", request.UploadBatchId, batch.Count);
+
         var token = await _tokenProvider.GetTokenAsync(ct);
         if (token is null)
         {
@@ -131,8 +134,6 @@ public sealed class CloudUploadWorker : ICloudSyncService
             _logger.LogWarning("Cloud upload blocked: CloudBaseUrl {Url} does not use HTTPS", config.CloudBaseUrl);
             return 0;
         }
-
-        var request = BuildUploadRequest(batch, config);
 
         UploadResponse? uploadResponse;
         try
@@ -331,6 +332,10 @@ public sealed class CloudUploadWorker : ICloudSyncService
             // Architecture rule #2: Never skip past a failed record.
             await bufferManager.RecordUploadFailureAsync(rejectedIds, "REJECTED by cloud", ct);
             _logger.LogWarning("Cloud upload: {Count} transaction(s) rejected by cloud", rejectedIds.Count);
+
+            // GAP-1: Dead-letter records that have exhausted all upload retries.
+            // This runs after recording failures so the attempt counts are up to date.
+            await bufferManager.DeadLetterExhaustedAsync(ct);
         }
 
         return succeeded;
@@ -353,7 +358,11 @@ public sealed class CloudUploadWorker : ICloudSyncService
         AgentConfiguration config)
     {
         var transactions = batch.Select(t => ToCanonical(t, config)).ToList();
-        return new UploadRequest { Transactions = transactions };
+        return new UploadRequest
+        {
+            Transactions = transactions,
+            UploadBatchId = Guid.NewGuid().ToString()
+        };
     }
 
     private static CanonicalTransaction ToCanonical(BufferedTransaction t, AgentConfiguration config) => new()

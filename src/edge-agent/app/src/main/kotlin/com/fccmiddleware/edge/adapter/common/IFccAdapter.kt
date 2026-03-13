@@ -66,6 +66,19 @@ interface IFccAdapter {
     suspend fun cancelPreAuth(command: CancelPreAuthCommand): Boolean
 
     /**
+     * Declares the adapter's pump status capability level.
+     * Callers can check this before relying on [getPumpStatus] data.
+     */
+    val pumpStatusCapability: PumpStatusCapability
+
+    /**
+     * Optional pre-auth matcher for standardized pre-auth ↔ transaction correlation.
+     * Null when the adapter does not support pre-auth (e.g., some DOMS configurations).
+     */
+    val preAuthMatcher: IPreAuthMatcher?
+        get() = null
+
+    /**
      * Return one latest status record per configured pump-nozzle pair reachable
      * through this FCC.
      *

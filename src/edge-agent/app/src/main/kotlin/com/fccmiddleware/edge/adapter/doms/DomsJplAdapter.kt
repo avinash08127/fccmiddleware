@@ -2,6 +2,7 @@ package com.fccmiddleware.edge.adapter.doms
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.*
+import com.fccmiddleware.edge.adapter.common.PumpStatusCapability
 import com.fccmiddleware.edge.adapter.doms.jpl.JplHeartbeatManager
 import com.fccmiddleware.edge.adapter.doms.jpl.JplTcpClient
 import com.fccmiddleware.edge.adapter.doms.mapping.DomsCanonicalMapper
@@ -31,6 +32,8 @@ class DomsJplAdapter(
      *  Used to bind FCC traffic to WiFi via Android Network.bindSocket(). */
     private val socketBinder: ((java.net.Socket) -> Unit)? = null,
 ) : IFccAdapter, IFccConnectionLifecycle {
+
+    override val pumpStatusCapability = PumpStatusCapability.LIVE
 
     companion object {
         private const val TAG = "DomsJplAdapter"

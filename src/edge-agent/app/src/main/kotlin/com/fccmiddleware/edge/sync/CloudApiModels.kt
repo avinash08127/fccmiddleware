@@ -12,6 +12,8 @@ import kotlinx.serialization.Serializable
 data class CloudUploadRequest(
     /** Batch of canonical transactions in ascending completedAt order. Max 500. */
     val transactions: List<CloudTransactionDto>,
+    /** Batch-level idempotency key. Cloud caches results keyed by this ID. */
+    val uploadBatchId: String? = null,
 )
 
 /**
@@ -242,6 +244,8 @@ data class BufferStatusDto(
     val failedCount: Int,
     val oldestPendingAtUtc: String?,
     val bufferSizeMb: Int,
+    val fiscalPendingCount: Int = 0,
+    val fiscalDeadLetterCount: Int = 0,
 )
 
 @Serializable

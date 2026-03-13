@@ -1,6 +1,11 @@
 package com.fccmiddleware.edge.adapter.advatec
 
 import com.fccmiddleware.edge.adapter.common.*
+import com.fccmiddleware.edge.adapter.common.IPreAuthMatcher
+import com.fccmiddleware.edge.adapter.common.PreAuthMatchResult
+import com.fccmiddleware.edge.adapter.common.PreAuthMatchingStrategy
+import com.fccmiddleware.edge.adapter.common.ActivePreAuthSnapshot
+import com.fccmiddleware.edge.adapter.common.PumpStatusCapability
 import com.fccmiddleware.edge.logging.AppLogger
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -37,6 +42,52 @@ import kotlin.coroutines.cancellation.CancellationException
  * pipeline buffers them.
  */
 class AdvatecAdapter(private val config: AgentFccConfig) : IFccAdapter {
+
+    override val pumpStatusCapability = PumpStatusCapability.NOT_APPLICABLE
+
+    override val preAuthMatcher: IPreAuthMatcher = object : IPreAuthMatcher {
+        override val matchingStrategy = PreAuthMatchingStrategy.HEURISTIC
+
+        override fun registerPreAuth(command: PreAuthCommand, vendorRef: String?): String {
+            return "ADVATEC-${command.pumpNumber}-${System.currentTimeMillis()}"
+        }
+
+        override fun matchTransaction(pumpNumber: Int, vendorMatchKey: String?): PreAuthMatchResult? {
+            val preAuth = activePreAuths[pumpNumber] ?: return null
+            // Heuristic: match by pump number (Advatec processes sequentially per pump)
+            if (vendorMatchKey != null && preAuth.customerId.equals(vendorMatchKey, ignoreCase = true)) {
+                return PreAuthMatchResult(
+                    correlationId = preAuth.correlationId,
+                    strategy = PreAuthMatchingStrategy.HEURISTIC,
+                    odooOrderId = preAuth.odooOrderId,
+                )
+            }
+            // FIFO fallback: match oldest active pre-auth on this pump
+            return PreAuthMatchResult(
+                correlationId = preAuth.correlationId,
+                strategy = PreAuthMatchingStrategy.HEURISTIC,
+                odooOrderId = preAuth.odooOrderId,
+            )
+        }
+
+        override fun removePreAuth(correlationId: String): Boolean {
+            val entry = activePreAuths.entries.find { it.value.correlationId == correlationId }
+            return if (entry != null) {
+                activePreAuths.remove(entry.key) != null
+            } else false
+        }
+
+        override fun getActivePreAuths(): List<ActivePreAuthSnapshot> {
+            return activePreAuths.entries.map { (pump, preAuth) ->
+                ActivePreAuthSnapshot(
+                    correlationId = preAuth.correlationId,
+                    pumpNumber = pump,
+                    registeredAtUtc = Instant.ofEpochMilli(preAuth.createdAtMillis).toString(),
+                    odooOrderId = preAuth.odooOrderId,
+                )
+            }
+        }
+    }
 
     companion object {
         private const val TAG = "AdvatecAdapter"

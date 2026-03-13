@@ -16,10 +16,11 @@ enum class PreAuthStatus {
 /**
  * Edge-only sync state for buffered transactions.
  * Progression: PENDING → UPLOADED → SYNCED_TO_ODOO → ARCHIVED → (deleted)
+ *              PENDING → DEAD_LETTER → (deleted after retention)
  * Separate from TransactionStatus per state machine spec §5.3.
  */
 enum class SyncStatus {
-    PENDING, UPLOADED, SYNCED_TO_ODOO, ARCHIVED
+    PENDING, UPLOADED, SYNCED_TO_ODOO, ARCHIVED, DEAD_LETTER
 }
 
 /** Site ingestion mode from site config. */
@@ -45,6 +46,18 @@ enum class PumpState {
 /** Source of a pump status snapshot. */
 enum class PumpStatusSource {
     FCC_LIVE, EDGE_SYNTHESIZED
+}
+
+/** Adapter-declared pump status capability level. */
+enum class PumpStatusCapability {
+    /** Real-time FCC pump status (DOMS). */
+    LIVE,
+    /** Edge-synthesized from available data (Petronite). */
+    SYNTHESIZED,
+    /** Protocol does not support pump status (Radix). */
+    NOT_SUPPORTED,
+    /** Device type does not have pumps (Advatec fiscal). */
+    NOT_APPLICABLE,
 }
 
 /** Which ingestion path delivered a transaction. */

@@ -39,8 +39,15 @@ internal static class PumpStatusEndpoints
 
             return Results.Ok(new
             {
+                capability = result.Capability?.ToString()?.ToUpperInvariant(),
                 pumps = result.Pumps,
                 source = result.Source,
+                reason = result.Capability switch
+                {
+                    PumpStatusCapability.NotSupported => "FCC protocol does not support pump status",
+                    PumpStatusCapability.NotApplicable => "Device type does not have pumps",
+                    _ => (string?)null
+                },
                 cachedAtUtc = result.CachedAtUtc,
                 observedAtUtc = result.ObservedAtUtc,
             });

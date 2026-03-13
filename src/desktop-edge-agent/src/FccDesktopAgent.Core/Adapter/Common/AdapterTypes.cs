@@ -116,3 +116,36 @@ public sealed record FccConnectionConfig(
     int PumpNumberOffset = 0,
     /// <summary>Resolved FCC product code mapping.</summary>
     IReadOnlyDictionary<string, string>? ProductCodeMapping = null);
+
+// ---------------------------------------------------------------------------
+// Pre-auth matching contract (GAP-5)
+// ---------------------------------------------------------------------------
+
+/// <summary>Matching confidence level for pre-auth → transaction correlation.</summary>
+public enum PreAuthMatchingStrategy { Deterministic, Heuristic }
+
+/// <summary>Result of matching a transaction to an active pre-auth.</summary>
+public sealed record PreAuthMatchResult(
+    string CorrelationId,
+    PreAuthMatchingStrategy Strategy,
+    string? OdooOrderId = null);
+
+/// <summary>Snapshot of an active pre-auth for diagnostics.</summary>
+public sealed record ActivePreAuthSnapshot(
+    string CorrelationId,
+    int PumpNumber,
+    DateTimeOffset RegisteredAt,
+    string? OdooOrderId = null);
+
+/// <summary>
+/// Standardized pre-auth matching interface (GAP-5).
+/// Each adapter implements vendor-specific matching behind this common contract.
+/// </summary>
+public interface IPreAuthMatcher
+{
+    PreAuthMatchingStrategy MatchingStrategy { get; }
+    string RegisterPreAuth(PreAuthCommand command, string? vendorRef);
+    PreAuthMatchResult? MatchTransaction(int pumpNumber, string? vendorMatchKey);
+    bool RemovePreAuth(string correlationId);
+    IReadOnlyList<ActivePreAuthSnapshot> GetActivePreAuths();
+}

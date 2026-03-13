@@ -111,6 +111,15 @@ class IngestionOrchestrator(
          */
         private const val MAX_FETCH_CYCLES = 10
 
+        /** Maximum fiscalization attempts before dead-lettering. */
+        private const val MAX_FISCAL_ATTEMPTS = 5
+
+        /** Base backoff delay for fiscalization retry in milliseconds. */
+        private const val FISCAL_BASE_BACKOFF_MS = 30_000L
+
+        /** Maximum backoff delay for fiscalization retry in milliseconds. */
+        private const val FISCAL_MAX_BACKOFF_MS = 480_000L
+
         /**
          * Minimum wall-clock interval between CLOUD_DIRECT scheduled polls.
          *
@@ -328,44 +337,125 @@ class IngestionOrchestrator(
             AppLogger.e(TAG, "FCC poll failed after $fetchCycles cycle(s)", e)
         }
 
-        // ── ADV-7.3: Post-dispense fiscalization ──────────────────────────────
-        // After all transactions are safely buffered, attempt fiscalization for each.
-        // Non-blocking: fiscalization failure does NOT block transaction ingestion.
-        if (!txsToFiscalize.isNullOrEmpty() && fiscService != null) {
-            AppLogger.i(TAG, "Fiscalization: processing ${txsToFiscalize.size} newly buffered transaction(s)")
+        // ── ADV-7.3 / GAP-7: Mark newly buffered transactions for fiscalization ─
+        if (!txsToFiscalize.isNullOrEmpty()) {
             val txDao = transactionDao
-
+            val now = Instant.now().toString()
             for (tx in txsToFiscalize) {
                 try {
-                    val context = FiscalizationContext(
-                        customerTaxId = null,
-                        customerName = null,
-                        customerIdType = null,
-                        paymentType = "CASH",
-                    )
-                    val result = fiscService.submitForFiscalization(tx, context)
-
-                    if (result.success && !result.receiptCode.isNullOrEmpty()) {
-                        txDao?.updateFiscalReceipt(tx.id, result.receiptCode, Instant.now().toString())
-                        AppLogger.i(
-                            TAG,
-                            "Fiscalization: receipt attached to tx ${tx.id} — ReceiptCode=${result.receiptCode}",
-                        )
-                    } else {
-                        AppLogger.w(
-                            TAG,
-                            "Fiscalization: failed for tx ${tx.id} — ${result.errorMessage} (non-fatal)",
-                        )
-                    }
-                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                    throw e
+                    txDao?.markFiscalPending(tx.id, now)
                 } catch (e: Exception) {
-                    AppLogger.w(TAG, "Fiscalization: error for tx ${tx.id} (non-fatal): ${e.message}")
+                    AppLogger.w(TAG, "Failed to mark fiscal pending for tx ${tx.id}: ${e.message}")
                 }
             }
+            // Attempt immediate fiscalization for newly queued transactions
+            retryPendingFiscalization()
         }
 
         return PollResult(newCount, skippedCount, fetchCycles, cursorAdvanced)
+    }
+
+    // -------------------------------------------------------------------------
+    // Fiscalization retry with exponential backoff (GAP-7)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Retries pending fiscalization for transactions that have not exceeded max attempts.
+     * Uses exponential backoff: 30s, 60s, 120s, 240s, 480s.
+     * Called on each cadence tick and after new transactions are queued.
+     */
+    internal suspend fun retryPendingFiscalization() {
+        val fiscService = fiscalizationService ?: return
+        val txDao = transactionDao ?: return
+
+        // Calculate the backoff threshold — only retry records whose last attempt
+        // is older than the minimum backoff (30s). The per-record backoff is checked
+        // after retrieval based on individual attempt counts.
+        val backoffThreshold = Instant.now()
+            .minusMillis(FISCAL_BASE_BACKOFF_MS)
+            .toString()
+
+        val pending = try {
+            txDao.getPendingFiscalization(MAX_FISCAL_ATTEMPTS, backoffThreshold, 10)
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to query pending fiscalization", e)
+            return
+        }
+
+        if (pending.isEmpty()) return
+
+        AppLogger.i(TAG, "Fiscalization retry: ${pending.size} transaction(s) pending")
+
+        for (tx in pending) {
+            // Per-record exponential backoff check
+            val requiredBackoffMs = (FISCAL_BASE_BACKOFF_MS * (1L shl tx.fiscalAttempts.coerceAtMost(10)))
+                .coerceAtMost(FISCAL_MAX_BACKOFF_MS)
+            if (tx.lastFiscalAttemptAt != null) {
+                try {
+                    val lastAttempt = Instant.parse(tx.lastFiscalAttemptAt)
+                    val elapsedMs = System.currentTimeMillis() - lastAttempt.toEpochMilli()
+                    if (elapsedMs < requiredBackoffMs) continue
+                } catch (_: Exception) { /* parse failure — proceed with retry */ }
+            }
+
+            val now = Instant.now().toString()
+
+            try {
+                val context = FiscalizationContext(
+                    customerTaxId = null,
+                    customerName = null,
+                    customerIdType = null,
+                    paymentType = "CASH",
+                )
+                val result = fiscService.submitForFiscalization(
+                    // Reconstruct a minimal CanonicalTransaction from buffered fields
+                    CanonicalTransaction(
+                        id = tx.id,
+                        fccTransactionId = tx.fccTransactionId,
+                        siteCode = tx.siteCode,
+                        pumpNumber = tx.pumpNumber,
+                        nozzleNumber = tx.nozzleNumber,
+                        productCode = tx.productCode,
+                        volumeMicrolitres = tx.volumeMicrolitres,
+                        amountMinorUnits = tx.amountMinorUnits,
+                        unitPriceMinorPerLitre = tx.unitPriceMinorPerLitre,
+                        currencyCode = tx.currencyCode,
+                        startedAt = tx.startedAt,
+                        completedAt = tx.completedAt,
+                        fccVendor = tx.fccVendor,
+                        status = tx.status,
+                        ingestionSource = tx.ingestionSource,
+                        correlationId = tx.correlationId,
+                        ingestedAtUtc = tx.createdAt,
+                        rawPayloadJson = tx.rawPayloadJson,
+                    ),
+                    context,
+                )
+
+                if (result.success && !result.receiptCode.isNullOrEmpty()) {
+                    txDao.markFiscalSuccess(tx.id, result.receiptCode, now)
+                    AppLogger.i(TAG, "Fiscalization retry: receipt attached to tx ${tx.id} — attempt=${tx.fiscalAttempts + 1}")
+                } else {
+                    if (tx.fiscalAttempts + 1 >= MAX_FISCAL_ATTEMPTS) {
+                        txDao.markFiscalDeadLetter(tx.id, now)
+                        AppLogger.e(TAG, "Fiscalization dead-letter: tx ${tx.id} exceeded $MAX_FISCAL_ATTEMPTS attempts — ${result.errorMessage}")
+                    } else {
+                        txDao.recordFiscalFailure(tx.id, now)
+                        AppLogger.w(TAG, "Fiscalization retry failed: tx ${tx.id} attempt=${tx.fiscalAttempts + 1} — ${result.errorMessage}")
+                    }
+                }
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (tx.fiscalAttempts + 1 >= MAX_FISCAL_ATTEMPTS) {
+                    txDao.markFiscalDeadLetter(tx.id, now)
+                    AppLogger.e(TAG, "Fiscalization dead-letter: tx ${tx.id} exceeded $MAX_FISCAL_ATTEMPTS attempts — ${e.message}")
+                } else {
+                    txDao.recordFiscalFailure(tx.id, now)
+                    AppLogger.w(TAG, "Fiscalization retry error: tx ${tx.id} attempt=${tx.fiscalAttempts + 1} — ${e.message}")
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

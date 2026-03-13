@@ -23,6 +23,9 @@ namespace FccDesktopAgent.Core.Adapter.Advatec;
 /// </summary>
 public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
 {
+    /// <inheritdoc />
+    public PumpStatusCapability PumpStatusCapability => PumpStatusCapability.NotApplicable;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNameCaseInsensitive = true

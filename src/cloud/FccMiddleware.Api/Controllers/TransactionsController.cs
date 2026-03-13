@@ -14,6 +14,7 @@ using FccMiddleware.Domain.Enums;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace FccMiddleware.Api.Controllers;
 
@@ -123,6 +124,8 @@ public sealed class TransactionsController : ControllerBase
     [Consumes("text/xml", "application/xml")]
     [Produces("text/xml")]
     [AllowAnonymous] // Auth is via USN-Code lookup + Radix SHA-1 signature validation
+    [RequestSizeLimit(1_048_576)] // S-3: 1 MB max for XML payloads
+    [EnableRateLimiting("anonymous-ingress")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -222,6 +225,8 @@ public sealed class TransactionsController : ControllerBase
     /// </summary>
     [HttpPost("/api/v1/ingest/petronite/webhook")]
     [AllowAnonymous] // Auth is via X-Webhook-Secret constant-time comparison
+    [RequestSizeLimit(1_048_576)] // S-3: 1 MB max for webhook payloads
+    [EnableRateLimiting("anonymous-ingress")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> IngestPetroniteWebhook(CancellationToken cancellationToken)
@@ -308,27 +313,23 @@ public sealed class TransactionsController : ControllerBase
     /// </summary>
     [HttpPost("/api/v1/ingest/advatec/webhook")]
     [AllowAnonymous] // Auth is via X-Webhook-Token constant-time comparison
+    [RequestSizeLimit(1_048_576)] // S-3: 1 MB max for webhook payloads
+    [EnableRateLimiting("anonymous-ingress")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> IngestAdvatecWebhook(CancellationToken cancellationToken)
     {
-        // ── Validate webhook token header or query parameter ──────────────────
-        var tokenValue = Request.Headers.TryGetValue("X-Webhook-Token", out var tokenHeader)
-            ? tokenHeader.FirstOrDefault()
-            : null;
-
-        // Fallback: check ?token= query parameter (Advatec may configure webhook URL with token param)
-        if (string.IsNullOrWhiteSpace(tokenValue))
-        {
-            tokenValue = Request.Query["token"].FirstOrDefault();
-        }
-
-        if (string.IsNullOrWhiteSpace(tokenValue))
+        // S-4: Accept webhook token only from header — query-string tokens leak
+        // via proxy logs, referrer headers, and observability systems.
+        if (!Request.Headers.TryGetValue("X-Webhook-Token", out var tokenHeader)
+            || string.IsNullOrWhiteSpace(tokenHeader.FirstOrDefault()))
         {
             return Unauthorized(BuildError(
                 "UNAUTHORIZED.MISSING_WEBHOOK_TOKEN",
-                "X-Webhook-Token header or ?token= query parameter is required."));
+                "X-Webhook-Token header is required."));
         }
+
+        var tokenValue = tokenHeader.First()!;
 
         // ── Lookup site by Advatec webhook token (constant-time comparison) ──
         var siteResult = await _siteFccConfigProvider.GetByAdvatecWebhookTokenAsync(tokenValue, cancellationToken);
@@ -736,7 +737,8 @@ public sealed class TransactionsController : ControllerBase
             LegalEntityId  = legalEntityId,
             DeviceSiteCode = siteCode,
             DeviceId       = deviceId,
-            CorrelationId  = correlationId
+            CorrelationId  = correlationId,
+            UploadBatchId  = request.UploadBatchId
         };
 
         var result = await _mediator.Send(command, cancellationToken);

@@ -790,14 +790,18 @@ class CloudUploadWorker(
         if (rejectedPairs.isNotEmpty()) {
             val attemptAt = Instant.now().toString()
             for ((tx, error) in rejectedPairs) {
-                AppLogger.w(TAG, "Record ${tx.fccTransactionId} REJECTED by cloud: $error")
+                val newAttempts = tx.uploadAttempts + 1
+                AppLogger.w(TAG, "Record ${tx.fccTransactionId} REJECTED by cloud (attempt $newAttempts): $error")
                 bm.recordUploadFailure(
                     id = tx.id,
-                    attempts = tx.uploadAttempts + 1,
+                    attempts = newAttempts,
                     attemptAt = attemptAt,
                     error = error,
                 )
             }
+            // GAP-1: Dead-letter records that have exhausted all upload retries.
+            // This runs after recording failures so the attempt counts are up to date.
+            bm.deadLetterExhausted()
         }
 
         AppLogger.i(
@@ -821,8 +825,11 @@ class CloudUploadWorker(
         provider: DeviceTokenProvider,
     ): CloudUploadRequest {
         val legalEntityId = provider.getLegalEntityId() ?: ""
+        val batchId = java.util.UUID.randomUUID().toString()
+        AppLogger.i(TAG, "Upload batch: batchId=$batchId records=${batch.size}")
         return CloudUploadRequest(
             transactions = batch.map { tx -> tx.toDto(legalEntityId) },
+            uploadBatchId = batchId,
         )
     }
 

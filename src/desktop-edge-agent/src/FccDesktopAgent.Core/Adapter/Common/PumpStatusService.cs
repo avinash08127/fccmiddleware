@@ -24,7 +24,8 @@ public sealed record PumpStatusResult(
     IReadOnlyList<PumpStatus> Pumps,
     string Source,
     DateTimeOffset? CachedAtUtc,
-    DateTimeOffset ObservedAtUtc);
+    DateTimeOffset ObservedAtUtc,
+    PumpStatusCapability? Capability = null);
 
 /// <inheritdoc />
 public sealed class PumpStatusService : IPumpStatusService
@@ -85,7 +86,7 @@ public sealed class PumpStatusService : IPumpStatusService
             _cachedAt = DateTimeOffset.UtcNow;
 
             var filtered = Filter(statuses, pumpNumber);
-            return new PumpStatusResult(filtered, "live", null, DateTimeOffset.UtcNow);
+            return new PumpStatusResult(filtered, "live", null, DateTimeOffset.UtcNow, adapter.PumpStatusCapability);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

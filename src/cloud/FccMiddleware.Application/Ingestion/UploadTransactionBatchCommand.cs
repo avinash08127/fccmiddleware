@@ -46,4 +46,10 @@ public sealed record UploadTransactionBatchCommand : IRequest<UploadTransactionB
 
     /// <summary>Correlation ID for end-to-end tracing.</summary>
     public required Guid CorrelationId { get; init; }
+
+    /// <summary>
+    /// Optional batch-level idempotency key. When present, the handler checks Redis
+    /// for a cached result before processing and caches the result after processing.
+    /// </summary>
+    public string? UploadBatchId { get; init; }
 }

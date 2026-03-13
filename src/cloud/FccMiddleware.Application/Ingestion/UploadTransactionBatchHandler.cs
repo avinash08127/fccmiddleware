@@ -44,6 +44,20 @@ public sealed class UploadTransactionBatchHandler
         UploadTransactionBatchCommand command,
         CancellationToken cancellationToken)
     {
+        // ── Batch-level idempotency (GAP-4) ─────────────────────────────────────
+        // If the edge provided an uploadBatchId, check Redis for a cached result.
+        if (!string.IsNullOrEmpty(command.UploadBatchId))
+        {
+            var cached = await _deduplicationService.GetBatchResultAsync(command.UploadBatchId, cancellationToken);
+            if (cached is not null)
+            {
+                _logger.LogInformation(
+                    "Batch cache hit for batchId={BatchId} device={DeviceId} — returning cached result ({Count} records)",
+                    command.UploadBatchId, command.DeviceId, cached.Results.Count);
+                return cached;
+            }
+        }
+
         var results = new List<SingleUploadResult>(command.Records.Count);
 
         // Track (fccTransactionId:siteCode) keys accepted within this batch to detect
@@ -182,7 +196,15 @@ public sealed class UploadTransactionBatchHandler
             results.Count(r => r.Outcome == "DUPLICATE"),
             results.Count(r => r.Outcome == "REJECTED"));
 
-        return new UploadTransactionBatchResult { Results = results };
+        var batchResult = new UploadTransactionBatchResult { Results = results };
+
+        // ── Cache batch result for idempotent retries (GAP-4) ────────────────────
+        if (!string.IsNullOrEmpty(command.UploadBatchId))
+        {
+            await _deduplicationService.SetBatchResultAsync(command.UploadBatchId, batchResult, cancellationToken);
+        }
+
+        return batchResult;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

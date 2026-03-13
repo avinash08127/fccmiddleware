@@ -84,6 +84,17 @@ public sealed class BufferedTransaction
     /// <summary>Timestamp when Odoo acknowledged this transaction. Null until acknowledged.</summary>
     public DateTimeOffset? AcknowledgedAt { get; set; }
 
+    // ── Fiscalization retry tracking (GAP-7) ──────────────────────────────
+
+    /// <summary>Number of fiscalization attempts made.</summary>
+    public int FiscalAttempts { get; set; }
+
+    /// <summary>ISO 8601 UTC of last fiscalization attempt.</summary>
+    public DateTimeOffset? LastFiscalAttemptAt { get; set; }
+
+    /// <summary>NONE | PENDING | SUCCESS | DEAD_LETTER</summary>
+    public string FiscalStatus { get; set; } = "NONE";
+
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

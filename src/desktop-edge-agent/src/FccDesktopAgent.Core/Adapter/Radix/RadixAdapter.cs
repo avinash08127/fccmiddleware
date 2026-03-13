@@ -28,6 +28,9 @@ using Microsoft.Extensions.Logging;
 /// </summary>
 public sealed class RadixAdapter : IFccAdapter
 {
+    /// <inheritdoc />
+    public PumpStatusCapability PumpStatusCapability => PumpStatusCapability.NotSupported;
+
     private readonly IHttpClientFactory _httpFactory;
     private readonly FccConnectionConfig _config;
     private readonly ILogger<RadixAdapter> _logger;

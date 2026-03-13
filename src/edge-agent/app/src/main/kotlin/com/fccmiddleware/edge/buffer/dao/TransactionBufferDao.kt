@@ -377,4 +377,149 @@ interface TransactionBufferDao {
         "WHERE id = :id"
     )
     suspend fun updateFiscalReceipt(id: String, receiptCode: String, now: String)
+
+    // ── GAP-1: Dead-letter queries ──────────────────────────────────────────
+
+    /**
+     * Transition PENDING records that have exhausted their upload retries to DEAD_LETTER.
+     * Returns the number of records dead-lettered.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "sync_status = 'DEAD_LETTER', " +
+        "updated_at = :now " +
+        "WHERE sync_status = 'PENDING' " +
+        "AND upload_attempts >= :maxAttempts"
+    )
+    suspend fun deadLetterExhaustedPending(maxAttempts: Int, now: String): Int
+
+    /**
+     * Retention cleanup: delete DEAD_LETTER records older than cutoff.
+     * Returns the number of rows deleted.
+     */
+    @Query(
+        "DELETE FROM buffered_transactions " +
+        "WHERE sync_status = 'DEAD_LETTER' " +
+        "AND updated_at < :cutoffDate"
+    )
+    suspend fun deleteOldDeadLettered(cutoffDate: String): Int
+
+    /**
+     * Delete the oldest DEAD_LETTER records to free space (quota enforcement).
+     * Returns the number of rows deleted.
+     */
+    @Query(
+        "DELETE FROM buffered_transactions WHERE id IN (" +
+        "  SELECT id FROM buffered_transactions " +
+        "  WHERE sync_status = 'DEAD_LETTER' " +
+        "  ORDER BY created_at ASC " +
+        "  LIMIT :deleteCount" +
+        ")"
+    )
+    suspend fun deleteOldestDeadLettered(deleteCount: Int): Int
+
+    /**
+     * Count of DEAD_LETTER records for telemetry.
+     */
+    @Query(
+        "SELECT COUNT(*) FROM buffered_transactions " +
+        "WHERE sync_status = 'DEAD_LETTER'"
+    )
+    suspend fun countDeadLettered(): Int
+
+    // ── GAP-2: Stale uploaded revert query ──────────────────────────────────
+
+    /**
+     * Revert UPLOADED records older than [cutoffDate] back to PENDING for re-upload.
+     * Handles the case where cloud accepted the upload but the Odoo sync poll
+     * never confirmed it. Re-uploading is safe because the cloud deduplicates
+     * by fccTransactionId. Resets upload_attempts to 0 since the original upload succeeded.
+     * Returns the number of records reverted.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "sync_status = 'PENDING', " +
+        "upload_attempts = 0, " +
+        "updated_at = :now " +
+        "WHERE sync_status = 'UPLOADED' " +
+        "AND updated_at < :cutoffDate"
+    )
+    suspend fun revertStaleUploaded(cutoffDate: String, now: String): Int
+
+    // ── Fiscalization retry queries (GAP-7) ──────────────────────────────
+
+    /**
+     * Returns transactions that need fiscalization retry.
+     * Only returns records where fiscal_status = 'PENDING', attempts < max,
+     * and enough time has passed since the last attempt (backoff threshold).
+     */
+    @Query(
+        "SELECT * FROM buffered_transactions " +
+        "WHERE fiscal_status = 'PENDING' " +
+        "AND fiscal_attempts < :maxAttempts " +
+        "AND (last_fiscal_attempt_at IS NULL OR last_fiscal_attempt_at < :backoffThreshold) " +
+        "ORDER BY created_at ASC " +
+        "LIMIT :limit"
+    )
+    suspend fun getPendingFiscalization(maxAttempts: Int, backoffThreshold: String, limit: Int): List<BufferedTransaction>
+
+    /**
+     * Record a fiscalization failure: increment attempts, set last attempt timestamp.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "fiscal_attempts = fiscal_attempts + 1, " +
+        "last_fiscal_attempt_at = :now, " +
+        "updated_at = :now " +
+        "WHERE id = :id"
+    )
+    suspend fun recordFiscalFailure(id: String, now: String)
+
+    /**
+     * Mark a transaction as fiscal dead-letter after exceeding max retry attempts.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "fiscal_status = 'DEAD_LETTER', " +
+        "fiscal_attempts = fiscal_attempts + 1, " +
+        "last_fiscal_attempt_at = :now, " +
+        "updated_at = :now " +
+        "WHERE id = :id"
+    )
+    suspend fun markFiscalDeadLetter(id: String, now: String)
+
+    /**
+     * Mark a transaction as fiscal success with receipt code.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "fiscal_status = 'SUCCESS', " +
+        "fiscal_receipt_number = :receiptCode, " +
+        "last_fiscal_attempt_at = :now, " +
+        "updated_at = :now " +
+        "WHERE id = :id"
+    )
+    suspend fun markFiscalSuccess(id: String, receiptCode: String, now: String)
+
+    /**
+     * Set fiscal_status to PENDING for newly buffered transactions that need fiscalization.
+     */
+    @Query(
+        "UPDATE buffered_transactions SET " +
+        "fiscal_status = 'PENDING', " +
+        "updated_at = :now " +
+        "WHERE id = :id AND fiscal_status = 'NONE'"
+    )
+    suspend fun markFiscalPending(id: String, now: String)
+
+    /**
+     * Count of transactions in each fiscal status for telemetry.
+     */
+    @Query(
+        "SELECT fiscal_status AS sync_status, COUNT(*) AS count " +
+        "FROM buffered_transactions " +
+        "WHERE fiscal_status IN ('PENDING', 'DEAD_LETTER') " +
+        "GROUP BY fiscal_status"
+    )
+    suspend fun countByFiscalStatus(): List<StatusCount>
 }

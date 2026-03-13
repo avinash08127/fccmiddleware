@@ -19,6 +19,12 @@ public interface IFccAdapter
     Task<PreAuthResult> SendPreAuthAsync(PreAuthCommand command, CancellationToken ct);
 
     /// <summary>
+    /// Declares the adapter's pump status capability level.
+    /// Callers can check this before relying on pump status data.
+    /// </summary>
+    PumpStatusCapability PumpStatusCapability { get; }
+
+    /// <summary>
     /// Fetch the current pump status snapshot from the FCC.
     /// Returns an empty list if the FCC is unreachable.
     /// </summary>

@@ -122,6 +122,10 @@ data class BatchAcknowledgeResponse(
 @Serializable
 data class PumpStatusResponse(
     val pumps: List<com.fccmiddleware.edge.adapter.common.PumpStatus>,
+    /** Adapter-declared pump status capability level. */
+    val capability: String? = null,
+    /** Human-readable reason when capability is NOT_SUPPORTED or NOT_APPLICABLE. */
+    val reason: String? = null,
     /** true when FCC was unreachable and data is from the last-known cache. */
     val stale: Boolean = false,
     /** Age of the cached data in seconds; null when live. */

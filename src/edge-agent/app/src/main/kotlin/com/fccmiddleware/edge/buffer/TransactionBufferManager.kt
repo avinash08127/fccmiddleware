@@ -27,6 +27,9 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
 
         /** Emergency cleanup batch size when SQLITE_FULL is encountered. */
         private const val EMERGENCY_CLEANUP_BATCH = 500
+
+        /** Maximum upload attempts before a record is dead-lettered (GAP-1). */
+        const val MAX_UPLOAD_ATTEMPTS = 20
     }
 
     /**
@@ -199,6 +202,43 @@ class TransactionBufferManager(private val dao: TransactionBufferDao) {
                 ?: SyncStatus.PENDING
             status to row.count
         }
+    }
+
+    /**
+     * GAP-1: Transition PENDING records that have exhausted upload retries to DEAD_LETTER.
+     * Dead-lettered records are excluded from upload batches but remain queryable for diagnostics.
+     * CleanupWorker deletes them after the retention period.
+     *
+     * @param maxAttempts Maximum upload attempts before dead-lettering. Default: [MAX_UPLOAD_ATTEMPTS].
+     * @return Number of records transitioned to DEAD_LETTER.
+     */
+    suspend fun deadLetterExhausted(maxAttempts: Int = MAX_UPLOAD_ATTEMPTS): Int {
+        val now = Instant.now().toString()
+        val count = dao.deadLetterExhaustedPending(maxAttempts, now)
+        if (count > 0) {
+            AppLogger.w(TAG, "Dead-lettered $count records that exceeded $maxAttempts upload attempts")
+        }
+        return count
+    }
+
+    /**
+     * GAP-2: Revert UPLOADED records older than [staleDays] back to PENDING for re-upload.
+     * Handles the case where cloud accepted the upload but the Odoo sync poll never confirmed it.
+     * Re-uploading is safe because the cloud deduplicates by fccTransactionId.
+     *
+     * @param staleDays Days after which UPLOADED records are considered stale. Default: 3.
+     * @return Number of records reverted to PENDING.
+     */
+    suspend fun revertStaleUploaded(staleDays: Int = 3): Int {
+        val cutoff = Instant.now()
+            .minus(staleDays.toLong(), java.time.temporal.ChronoUnit.DAYS)
+            .toString()
+        val now = Instant.now().toString()
+        val count = dao.revertStaleUploaded(cutoff, now)
+        if (count > 0) {
+            AppLogger.w(TAG, "Reverted $count stale UPLOADED records (older than ${staleDays}d) back to PENDING")
+        }
+        return count
     }
 
     // -------------------------------------------------------------------------

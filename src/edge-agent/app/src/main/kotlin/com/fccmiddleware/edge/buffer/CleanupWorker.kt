@@ -56,6 +56,9 @@ class CleanupWorker(
         /** Minimum free disk space in bytes before we trigger emergency cleanup (50 MB). */
         const val MIN_FREE_DISK_BYTES = 50L * 1024 * 1024
 
+        /** GAP-2: Days after which UPLOADED records are considered stale and reverted to PENDING. */
+        const val DEFAULT_STALE_PENDING_DAYS = 3
+
         /** Name of the Room database file (must match BufferDatabase.create). */
         private const val DB_FILE_NAME = "fcc_buffer.db"
     }
@@ -68,6 +71,9 @@ class CleanupWorker(
         val quotaArchivedPending: Int = 0,
         val quotaDeletedArchived: Int = 0,
         val quotaDeletedSynced: Int = 0,
+        val quotaDeletedDeadLettered: Int = 0,
+        val deadLetterDeleted: Int = 0,
+        val staleUploadedReverted: Int = 0,
         val diskSpaceLow: Boolean = false,
     )
 
@@ -85,7 +91,20 @@ class CleanupWorker(
         retentionDays: Int = DEFAULT_RETENTION_DAYS,
         maxBufferRecords: Int = DEFAULT_MAX_BUFFER_RECORDS,
         pendingKeepCount: Int = DEFAULT_PENDING_KEEP_COUNT,
+        stalePendingDays: Int = DEFAULT_STALE_PENDING_DAYS,
     ): CleanupResult {
+        // GAP-2: Revert stale UPLOADED records back to PENDING before retention cleanup.
+        // Records stuck at UPLOADED for >stalePendingDays are likely due to a cloud-side
+        // processing delay. Re-uploading is safe because the cloud deduplicates.
+        val staleCutoff = Instant.now()
+            .minus(stalePendingDays.toLong(), ChronoUnit.DAYS)
+            .toString()
+        val staleNow = Instant.now().toString()
+        val staleReverted = transactionDao.revertStaleUploaded(staleCutoff, staleNow)
+        if (staleReverted > 0) {
+            AppLogger.w(TAG, "GAP-2: Reverted $staleReverted stale UPLOADED records (older than ${stalePendingDays}d) back to PENDING")
+        }
+
         // Pass 1: retention-based cleanup
         //   M-14: Follow the documented lifecycle SYNCED_TO_ODOO → ARCHIVED → (deleted).
         //   First archive old SYNCED_TO_ODOO records, then delete old ARCHIVED records.
@@ -96,13 +115,15 @@ class CleanupWorker(
 
         val txArchived = transactionDao.archiveOldSynced(cutoff, now)
         val txDeleted = transactionDao.deleteOldArchived(cutoff)
+        // GAP-1: Delete DEAD_LETTER records past retention
+        val deadLetterDeleted = transactionDao.deleteOldDeadLettered(cutoff)
         val preAuthDeleted = preAuthDao.deleteTerminal(cutoff)
         val auditDeleted = auditLogDao.deleteOlderThan(cutoff)
 
         AppLogger.d(
             TAG,
-            "Retention cleanup: txArchived=$txArchived txDeleted=$txDeleted preAuth=$preAuthDeleted audit=$auditDeleted" +
-                " (cutoff=$cutoff retentionDays=$retentionDays)"
+            "Retention cleanup: txArchived=$txArchived txDeleted=$txDeleted deadLetter=$deadLetterDeleted" +
+                " preAuth=$preAuthDeleted audit=$auditDeleted (cutoff=$cutoff retentionDays=$retentionDays)"
         )
 
         // Pass 2: quota-based cleanup
@@ -124,6 +145,9 @@ class CleanupWorker(
             quotaArchivedPending = quotaResult.archivedPending,
             quotaDeletedArchived = quotaResult.deletedArchived,
             quotaDeletedSynced = quotaResult.deletedSynced,
+            quotaDeletedDeadLettered = quotaResult.deletedDeadLettered,
+            deadLetterDeleted = deadLetterDeleted,
+            staleUploadedReverted = staleReverted,
             diskSpaceLow = diskLow,
         )
 
@@ -144,6 +168,7 @@ class CleanupWorker(
     // -------------------------------------------------------------------------
 
     private data class QuotaCleanupResult(
+        val deletedDeadLettered: Int = 0,
         val deletedArchived: Int = 0,
         val deletedSynced: Int = 0,
         val archivedPending: Int = 0,
@@ -151,9 +176,10 @@ class CleanupWorker(
 
     /**
      * Enforce buffer record count quota. Cleanup priority:
-     * 1. Delete ARCHIVED (already uploaded, no longer needed)
-     * 2. Delete SYNCED_TO_ODOO (Odoo has confirmed receipt)
-     * 3. Force-archive oldest PENDING (last resort — these haven't been uploaded yet)
+     * 1. Delete DEAD_LETTER (permanently failed, least valuable)
+     * 2. Delete ARCHIVED (already uploaded, no longer needed)
+     * 3. Delete SYNCED_TO_ODOO (Odoo has confirmed receipt)
+     * 4. Force-archive oldest PENDING (last resort — these haven't been uploaded yet)
      */
     private suspend fun enforceQuota(
         maxRecords: Int,
@@ -170,30 +196,36 @@ class CleanupWorker(
         val now = Instant.now().toString()
         var remaining = excess
 
-        // Step 1: delete ARCHIVED records first (safest to remove)
+        // Step 1: delete DEAD_LETTER records first (permanently failed, least valuable)
+        val deletedDeadLettered = if (remaining > 0) {
+            transactionDao.deleteOldestDeadLettered(remaining).also { remaining -= it }
+        } else 0
+
+        // Step 2: delete ARCHIVED records (safest to remove after dead-letter)
         val deletedArchived = if (remaining > 0) {
             transactionDao.deleteOldestArchived(remaining).also { remaining -= it }
         } else 0
 
-        // Step 2: delete SYNCED_TO_ODOO records (Odoo has already received them)
+        // Step 3: delete SYNCED_TO_ODOO records (Odoo has already received them)
         val deletedSynced = if (remaining > 0) {
             transactionDao.deleteOldestSynced(remaining).also { remaining -= it }
         } else 0
 
-        // Step 3: force-archive oldest PENDING records, keeping at least pendingKeepCount
+        // Step 4: force-archive oldest PENDING records, keeping at least pendingKeepCount
         val archivedPending = if (remaining > 0) {
             transactionDao.archiveOldestPending(pendingKeepCount, now)
         } else 0
 
-        if (deletedArchived > 0 || deletedSynced > 0 || archivedPending > 0) {
+        if (deletedDeadLettered > 0 || deletedArchived > 0 || deletedSynced > 0 || archivedPending > 0) {
             AppLogger.w(
                 TAG,
-                "Quota cleanup: deletedArchived=$deletedArchived deletedSynced=$deletedSynced " +
-                    "archivedPending=$archivedPending (excess=$excess)"
+                "Quota cleanup: deletedDeadLettered=$deletedDeadLettered deletedArchived=$deletedArchived " +
+                    "deletedSynced=$deletedSynced archivedPending=$archivedPending (excess=$excess)"
             )
         }
 
         return QuotaCleanupResult(
+            deletedDeadLettered = deletedDeadLettered,
             deletedArchived = deletedArchived,
             deletedSynced = deletedSynced,
             archivedPending = archivedPending,
@@ -232,9 +264,12 @@ class CleanupWorker(
 
     private fun buildAuditMessage(result: CleanupResult, retentionDays: Int): String {
         val parts = mutableListOf<String>()
-        parts += "Retention: txArchived=${result.transactionsArchived} txDeleted=${result.transactionsDeleted} preAuth=${result.preAuthsDeleted} audit=${result.auditEntriesDeleted} (${retentionDays}d)"
-        if (result.quotaDeletedArchived > 0 || result.quotaDeletedSynced > 0 || result.quotaArchivedPending > 0) {
-            parts += "Quota: archived=${result.quotaDeletedArchived} synced=${result.quotaDeletedSynced} pendingArchived=${result.quotaArchivedPending}"
+        parts += "Retention: txArchived=${result.transactionsArchived} txDeleted=${result.transactionsDeleted} deadLetter=${result.deadLetterDeleted} preAuth=${result.preAuthsDeleted} audit=${result.auditEntriesDeleted} (${retentionDays}d)"
+        if (result.staleUploadedReverted > 0) {
+            parts += "StaleRevert: ${result.staleUploadedReverted}"
+        }
+        if (result.quotaDeletedDeadLettered > 0 || result.quotaDeletedArchived > 0 || result.quotaDeletedSynced > 0 || result.quotaArchivedPending > 0) {
+            parts += "Quota: deadLetter=${result.quotaDeletedDeadLettered} archived=${result.quotaDeletedArchived} synced=${result.quotaDeletedSynced} pendingArchived=${result.quotaArchivedPending}"
         }
         if (result.diskSpaceLow) {
             parts += "DISK_LOW"

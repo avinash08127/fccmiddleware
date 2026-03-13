@@ -3,6 +3,7 @@ package com.fccmiddleware.edge.api
 import com.fccmiddleware.edge.adapter.common.ConnectivityState
 import com.fccmiddleware.edge.adapter.common.IFccAdapter
 import com.fccmiddleware.edge.adapter.common.PumpStatus
+import com.fccmiddleware.edge.adapter.common.PumpStatusCapability
 import com.fccmiddleware.edge.connectivity.ConnectivityManager
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respond
@@ -30,7 +31,7 @@ fun Routing.pumpStatusRoutes(cache: PumpStatusCache) {
     get("/api/v1/pump-status") {
         val pumpNumberFilter = call.request.queryParameters["pumpNumber"]?.toIntOrNull()
 
-        val (pumps, stale, fetchedAtUtc, dataAgeSeconds) = cache.get()
+        val (pumps, stale, fetchedAtUtc, dataAgeSeconds, capability) = cache.get()
 
         val filtered = if (pumpNumberFilter != null) {
             pumps.filter { it.pumpNumber == pumpNumberFilter }
@@ -42,6 +43,12 @@ fun Routing.pumpStatusRoutes(cache: PumpStatusCache) {
             HttpStatusCode.OK,
             PumpStatusResponse(
                 pumps = filtered,
+                capability = capability?.name,
+                reason = when (capability) {
+                    PumpStatusCapability.NOT_SUPPORTED -> "FCC protocol does not support pump status"
+                    PumpStatusCapability.NOT_APPLICABLE -> "Device type does not have pumps"
+                    else -> null
+                },
                 stale = stale,
                 dataAgeSeconds = dataAgeSeconds,
                 fetchedAtUtc = fetchedAtUtc,
@@ -74,6 +81,7 @@ class PumpStatusCache(
         val stale: Boolean,
         val fetchedAtUtc: String?,
         val dataAgeSeconds: Int?,
+        val capability: PumpStatusCapability?,
     )
 
     private val mutex = Mutex()
@@ -107,7 +115,7 @@ class PumpStatusCache(
                 cached = result
                 cachedAtMs = System.currentTimeMillis()
                 val fetchedAt = Instant.ofEpochMilli(cachedAtMs).toString()
-                Result(pumps = result, stale = false, fetchedAtUtc = fetchedAt, dataAgeSeconds = null)
+                Result(pumps = result, stale = false, fetchedAtUtc = fetchedAt, dataAgeSeconds = null, capability = adapter.pumpStatusCapability)
             } else {
                 staleFallback()
             }
@@ -119,6 +127,6 @@ class PumpStatusCache(
             ((System.currentTimeMillis() - cachedAtMs) / 1_000L).toInt()
         } else null
         val fetchedAt = if (cachedAtMs > 0L) Instant.ofEpochMilli(cachedAtMs).toString() else null
-        return Result(pumps = cached, stale = true, fetchedAtUtc = fetchedAt, dataAgeSeconds = ageSeconds)
+        return Result(pumps = cached, stale = true, fetchedAtUtc = fetchedAt, dataAgeSeconds = ageSeconds, capability = fccAdapter?.pumpStatusCapability)
     }
 }

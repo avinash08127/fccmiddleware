@@ -18,7 +18,8 @@ public enum SyncStatus
     Uploaded,
     DuplicateConfirmed,
     SyncedToOdoo,
-    Archived
+    Archived,
+    DeadLetter
 }
 
 /// <summary>Pre-authorization lifecycle status.</summary>
@@ -82,4 +83,17 @@ public enum PumpStatusSource
 {
     FccLive,
     EdgeSynthesized
+}
+
+/// <summary>Adapter-declared pump status capability level.</summary>
+public enum PumpStatusCapability
+{
+    /// <summary>Real-time FCC pump status (DOMS).</summary>
+    Live,
+    /// <summary>Edge-synthesized from available data (Petronite).</summary>
+    Synthesized,
+    /// <summary>Protocol does not support pump status (Radix).</summary>
+    NotSupported,
+    /// <summary>Device type does not have pumps (Advatec fiscal).</summary>
+    NotApplicable,
 }

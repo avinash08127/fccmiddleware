@@ -11,6 +11,10 @@ public sealed class UploadRequest
 {
     [JsonPropertyName("transactions")]
     public List<CanonicalTransaction> Transactions { get; init; } = [];
+
+    /// <summary>Batch-level idempotency key. Cloud caches results keyed by this ID.</summary>
+    [JsonPropertyName("uploadBatchId")]
+    public string? UploadBatchId { get; init; }
 }
 
 /// <summary>

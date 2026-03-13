@@ -109,4 +109,36 @@ interface PreAuthDao {
         "AND created_at < :cutoffDate"
     )
     suspend fun deleteTerminal(cutoffDate: String): Int
+
+    // ── GAP-3: Atomic cancel/expire with cloud unsync ───────────────────────
+
+    /**
+     * GAP-3: Atomically set status to CANCELLED and reset is_cloud_synced to 0.
+     * This ensures the PreAuthCloudForwardWorker picks up the cancellation for re-forwarding
+     * even if the record was already synced as AUTHORIZED (is_cloud_synced = 1).
+     */
+    @Query(
+        "UPDATE pre_auth_records SET " +
+        "status = 'CANCELLED', " +
+        "is_cloud_synced = 0, " +
+        "completed_at = :cancelledAt, " +
+        "failure_reason = :failureReason " +
+        "WHERE id = :id"
+    )
+    suspend fun markCancelledAndUnsync(id: String, cancelledAt: String, failureReason: String?)
+
+    /**
+     * GAP-3: Atomically set status to EXPIRED and reset is_cloud_synced to 0.
+     * This ensures the PreAuthCloudForwardWorker picks up the expiry for re-forwarding
+     * even if the record was already synced as AUTHORIZED (is_cloud_synced = 1).
+     */
+    @Query(
+        "UPDATE pre_auth_records SET " +
+        "status = 'EXPIRED', " +
+        "is_cloud_synced = 0, " +
+        "completed_at = :expiredAt, " +
+        "failure_reason = :failureReason " +
+        "WHERE id = :id"
+    )
+    suspend fun markExpiredAndUnsync(id: String, expiredAt: String, failureReason: String?)
 }

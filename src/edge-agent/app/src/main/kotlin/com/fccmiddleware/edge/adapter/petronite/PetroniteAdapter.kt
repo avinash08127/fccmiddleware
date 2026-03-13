@@ -2,6 +2,11 @@ package com.fccmiddleware.edge.adapter.petronite
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.*
+import com.fccmiddleware.edge.adapter.common.IPreAuthMatcher
+import com.fccmiddleware.edge.adapter.common.PreAuthMatchResult
+import com.fccmiddleware.edge.adapter.common.PreAuthMatchingStrategy
+import com.fccmiddleware.edge.adapter.common.ActivePreAuthSnapshot
+import com.fccmiddleware.edge.adapter.common.PumpStatusCapability
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.get
@@ -41,6 +46,42 @@ class PetroniteAdapter(
     private val config: AgentFccConfig,
     private val httpClient: HttpClient = HttpClient(OkHttp),
 ) : IFccAdapter {
+
+    override val pumpStatusCapability = PumpStatusCapability.SYNTHESIZED
+
+    override val preAuthMatcher: IPreAuthMatcher = object : IPreAuthMatcher {
+        override val matchingStrategy = PreAuthMatchingStrategy.DETERMINISTIC
+
+        override fun registerPreAuth(command: PreAuthCommand, vendorRef: String?): String {
+            return "PETRONITE-${vendorRef ?: command.odooOrderId ?: "unknown"}"
+        }
+
+        override fun matchTransaction(pumpNumber: Int, vendorMatchKey: String?): PreAuthMatchResult? {
+            if (vendorMatchKey == null) return null
+            val preAuth = activePreAuths[vendorMatchKey] ?: return null
+            return PreAuthMatchResult(
+                correlationId = "PETRONITE-$vendorMatchKey",
+                strategy = PreAuthMatchingStrategy.DETERMINISTIC,
+                odooOrderId = preAuth.odooOrderId,
+            )
+        }
+
+        override fun removePreAuth(correlationId: String): Boolean {
+            val orderId = correlationId.removePrefix("PETRONITE-")
+            return activePreAuths.remove(orderId) != null
+        }
+
+        override fun getActivePreAuths(): List<ActivePreAuthSnapshot> {
+            return activePreAuths.entries.map { (orderId, preAuth) ->
+                ActivePreAuthSnapshot(
+                    correlationId = "PETRONITE-$orderId",
+                    pumpNumber = preAuth.pumpNumber,
+                    registeredAtUtc = Instant.ofEpochMilli(preAuth.createdAtMillis).toString(),
+                    odooOrderId = preAuth.odooOrderId,
+                )
+            }
+        }
+    }
 
     private val json = Json { ignoreUnknownKeys = true }
 

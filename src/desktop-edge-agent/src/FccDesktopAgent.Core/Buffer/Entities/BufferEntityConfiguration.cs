@@ -49,6 +49,8 @@ internal sealed class BufferedTransactionConfiguration : IEntityTypeConfiguratio
         builder.Property(t => t.OdooOrderId).HasMaxLength(128);
         builder.Property(t => t.PaymentId).HasMaxLength(128);
         builder.Property(t => t.AcknowledgedAt).HasConversion(Converters.Optional);
+        builder.Property(t => t.FiscalStatus).IsRequired().HasMaxLength(16).HasDefaultValue("NONE");
+        builder.Property(t => t.LastFiscalAttemptAt).HasConversion(Converters.Optional);
 
         // ix_bt_dedup — UNIQUE(FccTransactionId, SiteCode)
         builder.HasIndex(t => new { t.FccTransactionId, t.SiteCode })

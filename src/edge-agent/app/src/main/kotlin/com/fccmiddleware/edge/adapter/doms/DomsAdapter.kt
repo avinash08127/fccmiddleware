@@ -1,6 +1,7 @@
 package com.fccmiddleware.edge.adapter.doms
 
 import com.fccmiddleware.edge.adapter.common.*
+import com.fccmiddleware.edge.adapter.common.PumpStatusCapability
 
 /**
  * DomsAdapter — Edge Agent adapter for the DOMS FCC protocol.
@@ -16,6 +17,8 @@ import com.fccmiddleware.edge.adapter.common.*
  * Full implementation follows EA-1.x tasks.
  */
 class DomsAdapter(private val config: AgentFccConfig) : IFccAdapter {
+
+    override val pumpStatusCapability = PumpStatusCapability.LIVE
 
     override suspend fun normalize(rawPayload: RawPayloadEnvelope): NormalizationResult {
         return NormalizationResult.Failure(

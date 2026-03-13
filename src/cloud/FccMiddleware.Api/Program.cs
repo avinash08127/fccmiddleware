@@ -1,4 +1,5 @@
 using System.Text;
+using System.Threading.RateLimiting;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Api.Portal;
@@ -45,6 +46,13 @@ Log.Logger = new LoggerConfiguration()
 try
 {
     var builder = WebApplication.CreateBuilder(args);
+
+    // S-3: Lower default max request body size from 30 MB to 5 MB.
+    // Per-endpoint overrides via [RequestSizeLimit] tighten further for webhooks.
+    builder.WebHost.ConfigureKestrel(options =>
+    {
+        options.Limits.MaxRequestBodySize = 5 * 1024 * 1024; // 5 MB
+    });
 
     // Registers: Serilog (structured JSON → console), OpenTelemetry, base health check
     builder.AddServiceDefaults();
@@ -279,6 +287,42 @@ try
             options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
         });
 
+    // S-3: Per-IP rate limiting for anonymous and secret-authenticated routes.
+    builder.Services.AddRateLimiter(options =>
+    {
+        options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+        // Anonymous webhook ingestion endpoints (Radix, Petronite, Advatec)
+        options.AddPolicy("anonymous-ingress", httpContext =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 100,
+                    Window = TimeSpan.FromMinutes(1),
+                }));
+
+        // Device registration (bootstrap-token authenticated)
+        options.AddPolicy("registration", httpContext =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 10,
+                    Window = TimeSpan.FromMinutes(1),
+                }));
+
+        // Token refresh endpoint
+        options.AddPolicy("token-refresh", httpContext =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 20,
+                    Window = TimeSpan.FromMinutes(1),
+                }));
+    });
+
     builder.Services.Configure<ApiBehaviorOptions>(options =>
     {
         options.InvalidModelStateResponseFactory = context =>
@@ -419,6 +463,7 @@ try
         app.UseHsts();
     }
 
+    app.UseRateLimiter();
     app.UseAuthentication();
     app.UseMiddleware<DeviceActiveCheckMiddleware>();
     app.UseMiddleware<TenantScopeMiddleware>();

@@ -58,6 +58,15 @@ public sealed class FccHmacAuthHandler : AuthenticationHandler<FccHmacAuthOption
             return AuthenticateResult.Fail("HMAC timestamp is outside the allowed clock skew.");
         }
 
+        // S-3: Reject oversized bodies before buffering to prevent memory pressure.
+        // Kestrel's MaxRequestBodySize (5 MB) enforces at transport level; this is
+        // defence-in-depth for when Content-Length is known upfront.
+        const long maxHmacBodyBytes = 5 * 1024 * 1024;
+        if (Request.ContentLength > maxHmacBodyBytes)
+        {
+            return AuthenticateResult.Fail("Request body exceeds maximum allowed size.");
+        }
+
         Request.EnableBuffering();
         using var reader = new StreamReader(Request.Body, Encoding.UTF8, leaveOpen: true);
         var body = await reader.ReadToEndAsync(Context.RequestAborted);

@@ -9,6 +9,7 @@ import androidx.room.PrimaryKey
  * Locally-buffered FCC dispense transaction.
  *
  * Edge sync states: PENDING → UPLOADED → SYNCED_TO_ODOO → ARCHIVED → (deleted)
+ *                   PENDING → DEAD_LETTER → (deleted after retention)
  *
  * Upload order is created_at ASC (oldest first). A failed record is never skipped.
  * pumpNumber / nozzleNumber are FCC numbers as received from the FCC.
@@ -89,7 +90,7 @@ data class BufferedTransaction(
     @ColumnInfo(name = "status")
     val status: String = "PENDING",
 
-    /** SyncStatus: PENDING | UPLOADED | SYNCED_TO_ODOO | ARCHIVED */
+    /** SyncStatus: PENDING | UPLOADED | SYNCED_TO_ODOO | ARCHIVED | DEAD_LETTER */
     @ColumnInfo(name = "sync_status")
     val syncStatus: String = "PENDING",
 
@@ -129,6 +130,17 @@ data class BufferedTransaction(
 
     @ColumnInfo(name = "is_discard", defaultValue = "0")
     val isDiscard: Boolean = false,
+
+    // ── Fiscalization retry tracking (GAP-7) ──────────────────────────────
+    @ColumnInfo(name = "fiscal_attempts", defaultValue = "0")
+    val fiscalAttempts: Int = 0,
+
+    @ColumnInfo(name = "last_fiscal_attempt_at")
+    val lastFiscalAttemptAt: String? = null,
+
+    /** NONE | PENDING | SUCCESS | DEAD_LETTER */
+    @ColumnInfo(name = "fiscal_status", defaultValue = "'NONE'")
+    val fiscalStatus: String = "NONE",
 
     @ColumnInfo(name = "schema_version")
     val schemaVersion: Int = 1,

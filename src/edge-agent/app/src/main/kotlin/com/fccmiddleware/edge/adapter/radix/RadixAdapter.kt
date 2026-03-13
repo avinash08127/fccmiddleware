@@ -2,6 +2,11 @@ package com.fccmiddleware.edge.adapter.radix
 
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.adapter.common.*
+import com.fccmiddleware.edge.adapter.common.IPreAuthMatcher
+import com.fccmiddleware.edge.adapter.common.PreAuthMatchResult
+import com.fccmiddleware.edge.adapter.common.PreAuthMatchingStrategy
+import com.fccmiddleware.edge.adapter.common.ActivePreAuthSnapshot
+import com.fccmiddleware.edge.adapter.common.PumpStatusCapability
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.header
@@ -46,6 +51,43 @@ class RadixAdapter(
     private val config: AgentFccConfig,
     private val httpClient: HttpClient = HttpClient(OkHttp),
 ) : IFccAdapter, Closeable {
+
+    override val pumpStatusCapability = PumpStatusCapability.NOT_SUPPORTED
+
+    override val preAuthMatcher: IPreAuthMatcher = object : IPreAuthMatcher {
+        override val matchingStrategy = PreAuthMatchingStrategy.DETERMINISTIC
+
+        override fun registerPreAuth(command: PreAuthCommand, vendorRef: String?): String {
+            return "RADIX-TOKEN-${vendorRef ?: "0"}"
+        }
+
+        override fun matchTransaction(pumpNumber: Int, vendorMatchKey: String?): PreAuthMatchResult? {
+            if (vendorMatchKey == null) return null
+            val token = vendorMatchKey.toIntOrNull() ?: return null
+            val preAuth = activePreAuths[token] ?: return null
+            return PreAuthMatchResult(
+                correlationId = "RADIX-TOKEN-$token",
+                strategy = PreAuthMatchingStrategy.DETERMINISTIC,
+                odooOrderId = preAuth.odooOrderId,
+            )
+        }
+
+        override fun removePreAuth(correlationId: String): Boolean {
+            val token = correlationId.removePrefix("RADIX-TOKEN-").toIntOrNull() ?: return false
+            return activePreAuths.remove(token) != null
+        }
+
+        override fun getActivePreAuths(): List<ActivePreAuthSnapshot> {
+            return activePreAuths.entries.map { (token, preAuth) ->
+                ActivePreAuthSnapshot(
+                    correlationId = "RADIX-TOKEN-$token",
+                    pumpNumber = preAuth.pumpNumber,
+                    registeredAtUtc = preAuth.createdAt.toString(),
+                    odooOrderId = preAuth.odooOrderId,
+                )
+            }
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Token counter — shared across heartbeat, fetch, and pre-auth

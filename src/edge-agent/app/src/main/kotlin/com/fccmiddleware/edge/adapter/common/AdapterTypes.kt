@@ -307,3 +307,86 @@ data class AgentFccConfig(
     /** Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL). */
     val advatecCustIdType: Int? = null,
 )
+
+// ---------------------------------------------------------------------------
+// Pre-auth matching contract (GAP-5) — standardized interface across adapters
+// ---------------------------------------------------------------------------
+
+/** Matching confidence level for pre-auth → transaction correlation. */
+enum class PreAuthMatchingStrategy {
+    /** Match is based on a unique vendor-assigned key (Radix TOKEN, Petronite orderId). */
+    DETERMINISTIC,
+    /** Match relies on heuristics like pump number + time window (Advatec). */
+    HEURISTIC,
+}
+
+/** Result of attempting to match a transaction to an active pre-auth. */
+@Serializable
+data class PreAuthMatchResult(
+    /** Standardized correlation ID linking the pre-auth to the transaction. */
+    val correlationId: String,
+    /** Confidence level of the match. */
+    val strategy: PreAuthMatchingStrategy,
+    /** Odoo order ID from the pre-auth, if available. */
+    val odooOrderId: String? = null,
+)
+
+/** Snapshot of an active (non-terminal) pre-auth for diagnostics. */
+@Serializable
+data class ActivePreAuthSnapshot(
+    /** Standardized correlation ID. */
+    val correlationId: String,
+    /** Physical pump number. */
+    val pumpNumber: Int,
+    /** When the pre-auth was registered. ISO 8601 UTC. */
+    val registeredAtUtc: String,
+    /** Odoo order ID, if available. */
+    val odooOrderId: String? = null,
+)
+
+/**
+ * Standardized pre-auth matching interface (GAP-5).
+ *
+ * Each adapter implements its own vendor-specific matching logic behind this
+ * common interface. The matching strategy (DETERMINISTIC vs HEURISTIC) is
+ * declared so callers know the confidence level of matches.
+ *
+ * Correlation ID format by vendor:
+ *   - Radix: "RADIX-TOKEN-{token}"
+ *   - Petronite: "PETRONITE-{orderId}"
+ *   - Advatec: "ADVATEC-{pumpNumber}-{timestamp}"
+ */
+interface IPreAuthMatcher {
+    /** Vendor-specific matching confidence. */
+    val matchingStrategy: PreAuthMatchingStrategy
+
+    /**
+     * Register a new pre-auth and return its standardized correlation ID.
+     *
+     * @param command The pre-auth command with pump/amount details.
+     * @param vendorRef Vendor-assigned reference (e.g., Radix TOKEN, Petronite orderId).
+     * @return Standardized correlation ID in the format "{VENDOR}-{ref}".
+     */
+    fun registerPreAuth(command: PreAuthCommand, vendorRef: String?): String
+
+    /**
+     * Match a transaction to an active pre-auth.
+     *
+     * @param pumpNumber Physical pump number from the transaction.
+     * @param vendorMatchKey Vendor-specific key for matching (TOKEN for Radix, orderId for Petronite, customerId for Advatec).
+     * @return Match result with correlation ID, or null if no match found.
+     */
+    fun matchTransaction(pumpNumber: Int, vendorMatchKey: String?): PreAuthMatchResult?
+
+    /**
+     * Remove/expire a pre-auth by its correlation ID.
+     *
+     * @return true if the pre-auth was found and removed.
+     */
+    fun removePreAuth(correlationId: String): Boolean
+
+    /**
+     * List active (non-terminal) pre-auths for diagnostics and status endpoints.
+     */
+    fun getActivePreAuths(): List<ActivePreAuthSnapshot>
+}

@@ -57,7 +57,7 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
         LocalPump::class,
         LocalNozzle::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class BufferDatabase : RoomDatabase() {
@@ -158,6 +158,14 @@ abstract class BufferDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN fiscal_attempts INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN last_fiscal_attempt_at TEXT")
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN fiscal_status TEXT NOT NULL DEFAULT 'NONE'")
+            }
+        }
+
         fun create(context: Context): BufferDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
@@ -165,7 +173,7 @@ abstract class BufferDatabase : RoomDatabase() {
                 "fcc_buffer.db"
             )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
         }
     }
