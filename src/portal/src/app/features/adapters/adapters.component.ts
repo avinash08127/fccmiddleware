@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { Component, DestroyRef, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, DestroyRef, effect, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -7,9 +7,9 @@ import { CardModule } from 'primeng/card';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { TableModule } from 'primeng/table';
 import { SelectModule } from 'primeng/select';
-import { MasterDataService } from '../../core/services/master-data.service';
+import { LegalEntityStateService } from '../../core/services/legal-entity-state.service';
 import { AdapterService } from '../../core/services/adapter.service';
-import { AdapterSummary, LegalEntity } from '../../core/models';
+import { AdapterSummary } from '../../core/models';
 
 @Component({
   selector: 'app-adapters',
@@ -116,41 +116,32 @@ import { AdapterSummary, LegalEntity } from '../../core/models';
     `,
   ],
 })
-export class AdaptersComponent implements OnInit {
-  private readonly masterDataService = inject(MasterDataService);
+export class AdaptersComponent {
+  private readonly leState = inject(LegalEntityStateService);
   private readonly adapterService = inject(AdapterService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
   readonly loading = signal(false);
-  readonly legalEntities = signal<LegalEntity[]>([]);
-  readonly selectedLegalEntityId = signal<string | null>(null);
+  readonly selectedLegalEntityId = this.leState.selectedId;
   readonly adapters = signal<AdapterSummary[]>([]);
+  readonly legalEntityOptions = this.leState.options;
 
-  readonly legalEntityOptions = computed(() =>
-    this.legalEntities().map((item) => ({
-      label: `${item.name} (${item.code})`,
-      value: item.id,
-    })),
-  );
-
-  ngOnInit(): void {
-    this.masterDataService
-      .getLegalEntities()
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((entities) => {
-        this.legalEntities.set(entities);
-        if (entities.length === 1) {
-          this.onLegalEntityChange(entities[0].id);
-        }
-      });
+  constructor() {
+    effect(() => {
+      const id = this.leState.selectedId();
+      if (id) {
+        this.loadAdapters(id);
+      }
+    });
   }
 
   onLegalEntityChange(legalEntityId: string | null): void {
-    this.selectedLegalEntityId.set(legalEntityId);
-    this.adapters.set([]);
-    if (!legalEntityId) return;
+    this.leState.select(legalEntityId);
+  }
 
+  private loadAdapters(legalEntityId: string): void {
+    this.adapters.set([]);
     this.loading.set(true);
     this.adapterService
       .getAdapters(legalEntityId)

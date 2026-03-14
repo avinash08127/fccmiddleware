@@ -11,6 +11,14 @@ public sealed class RegisterDeviceCommand : IRequest<Result<RegisterDeviceResult
     public required string DeviceModel { get; init; }
     public required string OsVersion { get; init; }
     public required string AgentVersion { get; init; }
+    public string DeviceClass { get; init; } = "ANDROID";
+    public string? RoleCapability { get; init; }
+    public int? SiteHaPriority { get; init; }
+    public IReadOnlyList<string> Capabilities { get; init; } = Array.Empty<string>();
+    public string? PeerApiBaseUrl { get; init; }
+    public string? PeerApiAdvertisedHost { get; init; }
+    public int? PeerApiPort { get; init; }
+    public bool PeerApiTlsEnabled { get; init; }
     public bool ReplacePreviousAgent { get; init; }
 }
 

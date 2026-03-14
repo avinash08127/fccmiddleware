@@ -3,6 +3,8 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using FccDesktopAgent.App.Services;
 using FccDesktopAgent.Core.Config;
+using FccDesktopAgent.Core.Sync;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace FccDesktopAgent.App.Views;
 
@@ -37,6 +39,7 @@ public sealed partial class ProvisioningWindow : Window
         InitializeComponent();
 
         _orchestrator = new SetupOrchestrator(services);
+        ShowOperatorNotice(services?.GetService<IAgentCommandStateStore>());
 
         // Populate environment combo boxes
         EnvComboBox.ItemsSource = EnvDisplayItems;
@@ -434,6 +437,7 @@ public sealed partial class ProvisioningWindow : Window
         {
             await _orchestrator.PersistManualStateAsync();
             await _orchestrator.PersistApiKeyAsync();
+            await _orchestrator.ClearOperatorNoticeAsync();
 
             // F-DSK-007: Only start the host if it is not already running.
             await _orchestrator.StartHostAsync(AgentAppContext.WebApp, AgentAppContext.IsHostStarted);
@@ -446,6 +450,22 @@ public sealed partial class ProvisioningWindow : Window
         {
             NextButton.IsEnabled = true;
             NextButton.Content = "Retry Launch";
+        }
+    }
+
+    private void ShowOperatorNotice(IAgentCommandStateStore? stateStore)
+    {
+        var state = stateStore?.Load();
+        if (state is null || state.NoticeKind == OperatorNoticeKind.None || string.IsNullOrWhiteSpace(state.NoticeMessage))
+            return;
+
+        ProvisioningNoticeBorder.IsVisible = true;
+        ProvisioningNoticeText.Text = state.NoticeMessage;
+
+        if (state.NoticeKind == OperatorNoticeKind.Decommissioned)
+        {
+            ProvisioningNoticeBorder.Background = new SolidColorBrush(Color.Parse("#FEE2E2"));
+            ProvisioningNoticeText.Foreground = new SolidColorBrush(Color.Parse("#991B1B"));
         }
     }
 

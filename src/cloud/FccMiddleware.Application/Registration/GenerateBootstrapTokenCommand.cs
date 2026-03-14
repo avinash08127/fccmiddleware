@@ -8,6 +8,8 @@ public sealed class GenerateBootstrapTokenCommand : IRequest<Result<GenerateBoot
     public required string SiteCode { get; init; }
     public required Guid LegalEntityId { get; init; }
     public required string CreatedBy { get; init; }
+    public string? CreatedByActorId { get; init; }
+    public string? CreatedByActorDisplay { get; init; }
 
     /// <summary>Cloud environment key (e.g. "PRODUCTION", "STAGING"). Optional.</summary>
     public string? Environment { get; init; }

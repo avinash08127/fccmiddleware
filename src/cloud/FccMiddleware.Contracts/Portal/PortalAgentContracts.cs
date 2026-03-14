@@ -8,13 +8,29 @@ public sealed record AgentRegistrationDto
     public required Guid DeviceId { get; init; }
     public required string SiteCode { get; init; }
     public required Guid LegalEntityId { get; init; }
+    public required string DeviceClass { get; init; }
     public required string DeviceSerialNumber { get; init; }
     public required string DeviceModel { get; init; }
     public required string OsVersion { get; init; }
     public required string AgentVersion { get; init; }
+    public required string RoleCapability { get; init; }
+    public required int Priority { get; init; }
+    public string? CurrentRole { get; init; }
+    public required string[] Capabilities { get; init; }
+    public string? PeerApiBaseUrl { get; init; }
+    public string? PeerApiAdvertisedHost { get; init; }
+    public int? PeerApiPort { get; init; }
+    public required bool PeerApiTlsEnabled { get; init; }
+    public long? LeaderEpochSeen { get; init; }
+    public int? LastReplicationLagSeconds { get; init; }
     public required string Status { get; init; }
     public required DateTimeOffset RegisteredAt { get; init; }
     public DateTimeOffset? LastSeenAt { get; init; }
+    public string? SuspensionReasonCode { get; init; }
+    public string? SuspensionReason { get; init; }
+    public Guid? ReplacementForDeviceId { get; init; }
+    public DateTimeOffset? ApprovalGrantedAt { get; init; }
+    public string? ApprovalGrantedByActorDisplay { get; init; }
 }
 
 public sealed record AgentHealthSummaryDto
@@ -23,7 +39,15 @@ public sealed record AgentHealthSummaryDto
     public required string SiteCode { get; init; }
     public string? SiteName { get; init; }
     public required Guid LegalEntityId { get; init; }
+    public required string DeviceClass { get; init; }
     public required string AgentVersion { get; init; }
+    public required string RoleCapability { get; init; }
+    public required int Priority { get; init; }
+    public string? CurrentRole { get; init; }
+    public required bool IsCurrentLeader { get; init; }
+    public required long LeaderEpoch { get; init; }
+    public required string[] Capabilities { get; init; }
+    public string? PeerApiBaseUrl { get; init; }
     public required string Status { get; init; }
     public required bool HasTelemetry { get; init; }
     public string? ConnectivityState { get; init; }
@@ -31,8 +55,11 @@ public sealed record AgentHealthSummaryDto
     public bool? IsCharging { get; init; }
     public int? BufferDepth { get; init; }
     public int? SyncLagSeconds { get; init; }
+    public int? LastReplicationLagSeconds { get; init; }
     public DateTimeOffset? LastTelemetryAt { get; init; }
     public DateTimeOffset? LastSeenAt { get; init; }
+    public string? SuspensionReasonCode { get; init; }
+    public DateTimeOffset? ApprovalGrantedAt { get; init; }
 }
 
 public sealed record AgentTelemetryDto

@@ -7,6 +7,7 @@ using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Runtime;
 using FccDesktopAgent.Core.Security;
+using FccDesktopAgent.Core.Sync;
 using FccDesktopAgent.Core.WebSocket;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -89,6 +90,10 @@ try
     // Expose the DI container and WebApp to Avalonia
     AgentAppContext.ServiceProvider = webApp.Services;
     AgentAppContext.WebApp = webApp;
+
+    var commandExecutor = webApp.Services.GetService<IAgentCommandExecutor>();
+    if (commandExecutor is not null)
+        await commandExecutor.FinalizeAckedActionIfNeededAsync("startup", CancellationToken.None);
 
     // ── Registration gate — route based on device state ──────────────────────
     var registrationManager = webApp.Services.GetRequiredService<IRegistrationManager>();

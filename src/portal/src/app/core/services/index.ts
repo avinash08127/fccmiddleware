@@ -9,3 +9,5 @@ export * from './settings.service';
 export * from './bootstrap-token.service';
 export * from './logging.service';
 export * from './adapter.service';
+export * from './legal-entity-state.service';
+export * from './agent-command.service';

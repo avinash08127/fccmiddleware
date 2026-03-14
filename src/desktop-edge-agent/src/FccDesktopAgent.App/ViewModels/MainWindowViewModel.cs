@@ -4,6 +4,7 @@ using Avalonia.Threading;
 using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Connectivity;
+using FccDesktopAgent.Core.Sync;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -18,6 +19,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 {
     private readonly IServiceProvider? _services;
     private readonly IConnectivityMonitor? _connectivity;
+    private readonly IAgentCommandStateStore? _commandStateStore;
     private readonly Timer _statusTimer;
     private readonly CancellationTokenSource _disposeCts = new();
 
@@ -25,12 +27,17 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
     private IBrush _connectivityDotBrush = new SolidColorBrush(Color.Parse("#22C55E"));
     private string _bufferText = "0 pending";
     private string _lastSyncText = "Last sync: Never";
+    private string _operatorNoticeText = string.Empty;
+    private bool _hasOperatorNotice;
+    private IBrush _operatorNoticeBackgroundBrush = new SolidColorBrush(Color.Parse("#FEF3C7"));
+    private IBrush _operatorNoticeForegroundBrush = new SolidColorBrush(Color.Parse("#92400E"));
     private string _currentNavTarget = "Dashboard";
 
     public MainWindowViewModel(IServiceProvider? services)
     {
         _services = services;
         _connectivity = services?.GetService<IConnectivityMonitor>();
+        _commandStateStore = services?.GetService<IAgentCommandStateStore>();
 
         NavigateCommand = new RelayCommand<string>(target =>
             CurrentNavTarget = target ?? "Dashboard");
@@ -39,6 +46,12 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         {
             _connectivity.StateChanged += OnConnectivityChanged;
             UpdateConnectivity(_connectivity.Current);
+        }
+
+        if (_commandStateStore is not null)
+        {
+            _commandStateStore.StateChanged += OnOperatorStateChanged;
+            UpdateOperatorNotice(_commandStateStore.Load());
         }
 
         _statusTimer = new Timer(
@@ -72,6 +85,30 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         private set => SetProperty(ref _lastSyncText, value);
     }
 
+    public bool HasOperatorNotice
+    {
+        get => _hasOperatorNotice;
+        private set => SetProperty(ref _hasOperatorNotice, value);
+    }
+
+    public string OperatorNoticeText
+    {
+        get => _operatorNoticeText;
+        private set => SetProperty(ref _operatorNoticeText, value);
+    }
+
+    public IBrush OperatorNoticeBackgroundBrush
+    {
+        get => _operatorNoticeBackgroundBrush;
+        private set => SetProperty(ref _operatorNoticeBackgroundBrush, value);
+    }
+
+    public IBrush OperatorNoticeForegroundBrush
+    {
+        get => _operatorNoticeForegroundBrush;
+        private set => SetProperty(ref _operatorNoticeForegroundBrush, value);
+    }
+
     // ── Navigation ───────────────────────────────────────────────────────────
 
     public string CurrentNavTarget
@@ -102,6 +139,28 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
 
         ConnectivityText = text;
         ConnectivityDotBrush = new SolidColorBrush(Color.Parse(color));
+    }
+
+    private void OnOperatorStateChanged(object? sender, AgentCommandRuntimeState state)
+    {
+        Dispatcher.UIThread.Post(() => UpdateOperatorNotice(state));
+    }
+
+    private void UpdateOperatorNotice(AgentCommandRuntimeState state)
+    {
+        HasOperatorNotice = state.NoticeKind != OperatorNoticeKind.None
+            && !string.IsNullOrWhiteSpace(state.NoticeMessage);
+        OperatorNoticeText = state.NoticeMessage ?? string.Empty;
+
+        var (background, foreground) = state.NoticeKind switch
+        {
+            OperatorNoticeKind.Decommissioned => ("#FEE2E2", "#991B1B"),
+            OperatorNoticeKind.ResetCompleted => ("#DBEAFE", "#1D4ED8"),
+            _ => ("#FEF3C7", "#92400E")
+        };
+
+        OperatorNoticeBackgroundBrush = new SolidColorBrush(Color.Parse(background));
+        OperatorNoticeForegroundBrush = new SolidColorBrush(Color.Parse(foreground));
     }
 
     // ── Buffer Stats ─────────────────────────────────────────────────────────
@@ -158,6 +217,8 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
         _disposeCts.Cancel();
         if (_connectivity is not null)
             _connectivity.StateChanged -= OnConnectivityChanged;
+        if (_commandStateStore is not null)
+            _commandStateStore.StateChanged -= OnOperatorStateChanged;
         _statusTimer.Dispose();
         _disposeCts.Dispose();
     }

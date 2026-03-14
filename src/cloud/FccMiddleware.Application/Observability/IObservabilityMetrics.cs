@@ -23,4 +23,20 @@ public interface IObservabilityMetrics
     void RecordStaleTransactionCount(int staleCount);
 
     void RecordEdgeAgentOfflineHours(Guid legalEntityId, string siteCode, Guid deviceId, double offlineHours);
+
+    void RecordAgentCommandCreated(Guid legalEntityId, string siteCode, Guid deviceId, string commandType);
+
+    void RecordAgentCommandAcked(Guid legalEntityId, string siteCode, Guid deviceId, string commandType);
+
+    void RecordAgentCommandFailed(Guid legalEntityId, string siteCode, Guid deviceId, string commandType);
+
+    void RecordAgentCommandExpired(Guid legalEntityId, string siteCode, Guid deviceId, string commandType);
+
+    void RecordAgentPushHintAttempted(Guid legalEntityId, string siteCode, Guid deviceId, string kind);
+
+    void RecordAgentPushHintSucceeded(Guid legalEntityId, string siteCode, Guid deviceId, string kind);
+
+    void RecordAgentPushHintFailed(Guid legalEntityId, string siteCode, Guid deviceId, string kind);
+
+    void RecordBootstrapTokenHistoryApiLatency(Guid legalEntityId, double latencyMs);
 }

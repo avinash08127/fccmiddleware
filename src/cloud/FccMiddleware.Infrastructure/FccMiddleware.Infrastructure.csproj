@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.0.6.7" />
+    <PackageReference Include="AWSSDK.SimpleEmailV2" Version="4.0.7" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

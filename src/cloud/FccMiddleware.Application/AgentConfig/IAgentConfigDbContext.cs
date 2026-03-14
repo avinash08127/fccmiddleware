@@ -18,6 +18,8 @@ public interface IAgentConfigDbContext
 
     Task<SiteAdapterOverride?> GetSiteAdapterOverrideAsync(Guid siteId, string adapterKey, CancellationToken ct);
 
+    Task<List<AgentRegistration>> GetSiteAgentsAsync(Guid siteId, CancellationToken ct);
+
     /// <summary>
     /// Finds the agent registration for the given device ID.
     /// </summary>

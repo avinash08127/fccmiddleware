@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnInit, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, OnInit, inject, signal, computed, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
@@ -14,14 +14,13 @@ import { MultiSelectModule } from 'primeng/multiselect';
 import { InputTextModule } from 'primeng/inputtext';
 
 import { AuditService } from '../../core/services/audit.service';
-import { MasterDataService } from '../../core/services/master-data.service';
+import { LegalEntityStateService } from '../../core/services/legal-entity-state.service';
 import {
   AuditEvent,
   AuditEventQueryParams,
   EventType,
   KNOWN_AUDIT_EVENT_TYPES,
 } from '../../core/models/audit.model';
-import { LegalEntity } from '../../core/models/master-data.model';
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
@@ -431,7 +430,7 @@ interface LoadRequest {
 })
 export class AuditLogComponent implements OnInit {
   private readonly auditService = inject(AuditService);
-  private readonly masterDataService = inject(MasterDataService);
+  private readonly leState = inject(LegalEntityStateService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
@@ -439,12 +438,9 @@ export class AuditLogComponent implements OnInit {
   readonly pageSize = 20;
   readonly maxDays = MAX_DATE_RANGE_DAYS;
 
-  // ── Legal entity ──────────────────────────────────────────────────────────
-  private readonly legalEntities = signal<LegalEntity[]>([]);
-  readonly selectedLegalEntityId = signal<string | null>(null);
-  readonly legalEntityOptions = computed(() =>
-    this.legalEntities().map((e) => ({ label: `${e.name} (${e.code})`, value: e.id })),
-  );
+  // ── Legal entity (shared) ─────────────────────────────────────────────────
+  readonly selectedLegalEntityId = this.leState.selectedId;
+  readonly legalEntityOptions = this.leState.options;
 
   // ── Filter state ──────────────────────────────────────────────────────────
   filterCorrelationId = '';
@@ -473,11 +469,6 @@ export class AuditLogComponent implements OnInit {
   private readonly load$ = new Subject<LoadRequest>();
 
   constructor() {
-    this.masterDataService
-      .getLegalEntities()
-      .pipe(takeUntilDestroyed())
-      .subscribe({ next: (entities) => this.legalEntities.set(entities) });
-
     this.load$
       .pipe(
         switchMap((req) => {
@@ -510,7 +501,9 @@ export class AuditLogComponent implements OnInit {
   ngOnInit(): void {
     this.route.queryParamMap.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((params) => {
       const legalEntityId = params.get('legalEntityId');
-      this.selectedLegalEntityId.set(legalEntityId);
+      if (legalEntityId) {
+        this.leState.select(legalEntityId);
+      }
 
       this.filterCorrelationId = params.get('correlationId') ?? '';
       this.filterEventTypes = params.getAll('eventTypes');
@@ -535,7 +528,7 @@ export class AuditLogComponent implements OnInit {
   // ── Event handlers ────────────────────────────────────────────────────────
 
   onLegalEntityChange(entityId: string | null): void {
-    this.selectedLegalEntityId.set(entityId);
+    this.leState.select(entityId);
     this.listState.set(emptyListState());
     this.expandedRowKeys = {};
     this.searched.set(false);

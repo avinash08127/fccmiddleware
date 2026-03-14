@@ -1,4 +1,4 @@
-import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, effect, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -13,7 +13,7 @@ import { BadgeModule } from 'primeng/badge';
 import { FormsModule } from '@angular/forms';
 
 import { ReconciliationService } from '../../core/services/reconciliation.service';
-import { MasterDataService } from '../../core/services/master-data.service';
+import { LegalEntityStateService } from '../../core/services/legal-entity-state.service';
 import { SiteService } from '../../core/services/site.service';
 import {
   ReconciliationException,
@@ -572,7 +572,7 @@ interface LoadRequest {
 })
 export class ReconciliationListComponent {
   private readonly reconService = inject(ReconciliationService);
-  private readonly masterDataService = inject(MasterDataService);
+  private readonly leState = inject(LegalEntityStateService);
   private readonly siteService = inject(SiteService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
@@ -582,12 +582,9 @@ export class ReconciliationListComponent {
 
   readonly pageSize = 20;
 
-  // ── Legal entity ──────────────────────────────────────────────────────────
-  private readonly legalEntities = signal<LegalEntity[]>([]);
-  readonly selectedLegalEntityId = signal<string | null>(null);
-  readonly legalEntityOptions = computed(() =>
-    this.legalEntities().map((e) => ({ label: `${e.name} (${e.code})`, value: e.id })),
-  );
+  // ── Legal entity (shared) ─────────────────────────────────────────────────
+  readonly selectedLegalEntityId = this.leState.selectedId;
+  readonly legalEntityOptions = this.leState.options;
 
   // ── Site filter options ───────────────────────────────────────────────────
   readonly siteOptions = signal<{ label: string; value: string }[]>([]);
@@ -623,10 +620,15 @@ export class ReconciliationListComponent {
   private readonly loadReviewed$ = new Subject<LoadRequest>();
 
   constructor() {
-    this.masterDataService
-      .getLegalEntities()
-      .pipe(takeUntilDestroyed())
-      .subscribe({ next: (entities) => this.legalEntities.set(entities) });
+    // Auto-load when the shared legal entity selection changes.
+    effect(() => {
+      const entityId = this.leState.selectedId();
+      if (entityId) {
+        this.loadSitesForEntity(entityId);
+        this.resetAllTabs();
+        this.triggerTabLoad(this.activeTab());
+      }
+    });
 
     // Variance Flagged subscription
     this.loadVariance$
@@ -788,11 +790,7 @@ export class ReconciliationListComponent {
   // ── Event handlers ────────────────────────────────────────────────────────
 
   onLegalEntityChange(entityId: string | null): void {
-    this.selectedLegalEntityId.set(entityId);
-    if (!entityId) return;
-    this.loadSitesForEntity(entityId);
-    this.resetAllTabs();
-    this.triggerTabLoad(this.activeTab());
+    this.leState.select(entityId);
   }
 
   onFiltersChange(filters: ReconciliationFilters): void {

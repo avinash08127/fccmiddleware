@@ -3,6 +3,7 @@ using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.MasterData;
 using FccDesktopAgent.Core.Security;
+using FccDesktopAgent.Core.Sync;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -25,23 +26,34 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
     private readonly ILogger<RegistrationManager> _logger;
     private readonly ICredentialStore? _credentialStore;
     private readonly SiteDataManager? _siteDataManager;
+    private readonly IAgentCommandStateStore? _commandStateStore;
     private readonly string? _baseDirectoryOverride;
     private readonly object _lock = new();
     private RegistrationState? _cached;
 
-    public RegistrationManager(ILogger<RegistrationManager> logger, SiteDataManager siteDataManager, ICredentialStore credentialStore)
+    public RegistrationManager(
+        ILogger<RegistrationManager> logger,
+        SiteDataManager siteDataManager,
+        ICredentialStore credentialStore,
+        IAgentCommandStateStore commandStateStore)
     {
         _logger = logger;
         _siteDataManager = siteDataManager;
         _credentialStore = credentialStore;
+        _commandStateStore = commandStateStore;
     }
 
     /// <summary>Test constructor that overrides the data directory.</summary>
-    internal RegistrationManager(ILogger<RegistrationManager> logger, string baseDirectory, ICredentialStore? credentialStore = null)
+    internal RegistrationManager(
+        ILogger<RegistrationManager> logger,
+        string baseDirectory,
+        ICredentialStore? credentialStore = null,
+        IAgentCommandStateStore? commandStateStore = null)
     {
         _logger = logger;
         _baseDirectoryOverride = baseDirectory;
         _credentialStore = credentialStore;
+        _commandStateStore = commandStateStore;
         // L-04: _siteDataManager intentionally null in test constructor
     }
 
@@ -58,6 +70,17 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
             lock (_lock)
             {
                 return _cached?.IsDecommissioned ?? false;
+            }
+        }
+    }
+
+    public bool IsRegistered
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _cached?.IsRegistered ?? false;
             }
         }
     }
@@ -140,6 +163,13 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
         await PurgeTokensFromCredentialStoreAsync(ct);
 
         await SaveStateAsync(state, ct);
+        if (_commandStateStore is not null)
+        {
+            await _commandStateStore.SetNoticeAsync(
+                OperatorNoticeKind.Decommissioned,
+                "This device has been decommissioned by the cloud administrator.",
+                ct);
+        }
         _logger.LogWarning("Device marked as decommissioned");
         DeviceDecommissioned?.Invoke(this, EventArgs.Empty);
     }
@@ -155,6 +185,13 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
         await PurgeTokensFromCredentialStoreAsync(ct);
 
         await SaveStateAsync(state, ct);
+        if (_commandStateStore is not null)
+        {
+            await _commandStateStore.SetNoticeAsync(
+                OperatorNoticeKind.ReprovisioningRequired,
+                "Re-provisioning required. Complete setup again before the agent can resume normal operation.",
+                ct);
+        }
         _logger.LogWarning("Device marked for re-provisioning — restart to begin provisioning wizard");
         // M-10: Notify UI so it can show a re-provisioning prompt instead of
         // silently halting uploads with no user-visible indication.

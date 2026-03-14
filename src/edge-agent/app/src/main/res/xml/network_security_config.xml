@@ -41,6 +41,15 @@
         <domain includeSubdomains="true">api-dev.fccmiddleware.io</domain>
     </domain-config>
 
+    <!-- Local development: trust the ASP.NET dev certificate on emulator host -->
+    <domain-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+        <domain>10.0.2.2</domain>
+    </domain-config>
+
     <!-- Deny cleartext traffic to all other hosts by default -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>

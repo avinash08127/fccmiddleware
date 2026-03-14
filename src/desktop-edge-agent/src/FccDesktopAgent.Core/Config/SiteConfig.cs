@@ -18,6 +18,7 @@ public sealed class SiteConfig
     public SiteConfigSync? Sync { get; set; }
     public SiteConfigBuffer? Buffer { get; set; }
     public SiteConfigLocalApi? LocalApi { get; set; }
+    public SiteConfigSiteHa? SiteHa { get; set; }
     public SiteConfigTelemetry? Telemetry { get; set; }
     public SiteConfigFiscalization? Fiscalization { get; set; }
     public SiteConfigMappings? Mappings { get; set; }
@@ -29,6 +30,8 @@ public sealed class SiteConfigIdentity
     public string DeviceId { get; set; } = string.Empty;
     public string SiteCode { get; set; } = string.Empty;
     public string LegalEntityId { get; set; } = string.Empty;
+    public string DeviceClass { get; set; } = "DESKTOP";
+    public bool IsPrimaryAgent { get; set; }
 }
 
 public sealed class SiteConfigSite
@@ -44,15 +47,22 @@ public sealed class SiteConfigFcc
     public bool Enabled { get; set; }
     public string? FccId { get; set; }
     public string? Vendor { get; set; }
+    public string? Model { get; set; }
+    public string? Version { get; set; }
     public string? ConnectionProtocol { get; set; }
     public string? HostAddress { get; set; }
     public int? Port { get; set; }
     public string? CredentialRef { get; set; }
+    public int? CredentialRevision { get; set; }
+    public SiteConfigSecretEnvelope SecretEnvelope { get; set; } = new();
     public string? TransactionMode { get; set; }
     public string? IngestionMode { get; set; }
     public int? PullIntervalSeconds { get; set; }
+    public int? CatchUpPullIntervalSeconds { get; set; }
+    public int? HybridCatchUpIntervalSeconds { get; set; }
     public int HeartbeatIntervalSeconds { get; set; } = 30;
     public int HeartbeatTimeoutSeconds { get; set; } = 60;
+    public List<string> PushSourceIpAllowList { get; set; } = [];
 
     /// <summary>Pre-auth request timeout in seconds. Adapter default used when null.</summary>
     public int? PreAuthTimeoutSeconds { get; set; }
@@ -66,6 +76,15 @@ public sealed class SiteConfigFcc
     /// <summary>Petronite: local HTTP port for the webhook listener (default 8090).</summary>
     public int? WebhookListenerPort { get; set; }
 
+    // DOMS fields
+    public int? JplPort { get; set; }
+    public string? FcAccessCode { get; set; }
+    public string? DomsCountryCode { get; set; }
+    public string? PosVersionId { get; set; }
+    public string? ConfiguredPumps { get; set; }
+    public string? DppPorts { get; set; }
+    public int? ReconnectBackoffMaxSeconds { get; set; }
+
     // ── Radix fields ────────────────────────────────────────────────────────
     /// <summary>Radix: SHA-1 signing password for message authentication.</summary>
     public string? SharedSecret { get; set; }
@@ -75,6 +94,12 @@ public sealed class SiteConfigFcc
     public int? AuthPort { get; set; }
     /// <summary>Radix: JSON dictionary mapping canonical pump numbers to (PUMP_ADDR, FP) pairs.</summary>
     public string? FccPumpAddressMap { get; set; }
+
+    // Petronite fields
+    public string? ClientId { get; set; }
+    public string? ClientSecret { get; set; }
+    public string? WebhookSecret { get; set; }
+    public string? OAuthTokenEndpoint { get; set; }
 
     // ── Advatec EFD fields ──────────────────────────────────────────────────
     /// <summary>Advatec: Device HTTP port (default 5560).</summary>
@@ -87,6 +112,13 @@ public sealed class SiteConfigFcc
     public string? AdvatecEfdSerialNumber { get; set; }
     /// <summary>Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL).</summary>
     public int? AdvatecCustIdType { get; set; }
+    public string? AdvatecPumpMap { get; set; }
+}
+
+public sealed class SiteConfigSecretEnvelope
+{
+    public string Format { get; set; } = "NONE";
+    public string? Payload { get; set; }
 }
 
 public sealed class SiteConfigSync
@@ -119,6 +151,43 @@ public sealed class SiteConfigLocalApi
     public string? LanBindAddress { get; set; }
     public string? LanApiKeyRef { get; set; }
     public int RateLimitPerMinute { get; set; } = 60;
+}
+
+public sealed class SiteConfigSiteHa
+{
+    public bool Enabled { get; set; }
+    public bool AutoFailoverEnabled { get; set; }
+    public int Priority { get; set; } = 100;
+    public string RoleCapability { get; set; } = "PRIMARY_ELIGIBLE";
+    public string CurrentRole { get; set; } = "STANDBY_HOT";
+    public int HeartbeatIntervalSeconds { get; set; } = 5;
+    public int FailoverTimeoutSeconds { get; set; } = 30;
+    public int MaxReplicationLagSeconds { get; set; } = 15;
+    public string PeerDiscoveryMode { get; set; } = "HYBRID";
+    public bool AllowFailback { get; set; }
+    public string? LeaderAgentId { get; set; }
+    public long LeaderEpoch { get; set; }
+    public DateTimeOffset? LeaderSinceUtc { get; set; }
+    public List<SiteConfigPeerDirectoryEntry> PeerDirectory { get; set; } = [];
+}
+
+public sealed class SiteConfigPeerDirectoryEntry
+{
+    public string AgentId { get; set; } = string.Empty;
+    public string DeviceClass { get; set; } = "ANDROID";
+    public string Status { get; set; } = "ACTIVE";
+    public string RoleCapability { get; set; } = "PRIMARY_ELIGIBLE";
+    public int Priority { get; set; }
+    public string CurrentRole { get; set; } = "STANDBY_HOT";
+    public string? PeerApiBaseUrl { get; set; }
+    public string? PeerApiAdvertisedHost { get; set; }
+    public int? PeerApiPort { get; set; }
+    public bool PeerApiTlsEnabled { get; set; }
+    public List<string> Capabilities { get; set; } = [];
+    public string? AppVersion { get; set; }
+    public DateTimeOffset? LastHeartbeatUtc { get; set; }
+    public long? LeaderEpochSeen { get; set; }
+    public int? LastReplicationLagSeconds { get; set; }
 }
 
 public sealed class SiteConfigTelemetry

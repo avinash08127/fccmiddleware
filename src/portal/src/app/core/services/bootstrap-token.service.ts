@@ -5,7 +5,11 @@ import {
   GenerateBootstrapTokenRequest,
   GenerateBootstrapTokenResponse,
   RevokeBootstrapTokenResponse,
+  BootstrapTokenHistoryRow,
+  BootstrapTokenHistoryParams,
 } from '../models/bootstrap-token.model';
+import { PagedResult } from '../models/common.model';
+import { buildHttpParams } from './http-params.util';
 
 @Injectable({ providedIn: 'root' })
 export class BootstrapTokenService {
@@ -21,6 +25,13 @@ export class BootstrapTokenService {
   revoke(tokenId: string): Observable<RevokeBootstrapTokenResponse> {
     return this.http.delete<RevokeBootstrapTokenResponse>(
       `/api/v1/admin/bootstrap-tokens/${tokenId}`,
+    );
+  }
+
+  getHistory(params: BootstrapTokenHistoryParams): Observable<PagedResult<BootstrapTokenHistoryRow>> {
+    return this.http.get<PagedResult<BootstrapTokenHistoryRow>>(
+      '/api/v1/admin/bootstrap-tokens',
+      { params: buildHttpParams(params) },
     );
   }
 }

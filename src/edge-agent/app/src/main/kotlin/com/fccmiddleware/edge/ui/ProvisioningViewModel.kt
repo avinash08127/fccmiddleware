@@ -100,6 +100,19 @@ class ProvisioningViewModel(
             deviceModel = Build.MODEL,
             osVersion = Build.VERSION.RELEASE,
             agentVersion = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "1.0.0",
+            deviceClass = "ANDROID",
+            roleCapability = "PRIMARY_ELIGIBLE",
+            capabilities = listOf(
+                "FCC_CONTROL",
+                "LOCALHOST_API",
+                "LAN_PROXY",
+                "TRANSACTION_BUFFER",
+                "TELEMETRY",
+            ),
+            peerApi = com.fccmiddleware.edge.sync.PeerApiRegistrationMetadata(
+                port = 8585,
+                tlsEnabled = false,
+            ),
         )
     }
 

@@ -435,8 +435,8 @@ class ConfigManager(
         if (current.identity.deviceId != incoming.identity.deviceId) {
             violations += "identity.deviceId"
         }
-        if (current.identity.isPrimaryAgent != incoming.identity.isPrimaryAgent) {
-            violations += "identity.isPrimaryAgent"
+        if (current.identity.deviceClass != incoming.identity.deviceClass) {
+            violations += "identity.deviceClass"
         }
         if (current.identity.siteCode != incoming.identity.siteCode) {
             violations += "identity.siteCode"

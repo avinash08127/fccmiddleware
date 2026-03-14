@@ -9,6 +9,17 @@ import com.fccmiddleware.edge.config.EdgeAgentConfigDto
 import com.fccmiddleware.edge.config.SiteDataManager
 import java.time.Instant
 
+sealed class ConfigPollExecutionResult {
+    data class Applied(val configVersion: Int) : ConfigPollExecutionResult()
+    data class Unchanged(val currentConfigVersion: Int?) : ConfigPollExecutionResult()
+    data class Skipped(val configVersion: Int) : ConfigPollExecutionResult()
+    data class Rejected(val configVersion: Int, val reason: String) : ConfigPollExecutionResult()
+    data class RateLimited(val retryAfterSeconds: Long?) : ConfigPollExecutionResult()
+    data object Decommissioned : ConfigPollExecutionResult()
+    data class TransportFailure(val message: String) : ConfigPollExecutionResult()
+    data class Unavailable(val reason: String) : ConfigPollExecutionResult()
+}
+
 /**
  * ConfigPollWorker — polls `GET /api/v1/agent/config` for configuration updates.
  *
@@ -60,42 +71,44 @@ class ConfigPollWorker(
      * Poll cloud for configuration updates.
      * Called by [CadenceController] on the config poll cadence.
      */
-    suspend fun pollConfig() {
+    suspend fun pollConfig(): ConfigPollExecutionResult {
         val cm = configManager ?: run {
             AppLogger.d(TAG, "pollConfig() skipped — configManager not wired")
-            return
+            return ConfigPollExecutionResult.Unavailable("configManager not wired")
         }
         val client = cloudApiClient ?: run {
             AppLogger.d(TAG, "pollConfig() skipped — cloudApiClient not wired")
-            return
+            return ConfigPollExecutionResult.Unavailable("cloudApiClient not wired")
         }
         val provider = tokenProvider ?: run {
             AppLogger.d(TAG, "pollConfig() skipped — tokenProvider not wired")
-            return
+            return ConfigPollExecutionResult.Unavailable("tokenProvider not wired")
         }
 
         if (provider.isDecommissioned()) {
             AppLogger.w(TAG, "pollConfig() skipped — device decommissioned")
-            return
+            return ConfigPollExecutionResult.Decommissioned
         }
 
         // M-08: Circuit breaker check
         if (!circuitBreaker.allowRequest()) {
             val waitMs = circuitBreaker.remainingBackoffMs()
             AppLogger.d(TAG, "pollConfig() skipped — circuit breaker (state=${circuitBreaker.state}, ${waitMs}ms remaining)")
-            return
+            return ConfigPollExecutionResult.Unavailable(
+                "circuit breaker open for ${waitMs}ms",
+            )
         }
 
         val token = provider.getAccessToken() ?: run {
             AppLogger.w(TAG, "pollConfig() skipped — no access token available")
-            return
+            return ConfigPollExecutionResult.Unavailable("no access token available")
         }
 
         val currentVersion = cm.currentConfigVersion
         AppLogger.d(TAG, "Polling config (currentVersion=$currentVersion)")
 
         val result = doPoll(client, provider, currentVersion, token)
-        handlePollResult(cm, result)
+        return handlePollResult(cm, result)
     }
 
     // -------------------------------------------------------------------------
@@ -165,7 +178,7 @@ class ConfigPollWorker(
     private suspend fun handlePollResult(
         cm: ConfigManager,
         result: ConfigPollAttemptResult,
-    ) {
+    ): ConfigPollExecutionResult {
         when (result) {
             is ConfigPollAttemptResult.NewConfig -> {
                 val parsed = try {
@@ -173,7 +186,9 @@ class ConfigPollWorker(
                 } catch (e: Exception) {
                     AppLogger.e(TAG, "Failed to parse config JSON from cloud", e)
                     recordFailure("JSON parse error: ${e.message}")
-                    return
+                    return ConfigPollExecutionResult.TransportFailure(
+                        "JSON parse error: ${e.message}",
+                    )
                 }
 
                 val applyResult = cm.applyConfig(parsed, result.rawJson)
@@ -187,15 +202,21 @@ class ConfigPollWorker(
                         }
                         circuitBreaker.recordSuccess()
                         updateSyncState(parsed.configVersion)
+                        return ConfigPollExecutionResult.Applied(parsed.configVersion)
                     }
                     is ConfigApplyResult.Skipped -> {
                         AppLogger.d(TAG, "Config version ${parsed.configVersion} skipped (not newer)")
                         circuitBreaker.recordSuccess()
                         updateLastConfigPullAt()
+                        return ConfigPollExecutionResult.Skipped(parsed.configVersion)
                     }
                     is ConfigApplyResult.Rejected -> {
                         AppLogger.w(TAG, "Config version ${parsed.configVersion} rejected: ${applyResult.reason}")
                         recordFailure("Config rejected: ${applyResult.reason}")
+                        return ConfigPollExecutionResult.Rejected(
+                            configVersion = parsed.configVersion,
+                            reason = applyResult.reason,
+                        )
                     }
                 }
             }
@@ -204,6 +225,7 @@ class ConfigPollWorker(
                 AppLogger.d(TAG, "Config unchanged (304 Not Modified)")
                 circuitBreaker.recordSuccess()
                 updateLastConfigPullAt()
+                return ConfigPollExecutionResult.Unchanged(cm.currentConfigVersion)
             }
 
             is ConfigPollAttemptResult.RateLimited -> {
@@ -211,18 +233,22 @@ class ConfigPollWorker(
                 if (retryAfter != null) {
                     circuitBreaker.setBackoffSeconds(retryAfter)
                     AppLogger.w(TAG, "Config poll rate limited (429); backing off for ${retryAfter}s")
+                    return ConfigPollExecutionResult.RateLimited(retryAfter)
                 } else {
                     recordFailure("429 Too Many Requests (no Retry-After header)")
+                    return ConfigPollExecutionResult.RateLimited(null)
                 }
             }
 
             is ConfigPollAttemptResult.Decommissioned -> {
                 AppLogger.e(TAG, "DEVICE DECOMMISSIONED during config poll. All cloud sync permanently stopped.")
                 tokenProvider?.markDecommissioned()
+                return ConfigPollExecutionResult.Decommissioned
             }
 
             is ConfigPollAttemptResult.TransportFailure -> {
                 recordFailure(result.message)
+                return ConfigPollExecutionResult.TransportFailure(result.message)
             }
         }
     }

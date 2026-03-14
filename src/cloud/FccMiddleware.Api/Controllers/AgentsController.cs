@@ -1,4 +1,7 @@
+using System.Text.Json;
+using FccMiddleware.Api.AgentControl;
 using FccMiddleware.Api.Portal;
+using FccMiddleware.Contracts.AgentControl;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
 using FccMiddleware.Domain.Entities;
@@ -8,7 +11,7 @@ using FccMiddleware.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Text.Json;
+using Microsoft.Extensions.Options;
 
 namespace FccMiddleware.Api.Controllers;
 
@@ -19,11 +22,16 @@ public sealed class AgentsController : PortalControllerBase
 {
     private readonly FccMiddlewareDbContext _db;
     private readonly PortalAccessResolver _accessResolver;
+    private readonly IOptions<AgentCommandsOptions> _agentCommandsOptions;
 
-    public AgentsController(FccMiddlewareDbContext db, PortalAccessResolver accessResolver)
+    public AgentsController(
+        FccMiddlewareDbContext db,
+        PortalAccessResolver accessResolver,
+        IOptions<AgentCommandsOptions> agentCommandsOptions)
     {
         _db = db;
         _accessResolver = accessResolver;
+        _agentCommandsOptions = agentCommandsOptions;
     }
 
     [HttpGet]
@@ -61,7 +69,7 @@ public sealed class AgentsController : PortalControllerBase
             return Forbid();
         }
 
-        if (!TryParseAgentStatus(status, out var activeFilter))
+        if (!TryParseAgentStatus(status, out var statusFilter))
         {
             return BadRequest(BuildError("VALIDATION.INVALID_STATUS", $"Unknown agent status '{status}'."));
         }
@@ -81,9 +89,9 @@ public sealed class AgentsController : PortalControllerBase
             baseQuery = baseQuery.Where(agent => agent.SiteCode.Contains(siteCode));
         }
 
-        if (activeFilter.HasValue)
+        if (statusFilter.HasValue)
         {
-            baseQuery = baseQuery.Where(agent => agent.IsActive == activeFilter.Value);
+            baseQuery = baseQuery.Where(agent => agent.Status == statusFilter.Value);
         }
 
         // Push connectivity filter into the SQL query by joining with telemetry snapshots,
@@ -127,26 +135,62 @@ public sealed class AgentsController : PortalControllerBase
             .Where(snapshot => snapshot.LegalEntityId == legalEntityId && pageIds.Contains(snapshot.DeviceId))
             .ToDictionaryAsync(snapshot => snapshot.DeviceId, cancellationToken);
 
+        var siteIds = page.Select(agent => agent.SiteId).Distinct().ToArray();
+        var sitePeers = await _db.AgentRegistrations
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(agent =>
+                agent.LegalEntityId == legalEntityId
+                && siteIds.Contains(agent.SiteId)
+                && agent.IsActive
+                && agent.Status == AgentRegistrationStatus.ACTIVE)
+            .OrderBy(agent => agent.SiteHaPriority)
+            .ThenBy(agent => agent.RegisteredAt)
+            .ToListAsync(cancellationToken);
+
+        var leaderBySite = sitePeers
+            .GroupBy(agent => agent.SiteId)
+            .ToDictionary(group => group.Key, group => DetermineLeader(group));
+        var epochBySite = sitePeers
+            .GroupBy(agent => agent.SiteId)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Any() ? Math.Max(1, group.Max(agent => agent.LeaderEpochSeen ?? 0)) : 0L);
+
         var data = page
             .Select(agent =>
             {
                 snapshots.TryGetValue(agent.Id, out var snapshot);
+                leaderBySite.TryGetValue(agent.SiteId, out var leader);
+                epochBySite.TryGetValue(agent.SiteId, out var leaderEpoch);
+                var currentRole = ResolveCurrentRole(agent, leader);
                 return new AgentHealthSummaryDto
                 {
                     DeviceId = agent.Id,
                     SiteCode = agent.SiteCode,
                     SiteName = agent.Site.SiteName,
                     LegalEntityId = agent.LegalEntityId,
+                    DeviceClass = agent.DeviceClass,
                     AgentVersion = agent.AgentVersion,
-                    Status = agent.IsActive ? "ACTIVE" : "DEACTIVATED",
+                    RoleCapability = agent.RoleCapability,
+                    Priority = agent.SiteHaPriority,
+                    CurrentRole = currentRole,
+                    IsCurrentLeader = leader?.Id == agent.Id,
+                    LeaderEpoch = leaderEpoch,
+                    Capabilities = DeserializeCapabilities(agent.CapabilitiesJson),
+                    PeerApiBaseUrl = agent.PeerApiBaseUrl,
+                    Status = agent.Status.ToString(),
                     HasTelemetry = snapshot is not null,
                     ConnectivityState = snapshot?.ConnectivityState.ToString(),
                     BatteryPercent = snapshot?.BatteryPercent,
                     IsCharging = snapshot?.IsCharging,
                     BufferDepth = snapshot?.PendingUploadCount,
                     SyncLagSeconds = snapshot?.SyncLagSeconds,
+                    LastReplicationLagSeconds = agent.LastReplicationLagSeconds,
                     LastTelemetryAt = snapshot?.ReportedAtUtc,
-                    LastSeenAt = agent.LastSeenAt
+                    LastSeenAt = agent.LastSeenAt,
+                    SuspensionReasonCode = agent.SuspensionReasonCode,
+                    ApprovalGrantedAt = agent.ApprovalGrantedAt
                 };
             })
             .ToList();
@@ -192,6 +236,88 @@ public sealed class AgentsController : PortalControllerBase
         }
 
         return Ok(ToAgentRegistrationDto(agent));
+    }
+
+    [HttpGet("{id:guid}/commands")]
+    [ProducesResponseType(typeof(PortalPagedResult<CreateAgentCommandResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetCommands(
+        Guid id,
+        [FromQuery] string? cursor = null,
+        [FromQuery] int pageSize = 50,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_agentCommandsOptions.Value.Enabled)
+        {
+            return NotFound(BuildError("FEATURE_DISABLED", "Agent command APIs are disabled."));
+        }
+
+        if (pageSize is < 1 or > 100)
+        {
+            return BadRequest(BuildError("VALIDATION.INVALID_PAGE_SIZE", "pageSize must be between 1 and 100."));
+        }
+
+        var access = _accessResolver.Resolve(User);
+        if (!access.IsValid)
+        {
+            return Unauthorized();
+        }
+
+        var agent = await _db.AgentRegistrations
+            .ForPortal(access)
+            .FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
+
+        if (agent is null)
+        {
+            return NotFound(BuildError("NOT_FOUND.AGENT", "Agent was not found."));
+        }
+
+        await ExpirePendingCommandsAsync(id, cancellationToken);
+
+        IQueryable<AgentCommand> query = _db.AgentCommands
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(item => item.DeviceId == id);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        if (PortalCursor.TryDecode(cursor, out var cursorTimestamp, out var cursorId))
+        {
+            query = query.Where(item =>
+                item.CreatedAt > cursorTimestamp
+                || (item.CreatedAt == cursorTimestamp && item.Id.CompareTo(cursorId) > 0));
+        }
+
+        var rows = await query
+            .OrderBy(item => item.CreatedAt)
+            .ThenBy(item => item.Id)
+            .Take(pageSize + 1)
+            .ToListAsync(cancellationToken);
+
+        var hasMore = rows.Count > pageSize;
+        if (hasMore)
+        {
+            rows.RemoveAt(rows.Count - 1);
+        }
+
+        string? nextCursor = null;
+        if (hasMore && rows.Count > 0)
+        {
+            var last = rows[^1];
+            nextCursor = PortalCursor.Encode(last.CreatedAt, last.Id);
+        }
+
+        return Ok(new PortalPagedResult<CreateAgentCommandResponse>
+        {
+            Data = rows.Select(ToCreateAgentCommandResponse).ToList(),
+            Meta = new PortalPageMeta
+            {
+                PageSize = rows.Count,
+                HasMore = hasMore,
+                NextCursor = nextCursor,
+                TotalCount = totalCount
+            }
+        });
     }
 
     [HttpGet("{id:guid}/telemetry")]
@@ -332,14 +458,148 @@ public sealed class AgentsController : PortalControllerBase
             DeviceId = agent.Id,
             SiteCode = agent.SiteCode,
             LegalEntityId = agent.LegalEntityId,
+            DeviceClass = agent.DeviceClass,
             DeviceSerialNumber = agent.DeviceSerialNumber,
             DeviceModel = agent.DeviceModel,
             OsVersion = agent.OsVersion,
             AgentVersion = agent.AgentVersion,
-            Status = agent.IsActive ? "ACTIVE" : "DEACTIVATED",
+            RoleCapability = agent.RoleCapability,
+            Priority = agent.SiteHaPriority,
+            CurrentRole = agent.CurrentRole,
+            Capabilities = DeserializeCapabilities(agent.CapabilitiesJson),
+            PeerApiBaseUrl = agent.PeerApiBaseUrl,
+            PeerApiAdvertisedHost = agent.PeerApiAdvertisedHost,
+            PeerApiPort = agent.PeerApiPort,
+            PeerApiTlsEnabled = agent.PeerApiTlsEnabled,
+            LeaderEpochSeen = agent.LeaderEpochSeen,
+            LastReplicationLagSeconds = agent.LastReplicationLagSeconds,
+            Status = agent.Status.ToString(),
             RegisteredAt = agent.RegisteredAt,
-            LastSeenAt = agent.LastSeenAt
+            LastSeenAt = agent.LastSeenAt,
+            SuspensionReasonCode = agent.SuspensionReasonCode,
+            SuspensionReason = agent.SuspensionReason,
+            ReplacementForDeviceId = agent.ReplacementForDeviceId,
+            ApprovalGrantedAt = agent.ApprovalGrantedAt,
+            ApprovalGrantedByActorDisplay = agent.ApprovalGrantedByActorDisplay
         };
+
+    private static AgentRegistration? DetermineLeader(IEnumerable<AgentRegistration> agents) =>
+        agents
+            .Where(agent => !string.Equals(agent.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(agent => agent.SiteHaPriority)
+            .ThenBy(agent => string.Equals(agent.DeviceClass, "DESKTOP", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(agent => agent.RegisteredAt)
+            .FirstOrDefault();
+
+    private static string ResolveCurrentRole(AgentRegistration agent, AgentRegistration? leader)
+    {
+        if (!string.IsNullOrWhiteSpace(agent.CurrentRole))
+        {
+            return agent.CurrentRole!;
+        }
+
+        if (!agent.IsActive || agent.Status != AgentRegistrationStatus.ACTIVE)
+        {
+            return "OFFLINE";
+        }
+
+        if (string.Equals(agent.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
+        {
+            return "READ_ONLY";
+        }
+
+        return leader?.Id == agent.Id ? "PRIMARY" : "STANDBY_HOT";
+    }
+
+    private static string[] DeserializeCapabilities(string? capabilitiesJson)
+    {
+        if (string.IsNullOrWhiteSpace(capabilitiesJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<string[]>(capabilitiesJson) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static CreateAgentCommandResponse ToCreateAgentCommandResponse(AgentCommand command) =>
+        new()
+        {
+            CommandId = command.Id,
+            DeviceId = command.DeviceId,
+            LegalEntityId = command.LegalEntityId,
+            SiteCode = command.SiteCode,
+            CommandType = command.CommandType,
+            Status = command.Status,
+            Reason = command.Reason,
+            Payload = ParseJsonOrNull(command.PayloadJson),
+            CreatedAt = command.CreatedAt,
+            ExpiresAt = command.ExpiresAt,
+            CreatedByActorId = command.CreatedByActorId,
+            CreatedByActorDisplay = command.CreatedByActorDisplay
+        };
+
+    private static JsonElement? ParseJsonOrNull(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.Clone();
+    }
+
+    private async Task ExpirePendingCommandsAsync(Guid deviceId, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var commands = await _db.AgentCommands
+            .IgnoreQueryFilters()
+            .Where(item =>
+                item.DeviceId == deviceId
+                && item.ExpiresAt <= now
+                && (item.Status == AgentCommandStatus.PENDING || item.Status == AgentCommandStatus.DELIVERY_HINT_SENT))
+            .ToListAsync(cancellationToken);
+
+        if (commands.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var command in commands)
+        {
+            command.Status = AgentCommandStatus.EXPIRED;
+            command.LastError = "Command expired before acknowledgement.";
+            command.UpdatedAt = now;
+
+            _db.AuditEvents.Add(new AuditEvent
+            {
+                Id = Guid.NewGuid(),
+                CreatedAt = now,
+                LegalEntityId = command.LegalEntityId,
+                EventType = AgentControlAuditEventTypes.AgentCommandExpired,
+                CorrelationId = Guid.NewGuid(),
+                SiteCode = command.SiteCode,
+                Source = nameof(AgentsController),
+                EntityId = command.DeviceId,
+                Payload = JsonSerializer.Serialize(new
+                {
+                    CommandId = command.Id,
+                    DeviceId = command.DeviceId,
+                    command.CommandType,
+                    ExpiredAt = now
+                })
+            });
+        }
+
+        await _db.SaveChangesAsync(cancellationToken);
+    }
 
     private static AgentTelemetryDto? ToAgentTelemetryDto(AgentTelemetrySnapshot snapshot)
     {
@@ -416,23 +676,17 @@ public sealed class AgentsController : PortalControllerBase
         return JsonSerializer.Deserialize<AgentTelemetryDto>(snapshot.PayloadJson, PortalJson.SerializerOptions);
     }
 
-    private static bool TryParseAgentStatus(string? status, out bool? isActive)
+    private static bool TryParseAgentStatus(string? status, out AgentRegistrationStatus? parsedStatus)
     {
-        isActive = null;
+        parsedStatus = null;
         if (string.IsNullOrWhiteSpace(status))
         {
             return true;
         }
 
-        if (string.Equals(status, "ACTIVE", StringComparison.OrdinalIgnoreCase))
+        if (Enum.TryParse<AgentRegistrationStatus>(status, true, out var statusValue))
         {
-            isActive = true;
-            return true;
-        }
-
-        if (string.Equals(status, "DEACTIVATED", StringComparison.OrdinalIgnoreCase))
-        {
-            isActive = false;
+            parsedStatus = statusValue;
             return true;
         }
 

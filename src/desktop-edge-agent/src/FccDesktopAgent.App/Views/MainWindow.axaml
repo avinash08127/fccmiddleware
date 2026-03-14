@@ -9,10 +9,20 @@
         MinWidth="700"
         MinHeight="450">
 
-  <Grid RowDefinitions="*,Auto">
+  <Grid RowDefinitions="Auto,*,Auto">
+
+    <Border Grid.Row="0"
+            IsVisible="{Binding HasOperatorNotice}"
+            Background="{Binding OperatorNoticeBackgroundBrush}"
+            Padding="16,10">
+      <TextBlock Text="{Binding OperatorNoticeText}"
+                 Foreground="{Binding OperatorNoticeForegroundBrush}"
+                 TextWrapping="Wrap"
+                 FontSize="13" />
+    </Border>
 
     <!-- Main content area: sidebar + page -->
-    <Grid Grid.Row="0" ColumnDefinitions="200,*">
+    <Grid Grid.Row="1" ColumnDefinitions="200,*">
 
       <!-- Sidebar navigation -->
       <Border Grid.Column="0"
@@ -106,7 +116,7 @@
     </Grid>
 
     <!-- Status bar — bound to ViewModel properties (T-DSK-001) -->
-    <Border Grid.Row="1"
+    <Border Grid.Row="2"
             Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}"
             BorderThickness="0,1,0,0"
             BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"

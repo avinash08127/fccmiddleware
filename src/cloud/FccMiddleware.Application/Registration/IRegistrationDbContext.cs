@@ -12,8 +12,9 @@ public interface IRegistrationDbContext
     Task<BootstrapToken?> FindBootstrapTokenByIdAsync(Guid tokenId, CancellationToken ct);
     Task<int> CountActiveBootstrapTokensForSiteAsync(string siteCode, Guid legalEntityId, CancellationToken ct);
     Task<Site?> FindSiteBySiteCodeAsync(string siteCode, CancellationToken ct);
-    Task<AgentRegistration?> FindActiveAgentForSiteAsync(Guid siteId, CancellationToken ct);
+    Task<List<AgentRegistration>> FindActiveAgentsForSiteAsync(Guid siteId, CancellationToken ct);
     Task<AgentRegistration?> FindAgentByIdAsync(Guid deviceId, CancellationToken ct);
+    Task<AgentRegistration?> FindSuspendedAgentForSiteAndSerialAsync(Guid siteId, string deviceSerialNumber, CancellationToken ct);
     Task<DeviceRefreshToken?> FindRefreshTokenByHashAsync(string tokenHash, CancellationToken ct);
     Task<List<DeviceRefreshToken>> GetActiveRefreshTokensForDeviceAsync(Guid deviceId, CancellationToken ct);
 

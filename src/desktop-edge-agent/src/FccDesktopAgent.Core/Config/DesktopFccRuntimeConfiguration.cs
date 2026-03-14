@@ -117,10 +117,15 @@ internal static class DesktopFccRuntimeConfiguration
             throw new InvalidOperationException("FCC siteCode is not configured.");
 
         var baseUrl = ResolveBaseUrl(vendor, agentConfig, fccSection, overrideManager);
-        var productCodeMapping = siteConfig?.Mappings?.Nozzles
-            ?.Where(item => !string.IsNullOrWhiteSpace(item.ProductCode))
-            .GroupBy(item => item.ProductCode, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Key, StringComparer.OrdinalIgnoreCase);
+        var productCodeMapping = siteConfig?.Mappings?.Products
+            ?.Where(item =>
+                item.Active
+                && !string.IsNullOrWhiteSpace(item.FccProductCode)
+                && !string.IsNullOrWhiteSpace(item.CanonicalProductCode))
+            .ToDictionary(
+                item => item.FccProductCode,
+                item => item.CanonicalProductCode,
+                StringComparer.OrdinalIgnoreCase);
 
         // Petronite webhook listener port: cloud config > local config > default (8090).
         int? webhookListenerPort = fccSection?.WebhookListenerPort
@@ -135,7 +140,7 @@ internal static class DesktopFccRuntimeConfiguration
         var advatecCustIdType = fccSection?.AdvatecCustIdType;
 
         // Apply JPL port override if set
-        var resolvedJplPort = overrideManager?.GetEffectiveJplPort(fccSection?.Port) ?? fccSection?.Port;
+        var resolvedJplPort = overrideManager?.GetEffectiveJplPort(fccSection?.JplPort) ?? fccSection?.JplPort;
 
         var connectionConfig = new FccConnectionConfig(
             BaseUrl: baseUrl,
@@ -144,10 +149,20 @@ internal static class DesktopFccRuntimeConfiguration
             SiteCode: siteCode,
             ConnectionProtocol: fccSection?.ConnectionProtocol,
             JplPort: resolvedJplPort,
+            FcAccessCode: fccSection?.FcAccessCode,
+            DomsCountryCode: fccSection?.DomsCountryCode,
+            PosVersionId: fccSection?.PosVersionId,
+            ReconnectBackoffMaxSeconds: fccSection?.ReconnectBackoffMaxSeconds,
+            ConfiguredPumps: fccSection?.ConfiguredPumps,
+            DppPorts: fccSection?.DppPorts,
             AuthPort: fccSection?.AuthPort ?? fccSection?.Port,
             SharedSecret: fccSection?.SharedSecret,
             UsnCode: fccSection?.UsnCode,
             FccPumpAddressMap: fccSection?.FccPumpAddressMap,
+            ClientId: fccSection?.ClientId,
+            ClientSecret: fccSection?.ClientSecret,
+            WebhookSecret: fccSection?.WebhookSecret,
+            OAuthTokenEndpoint: fccSection?.OAuthTokenEndpoint,
             HeartbeatIntervalSeconds: fccSection?.HeartbeatIntervalSeconds,
             LegalEntityId: siteConfig?.Identity?.LegalEntityId,
             CurrencyCode: siteConfig?.Site?.Currency,
@@ -161,6 +176,7 @@ internal static class DesktopFccRuntimeConfiguration
             AdvatecWebhookToken: advatecWebhookToken,
             AdvatecEfdSerialNumber: advatecEfdSerialNumber,
             AdvatecCustIdType: advatecCustIdType,
+            AdvatecPumpMap: fccSection?.AdvatecPumpMap,
             PreAuthTimeoutSeconds: fccSection?.PreAuthTimeoutSeconds,
             FiscalReceiptTimeoutSeconds: fccSection?.FiscalReceiptTimeoutSeconds,
             ApiRequestTimeoutSeconds: fccSection?.ApiRequestTimeoutSeconds);

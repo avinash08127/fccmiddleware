@@ -30,4 +30,10 @@ public interface IConfigManager
 
     /// <summary>Load last-known-good config from database on startup.</summary>
     Task LoadFromDatabaseAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Clears the in-memory and persisted cloud config snapshot so the agent
+    /// re-enters an unconfigured/provisioning state without a process restart.
+    /// </summary>
+    Task ResetAsync(CancellationToken ct);
 }

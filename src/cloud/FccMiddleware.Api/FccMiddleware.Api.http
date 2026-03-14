@@ -4,3 +4,24 @@ GET {{FccMiddleware.Api_HostAddress}}/weatherforecast/
 Accept: application/json
 
 ###
+
+# Phase 5 suspicious-registration review examples
+POST {{FccMiddleware.Api_HostAddress}}/api/v1/admin/agent/{{deviceId}}/approve
+Content-Type: application/json
+Authorization: Bearer {{portalToken}}
+
+{
+  "reason": "Approved replacement after verifying the field swap request."
+}
+
+###
+
+POST {{FccMiddleware.Api_HostAddress}}/api/v1/admin/agent/{{deviceId}}/reject
+Content-Type: application/json
+Authorization: Bearer {{portalToken}}
+
+{
+  "reason": "Rejected because the serial number does not match the approved device list."
+}
+
+###

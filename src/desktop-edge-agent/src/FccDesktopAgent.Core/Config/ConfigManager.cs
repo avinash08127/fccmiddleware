@@ -191,6 +191,35 @@ public sealed class ConfigManager
         }
     }
 
+    public async Task ResetAsync(CancellationToken ct)
+    {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
+
+        var record = await db.AgentConfigs.FindAsync([1], ct);
+        if (record is not null)
+            db.AgentConfigs.Remove(record);
+
+        var syncState = await db.SyncStates.FindAsync([1], ct);
+        if (syncState is not null)
+        {
+            syncState.ConfigVersion = null;
+            syncState.LastConfigSyncAt = null;
+            syncState.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        lock (_lock)
+        {
+            _current = null;
+            _currentVersion = null;
+            _restartRequired = false;
+        }
+
+        SignalOptionsChange();
+    }
+
     // ── IOptionsChangeTokenSource<AgentConfiguration> ─────────────────────────
 
     public string? Name => Options.DefaultName;

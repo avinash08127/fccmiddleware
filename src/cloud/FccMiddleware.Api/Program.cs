@@ -1,5 +1,6 @@
 using System.Text;
 using System.Threading.RateLimiting;
+using FccMiddleware.Api.AgentControl;
 using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Api.Portal;
@@ -37,6 +38,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FccMiddleware.Application.Observability;
+using Microsoft.Extensions.Options;
 
 // Bootstrap logger — active only until DI container is built.
 // ServiceDefaults replaces this with the full structured-JSON logger.
@@ -168,9 +170,22 @@ try
                 validAudiences.Add(additionalAudience);
             }
 
+            // Entra may issue v1.0 tokens (sts.windows.net issuer) or v2.0 tokens
+            // (login.microsoftonline.com issuer) depending on the app manifest's
+            // accessTokenAcceptedVersion. Accept both so either version works.
+            var tenantId = authority
+                .Replace("https://login.microsoftonline.com/", "")
+                .TrimEnd('/').Replace("/v2.0", "");
+            var validIssuers = new[]
+            {
+                $"https://login.microsoftonline.com/{tenantId}/v2.0",
+                $"https://sts.windows.net/{tenantId}/",
+            };
+
             options.TokenValidationParameters = new TokenValidationParameters
             {
                 ValidateIssuer = true,
+                ValidIssuers = validIssuers,
                 ValidateAudience = true,
                 ValidAudiences = validAudiences,
                 ValidateIssuerSigningKey = !string.IsNullOrWhiteSpace(signingKey),
@@ -178,6 +193,30 @@ try
                 ClockSkew = TimeSpan.FromSeconds(30),
                 RoleClaimType = "roles",
                 NameClaimType = "oid"
+            };
+
+            // Log JWT validation failures so we can diagnose 401s
+            options.Events = new JwtBearerEvents
+            {
+                OnAuthenticationFailed = context =>
+                {
+                    var logger = context.HttpContext.RequestServices
+                        .GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("PortalJwt");
+                    logger.LogWarning(context.Exception,
+                        "PortalBearer token validation failed: {Message}", context.Exception.Message);
+                    return Task.CompletedTask;
+                },
+                OnTokenValidated = context =>
+                {
+                    var logger = context.HttpContext.RequestServices
+                        .GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("PortalJwt");
+                    var aud = context.SecurityToken is Microsoft.IdentityModel.JsonWebTokens.JsonWebToken jwt
+                        ? string.Join(", ", jwt.Audiences) : "unknown";
+                    logger.LogInformation("PortalBearer token validated. Audiences: {Audiences}", aud);
+                    return Task.CompletedTask;
+                },
             };
 
             if (!string.IsNullOrWhiteSpace(signingKey))
@@ -193,7 +232,7 @@ try
             }
 
             options.Authority = authority.TrimEnd('/');
-            options.RequireHttpsMetadata = true;
+            options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
         });
 
     builder.Services.AddScoped<PortalUserService>();
@@ -369,6 +408,42 @@ try
     builder.Services.AddScoped<FccMiddleware.Domain.Interfaces.ICurrentTenantProvider>(
         sp => sp.GetRequiredService<FccMiddleware.Infrastructure.Persistence.TenantContext>());
     builder.Services.AddScoped<PortalAccessResolver>();
+    builder.Services.Configure<AgentCommandsOptions>(
+        builder.Configuration.GetSection(AgentCommandsOptions.SectionName));
+    builder.Services.Configure<BootstrapTokensOptions>(
+        builder.Configuration.GetSection(BootstrapTokensOptions.SectionName));
+    builder.Services.Configure<SuspiciousDeviceWorkflowOptions>(
+        builder.Configuration.GetSection(SuspiciousDeviceWorkflowOptions.SectionName));
+    builder.Services.Configure<FirebaseMessagingOptions>(
+        builder.Configuration.GetSection(FirebaseMessagingOptions.SectionName));
+    builder.Services.Configure<FccMiddleware.Application.Notifications.EmailNotificationOptions>(
+        builder.Configuration.GetSection(FccMiddleware.Application.Notifications.EmailNotificationOptions.SectionName));
+
+    // ── Infrastructure: Email notifications (bootstrap token generation) ─────
+    builder.Services.AddSingleton<FccMiddleware.Application.Notifications.IEmailNotificationService>(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<FccMiddleware.Application.Notifications.EmailNotificationOptions>>().Value;
+        var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+        if (!opts.Enabled)
+            return new FccMiddleware.Infrastructure.Messaging.NoOpEmailService(
+                loggerFactory.CreateLogger<FccMiddleware.Infrastructure.Messaging.NoOpEmailService>());
+
+        return opts.Provider?.ToUpperInvariant() switch
+        {
+            "AWSSES" => new FccMiddleware.Infrastructure.Messaging.AwsSesEmailService(
+                new Amazon.SimpleEmailV2.AmazonSimpleEmailServiceV2Client(
+                    Amazon.RegionEndpoint.GetBySystemName(opts.AwsSesRegion)),
+                sp.GetRequiredService<IOptions<FccMiddleware.Application.Notifications.EmailNotificationOptions>>(),
+                loggerFactory.CreateLogger<FccMiddleware.Infrastructure.Messaging.AwsSesEmailService>()),
+            "SENDGRID" => new FccMiddleware.Infrastructure.Messaging.SendGridEmailService(
+                sp.GetRequiredService<IHttpClientFactory>().CreateClient("SendGrid"),
+                sp.GetRequiredService<IOptions<FccMiddleware.Application.Notifications.EmailNotificationOptions>>(),
+                loggerFactory.CreateLogger<FccMiddleware.Infrastructure.Messaging.SendGridEmailService>()),
+            _ => new FccMiddleware.Infrastructure.Messaging.NoOpEmailService(
+                loggerFactory.CreateLogger<FccMiddleware.Infrastructure.Messaging.NoOpEmailService>())
+        };
+    });
 
     // ── Infrastructure: Field-level encryption for database secrets ──────────
     builder.Services.AddSingleton<FccMiddleware.Application.Common.IFieldEncryptor>(sp =>
@@ -411,6 +486,8 @@ try
     builder.Services.AddScoped<IPreAuthDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IReconciliationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddSingleton<IObservabilityMetrics, CloudWatchEmfMetricSink>();
+    builder.Services.AddHttpClient<IAgentPushHintSender, FirebasePushHintSender>();
+    builder.Services.AddScoped<IAgentPushHintDispatcher, AgentPushHintDispatcher>();
     builder.Services.Configure<ReconciliationOptions>(
         builder.Configuration.GetSection(ReconciliationOptions.SectionName));
     builder.Services.AddScoped<ReconciliationMatchingService>();
@@ -490,9 +567,9 @@ try
         app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
     }
 
-    app.UseHttpsRedirection();
     if (!app.Environment.IsDevelopment())
     {
+        app.UseHttpsRedirection();
         app.UseHsts();
     }
 

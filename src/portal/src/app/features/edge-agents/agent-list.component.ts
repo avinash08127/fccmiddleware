@@ -1,4 +1,4 @@
-import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, effect, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -15,9 +15,8 @@ import { TagModule } from 'primeng/tag';
 import { BadgeModule } from 'primeng/badge';
 
 import { AgentService } from '../../core/services/agent.service';
-import { MasterDataService } from '../../core/services/master-data.service';
-import { AgentHealthSummary, ConnectivityState } from '../../core/models/agent.model';
-import { LegalEntity } from '../../core/models/master-data.model';
+import { LegalEntityStateService } from '../../core/services/legal-entity-state.service';
+import { AgentHealthSummary, AgentRegistrationStatus, ConnectivityState } from '../../core/models/agent.model';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
 import { hasAnyRequiredRole, getCurrentAccount } from '../../core/auth/auth-state';
@@ -28,6 +27,7 @@ const OFFLINE_THRESHOLD_MS = 5 * 60 * 1000;
 const PAGE_SIZE = 100;
 
 function isAgentOffline(agent: AgentHealthSummary): boolean {
+  if (agent.status !== AgentRegistrationStatus.ACTIVE) return false;
   if (agent.connectivityState === ConnectivityState.FULLY_OFFLINE) return true;
   if (!agent.lastSeenAt) return true;
   return Date.now() - new Date(agent.lastSeenAt).getTime() > OFFLINE_THRESHOLD_MS;
@@ -60,9 +60,12 @@ function formatLag(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+type AgentStatusFilter = AgentRegistrationStatus | null;
+
 interface AgentFilters {
   siteCode: string;
   connectivityState: ConnectivityState | null;
+  status: AgentStatusFilter;
 }
 
 @Component({
@@ -96,6 +99,14 @@ interface AgentFilters {
             optionValue="value"
             placeholder="Select Legal Entity"
             styleClass="entity-selector"
+          />
+          <p-button
+            label="Token History"
+            icon="pi pi-history"
+            severity="secondary"
+            size="small"
+            [outlined]="true"
+            (onClick)="navigateToTokenHistory()"
           />
           @if (isAdmin()) {
             <p-button
@@ -135,6 +146,17 @@ interface AgentFilters {
         <!-- Filters -->
         <p-panel header="Filters" [toggleable]="true" styleClass="filters-panel">
           <div class="filters-row">
+            <div class="filter-field">
+              <label for="agent-filter-status">Status</label>
+              <p-select
+                inputId="agent-filter-status"
+                [options]="statusOptions"
+                [(ngModel)]="filters.status"
+                placeholder="All"
+                [showClear]="true"
+                (ngModelChange)="onStatusFilterChange()"
+              />
+            </div>
             <div class="filter-field">
               <label for="agent-filter-site-code">Site Code</label>
               <input
@@ -200,6 +222,7 @@ interface AgentFilters {
               <ng-template pTemplate="header">
                 <tr>
                   <th pSortableColumn="siteCode">Site <p-sortIcon field="siteCode" /></th>
+                  <th pSortableColumn="status" style="width:7rem">Status <p-sortIcon field="status" /></th>
                   <th>Connectivity</th>
                   <th pSortableColumn="bufferDepth">Buffer <p-sortIcon field="bufferDepth" /></th>
                   <th pSortableColumn="lastSeenAt">Last Seen <p-sortIcon field="lastSeenAt" /></th>
@@ -215,6 +238,9 @@ interface AgentFilters {
                       <strong>{{ agent.siteCode }}</strong>
                       @if (agent.siteName) { <span class="site-name">{{ agent.siteName }}</span> }
                     </div>
+                  </td>
+                  <td>
+                    <span class="status-badge" [class]="agentStatusClass(agent.status)">{{ agent.status }}</span>
                   </td>
                   <td>
                     <span class="conn-badge" [class]="connectivityClass(agent.connectivityState)">
@@ -244,7 +270,7 @@ interface AgentFilters {
           <ng-template pTemplate="header">
             <div class="card-header-row">
               <span>
-                Online Agents
+                Agent Inventory
                 @if (totalCount() !== null) {
                   <span class="agent-count">— {{ agents().length }} of {{ totalCount() }} loaded</span>
                 }
@@ -265,6 +291,7 @@ interface AgentFilters {
             <ng-template pTemplate="header">
               <tr>
                 <th pSortableColumn="siteCode">Site <p-sortIcon field="siteCode" /></th>
+                <th pSortableColumn="status" style="width:7rem">Status <p-sortIcon field="status" /></th>
                 <th pSortableColumn="connectivityState">Connectivity <p-sortIcon field="connectivityState" /></th>
                 <th pSortableColumn="bufferDepth">Buffer Depth <p-sortIcon field="bufferDepth" /></th>
                 <th pSortableColumn="lastSeenAt">Last Seen <p-sortIcon field="lastSeenAt" /></th>
@@ -281,6 +308,9 @@ interface AgentFilters {
                     <strong>{{ agent.siteCode }}</strong>
                     @if (agent.siteName) { <span class="site-name">{{ agent.siteName }}</span> }
                   </div>
+                </td>
+                <td>
+                  <span class="status-badge" [class]="agentStatusClass(agent.status)">{{ agent.status }}</span>
                 </td>
                 <td>
                   <span class="conn-badge" [class]="connectivityClass(agent.connectivityState)">
@@ -304,7 +334,7 @@ interface AgentFilters {
 
             <ng-template pTemplate="emptymessage">
               <tr>
-                <td colspan="7">
+                <td colspan="8">
                   <app-empty-state
                     icon="pi-check-circle"
                     title="No online agents match your filters"
@@ -486,12 +516,26 @@ interface AgentFilters {
       font: inherit;
     }
 
+    /* Status badges */
+    .status-badge {
+      display: inline-block;
+      padding: 0.2rem 0.6rem;
+      border-radius: 9999px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .status-active      { background: #dcfce7; color: #15803d; }
+    .status-pending     { background: #fef3c7; color: #b45309; }
+    .status-quarantined { background: #fee2e2; color: #b91c1c; }
+    .status-deactivated { background: #fee2e2; color: #dc2626; }
+
     code { font-family: monospace; font-size: 0.78rem; }
   `],
 })
 export class AgentListComponent {
   private readonly agentService = inject(AgentService);
-  private readonly masterDataService = inject(MasterDataService);
+  private readonly leState = inject(LegalEntityStateService);
   private readonly msal = inject(MsalService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
@@ -500,12 +544,10 @@ export class AgentListComponent {
     return hasAnyRequiredRole(null, ['FccAdmin', 'FccUser']);
   });
 
-  // ── Legal entity ─────────────────────────────────────────────────────────
-  private readonly legalEntities = signal<LegalEntity[]>([]);
-  readonly selectedLegalEntityId = signal<string | null>(null);
-  readonly legalEntityOptions = computed(() =>
-    this.legalEntities().map((e) => ({ label: `${e.name} (${e.code})`, value: e.id })),
-  );
+  // ── Legal entity (shared) ──────────────────────────────────────────────
+  readonly selectedLegalEntityId = this.leState.selectedId;
+  readonly legalEntityOptions = this.leState.options;
+  readonly legalEntitiesError = this.leState.error;
 
   // ── Agent data ────────────────────────────────────────────────────────────
   readonly agents = signal<AgentHealthSummary[]>([]);
@@ -514,11 +556,11 @@ export class AgentListComponent {
   readonly error = signal(false);
   readonly hasMore = signal(false);
   readonly totalCount = signal<number | null>(null);
-  readonly legalEntitiesError = signal(false);
   private readonly nextCursor = signal<string | null>(null);
 
   // ── Filters — now sent to backend as query params ─────────────────────────
-  filters: AgentFilters = { siteCode: '', connectivityState: null };
+  // AC-4.2: Default to ACTIVE so decommissioned agents are hidden by default
+  filters: AgentFilters = { siteCode: '', connectivityState: null, status: AgentRegistrationStatus.ACTIVE };
 
   // ── Offline/online split from loaded pages (client-side categorisation) ───
   readonly filteredOffline = computed(() => this.agents().filter(isAgentOffline));
@@ -536,14 +578,21 @@ export class AgentListComponent {
     { label: 'Offline',         value: ConnectivityState.FULLY_OFFLINE },
   ];
 
+  readonly statusOptions = [
+    { label: 'Active', value: AgentRegistrationStatus.ACTIVE },
+    { label: 'Pending Approval', value: AgentRegistrationStatus.PENDING_APPROVAL },
+    { label: 'Quarantined', value: AgentRegistrationStatus.QUARANTINED },
+    { label: 'Decommissioned', value: AgentRegistrationStatus.DEACTIVATED },
+  ];
+
   constructor() {
-    this.masterDataService
-      .getLegalEntities()
-      .pipe(takeUntilDestroyed())
-      .subscribe({
-        next: (entities) => this.legalEntities.set(entities),
-        error: () => this.legalEntitiesError.set(true),
-      });
+    // Auto-load when the shared legal entity selection changes.
+    effect(() => {
+      const id = this.leState.selectedId();
+      if (id) {
+        this.immediateRefresh$.next();
+      }
+    });
 
     // First-page load: immediate or debounced refresh → switchMap cancels in-flight request
     merge(
@@ -564,6 +613,7 @@ export class AgentListComponent {
           pageSize: PAGE_SIZE,
           siteCode: this.filters.siteCode || undefined,
           connectivityState: this.filters.connectivityState ?? undefined,
+          status: this.filters.status ?? undefined,
         }).pipe(
           catchError(() => {
             this.error.set(true);
@@ -594,6 +644,7 @@ export class AgentListComponent {
           cursor,
           siteCode: this.filters.siteCode || undefined,
           connectivityState: this.filters.connectivityState ?? undefined,
+          status: this.filters.status ?? undefined,
         }).pipe(
           catchError(() => {
             this.loadingMore.set(false);
@@ -616,10 +667,8 @@ export class AgentListComponent {
   }
 
   onLegalEntityChange(entityId: string | null): void {
-    this.selectedLegalEntityId.set(entityId);
-    if (entityId) {
-      this.immediateRefresh$.next();
-    } else {
+    this.leState.select(entityId);
+    if (!entityId) {
       this.agents.set([]);
       this.hasMore.set(false);
       this.totalCount.set(null);
@@ -635,8 +684,12 @@ export class AgentListComponent {
     this.immediateRefresh$.next();
   }
 
+  onStatusFilterChange(): void {
+    this.immediateRefresh$.next();
+  }
+
   clearFilters(): void {
-    this.filters = { siteCode: '', connectivityState: null };
+    this.filters = { siteCode: '', connectivityState: null, status: null };
     this.immediateRefresh$.next();
   }
 
@@ -654,6 +707,10 @@ export class AgentListComponent {
 
   navigateToBootstrapToken(): void {
     this.router.navigate(['/agents', 'bootstrap-token']);
+  }
+
+  navigateToTokenHistory(): void {
+    this.router.navigate(['/agents', 'token-history']);
   }
 
   // ── Template helpers ──────────────────────────────────────────────────────
@@ -681,5 +738,18 @@ export class AgentListComponent {
     if (seconds > 3600) return 'lag-danger';
     if (seconds > 300)  return 'lag-warn';
     return 'lag-ok';
+  }
+
+  agentStatusClass(status: string): string {
+    switch (status) {
+      case AgentRegistrationStatus.ACTIVE:
+        return 'status-active';
+      case AgentRegistrationStatus.PENDING_APPROVAL:
+        return 'status-pending';
+      case AgentRegistrationStatus.QUARANTINED:
+        return 'status-quarantined';
+      default:
+        return 'status-deactivated';
+    }
   }
 }

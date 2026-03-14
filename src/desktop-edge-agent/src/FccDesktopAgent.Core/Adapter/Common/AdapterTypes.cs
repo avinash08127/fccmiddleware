@@ -82,6 +82,8 @@ public sealed record FccConnectionConfig(
     int? ReconnectBackoffMaxSeconds = null,
     /// <summary>DOMS TCP: Comma-separated list of configured pump numbers (e.g., "1,2,3,4").</summary>
     string? ConfiguredPumps = null,
+    /// <summary>DOMS TCP: Optional raw DPP port list delivered from cloud config.</summary>
+    string? DppPorts = null,
     // ── Petronite OAuth2 fields ──────────────────────────────────────────────
     /// <summary>Petronite: OAuth2 client ID for Client Credentials flow.</summary>
     [property: SensitiveData] string? ClientId = null,
@@ -106,6 +108,8 @@ public sealed record FccConnectionConfig(
     string? AdvatecEfdSerialNumber = null,
     /// <summary>Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL).</summary>
     int? AdvatecCustIdType = null,
+    /// <summary>Advatec: Optional FCC-to-pump map JSON delivered from cloud config.</summary>
+    string? AdvatecPumpMap = null,
     /// <summary>Resolved legal entity identifier used by normalization and correlation flows.</summary>
     string? LegalEntityId = null,
     /// <summary>Resolved ISO 4217 currency code for the site.</summary>

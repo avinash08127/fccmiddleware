@@ -19,6 +19,7 @@ This directory contains the complete phased development plan for the Forecourt M
 | `dev-plan-desktop-edge-agent.md` | 25 tasks across 5 phases |
 | `dev-plan-angular-portal.md` | 16 tasks across 4 phases |
 | `dev-plan-virtual-lab.md` | FCC Simulator + Pump Simulator virtual lab plan |
+| `dev-plan-agent-control-bootstrap-audit-fcm.md` | Focused cross-application plan for bootstrap token history, agent commands, and Android FCM wake-up support |
 
 ## How to Use
 

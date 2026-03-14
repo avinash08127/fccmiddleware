@@ -28,6 +28,14 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <service
+            android:name=".push.EdgeFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"
@@ -38,44 +46,17 @@
             </intent-filter>
         </receiver>
 
-        <!-- Splash screen — app entry point with Puma Energy branding -->
+        <!-- Single Compose Activity — all screens are Compose routes -->
         <activity
-            android:name=".ui.SplashActivity"
+            android:name=".ui.MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout"
-            android:theme="@style/Theme.FccEdgeAgent.Splash">
+            android:theme="@style/Theme.FccEdgeAgent">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- Launcher activity — routes to Provisioning or Diagnostics based on registration state -->
-        <activity
-            android:name=".ui.LauncherActivity"
-            android:exported="false"
-            android:theme="@style/Theme.FccEdgeAgent.Launcher" />
-
-        <!-- QR code provisioning screen — shown on first launch -->
-        <activity
-            android:name=".ui.ProvisioningActivity"
-            android:exported="false"
-            android:configChanges="orientation|screenSize|screenLayout" />
-
-        <!-- Diagnostics screen — shown after successful registration -->
-        <activity
-            android:name=".ui.DiagnosticsActivity"
-            android:exported="false" />
-
-        <!-- FCC connection settings — local override management -->
-        <activity
-            android:name=".ui.SettingsActivity"
-            android:exported="false" />
-
-        <!-- Device decommissioned screen — dead-end after 403 DEVICE_DECOMMISSIONED -->
-        <activity
-            android:name=".ui.DecommissionedActivity"
-            android:exported="false" />
 
         <!-- FileProvider for sharing log zip files via share sheet -->
         <provider

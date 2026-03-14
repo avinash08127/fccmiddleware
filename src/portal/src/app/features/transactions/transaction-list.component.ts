@@ -1,4 +1,4 @@
-import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, effect, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -11,14 +11,13 @@ import { SelectModule } from 'primeng/select';
 import { FormsModule } from '@angular/forms';
 
 import { TransactionService } from '../../core/services/transaction.service';
-import { MasterDataService } from '../../core/services/master-data.service';
+import { LegalEntityStateService } from '../../core/services/legal-entity-state.service';
 import { SiteService } from '../../core/services/site.service';
 import {
   Transaction,
   TransactionStatus,
   TransactionQueryParams,
 } from '../../core/models/transaction.model';
-import { LegalEntity } from '../../core/models/master-data.model';
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { CurrencyMinorUnitsPipe } from '../../shared/pipes/currency-minor-units.pipe';
@@ -226,19 +225,16 @@ interface LoadRequest {
 })
 export class TransactionListComponent {
   private readonly txService = inject(TransactionService);
-  private readonly masterDataService = inject(MasterDataService);
+  private readonly leState = inject(LegalEntityStateService);
   private readonly siteService = inject(SiteService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
   readonly pageSize = 20;
 
-  // ── Legal entity ──────────────────────────────────────────────────────────
-  private readonly legalEntities = signal<LegalEntity[]>([]);
-  readonly selectedLegalEntityId = signal<string | null>(null);
-  readonly legalEntityOptions = computed(() =>
-    this.legalEntities().map((e) => ({ label: `${e.name} (${e.code})`, value: e.id })),
-  );
+  // ── Legal entity (shared) ─────────────────────────────────────────────────
+  readonly selectedLegalEntityId = this.leState.selectedId;
+  readonly legalEntityOptions = this.leState.options;
 
   // ── Site filter options ───────────────────────────────────────────────────
   readonly siteOptions = signal<{ label: string; value: string }[]>([]);
@@ -266,10 +262,14 @@ export class TransactionListComponent {
   private readonly loadSites$ = new Subject<string>();
 
   constructor() {
-    this.masterDataService
-      .getLegalEntities()
-      .pipe(takeUntilDestroyed())
-      .subscribe({ next: (entities) => this.legalEntities.set(entities) });
+    // Auto-load when the shared legal entity selection changes.
+    effect(() => {
+      const entityId = this.leState.selectedId();
+      if (entityId) {
+        this.loadSitesForEntity(entityId);
+        this.resetState();
+      }
+    });
 
     this.loadSites$
       .pipe(
@@ -326,12 +326,7 @@ export class TransactionListComponent {
   // ── Event handlers ────────────────────────────────────────────────────────
 
   onLegalEntityChange(entityId: string | null): void {
-    this.selectedLegalEntityId.set(entityId);
-    if (!entityId) return;
-
-    this.loadSitesForEntity(entityId);
-    this.resetState();
-    // Table becomes visible → onLazyLoad fires automatically with first=0
+    this.leState.select(entityId);
   }
 
   onFiltersChange(filters: TransactionFilters): void {

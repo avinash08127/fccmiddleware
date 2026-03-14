@@ -3,6 +3,7 @@ import {
   provideBrowserGlobalErrorListeners,
   provideZoneChangeDetection,
 } from '@angular/core';
+import { provideAnimationsAsync } from '@angular/platform-browser/animations/async';
 import {
   provideRouter,
   withEnabledBlockingInitialNavigation,
@@ -58,6 +59,7 @@ export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideZoneChangeDetection({ eventCoalescing: true }),
+    provideAnimationsAsync(),
     provideRouter(routes, withEnabledBlockingInitialNavigation()),
 
     // HTTP client — functional interceptors + DI-based class interceptors (MSAL)

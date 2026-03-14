@@ -121,6 +121,83 @@ public sealed class CloudWatchEmfMetricSink : IObservabilityMetrics
             ("siteCode", siteCode),
             ("deviceId", deviceId.ToString()));
 
+    public void RecordAgentCommandCreated(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) =>
+        EmitMetric(
+            "agent_command_created_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("deviceId", deviceId.ToString()),
+            ("commandType", commandType));
+
+    public void RecordAgentCommandAcked(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) =>
+        EmitMetric(
+            "agent_command_acked_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("deviceId", deviceId.ToString()),
+            ("commandType", commandType));
+
+    public void RecordAgentCommandFailed(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) =>
+        EmitMetric(
+            "agent_command_failed_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("deviceId", deviceId.ToString()),
+            ("commandType", commandType));
+
+    public void RecordAgentCommandExpired(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) =>
+        EmitMetric(
+            "agent_command_expired_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("deviceId", deviceId.ToString()),
+            ("commandType", commandType));
+
+    public void RecordAgentPushHintAttempted(Guid legalEntityId, string siteCode, Guid deviceId, string kind) =>
+        EmitMetric(
+            "agent_push_hint_attempted_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("deviceId", deviceId.ToString()),
+            ("kind", kind));
+
+    public void RecordAgentPushHintSucceeded(Guid legalEntityId, string siteCode, Guid deviceId, string kind) =>
+        EmitMetric(
+            "agent_push_hint_succeeded_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("deviceId", deviceId.ToString()),
+            ("kind", kind));
+
+    public void RecordAgentPushHintFailed(Guid legalEntityId, string siteCode, Guid deviceId, string kind) =>
+        EmitMetric(
+            "agent_push_hint_failed_count",
+            1,
+            "Count",
+            ("legalEntityId", legalEntityId.ToString()),
+            ("siteCode", siteCode),
+            ("deviceId", deviceId.ToString()),
+            ("kind", kind));
+
+    public void RecordBootstrapTokenHistoryApiLatency(Guid legalEntityId, double latencyMs) =>
+        EmitMetric(
+            "bootstrap_token_history_api_latency_ms",
+            latencyMs,
+            "Milliseconds",
+            ("legalEntityId", legalEntityId.ToString()));
+
     private void EmitMetric(string name, double value, string unit, params (string Key, string Value)[] dimensions)
     {
         var dimensionKeys = new List<string> { "service", "environment" };

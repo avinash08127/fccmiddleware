@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -96,9 +97,14 @@ public sealed class RefreshDeviceTokenHandler
 
         // 2. Verify device is still active
         var device = await _db.FindAgentByIdAsync(existingToken.DeviceId, cancellationToken);
-        if (device is null || !device.IsActive)
+        if (device is null)
             return Result<RefreshDeviceTokenResult>.Failure("DEVICE_DECOMMISSIONED",
                 "Device has been decommissioned.");
+
+        if (device.Status != AgentRegistrationStatus.ACTIVE || !device.IsActive)
+            return Result<RefreshDeviceTokenResult>.Failure(
+                device.Status.ToDeviceAccessErrorCode(),
+                device.Status.ToDeviceAccessErrorMessage());
 
         // 3. Revoke old refresh token (rotation)
         existingToken.RevokedAt = now;

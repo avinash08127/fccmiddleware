@@ -7,5 +7,7 @@ namespace FccMiddleware.Domain.Enums;
 public enum AgentRegistrationStatus
 {
     ACTIVE,
+    PENDING_APPROVAL,
+    QUARANTINED,
     DEACTIVATED
 }

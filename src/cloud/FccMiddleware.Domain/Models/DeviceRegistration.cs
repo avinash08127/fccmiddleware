@@ -46,8 +46,31 @@ public class DeviceRegistrationRequest
     /// <summary>Edge Agent app version in semantic version format (e.g., 1.2.3).</summary>
     public string AgentVersion { get; set; } = null!;
 
+    /// <summary>Registration-time device class. Expected values: ANDROID, DESKTOP.</summary>
+    public string DeviceClass { get; set; } = "ANDROID";
+
+    /// <summary>HA role eligibility advertised by the registering device.</summary>
+    public string? RoleCapability { get; set; }
+
+    /// <summary>Configured HA priority where lower numbers have higher preference.</summary>
+    public int? SiteHaPriority { get; set; }
+
+    /// <summary>Capabilities advertised by the device, such as FCC_CONTROL or LAN_PROXY.</summary>
+    public string[] Capabilities { get; set; } = [];
+
+    /// <summary>Optional peer API metadata used for peer directory bootstrap.</summary>
+    public PeerApiRegistrationMetadata? PeerApi { get; set; }
+
     /// <summary>If true, deactivates any existing active agent for this site with a different serial number.</summary>
     public bool ReplacePreviousAgent { get; set; } = false;
+}
+
+public class PeerApiRegistrationMetadata
+{
+    public string? BaseUrl { get; set; }
+    public string? AdvertisedHost { get; set; }
+    public int? Port { get; set; }
+    public bool TlsEnabled { get; set; }
 }
 
 /// <summary>

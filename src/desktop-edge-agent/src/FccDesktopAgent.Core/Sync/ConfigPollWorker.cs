@@ -55,12 +55,15 @@ public sealed class ConfigPollWorker : IConfigPoller
 
     /// <inheritdoc />
     public async Task<bool> PollAsync(CancellationToken ct)
+        => await PollWithDetailsAsync(ct) is ConfigPollExecutionResult.Applied;
+
+    public async Task<ConfigPollExecutionResult> PollWithDetailsAsync(CancellationToken ct)
     {
         // T-DSK-013: Check centralized decommission flag instead of per-worker volatile boolean.
         if (_registrationManager.IsDecommissioned)
         {
             _logger.LogDebug("Config poll skipped: device is decommissioned");
-            return false;
+            return new ConfigPollExecutionResult.Decommissioned();
         }
 
         // T-DSK-010: Delegate auth flow (token acquisition, 401 refresh, decommission handling)
@@ -69,31 +72,37 @@ public sealed class ConfigPollWorker : IConfigPoller
             SendPollRequestAsync, "config poll", ct);
 
         if (result.RequiresHalt)
-            return false;
+            return result.Outcome == AuthRequestOutcome.Decommissioned
+                ? new ConfigPollExecutionResult.Decommissioned()
+                : new ConfigPollExecutionResult.Unavailable("re-provisioning required");
+
+        if (result.Outcome == AuthRequestOutcome.NoToken)
+            return new ConfigPollExecutionResult.Unavailable("no device token available");
+
+        if (result.Outcome == AuthRequestOutcome.AuthFailed)
+            return new ConfigPollExecutionResult.TransportFailure("token refresh failed");
 
         if (!result.IsSuccess)
-            return false;
+            return new ConfigPollExecutionResult.TransportFailure(result.Error?.Message ?? "config poll failed");
 
         // null = 304 Not Modified
         var response = result.Value;
         if (response is null)
-            return false;
+            return new ConfigPollExecutionResult.Unchanged(ParseCurrentConfigVersion());
 
         // Apply the new config
         var applyResult = await _configManager.ApplyConfigAsync(
             response.Config, response.RawJson, response.ConfigVersion, ct);
 
-        if (applyResult.Outcome == ConfigApplyOutcome.Applied)
+        return applyResult.Outcome switch
         {
-            _logger.LogInformation(
-                "Config version {Version} applied successfully", applyResult.ConfigVersion);
-            return true;
-        }
-
-        _logger.LogDebug(
-            "Config version {Version} not applied: {Outcome}",
-            applyResult.ConfigVersion, applyResult.Outcome);
-        return false;
+            ConfigApplyOutcome.Applied => BuildAppliedResult(applyResult.ConfigVersion),
+            ConfigApplyOutcome.StaleVersion or ConfigApplyOutcome.NotYetEffective => new ConfigPollExecutionResult.Skipped(applyResult.ConfigVersion),
+            ConfigApplyOutcome.Rejected => new ConfigPollExecutionResult.Rejected(
+                applyResult.ConfigVersion,
+                applyResult.ErrorMessage ?? "Config validation failed"),
+            _ => new ConfigPollExecutionResult.TransportFailure("config poll failed")
+        };
     }
 
     // ── HTTP ─────────────────────────────────────────────────────────────────
@@ -157,6 +166,17 @@ public sealed class ConfigPollWorker : IConfigPoller
         var configVersion = etag ?? siteConfig.ConfigVersion.ToString();
 
         return new ConfigPollResponse(siteConfig, rawJson, configVersion);
+    }
+
+    private ConfigPollExecutionResult.Applied BuildAppliedResult(int configVersion)
+    {
+        _logger.LogInformation("Config version {Version} applied successfully", configVersion);
+        return new ConfigPollExecutionResult.Applied(configVersion);
+    }
+
+    private int? ParseCurrentConfigVersion()
+    {
+        return int.TryParse(_configManager.CurrentConfigVersion, out var version) ? version : null;
     }
 }
 

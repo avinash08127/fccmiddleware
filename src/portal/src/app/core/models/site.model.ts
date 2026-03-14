@@ -99,6 +99,12 @@ export enum SecretEnvelopeFormat {
   JWE_BASE64 = 'JWE_BASE64',
 }
 
+export enum PeerDiscoveryMode {
+  CLOUD_DIRECTORY = 'CLOUD_DIRECTORY',
+  LAN_BROADCAST = 'LAN_BROADCAST',
+  HYBRID = 'HYBRID',
+}
+
 // ── Site (from master-data sync schema) ──────────────────────────────────────
 
 export interface Site {
@@ -231,6 +237,7 @@ export interface SiteConfigIdentity {
   timezone: string;
   currencyCode: string;
   deviceId: string;
+  deviceClass: import('./agent.model').AgentDeviceClass;
   isPrimaryAgent: boolean;
 }
 
@@ -272,6 +279,41 @@ export interface SiteConfigLocalApi {
   lanAllowCidrs: string[];
   lanApiKeyRef: string | null;
   rateLimitPerMinute: number;
+}
+
+export interface SiteConfigPeerDirectoryEntry {
+  agentId: string;
+  deviceClass: import('./agent.model').AgentDeviceClass;
+  status: import('./agent.model').AgentRegistrationStatus;
+  roleCapability: import('./agent.model').AgentRoleCapability;
+  priority: number;
+  currentRole: import('./agent.model').SiteHaRuntimeRole;
+  peerApiBaseUrl: string | null;
+  peerApiAdvertisedHost: string | null;
+  peerApiPort: number | null;
+  peerApiTlsEnabled: boolean;
+  capabilities: string[];
+  appVersion: string | null;
+  lastHeartbeatUtc: string | null;
+  leaderEpochSeen: number | null;
+  lastReplicationLagSeconds: number | null;
+}
+
+export interface SiteConfigSiteHa {
+  enabled: boolean;
+  autoFailoverEnabled: boolean;
+  priority: number;
+  roleCapability: import('./agent.model').AgentRoleCapability;
+  currentRole: import('./agent.model').SiteHaRuntimeRole;
+  heartbeatIntervalSeconds: number;
+  failoverTimeoutSeconds: number;
+  maxReplicationLagSeconds: number;
+  peerDiscoveryMode: PeerDiscoveryMode;
+  allowFailback: boolean;
+  leaderAgentId: string | null;
+  leaderEpoch: number;
+  leaderSinceUtc: string | null;
+  peerDirectory: SiteConfigPeerDirectoryEntry[];
 }
 
 export interface SiteConfigTelemetry {
@@ -341,6 +383,7 @@ export interface SiteConfig {
   sync: SiteConfigSync;
   buffer: SiteConfigBuffer;
   localApi: SiteConfigLocalApi;
+  siteHa: SiteConfigSiteHa;
   telemetry: SiteConfigTelemetry;
   fiscalization: SiteConfigFiscalization;
   mappings: SiteConfigMappings;

@@ -52,6 +52,14 @@ export class AgentService {
   decommissionAgent(deviceId: string, reason: string): Observable<DecommissionResponse> {
     return this.http.post<DecommissionResponse>(`/api/v1/admin/agent/${deviceId}/decommission`, { reason });
   }
+
+  approveSuspiciousAgent(deviceId: string, reason: string): Observable<SuspiciousRegistrationReviewResponse> {
+    return this.http.post<SuspiciousRegistrationReviewResponse>(`/api/v1/admin/agent/${deviceId}/approve`, { reason });
+  }
+
+  rejectSuspiciousAgent(deviceId: string, reason: string): Observable<SuspiciousRegistrationReviewResponse> {
+    return this.http.post<SuspiciousRegistrationReviewResponse>(`/api/v1/admin/agent/${deviceId}/reject`, { reason });
+  }
 }
 
 export interface DecommissionResponse {
@@ -62,6 +70,12 @@ export interface DecommissionResponse {
 export interface DiagnosticLogsResponse {
   deviceId: string;
   batches: DiagnosticLogBatch[];
+}
+
+export interface SuspiciousRegistrationReviewResponse {
+  deviceId: string;
+  status: string;
+  updatedAt: string;
 }
 
 export interface DiagnosticLogBatch {

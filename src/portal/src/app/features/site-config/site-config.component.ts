@@ -1,4 +1,4 @@
-import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, effect, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -15,14 +15,13 @@ import { FormsModule } from '@angular/forms';
 import { MessageService } from 'primeng/api';
 
 import { SiteService, SiteQueryParams } from '../../core/services/site.service';
-import { MasterDataService } from '../../core/services/master-data.service';
+import { LegalEntityStateService } from '../../core/services/legal-entity-state.service';
 import { LoggingService } from '../../core/services/logging.service';
 import {
   Site,
   SiteOperatingModel,
   ConnectivityMode,
 } from '../../core/models/site.model';
-import { LegalEntity } from '../../core/models/master-data.model';
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { StatusLabelPipe } from '../../shared/pipes/status-label.pipe';
@@ -292,7 +291,7 @@ type PrimeSeverity = 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'con
 })
 export class SiteConfigComponent {
   private readonly siteService = inject(SiteService);
-  private readonly masterDataService = inject(MasterDataService);
+  private readonly leState = inject(LegalEntityStateService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
   private readonly messageService = inject(MessageService);
@@ -300,12 +299,9 @@ export class SiteConfigComponent {
 
   readonly pageSize = 20;
 
-  // ── Legal entity ──────────────────────────────────────────────────────────
-  private readonly legalEntities = signal<LegalEntity[]>([]);
-  readonly selectedLegalEntityId = signal<string | null>(null);
-  readonly legalEntityOptions = computed(() =>
-    this.legalEntities().map((e) => ({ label: `${e.name} (${e.code})`, value: e.id })),
-  );
+  // ── Legal entity (shared) ─────────────────────────────────────────────────
+  readonly selectedLegalEntityId = this.leState.selectedId;
+  readonly legalEntityOptions = this.leState.options;
 
   // ── Table state ───────────────────────────────────────────────────────────
   readonly sites = signal<Site[]>([]);
@@ -338,23 +334,13 @@ export class SiteConfigComponent {
   ];
 
   constructor() {
-    // F09-06: Error handler added — a failed legal-entity load leaves the page unusable,
-    // so we must surface the failure rather than silently leaving the dropdown empty.
-    this.masterDataService
-      .getLegalEntities()
-      .pipe(takeUntilDestroyed())
-      .subscribe({
-        next: (entities) => this.legalEntities.set(entities),
-        error: () => {
-          this.logger.error('SiteConfigComponent', 'Failed to load legal entities');
-          this.messageService.add({
-            severity: 'error',
-            summary: 'Load failed',
-            detail: 'Could not load legal entities. Please refresh the page.',
-            life: 0,
-          });
-        },
-      });
+    // Auto-load sites when the shared legal entity selection changes.
+    effect(() => {
+      const entityId = this.leState.selectedId();
+      if (entityId) {
+        this.resetAndLoad();
+      }
+    });
 
     this.load$
       .pipe(
@@ -403,9 +389,7 @@ export class SiteConfigComponent {
   }
 
   onLegalEntityChange(entityId: string | null): void {
-    this.selectedLegalEntityId.set(entityId);
-    if (!entityId) return;
-    this.resetAndLoad();
+    this.leState.select(entityId);
   }
 
   onFilterChange(): void {
@@ -427,8 +411,7 @@ export class SiteConfigComponent {
   }
 
   legalEntityName(id: string): string {
-    const entity = this.legalEntities().find((e) => e.id === id);
-    return entity ? `${entity.name} (${entity.code})` : id;
+    return this.leState.nameOf(id);
   }
 
   modelSeverity(model: SiteOperatingModel): PrimeSeverity {

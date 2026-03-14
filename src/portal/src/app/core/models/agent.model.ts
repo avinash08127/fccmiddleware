@@ -11,7 +11,28 @@ export enum ConnectivityState {
 
 export enum AgentRegistrationStatus {
   ACTIVE = 'ACTIVE',
+  PENDING_APPROVAL = 'PENDING_APPROVAL',
+  QUARANTINED = 'QUARANTINED',
   DEACTIVATED = 'DEACTIVATED',
+}
+
+export enum AgentDeviceClass {
+  ANDROID = 'ANDROID',
+  DESKTOP = 'DESKTOP',
+}
+
+export enum AgentRoleCapability {
+  PRIMARY_ELIGIBLE = 'PRIMARY_ELIGIBLE',
+  STANDBY_ONLY = 'STANDBY_ONLY',
+  READ_ONLY = 'READ_ONLY',
+}
+
+export enum SiteHaRuntimeRole {
+  PRIMARY = 'PRIMARY',
+  STANDBY_HOT = 'STANDBY_HOT',
+  RECOVERING = 'RECOVERING',
+  READ_ONLY = 'READ_ONLY',
+  OFFLINE = 'OFFLINE',
 }
 
 // ── Registration ──────────────────────────────────────────────────────────────
@@ -21,13 +42,29 @@ export interface AgentRegistration {
   deviceId: string;
   siteCode: string;
   legalEntityId: string;
+  deviceClass: AgentDeviceClass;
   deviceSerialNumber: string;
   deviceModel: string;
   osVersion: string;
   agentVersion: string;
+  roleCapability: AgentRoleCapability;
+  priority: number;
+  currentRole: SiteHaRuntimeRole | null;
+  capabilities: string[];
+  peerApiBaseUrl: string | null;
+  peerApiAdvertisedHost: string | null;
+  peerApiPort: number | null;
+  peerApiTlsEnabled: boolean;
+  leaderEpochSeen: number | null;
+  lastReplicationLagSeconds: number | null;
   status: AgentRegistrationStatus;
   registeredAt: string;
   lastSeenAt: string | null;
+  suspensionReasonCode: string | null;
+  suspensionReason: string | null;
+  replacementForDeviceId: string | null;
+  approvalGrantedAt: string | null;
+  approvalGrantedByActorDisplay: string | null;
 }
 
 export interface DeviceRegistrationRequest {
@@ -37,6 +74,16 @@ export interface DeviceRegistrationRequest {
   deviceModel: string;
   osVersion: string;
   agentVersion: string;
+  deviceClass?: AgentDeviceClass;
+  roleCapability?: AgentRoleCapability | null;
+  siteHaPriority?: number | null;
+  capabilities?: string[];
+  peerApi?: {
+    baseUrl?: string | null;
+    advertisedHost?: string | null;
+    port?: number | null;
+    tlsEnabled?: boolean;
+  } | null;
   replacePreviousAgent?: boolean;
 }
 
@@ -129,7 +176,15 @@ export interface AgentHealthSummary {
   siteCode: string;
   siteName: string | null;
   legalEntityId: string;
+  deviceClass: AgentDeviceClass;
   agentVersion: string;
+  roleCapability: AgentRoleCapability;
+  priority: number;
+  currentRole: SiteHaRuntimeRole | null;
+  isCurrentLeader: boolean;
+  leaderEpoch: number;
+  capabilities: string[];
+  peerApiBaseUrl: string | null;
   status: AgentRegistrationStatus;
   hasTelemetry: boolean;
   connectivityState: ConnectivityState | null;
@@ -137,8 +192,11 @@ export interface AgentHealthSummary {
   isCharging: boolean | null;
   bufferDepth: number | null;
   syncLagSeconds: number | null;
+  lastReplicationLagSeconds: number | null;
   lastTelemetryAt: string | null;
   lastSeenAt: string | null;
+  suspensionReasonCode: string | null;
+  approvalGrantedAt: string | null;
 }
 
 // ── Audit events ──────────────────────────────────────────────────────────────

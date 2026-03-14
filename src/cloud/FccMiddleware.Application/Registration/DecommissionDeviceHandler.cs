@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Domain.Entities;
+using FccMiddleware.Domain.Enums;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
@@ -28,11 +29,12 @@ public sealed class DecommissionDeviceHandler
             return Result<DecommissionDeviceResult>.Failure("DEVICE_NOT_FOUND",
                 $"Device '{request.DeviceId}' not found.");
 
-        if (!device.IsActive)
+        if (device.Status == AgentRegistrationStatus.DEACTIVATED)
             return Result<DecommissionDeviceResult>.Failure("DEVICE_ALREADY_DECOMMISSIONED",
                 "Device is already decommissioned.");
 
         // Deactivate device
+        device.Status = AgentRegistrationStatus.DEACTIVATED;
         device.IsActive = false;
         device.DeactivatedAt = now;
         device.UpdatedAt = now;

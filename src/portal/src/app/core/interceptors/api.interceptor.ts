@@ -1,6 +1,6 @@
 import { inject } from '@angular/core';
 import { HttpInterceptorFn, HttpErrorResponse } from '@angular/common/http';
-import { catchError, throwError } from 'rxjs';
+import { catchError, switchMap, throwError, from, of } from 'rxjs';
 import { Router } from '@angular/router';
 import { MessageService } from 'primeng/api';
 import { MsalService } from '@azure/msal-angular';
@@ -13,11 +13,26 @@ export const apiInterceptor: HttpInterceptorFn = (req, next) => {
   const logger = inject(LoggingService);
   const msal = inject(MsalService);
 
-  const apiReq = req.clone({
-    url: `${environment.apiBaseUrl}${req.url}`,
-  });
+  const absoluteUrl = `${environment.apiBaseUrl}${req.url}`;
 
-  return next(apiReq).pipe(
+  // Acquire token and attach it before sending the request
+  const account = msal.instance.getActiveAccount() ?? msal.instance.getAllAccounts()[0];
+  const token$ = account
+    ? from(msal.instance.acquireTokenSilent({
+        scopes: [`${environment.msalClientId}/.default`],
+        account,
+      })).pipe(catchError(() => of(null)))
+    : of(null);
+
+  return token$.pipe(
+    switchMap((tokenResult) => {
+      const headers: Record<string, string> = {};
+      if (tokenResult?.accessToken) {
+        headers['Authorization'] = `Bearer ${tokenResult.accessToken}`;
+      }
+      const apiReq = req.clone({ url: absoluteUrl, setHeaders: headers });
+      return next(apiReq);
+    }),
     catchError((error: HttpErrorResponse) => {
       if (error.status === 401) {
         logger.warn('ApiInterceptor', 'Received 401 — attempting MSAL token refresh', {

@@ -1,5 +1,6 @@
 import { Component, DestroyRef, inject, signal, computed, OnInit } from '@angular/core';
 import { CommonModule, DOCUMENT } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { HttpErrorResponse } from '@angular/common/http';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -14,14 +15,26 @@ import { TimelineModule } from 'primeng/timeline';
 import { TagModule } from 'primeng/tag';
 import { TableModule } from 'primeng/table';
 import { SkeletonModule } from 'primeng/skeleton';
+import { SelectModule } from 'primeng/select';
+import { InputTextModule } from 'primeng/inputtext';
+import { TextareaModule } from 'primeng/textarea';
+import { MessageModule } from 'primeng/message';
+import { TooltipModule } from 'primeng/tooltip';
 
 import { AgentService, DiagnosticLogBatch } from '../../core/services/agent.service';
+import { AgentCommandService } from '../../core/services/agent-command.service';
 import {
   AgentAuditEvent,
   AgentRegistration,
+  AgentRegistrationStatus,
   AgentTelemetry,
   ConnectivityState,
 } from '../../core/models/agent.model';
+import {
+  AgentCommandRow,
+  AgentCommandType,
+  AgentCommandStatus,
+} from '../../core/models/agent-command.model';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
 import { RoleVisibleDirective } from '../../shared/directives/role-visible.directive';
@@ -117,6 +130,7 @@ interface TimelineEvent {
   standalone: true,
   imports: [
     CommonModule,
+    FormsModule,
     RouterModule,
     CardModule,
     ButtonModule,
@@ -126,6 +140,11 @@ interface TimelineEvent {
     TagModule,
     TableModule,
     SkeletonModule,
+    SelectModule,
+    InputTextModule,
+    TextareaModule,
+    MessageModule,
+    TooltipModule,
     EmptyStateComponent,
     UtcDatePipe,
     RoleVisibleDirective,
@@ -152,13 +171,34 @@ interface TimelineEvent {
               <p class="page-subtitle">
                 Device: <code>{{ registration()!.deviceId }}</code>
                 &nbsp;&bull;&nbsp; Registered {{ registration()!.registeredAt | utcDate:'mediumDate' }}
+                &nbsp;&bull;&nbsp;
+                <span class="reg-status-badge" [class]="registrationStatusClass(registration()!.status)">
+                  {{ registration()!.status }}
+                </span>
               </p>
             }
           </div>
         </div>
         <div class="header-right">
-          <!-- F08-08: Decommission button for admin roles -->
           <ng-container *appRoleVisible="['FccAdmin', 'FccUser']">
+            @if (isSuspiciousRegistration()) {
+              <p-button
+                label="Approve"
+                icon="pi pi-check"
+                severity="success"
+                [outlined]="true"
+                [loading]="approvingSuspicious()"
+                (onClick)="confirmApproveSuspicious()"
+              />
+              <p-button
+                label="Reject"
+                icon="pi pi-times"
+                severity="warn"
+                [outlined]="true"
+                [loading]="rejectingSuspicious()"
+                (onClick)="confirmRejectSuspicious()"
+              />
+            }
             @if (registration() && registration()!.status !== 'DEACTIVATED') {
               <p-button
                 label="Decommission"
@@ -185,6 +225,21 @@ interface TimelineEvent {
           />
         </div>
       </div>
+
+      @if (isSuspiciousRegistration()) {
+        <p-message severity="warn" styleClass="suspicious-banner">
+          <div class="suspicious-banner__content">
+            <strong>{{ registration()!.status }}</strong>
+            <span>{{ registration()!.suspensionReason ?? 'This registration is being held for operator review.' }}</span>
+            @if (registration()!.approvalGrantedAt) {
+              <span>
+                Approval recorded {{ registration()!.approvalGrantedAt | utcDate:'short' }}.
+                Retry provisioning on the device to complete activation.
+              </span>
+            }
+          </div>
+        </p-message>
+      }
 
       @if (loading() && !telemetry() && !registration()) {
         <!-- Loading skeletons -->
@@ -490,6 +545,143 @@ interface TimelineEvent {
           }
         </p-card>
 
+        <!-- ── AC-4.3: Command Actions ─── -->
+        <ng-container *appRoleVisible="['FccAdmin', 'FccUser']">
+          @if (registration()?.status === 'ACTIVE') {
+            <p-card header="Issue Command" styleClass="command-card">
+              <div class="command-form">
+                <div class="command-form-row">
+                  <div class="command-field">
+                    <label for="cmd-type">Command Type</label>
+                    <p-select
+                      inputId="cmd-type"
+                      [options]="commandTypeOptions"
+                      [(ngModel)]="selectedCommandType"
+                      placeholder="Select command..."
+                      optionLabel="label"
+                      optionValue="value"
+                      styleClass="full-width"
+                    />
+                  </div>
+                </div>
+                @if (selectedCommandType) {
+                  <div class="command-form-row">
+                    <div class="command-field">
+                      <label for="cmd-reason">
+                        Reason
+                        @if (isDestructiveCommand()) {
+                          <span class="required-hint">(required, min 10 chars)</span>
+                        }
+                      </label>
+                      <textarea
+                        pTextarea
+                        id="cmd-reason"
+                        [(ngModel)]="commandReason"
+                        [rows]="2"
+                        placeholder="Reason for issuing this command..."
+                        class="full-width"
+                      ></textarea>
+                    </div>
+                  </div>
+                  @if (isDestructiveCommand()) {
+                    <p-message severity="warn" styleClass="command-warn">
+                      {{ selectedCommandType === 'DECOMMISSION'
+                        ? 'This will permanently decommission the device. The agent will stop functioning.'
+                        : 'This will clear all local data on the device. The agent will return to provisioning mode.' }}
+                    </p-message>
+                  }
+                  <div class="command-actions">
+                    <p-button
+                      [label]="'Issue ' + commandTypeLabel(selectedCommandType)"
+                      icon="pi pi-send"
+                      [severity]="isDestructiveCommand() ? 'danger' : 'primary'"
+                      [disabled]="!canIssueCommand() || issuingCommand()"
+                      [loading]="issuingCommand()"
+                      (onClick)="issueCommand()"
+                    />
+                  </div>
+                }
+                @if (commandError()) {
+                  <p-message severity="error" styleClass="command-result-msg">
+                    {{ commandError() }}
+                  </p-message>
+                }
+                @if (commandSuccess()) {
+                  <p-message severity="success" styleClass="command-result-msg">
+                    {{ commandSuccess() }}
+                  </p-message>
+                }
+              </div>
+            </p-card>
+          }
+        </ng-container>
+
+        <!-- ── AC-4.3: Command History ─── -->
+        <p-card header="Command History" styleClass="command-history-card">
+          @if (commandsLoading() && commands().length === 0) {
+            <div class="loading-msg"><i class="pi pi-spin pi-spinner"></i> Loading commands...</div>
+          } @else if (commands().length === 0) {
+            <app-empty-state
+              icon="pi-send"
+              title="No commands"
+              description="No commands have been issued for this agent."
+            />
+          } @else {
+            <p-table
+              [value]="commands()"
+              sortMode="single"
+              sortField="createdAt"
+              [sortOrder]="-1"
+              styleClass="p-datatable-sm p-datatable-striped"
+              [tableStyle]="{ 'min-width': '800px' }"
+            >
+              <ng-template pTemplate="header">
+                <tr>
+                  <th pSortableColumn="commandType">Type <p-sortIcon field="commandType" /></th>
+                  <th pSortableColumn="status" style="width:9rem">Status <p-sortIcon field="status" /></th>
+                  <th>Reason</th>
+                  <th pSortableColumn="createdAt">Created <p-sortIcon field="createdAt" /></th>
+                  <th>Expires</th>
+                  <th>Issued By</th>
+                </tr>
+              </ng-template>
+              <ng-template pTemplate="body" let-cmd>
+                <tr>
+                  <td>
+                    <code>{{ cmd.commandType }}</code>
+                  </td>
+                  <td>
+                    <p-tag
+                      [value]="cmd.status"
+                      [severity]="commandStatusSeverity(cmd.status)"
+                    />
+                  </td>
+                  <td class="reason-cell">{{ cmd.reason }}</td>
+                  <td>{{ cmd.createdAt | utcDate:'short' }}</td>
+                  <td>{{ cmd.expiresAt | utcDate:'short' }}</td>
+                  <td>
+                    <span class="actor-name">{{ cmd.createdByActorDisplay ?? '—' }}</span>
+                  </td>
+                </tr>
+              </ng-template>
+            </p-table>
+
+            @if (commandsHasMore()) {
+              <div class="load-more-row">
+                <p-button
+                  [label]="commandsLoadingMore() ? 'Loading...' : 'Load More'"
+                  icon="pi pi-chevron-down"
+                  severity="secondary"
+                  size="small"
+                  [loading]="commandsLoadingMore()"
+                  [disabled]="commandsLoadingMore()"
+                  (onClick)="loadMoreCommands()"
+                />
+              </div>
+            }
+          }
+        </p-card>
+
         <!-- ── Diagnostic Logs (from remote upload) ─── -->
         <p-card header="Diagnostic Logs (Remote)" styleClass="diag-logs-card">
           @if (diagnosticLogs().length === 0) {
@@ -587,7 +779,7 @@ interface TimelineEvent {
       margin-bottom: 1rem;
     }
     .detail-card { height: 100%; }
-    .timeline-card, .events-card { margin-bottom: 1rem; }
+    .timeline-card, .events-card, .command-card, .command-history-card { margin-bottom: 1rem; }
 
     /* ── Stat rows ──────────────────────────── */
     .stat-row {
@@ -719,6 +911,17 @@ interface TimelineEvent {
       background: #fee2e2;
       color: #dc2626;
     }
+    .suspicious-banner {
+      display: block;
+      margin-bottom: 1rem;
+    }
+    .suspicious-banner__content {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 0.75rem;
+      align-items: center;
+      line-height: 1.4;
+    }
 
     /* ── Restricted notice (F08-09) ──────────── */
     .restricted-notice {
@@ -740,6 +943,58 @@ interface TimelineEvent {
       font-size: 0.75rem;
     }
 
+    /* ── Command form ────────────────────────── */
+    .command-form { max-width: 500px; }
+    .command-form-row { margin-bottom: 0.75rem; }
+    .command-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .command-field label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--p-text-muted-color, #64748b);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .required-hint {
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 0.72rem;
+    }
+    .full-width { width: 100%; }
+    .command-actions { margin-top: 0.75rem; }
+    .command-warn { margin-bottom: 0.75rem; width: 100%; }
+    .command-result-msg { margin-top: 0.75rem; width: 100%; }
+
+    .reason-cell {
+      max-width: 250px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .actor-name {
+      font-size: 0.78rem;
+      color: var(--p-text-muted-color, #64748b);
+    }
+    .load-more-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--p-surface-border, #e2e8f0);
+    }
+    .loading-msg {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 2rem;
+      color: var(--p-text-muted-color, #64748b);
+      justify-content: center;
+    }
+
     /* ── Utilities ──────────────────────────── */
     .env-badge {
       display: inline-block;
@@ -752,6 +1007,20 @@ interface TimelineEvent {
       padding: 0.1rem 0.4rem;
       border-radius: 4px;
     }
+    /* ── Registration status badge ────────────── */
+    .reg-status-badge {
+      display: inline-block;
+      padding: 0.1rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      vertical-align: middle;
+    }
+    .reg-active      { background: #dcfce7; color: #15803d; }
+    .reg-pending     { background: #fef3c7; color: #b45309; }
+    .reg-quarantined { background: #fee2e2; color: #b91c1c; }
+    .reg-deactivated { background: #fee2e2; color: #dc2626; }
+
     code { font-family: monospace; font-size: 0.78rem; }
     .text-success { color: #16a34a; display: inline-flex; align-items: center; gap: 0.25rem; }
     .text-danger  { color: #dc2626; display: inline-flex; align-items: center; gap: 0.25rem; }
@@ -765,6 +1034,7 @@ export class AgentDetailComponent implements OnInit {
   private readonly route       = inject(ActivatedRoute);
   private readonly router      = inject(Router);
   private readonly agentService = inject(AgentService);
+  private readonly commandService = inject(AgentCommandService);
   private readonly destroyRef  = inject(DestroyRef);
   private readonly document    = inject(DOCUMENT);
 
@@ -775,6 +1045,32 @@ export class AgentDetailComponent implements OnInit {
   readonly loading       = signal(true);
   readonly error         = signal(false);
   readonly decommissioning = signal(false);
+  readonly approvingSuspicious = signal(false);
+  readonly rejectingSuspicious = signal(false);
+
+  // ── AC-4.3: Command state ──────────────────────────────────────────────
+  readonly commands = signal<AgentCommandRow[]>([]);
+  readonly commandsLoading = signal(false);
+  readonly commandsLoadingMore = signal(false);
+  readonly commandsHasMore = signal(false);
+  private readonly commandsNextCursor = signal<string | null>(null);
+
+  // Command issuance form
+  selectedCommandType: AgentCommandType | null = null;
+  commandReason = '';
+  readonly issuingCommand = signal(false);
+  readonly commandError = signal<string | null>(null);
+  readonly commandSuccess = signal<string | null>(null);
+
+  readonly commandTypeOptions = [
+    { label: 'Force Config Pull', value: 'FORCE_CONFIG_PULL' as AgentCommandType },
+    { label: 'Reset Local State', value: 'RESET_LOCAL_STATE' as AgentCommandType },
+    { label: 'Decommission', value: 'DECOMMISSION' as AgentCommandType },
+  ];
+
+  readonly isDestructiveCommand = computed(() =>
+    this.selectedCommandType === 'RESET_LOCAL_STATE' || this.selectedCommandType === 'DECOMMISSION',
+  );
 
   private agentId = '';
   private readonly refresh$ = new Subject<void>();
@@ -802,6 +1098,10 @@ export class AgentDetailComponent implements OnInit {
 
   // ── All events for recent events panel ───────────────────────────────────
   readonly recentEvents = computed(() => this.events());
+  readonly isSuspiciousRegistration = computed(() => {
+    const status = this.registration()?.status;
+    return status === AgentRegistrationStatus.PENDING_APPROVAL || status === AgentRegistrationStatus.QUARANTINED;
+  });
 
   ngOnInit(): void {
     this.agentId = this.route.snapshot.paramMap.get('id') ?? '';
@@ -849,9 +1149,10 @@ export class AgentDetailComponent implements OnInit {
         }
       });
 
-    // Initial load; diagnostic logs are on-demand only (not refreshed on the auto-refresh cycle)
+    // Initial load; diagnostic logs and commands loaded separately
     this.triggerRefresh();
     this.loadDiagnosticLogs();
+    this.loadCommands();
 
     // FM-P02: 30s interval — telemetry only when tab is visible
     interval(30_000)
@@ -932,6 +1233,62 @@ export class AgentDetailComponent implements OnInit {
       });
   }
 
+  confirmApproveSuspicious(): void {
+    const reg = this.registration();
+    if (!reg || !this.isSuspiciousRegistration()) return;
+
+    const reason = window.prompt(
+      `Approve suspicious registration for "${reg.deviceId}" (${reg.siteCode}).\n\nProvide an approval reason (at least 10 characters):`,
+    );
+    if (reason === null) return;
+    if (reason.trim().length < 10) {
+      window.alert('Reason must be at least 10 characters.');
+      return;
+    }
+
+    this.approvingSuspicious.set(true);
+    this.agentService.approveSuspiciousAgent(reg.deviceId, reason.trim())
+      .pipe(
+        catchError(() => {
+          this.approvingSuspicious.set(false);
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(() => {
+        this.approvingSuspicious.set(false);
+        this.triggerRefresh();
+      });
+  }
+
+  confirmRejectSuspicious(): void {
+    const reg = this.registration();
+    if (!reg || !this.isSuspiciousRegistration()) return;
+
+    const reason = window.prompt(
+      `Reject suspicious registration for "${reg.deviceId}" (${reg.siteCode}).\n\nProvide a rejection reason (at least 10 characters):`,
+    );
+    if (reason === null) return;
+    if (reason.trim().length < 10) {
+      window.alert('Reason must be at least 10 characters.');
+      return;
+    }
+
+    this.rejectingSuspicious.set(true);
+    this.agentService.rejectSuspiciousAgent(reg.deviceId, reason.trim())
+      .pipe(
+        catchError(() => {
+          this.rejectingSuspicious.set(false);
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(() => {
+        this.rejectingSuspicious.set(false);
+        this.triggerRefresh();
+      });
+  }
+
   private loadRegistration() {
     return this.agentService.getAgentById(this.agentId).pipe(
       catchError(() => of(this.registration())),
@@ -957,6 +1314,120 @@ export class AgentDetailComponent implements OnInit {
     );
   }
 
+  // ── AC-4.3: Command methods ──────────────────────────────────────────────
+
+  loadCommands(): void {
+    this.commandsLoading.set(true);
+    this.commandService.getCommands(this.agentId, { pageSize: 20 })
+      .pipe(
+        catchError(() => {
+          this.commandsLoading.set(false);
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((result) => {
+        this.commands.set(result.data);
+        this.commandsHasMore.set(result.meta.hasMore);
+        this.commandsNextCursor.set(result.meta.nextCursor);
+        this.commandsLoading.set(false);
+      });
+  }
+
+  loadMoreCommands(): void {
+    const cursor = this.commandsNextCursor();
+    if (!cursor) return;
+    this.commandsLoadingMore.set(true);
+    this.commandService.getCommands(this.agentId, { cursor, pageSize: 20 })
+      .pipe(
+        catchError(() => {
+          this.commandsLoadingMore.set(false);
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((result) => {
+        this.commands.update((current) => [...current, ...result.data]);
+        this.commandsHasMore.set(result.meta.hasMore);
+        this.commandsNextCursor.set(result.meta.nextCursor);
+        this.commandsLoadingMore.set(false);
+      });
+  }
+
+  canIssueCommand(): boolean {
+    if (this.registration()?.status !== AgentRegistrationStatus.ACTIVE) return false;
+    if (!this.selectedCommandType) return false;
+    if (!this.commandReason.trim()) return false;
+    if (this.isDestructiveCommand() && this.commandReason.trim().length < 10) return false;
+    return true;
+  }
+
+  issueCommand(): void {
+    if (!this.canIssueCommand() || !this.selectedCommandType) return;
+
+    // Extra confirmation for destructive commands
+    if (this.isDestructiveCommand()) {
+      const label = this.commandTypeLabel(this.selectedCommandType);
+      const confirmed = window.confirm(
+        `You are about to issue "${label}" to device ${this.agentId}.\n\nThis action cannot be undone. Continue?`,
+      );
+      if (!confirmed) return;
+    }
+
+    this.issuingCommand.set(true);
+    this.commandError.set(null);
+    this.commandSuccess.set(null);
+
+    this.commandService.createCommand(this.agentId, {
+      commandType: this.selectedCommandType,
+      reason: this.commandReason.trim(),
+    })
+      .pipe(
+        catchError((err) => {
+          const msg = err?.error?.message ?? `Failed to issue command (HTTP ${err.status}).`;
+          this.commandError.set(msg);
+          this.issuingCommand.set(false);
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((result) => {
+        this.commandSuccess.set(
+          `Command "${result.commandType}" issued successfully (ID: ${result.commandId.substring(0, 8)}...).`,
+        );
+        this.issuingCommand.set(false);
+        this.selectedCommandType = null;
+        this.commandReason = '';
+        // Refresh command history
+        this.loadCommands();
+        // Refresh agent data if it was a decommission
+        if (result.commandType === 'DECOMMISSION') {
+          this.triggerRefresh();
+        }
+      });
+  }
+
+  commandTypeLabel(type: AgentCommandType | null): string {
+    switch (type) {
+      case 'FORCE_CONFIG_PULL': return 'Force Config Pull';
+      case 'RESET_LOCAL_STATE': return 'Reset Local State';
+      case 'DECOMMISSION':     return 'Decommission';
+      default:                 return '';
+    }
+  }
+
+  commandStatusSeverity(status: AgentCommandStatus): 'success' | 'info' | 'warn' | 'danger' | 'secondary' | 'contrast' {
+    switch (status) {
+      case 'PENDING':             return 'warn';
+      case 'DELIVERY_HINT_SENT':  return 'info';
+      case 'ACKED':               return 'success';
+      case 'FAILED':              return 'danger';
+      case 'EXPIRED':             return 'secondary';
+      case 'CANCELLED':           return 'secondary';
+      default:                    return 'info';
+    }
+  }
+
   // ── Template helpers ─────────────────────────────────────────────────────
 
   connClass(state: string | null): string    { return connectivityCssClass(state); }
@@ -966,6 +1437,18 @@ export class AgentDetailComponent implements OnInit {
   formatLag(seconds: number | null): string  { return formatLag(seconds); }
   formatUptime(seconds: number): string      { return formatUptime(seconds); }
   formatStorage(mb: number): string          { return formatStorage(mb); }
+  registrationStatusClass(status: string | null): string {
+    switch (status) {
+      case AgentRegistrationStatus.ACTIVE:
+        return 'reg-active';
+      case AgentRegistrationStatus.PENDING_APPROVAL:
+        return 'reg-pending';
+      case AgentRegistrationStatus.QUARANTINED:
+        return 'reg-quarantined';
+      default:
+        return 'reg-deactivated';
+    }
+  }
 
   batteryBarClass(pct: number): string {
     if (pct <= 10) return 'battery-critical';

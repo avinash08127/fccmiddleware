@@ -1,4 +1,5 @@
 using FccMiddleware.Application.Registration;
+using FccMiddleware.Domain.Enums;
 
 namespace FccMiddleware.Api.Infrastructure;
 
@@ -40,13 +41,15 @@ public sealed class DeviceActiveCheckMiddleware
                     return;
                 }
 
-                if (!device.IsActive)
+                if (device.Status != AgentRegistrationStatus.ACTIVE || !device.IsActive)
                 {
-                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    context.Response.StatusCode = device.Status == AgentRegistrationStatus.DEACTIVATED
+                        ? StatusCodes.Status401Unauthorized
+                        : StatusCodes.Status403Forbidden;
                     await context.Response.WriteAsJsonAsync(new
                     {
-                        errorCode = "DEVICE_DECOMMISSIONED",
-                        message = "This device has been decommissioned.",
+                        errorCode = device.Status.ToDeviceAccessErrorCode(),
+                        message = device.Status.ToDeviceAccessErrorMessage(),
                     });
                     return;
                 }

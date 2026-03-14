@@ -12,7 +12,7 @@ object CloudEnvironments {
         "PRODUCTION" to CloudEnv("https://api.fccmiddleware.io", "Production"),
         "STAGING" to CloudEnv("https://api-staging.fccmiddleware.io", "Staging"),
         "DEVELOPMENT" to CloudEnv("https://api-dev.fccmiddleware.io", "Development"),
-        "LOCAL" to CloudEnv("https://localhost:5001", "Local"),
+        "LOCAL" to CloudEnv("https://10.0.2.2:7261", "Local"),
     )
 
     /** Resolve an environment key to its base URL, or null if unknown. */

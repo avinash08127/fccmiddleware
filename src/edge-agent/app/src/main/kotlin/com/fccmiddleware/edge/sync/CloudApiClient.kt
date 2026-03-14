@@ -23,7 +23,12 @@ import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import okhttp3.CertificatePinner
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 // ---------------------------------------------------------------------------
 // Status poll result type
@@ -196,6 +201,34 @@ interface CloudApiClient {
      * @param deviceToken Current (possibly expired) device JWT for identity binding (FM-S03).
      */
     suspend fun refreshToken(refreshToken: String, deviceToken: String): CloudTokenRefreshResult
+
+    /**
+     * Poll cloud for pending agent-control commands.
+     *
+     * Calls `GET /api/v1/agent/commands`.
+     */
+    suspend fun pollCommands(bearerToken: String): CloudCommandPollResult
+
+    /**
+     * Acknowledge a previously fetched command.
+     *
+     * Calls `POST /api/v1/agent/commands/{commandId}/ack`.
+     */
+    suspend fun ackCommand(
+        commandId: String,
+        request: CommandAckRequest,
+        bearerToken: String,
+    ): CloudCommandAckResult
+
+    /**
+     * Upsert the current Android FCM installation token for the authenticated device.
+     *
+     * Calls `POST /api/v1/agent/installations/android`.
+     */
+    suspend fun upsertAndroidInstallation(
+        request: AndroidInstallationUpsertRequest,
+        bearerToken: String,
+    ): CloudInstallationUpsertResult
 
     /**
      * Check agent version compatibility with the cloud.
@@ -652,17 +685,121 @@ class HttpCloudApiClient(
         }
     }
 
-    private fun createPinnedRegistrationClient(registrationBaseUrl: String): HttpClient? {
-        if (certificatePins.isEmpty()) return null
+    override suspend fun pollCommands(bearerToken: String): CloudCommandPollResult {
+        return try {
+            val response = httpClient.get("$cloudBaseUrl/api/v1/agent/commands") {
+                bearerAuth(bearerToken)
+            }
+            when (response.status) {
+                HttpStatusCode.OK -> CloudCommandPollResult.Success(response.body())
+                HttpStatusCode.Unauthorized -> CloudCommandPollResult.Unauthorized
+                HttpStatusCode.Forbidden -> {
+                    val errorCode = try {
+                        response.body<CloudErrorResponse>().errorCode
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudCommandPollResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.TooManyRequests -> {
+                    val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
+                    CloudCommandPollResult.RateLimited(retryAfter)
+                }
+                else -> CloudCommandPollResult.TransportError(
+                    buildTransportErrorMessage(response),
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            CloudCommandPollResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
 
+    override suspend fun ackCommand(
+        commandId: String,
+        request: CommandAckRequest,
+        bearerToken: String,
+    ): CloudCommandAckResult {
+        return try {
+            val response = httpClient.post("$cloudBaseUrl/api/v1/agent/commands/$commandId/ack") {
+                contentType(ContentType.Application.Json)
+                bearerAuth(bearerToken)
+                setBody(request)
+            }
+            when (response.status) {
+                HttpStatusCode.OK -> CloudCommandAckResult.Success(response.body())
+                HttpStatusCode.Unauthorized -> CloudCommandAckResult.Unauthorized
+                HttpStatusCode.Forbidden -> {
+                    val errorCode = try {
+                        response.body<CloudErrorResponse>().errorCode
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudCommandAckResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.Conflict -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudCommandAckResult.Conflict(error?.errorCode, error?.message)
+                }
+                else -> CloudCommandAckResult.TransportError(
+                    buildTransportErrorMessage(response),
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            CloudCommandAckResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
+
+    override suspend fun upsertAndroidInstallation(
+        request: AndroidInstallationUpsertRequest,
+        bearerToken: String,
+    ): CloudInstallationUpsertResult {
+        return try {
+            val response = httpClient.post("$cloudBaseUrl/api/v1/agent/installations/android") {
+                contentType(ContentType.Application.Json)
+                bearerAuth(bearerToken)
+                setBody(request)
+            }
+            when (response.status) {
+                HttpStatusCode.NoContent -> CloudInstallationUpsertResult.Success
+                HttpStatusCode.Unauthorized -> CloudInstallationUpsertResult.Unauthorized
+                HttpStatusCode.Forbidden -> {
+                    val errorCode = try {
+                        response.body<CloudErrorResponse>().errorCode
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudInstallationUpsertResult.Forbidden(errorCode)
+                }
+                else -> CloudInstallationUpsertResult.TransportError(
+                    buildTransportErrorMessage(response),
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            CloudInstallationUpsertResult.TransportError(e.message ?: "Unknown network error")
+        }
+    }
+
+    private fun createPinnedRegistrationClient(registrationBaseUrl: String): HttpClient? {
         val hostname = extractHostname(registrationBaseUrl)
             ?: throw IllegalArgumentException(
                 "Cannot extract hostname from registration cloudBaseUrl '$registrationBaseUrl'",
             )
         if (isLoopbackHost(hostname)) {
-            AppLogger.i(TAG, "Registration host $hostname is loopback - skipping certificate pinning")
-            return null
+            AppLogger.i(TAG, "Registration host $hostname is loopback - creating trust-all client (no pinning)")
+            return buildKtorClient(emptyList(), registrationBaseUrl, socketFactory, skipPinFallback = true)
         }
+
+        if (certificatePins.isEmpty()) return null
 
         AppLogger.i(TAG, "Using dedicated pinned registration client for $hostname")
         return registrationClientFactory?.invoke(registrationBaseUrl, certificatePins, socketFactory)
@@ -855,6 +992,21 @@ class HttpCloudApiClient(
                         if (certPinner != null) {
                             certificatePinner(certPinner)
                         }
+
+                        // DEV-ONLY: Trust self-signed certs for emulator loopback host
+                        val hostname = extractHostname(cloudBaseUrl)
+                        if (hostname != null && isLoopbackHost(hostname)) {
+                            val trustAllManager = object : X509TrustManager {
+                                override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) = Unit
+                                override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) = Unit
+                                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+                            }
+                            val sslContext = SSLContext.getInstance("TLS")
+                            sslContext.init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
+                            sslSocketFactory(sslContext.socketFactory, trustAllManager)
+                            hostnameVerifier { _, _ -> true }
+                            AppLogger.i(TAG, "DEV: SSL verification disabled for loopback host $hostname")
+                        }
                     }
                 }
                 // NET-011: isLenient removed — strict JSON parsing surfaces malformed
@@ -898,7 +1050,8 @@ class HttpCloudApiClient(
             return normalized == "localhost" ||
                 normalized == "127.0.0.1" ||
                 normalized == "::1" ||
-                normalized == "0:0:0:0:0:0:0:1"
+                normalized == "0:0:0:0:0:0:0:1" ||
+                normalized == "10.0.2.2" // Android emulator host loopback
         }
     }
 }

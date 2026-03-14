@@ -19,7 +19,6 @@ import { SiteService } from '../../core/services/site.service';
 import { LegalEntity } from '../../core/models/master-data.model';
 import { Site } from '../../core/models/site.model';
 import { GenerateBootstrapTokenResponse } from '../../core/models/bootstrap-token.model';
-import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { environment } from '../../../environments/environment';
 
 @Component({
@@ -35,7 +34,6 @@ import { environment } from '../../../environments/environment';
     InputTextModule,
     TagModule,
     TooltipModule,
-    EmptyStateComponent,
   ],
   template: `
     <div class="page-container">
@@ -129,14 +127,13 @@ import { environment } from '../../../environments/environment';
                 <span class="detail-label">Provisioning Token</span>
                 <div class="token-value-row">
                   <code class="token-code">{{ tokenDisplay() }}</code>
-                  @if (!tokenCleared()) {
                     <p-button
                       [icon]="copied() ? 'pi pi-check' : 'pi pi-copy'"
                       [severity]="copied() ? 'success' : 'secondary'"
                       size="small"
                       [rounded]="true"
                       [text]="true"
-                      pTooltip="Copy to clipboard & clear from memory"
+                      pTooltip="Copy to clipboard"
                       (onClick)="copyToken()"
                     />
                     <p-button
@@ -148,19 +145,12 @@ import { environment } from '../../../environments/environment';
                       [pTooltip]="tokenRevealed() ? 'Hide' : 'Reveal'"
                       (onClick)="tokenRevealed.set(!tokenRevealed())"
                     />
-                  }
                 </div>
               </div>
 
-              @if (tokenCleared()) {
-                <p-message severity="info" styleClass="result-msg">
-                  Token copied to clipboard and cleared from browser memory.
-                </p-message>
-              } @else {
-                <p-message severity="warn" styleClass="result-msg">
-                  Copy this token now. It will be cleared from memory after copying.
-                </p-message>
-              }
+              <p-message severity="info" styleClass="result-msg">
+                This is a single-use token. It becomes invalid once used by a device.
+              </p-message>
 
               @if (!tokenRevoked()) {
                 <div class="revoke-actions">
@@ -191,12 +181,8 @@ import { environment } from '../../../environments/environment';
                   Scan this QR code with the Android edge agent to provision the device.
                 </p>
                 <p-message severity="warn" styleClass="qr-security-warn">
-                  SENSITIVE CREDENTIAL: This QR code contains the provisioning token in plaintext.
-                  Treat it as a password — do not leave printed copies unattended, share via
-                  chat/email, or take screenshots. The token expires in 72 hours.
-                  @if (qrSecondsRemaining() > 0) {
-                    QR display auto-clears in {{ Math.floor(qrSecondsRemaining() / 60) }}:{{ (qrSecondsRemaining() % 60).toString().padStart(2, '0') }}.
-                  }
+                  This QR code contains the provisioning token. The token expires in 72 hours
+                  and can only be used once. Do not share via unprotected channels.
                 </p-message>
                 <div class="qr-image-wrapper">
                   <img [src]="qrDataUrl()" alt="Provisioning QR Code" class="qr-image" />
@@ -439,7 +425,7 @@ export class BootstrapTokenComponent {
     if (entityId) {
       this.loadingSites.set(true);
       this.siteService
-        .getSites({ legalEntityId: entityId, pageSize: 500, isActive: true })
+        .getSites({ legalEntityId: entityId, pageSize: 200, isActive: true })
         .pipe(
           catchError(() => {
             this.loadingSites.set(false);
@@ -499,10 +485,8 @@ export class BootstrapTokenComponent {
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe((result) => {
-        // M-17: Store raw token separately so we can clear it from memory after copy.
         this.rawTokenValue = result.rawToken;
-        // Store metadata without the raw token in the signal (visible in DevTools)
-        this.generatedToken.set({ ...result, rawToken: '' });
+        this.generatedToken.set(result);
         this.generating.set(false);
         this.generateQrCode(result);
       });
@@ -540,14 +524,6 @@ export class BootstrapTokenComponent {
     try {
       await navigator.clipboard.writeText(raw);
       this.copied.set(true);
-      // M-17: Clear the raw token from memory after successful copy.
-      // The token is now only in the clipboard — not in component state or DevTools.
-      this.rawTokenValue = null;
-      this.tokenCleared.set(true);
-      this.tokenRevealed.set(false);
-      // FM-S06: Also clear the QR code — it contains the raw token.
-      this.clearQrExpiry();
-      this.qrDataUrl.set(null);
       setTimeout(() => this.copied.set(false), 2000);
     } catch {
       this.error.set('Failed to copy to clipboard. Please reveal the token and copy it manually.');
@@ -574,7 +550,6 @@ export class BootstrapTokenComponent {
         color: { dark: '#000000', light: '#ffffff' },
       });
       this.qrDataUrl.set(dataUrl);
-      this.startQrExpiry();
     } catch {
       // QR generation failed silently — token is still usable via copy
     }

@@ -44,6 +44,32 @@ class EdgeAgentConfigContractTest {
     }
 
     @Test
+    fun `vendor specific adapter fields are projected into runtime config`() {
+        val config = canonicalEdgeConfig(configVersion = 9).copy(
+            fcc = canonicalEdgeConfig(configVersion = 9).fcc.copy(
+                vendor = "ADVATEC",
+                hostAddress = "10.20.30.40",
+                advatecDevicePort = 5561,
+                advatecWebhookToken = "adv-hook",
+                advatecEfdSerialNumber = "SERIAL-1",
+                advatecCustIdType = 2,
+                advatecPumpMap = "{\"SERIAL-1\":4}",
+                dppPorts = "2001,2002",
+            ),
+        )
+
+        val runtimeConfig = config.toAgentFccConfig()
+
+        assertEquals("10.20.30.40", runtimeConfig.advatecDeviceAddress)
+        assertEquals(5561, runtimeConfig.advatecDevicePort)
+        assertEquals("adv-hook", runtimeConfig.advatecWebhookToken)
+        assertEquals("SERIAL-1", runtimeConfig.advatecEfdSerialNumber)
+        assertEquals(2, runtimeConfig.advatecCustIdType)
+        assertEquals("{\"SERIAL-1\":4}", runtimeConfig.advatecPumpMap)
+        assertEquals("2001,2002", runtimeConfig.dppPorts)
+    }
+
+    @Test
     fun `LAN API remains localhost only until secure transport is implemented`() {
         val config = canonicalEdgeConfig(configVersion = 9).copy(
             localApi = LocalApiDto(

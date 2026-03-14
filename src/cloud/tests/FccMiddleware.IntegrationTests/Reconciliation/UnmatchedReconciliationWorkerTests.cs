@@ -139,7 +139,15 @@ public sealed class UnmatchedReconciliationWorkerTests
 
     private sealed class NoOpObservabilityMetrics : IObservabilityMetrics
     {
+        public void RecordAgentCommandAcked(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) { }
+        public void RecordAgentCommandCreated(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) { }
+        public void RecordAgentCommandExpired(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) { }
+        public void RecordAgentCommandFailed(Guid legalEntityId, string siteCode, Guid deviceId, string commandType) { }
+        public void RecordAgentPushHintAttempted(Guid legalEntityId, string siteCode, Guid deviceId, string kind) { }
+        public void RecordAgentPushHintFailed(Guid legalEntityId, string siteCode, Guid deviceId, string kind) { }
+        public void RecordAgentPushHintSucceeded(Guid legalEntityId, string siteCode, Guid deviceId, string kind) { }
         public void RecordApplicationError(string category, string route, int count = 1) { }
+        public void RecordBootstrapTokenHistoryApiLatency(Guid legalEntityId, double latencyMs) { }
         public void RecordEdgeAgentOfflineHours(Guid legalEntityId, string siteCode, Guid deviceId, double offlineHours) { }
         public void RecordEdgeBufferDepth(Guid legalEntityId, string siteCode, Guid deviceId, int pendingUploadCount) { }
         public void RecordEdgeSyncLag(Guid legalEntityId, string siteCode, Guid deviceId, double syncLagHours) { }

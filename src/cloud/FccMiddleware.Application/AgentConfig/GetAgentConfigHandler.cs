@@ -55,9 +55,9 @@ public sealed class GetAgentConfigHandler
                 "Device is not registered under the claimed legal entity.");
         }
 
-        // ── OB-P01: Cache assembled SiteConfigResponse per (siteCode, legalEntityId).
-        // All devices at the same site receive identical config (except DeviceId),
-        // so a single DB load can serve all concurrent requests during fleet restarts.
+        // ── OB-P01: Cache the site-level snapshot per (siteCode, legalEntityId).
+        // Identity and SiteHa are stamped per-device/per-request because peer membership
+        // changes independently of FCC/site configuration edits.
         var cacheKey = $"agent-config:{request.SiteCode}:{request.LegalEntityId}";
 
         if (!_cache.TryGetValue(cacheKey, out (int ConfigVersion, SiteConfigResponse Config) cached))
@@ -100,6 +100,7 @@ public sealed class GetAgentConfigHandler
                     Timezone = legalEntity.DefaultTimezone,
                     CurrencyCode = legalEntity.CurrencyCode,
                     DeviceId = string.Empty, // placeholder — overridden per-device below
+                    DeviceClass = "ANDROID",
                     IsPrimaryAgent = true
                 },
                 Site = new SiteDto
@@ -109,7 +110,7 @@ public sealed class GetAgentConfigHandler
                     SiteUsesPreAuth = site.SiteUsesPreAuth,
                     ConnectivityMode = site.ConnectivityMode,
                     OdooSiteId = site.OdooSiteId ?? string.Empty,
-                    CompanyTaxPayerId = site.CompanyTaxPayerId,
+                    CompanyTaxPayerId = site.CompanyTaxPayerId ?? string.Empty,
                     OperatorName = site.OperatorName,
                     OperatorTaxPayerId = site.OperatorTaxPayerId
                 },
@@ -117,6 +118,7 @@ public sealed class GetAgentConfigHandler
                 Sync = BuildSyncDto(),
                 Buffer = BuildBufferDto(),
                 LocalApi = BuildLocalApiDto(),
+                SiteHa = BuildPlaceholderSiteHa(),
                 Telemetry = BuildTelemetryDto(),
                 Fiscalization = BuildFiscalizationDto(site),
                 Mappings = await BuildMappingsDtoAsync(fccConfig, cancellationToken),
@@ -138,10 +140,19 @@ public sealed class GetAgentConfigHandler
             });
         }
 
+        var siteAgents = await _db.GetSiteAgentsAsync(cached.Config.Identity.SiteId, cancellationToken);
+        var siteHa = BuildSiteHaDto(agent, siteAgents);
+
         // Stamp per-device Identity (records are immutable; `with` creates a shallow copy)
         var deviceConfig = cached.Config with
         {
-            Identity = cached.Config.Identity with { DeviceId = request.DeviceId.ToString() }
+            Identity = cached.Config.Identity with
+            {
+                DeviceId = request.DeviceId.ToString(),
+                DeviceClass = agent.DeviceClass,
+                IsPrimaryAgent = string.Equals(siteHa.CurrentRole, "PRIMARY", StringComparison.Ordinal)
+            },
+            SiteHa = siteHa
         };
 
         return Result<GetAgentConfigResult>.Success(new GetAgentConfigResult
@@ -151,6 +162,23 @@ public sealed class GetAgentConfigHandler
             Config = deviceConfig
         });
     }
+
+    private static SiteHaDto BuildPlaceholderSiteHa() =>
+        new()
+        {
+            Enabled = false,
+            AutoFailoverEnabled = false,
+            Priority = 100,
+            RoleCapability = "PRIMARY_ELIGIBLE",
+            CurrentRole = "STANDBY_HOT",
+            HeartbeatIntervalSeconds = 5,
+            FailoverTimeoutSeconds = 30,
+            MaxReplicationLagSeconds = 15,
+            PeerDiscoveryMode = "HYBRID",
+            AllowFailback = false,
+            LeaderEpoch = 0,
+            PeerDirectory = []
+        };
 
     private static FccDto BuildFccDto(Domain.Entities.FccConfig fccConfig)
     {
@@ -221,6 +249,7 @@ public sealed class GetAgentConfigHandler
             MaxReplayBackoffSeconds = section.GetValue("MaxReplayBackoffSeconds", 300),
             InitialReplayBackoffSeconds = section.GetValue("InitialReplayBackoffSeconds", 5),
             MaxRecordsPerUploadWindow = section.GetValue("MaxRecordsPerUploadWindow", 5000),
+            CertificatePins = section.GetSection("CertificatePins").Get<string[]>() ?? [],
             Environment = section["Environment"]
         };
     }
@@ -250,6 +279,114 @@ public sealed class GetAgentConfigHandler
             LanApiKeyRef = null,
             RateLimitPerMinute = section.GetValue("RateLimitPerMinute", 120)
         };
+    }
+
+    private SiteHaDto BuildSiteHaDto(AgentRegistration currentAgent, IReadOnlyList<AgentRegistration> siteAgents)
+    {
+        var section = _configuration.GetSection("EdgeAgentDefaults:SiteHa");
+        var enabled = section.GetValue("Enabled", false);
+        var autoFailoverEnabled = enabled && section.GetValue("AutoFailoverEnabled", false);
+        var heartbeatIntervalSeconds = section.GetValue("HeartbeatIntervalSeconds", 5);
+        var failoverTimeoutSeconds = section.GetValue("FailoverTimeoutSeconds", 30);
+        var maxReplicationLagSeconds = section.GetValue("MaxReplicationLagSeconds", 15);
+        var peerDiscoveryMode = section["PeerDiscoveryMode"] ?? "HYBRID";
+        var allowFailback = section.GetValue("AllowFailback", false);
+
+        var activePeers = siteAgents
+            .Where(agent => agent.IsActive && agent.Status == AgentRegistrationStatus.ACTIVE)
+            .OrderBy(agent => agent.SiteHaPriority)
+            .ThenBy(agent => agent.RegisteredAt)
+            .ToList();
+
+        var leader = DetermineLeader(activePeers);
+        var currentRole = ResolvePeerRole(currentAgent, leader);
+        var leaderEpoch = activePeers.Count == 0
+            ? 0
+            : Math.Max(1, activePeers.Max(agent => agent.LeaderEpochSeen ?? 0));
+
+        var peerDirectory = activePeers
+            .Select(peer => new PeerDirectoryEntryDto
+            {
+                AgentId = peer.Id,
+                DeviceClass = peer.DeviceClass,
+                Status = peer.Status.ToString(),
+                RoleCapability = peer.RoleCapability,
+                Priority = peer.SiteHaPriority,
+                CurrentRole = ResolvePeerRole(peer, leader),
+                PeerApiBaseUrl = peer.PeerApiBaseUrl,
+                PeerApiAdvertisedHost = peer.PeerApiAdvertisedHost,
+                PeerApiPort = peer.PeerApiPort,
+                PeerApiTlsEnabled = peer.PeerApiTlsEnabled,
+                Capabilities = DeserializeCapabilities(peer.CapabilitiesJson),
+                AppVersion = peer.AgentVersion,
+                LastHeartbeatUtc = peer.LastSeenAt,
+                LeaderEpochSeen = peer.LeaderEpochSeen,
+                LastReplicationLagSeconds = peer.LastReplicationLagSeconds
+            })
+            .ToArray();
+
+        return new SiteHaDto
+        {
+            Enabled = enabled,
+            AutoFailoverEnabled = autoFailoverEnabled,
+            Priority = currentAgent.SiteHaPriority,
+            RoleCapability = currentAgent.RoleCapability,
+            CurrentRole = currentRole,
+            HeartbeatIntervalSeconds = heartbeatIntervalSeconds,
+            FailoverTimeoutSeconds = failoverTimeoutSeconds,
+            MaxReplicationLagSeconds = maxReplicationLagSeconds,
+            PeerDiscoveryMode = peerDiscoveryMode,
+            AllowFailback = allowFailback,
+            LeaderAgentId = leader?.Id,
+            LeaderEpoch = leaderEpoch,
+            LeaderSinceUtc = leader?.RegisteredAt,
+            PeerDirectory = peerDirectory
+        };
+    }
+
+    private static AgentRegistration? DetermineLeader(IReadOnlyList<AgentRegistration> activePeers) =>
+        activePeers
+            .Where(peer => !string.Equals(peer.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(peer => peer.SiteHaPriority)
+            .ThenBy(peer => string.Equals(peer.DeviceClass, "DESKTOP", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(peer => peer.RegisteredAt)
+            .FirstOrDefault();
+
+    private static string ResolvePeerRole(AgentRegistration peer, AgentRegistration? leader)
+    {
+        if (!peer.IsActive || peer.Status != AgentRegistrationStatus.ACTIVE)
+        {
+            return "OFFLINE";
+        }
+
+        if (!string.IsNullOrWhiteSpace(peer.CurrentRole))
+        {
+            return peer.CurrentRole!;
+        }
+
+        if (string.Equals(peer.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
+        {
+            return "READ_ONLY";
+        }
+
+        return leader?.Id == peer.Id ? "PRIMARY" : "STANDBY_HOT";
+    }
+
+    private static string[] DeserializeCapabilities(string? capabilitiesJson)
+    {
+        if (string.IsNullOrWhiteSpace(capabilitiesJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<string[]>(capabilitiesJson) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private TelemetryDto BuildTelemetryDto()
@@ -346,7 +483,7 @@ public sealed class GetAgentConfigHandler
         {
             PumpNumberOffset = pumpNumberOffset,
             PriceDecimalPlaces = 2,
-            VolumeUnit = "LITRES",
+            VolumeUnit = "LITRE",
             Products = products.ToArray(),
             Nozzles = nozzles.ToArray()
         };

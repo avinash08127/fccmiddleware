@@ -7,6 +7,8 @@ public sealed class RevokeBootstrapTokenCommand : IRequest<Result<RevokeBootstra
 {
     public required Guid TokenId { get; init; }
     public required string RevokedBy { get; init; }
+    public string? RevokedByActorId { get; init; }
+    public string? RevokedByActorDisplay { get; init; }
 }
 
 public sealed class RevokeBootstrapTokenResult

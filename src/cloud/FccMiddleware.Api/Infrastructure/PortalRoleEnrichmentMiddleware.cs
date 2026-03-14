@@ -1,5 +1,7 @@
 using System.Security.Claims;
+using FccMiddleware.Api.Auth;
 using FccMiddleware.Api.Portal;
+using Microsoft.AspNetCore.Authentication;
 
 namespace FccMiddleware.Api.Infrastructure;
 
@@ -27,8 +29,21 @@ public sealed class PortalRoleEnrichmentMiddleware
     {
         if (context.User.Identity is not { IsAuthenticated: true })
         {
-            await _next(context);
-            return;
+            // The default auth scheme is device-JWT (Bearer). Portal Entra tokens
+            // are only authenticated when the PortalBearer scheme is explicitly
+            // challenged — which normally happens during authorization (too late
+            // for this middleware). Try PortalBearer now so we can enrich claims
+            // before authorization runs.
+            var result = await context.AuthenticateAsync(PortalJwtOptions.SchemeName);
+            if (result.Succeeded)
+            {
+                context.User = result.Principal!;
+            }
+            else
+            {
+                await _next(context);
+                return;
+            }
         }
 
         // Device tokens carry "site" — skip those.
@@ -47,9 +62,11 @@ public sealed class PortalRoleEnrichmentMiddleware
         }
 
         // Extract email from Entra token — try multiple claim types.
-        // Entra v2.0 tokens use "preferred_username" for the user's email.
-        // Some configurations also emit "email" or "emails" (array serialized as multiple claims).
+        // v2.0 tokens use "preferred_username"; v1.0 tokens use "upn" or "unique_name".
+        // Some configurations also emit "email" or "emails".
         var email = context.User.FindFirst("preferred_username")?.Value
+                    ?? context.User.FindFirst("upn")?.Value
+                    ?? context.User.FindFirst("unique_name")?.Value
                     ?? context.User.FindFirst("email")?.Value
                     ?? context.User.FindFirst("emails")?.Value
                     ?? context.User.FindFirst(ClaimTypes.Email)?.Value;

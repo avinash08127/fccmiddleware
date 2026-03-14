@@ -47,6 +47,15 @@ class EncryptedPrefsManager(context: Context, masterKey: MasterKey) {
         const val KEY_ENVIRONMENT = "environment"
         const val KEY_PROVISIONING_DEVICE_SERIAL_FALLBACK = "provisioning_device_serial_fallback"
         const val KEY_LAST_KEY_ROTATION_AT = "last_key_rotation_at"
+        const val KEY_PENDING_RESET_COMMAND_ID = "pending_reset_command_id"
+        const val KEY_PENDING_RESET_ACKED = "pending_reset_acked"
+        const val KEY_ANDROID_INSTALLATION_ID = "android_installation_id"
+        const val KEY_ANDROID_INSTALLATION_LAST_TOKEN_HASH = "android_installation_last_token_hash"
+        const val KEY_ANDROID_INSTALLATION_SYNC_PENDING = "android_installation_sync_pending"
+        const val KEY_PENDING_COMMAND_HINT = "pending_command_hint"
+        const val KEY_PENDING_CONFIG_HINT = "pending_config_hint"
+        const val KEY_LAST_COMMAND_HINT_AT = "last_command_hint_at"
+        const val KEY_LAST_CONFIG_HINT_AT = "last_config_hint_at"
     }
 
     // No fallback to regular SharedPreferences — storing sensitive identity data
@@ -231,6 +240,96 @@ class EncryptedPrefsManager(context: Context, masterKey: MasterKey) {
     var lastKeyRotationAt: Long
         get() = prefs.getLong(KEY_LAST_KEY_ROTATION_AT, 0L)
         set(value) = prefs.edit().putLong(KEY_LAST_KEY_ROTATION_AT, value).apply()
+
+    // ---- Agent control / FCM state ----
+
+    var pendingResetCommandId: String?
+        get() = prefs.getString(KEY_PENDING_RESET_COMMAND_ID, null)
+        private set(value) {
+            val editor = prefs.edit()
+            if (value == null) {
+                editor.remove(KEY_PENDING_RESET_COMMAND_ID)
+            } else {
+                editor.putString(KEY_PENDING_RESET_COMMAND_ID, value)
+            }
+            editor.commit()
+        }
+
+    var pendingResetAcked: Boolean
+        get() = prefs.getBoolean(KEY_PENDING_RESET_ACKED, false)
+        private set(value) {
+            prefs.edit().putBoolean(KEY_PENDING_RESET_ACKED, value).commit()
+        }
+
+    fun markResetPending(commandId: String) {
+        prefs.edit()
+            .putString(KEY_PENDING_RESET_COMMAND_ID, commandId)
+            .putBoolean(KEY_PENDING_RESET_ACKED, false)
+            .commit()
+    }
+
+    fun markResetAcked(commandId: String) {
+        if (pendingResetCommandId != commandId) {
+            prefs.edit().putString(KEY_PENDING_RESET_COMMAND_ID, commandId).commit()
+        }
+        pendingResetAcked = true
+    }
+
+    fun clearPendingReset() {
+        pendingResetCommandId = null
+        pendingResetAcked = false
+    }
+
+    fun getOrCreateAndroidInstallationId(): String {
+        val existing = prefs.getString(KEY_ANDROID_INSTALLATION_ID, null)
+        if (!existing.isNullOrBlank()) return existing
+
+        val generated = UUID.randomUUID().toString()
+        prefs.edit().putString(KEY_ANDROID_INSTALLATION_ID, generated).commit()
+        return generated
+    }
+
+    var lastSyncedAndroidInstallationTokenHash: String?
+        get() = prefs.getString(KEY_ANDROID_INSTALLATION_LAST_TOKEN_HASH, null)
+        set(value) {
+            val editor = prefs.edit()
+            if (value == null) {
+                editor.remove(KEY_ANDROID_INSTALLATION_LAST_TOKEN_HASH)
+            } else {
+                editor.putString(KEY_ANDROID_INSTALLATION_LAST_TOKEN_HASH, value)
+            }
+            editor.commit()
+        }
+
+    var isAndroidInstallationSyncPending: Boolean
+        get() = prefs.getBoolean(KEY_ANDROID_INSTALLATION_SYNC_PENDING, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_ANDROID_INSTALLATION_SYNC_PENDING, value).commit()
+        }
+
+    var pendingCommandHint: Boolean
+        get() = prefs.getBoolean(KEY_PENDING_COMMAND_HINT, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_PENDING_COMMAND_HINT, value).commit()
+        }
+
+    var pendingConfigHint: Boolean
+        get() = prefs.getBoolean(KEY_PENDING_CONFIG_HINT, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_PENDING_CONFIG_HINT, value).commit()
+        }
+
+    var lastCommandHintAt: Long
+        get() = prefs.getLong(KEY_LAST_COMMAND_HINT_AT, 0L)
+        set(value) {
+            prefs.edit().putLong(KEY_LAST_COMMAND_HINT_AT, value).commit()
+        }
+
+    var lastConfigHintAt: Long
+        get() = prefs.getLong(KEY_LAST_CONFIG_HINT_AT, 0L)
+        set(value) {
+            prefs.edit().putLong(KEY_LAST_CONFIG_HINT_AT, value).commit()
+        }
 
     // ---- Runtime certificate pins (from SiteConfig) ----
 

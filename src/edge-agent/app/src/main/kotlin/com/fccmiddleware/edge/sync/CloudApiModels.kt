@@ -3,6 +3,7 @@ package com.fccmiddleware.edge.sync
 import com.fccmiddleware.edge.security.Sensitive
 import com.fccmiddleware.edge.security.SensitiveFieldFilter
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 // ---------------------------------------------------------------------------
 // Upload request — POST /api/v1/transactions/upload
@@ -286,6 +287,14 @@ data class ErrorCountsDto(
  * Matches DeviceRegistrationRequest schema from device-registration.schema.json.
  */
 @Serializable
+data class PeerApiRegistrationMetadata(
+    val baseUrl: String? = null,
+    val advertisedHost: String? = null,
+    val port: Int? = null,
+    val tlsEnabled: Boolean = false,
+)
+
+@Serializable
 data class DeviceRegistrationRequest(
     @Sensitive val provisioningToken: String,
     val siteCode: String,
@@ -293,6 +302,11 @@ data class DeviceRegistrationRequest(
     val deviceModel: String,
     val osVersion: String,
     val agentVersion: String,
+    val deviceClass: String = "ANDROID",
+    val roleCapability: String? = null,
+    val siteHaPriority: Int? = null,
+    val capabilities: List<String> = emptyList(),
+    val peerApi: PeerApiRegistrationMetadata? = null,
     val replacePreviousAgent: Boolean = false,
 ) {
     override fun toString(): String = SensitiveFieldFilter.redactToString(this)
@@ -364,6 +378,122 @@ sealed class CloudTokenRefreshResult {
     /** Network or unexpected HTTP error. */
     data class TransportError(val message: String) : CloudTokenRefreshResult()
 }
+
+// ---------------------------------------------------------------------------
+// Agent Control — GET /api/v1/agent/commands, POST /api/v1/agent/commands/{id}/ack
+// ---------------------------------------------------------------------------
+
+@Serializable
+enum class AgentCommandType {
+    FORCE_CONFIG_PULL,
+    RESET_LOCAL_STATE,
+    DECOMMISSION,
+}
+
+@Serializable
+enum class AgentCommandStatus {
+    PENDING,
+    DELIVERY_HINT_SENT,
+    ACKED,
+    FAILED,
+    EXPIRED,
+    CANCELLED,
+}
+
+@Serializable
+enum class AgentCommandCompletionStatus {
+    ACKED,
+    FAILED,
+}
+
+@Serializable
+data class EdgeCommandPollResponse(
+    val serverTimeUtc: String,
+    val commands: List<EdgeCommandDto>,
+)
+
+@Serializable
+data class EdgeCommandDto(
+    val commandId: String,
+    val commandType: AgentCommandType,
+    val status: AgentCommandStatus,
+    val reason: String,
+    val payload: JsonObject? = null,
+    val createdAt: String,
+    val expiresAt: String,
+)
+
+@Serializable
+data class CommandAckRequest(
+    val completionStatus: AgentCommandCompletionStatus,
+    val handledAtUtc: String? = null,
+    val failureCode: String? = null,
+    val failureMessage: String? = null,
+    val result: JsonObject? = null,
+)
+
+@Serializable
+data class CommandAckResponse(
+    val commandId: String,
+    val status: AgentCommandStatus,
+    val acknowledgedAt: String,
+    val duplicate: Boolean,
+)
+
+sealed class CloudCommandPollResult {
+    data class Success(val response: EdgeCommandPollResponse) : CloudCommandPollResult()
+    data object Unauthorized : CloudCommandPollResult()
+    data class Forbidden(val errorCode: String?) : CloudCommandPollResult()
+    data class RateLimited(val retryAfterSeconds: Long?) : CloudCommandPollResult()
+    data class TransportError(val message: String) : CloudCommandPollResult()
+}
+
+sealed class CloudCommandAckResult {
+    data class Success(val response: CommandAckResponse) : CloudCommandAckResult()
+    data object Unauthorized : CloudCommandAckResult()
+    data class Forbidden(val errorCode: String?) : CloudCommandAckResult()
+    data class Conflict(val errorCode: String?, val message: String?) : CloudCommandAckResult()
+    data class TransportError(val message: String) : CloudCommandAckResult()
+}
+
+// ---------------------------------------------------------------------------
+// Android Installation Token — POST /api/v1/agent/installations/android
+// ---------------------------------------------------------------------------
+
+@Serializable
+data class AndroidInstallationUpsertRequest(
+    val installationId: String,
+    @Sensitive val registrationToken: String,
+    val appVersion: String,
+    val osVersion: String,
+    val deviceModel: String,
+) {
+    override fun toString(): String = SensitiveFieldFilter.redactToString(this)
+}
+
+sealed class CloudInstallationUpsertResult {
+    data object Success : CloudInstallationUpsertResult()
+    data object Unauthorized : CloudInstallationUpsertResult()
+    data class Forbidden(val errorCode: String?) : CloudInstallationUpsertResult()
+    data class TransportError(val message: String) : CloudInstallationUpsertResult()
+}
+
+/**
+ * Data-only Android push hints are best-effort accelerators only.
+ * Poll/config fetch remains authoritative even if a hint is missed or duplicated.
+ */
+object PushHintKinds {
+    const val COMMAND_PENDING = "command_pending"
+    const val CONFIG_CHANGED = "config_changed"
+}
+
+@Serializable
+data class AndroidPushHintPayload(
+    val kind: String,
+    val deviceId: String,
+    val commandCount: Int? = null,
+    val configVersion: String? = null,
+)
 
 // ---------------------------------------------------------------------------
 // Pre-Auth Forward — POST /api/v1/preauth

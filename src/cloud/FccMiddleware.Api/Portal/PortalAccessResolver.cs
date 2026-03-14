@@ -53,6 +53,16 @@ public sealed class PortalAccessResolver
         ?? user.FindFirstValue("preferred_username")
         ?? user.Identity?.Name;
 
+    public string? ResolveUserDisplay(ClaimsPrincipal user) =>
+        user.FindFirstValue("preferred_username")
+        ?? user.FindFirstValue("upn")
+        ?? user.FindFirstValue("unique_name")
+        ?? user.FindFirstValue("email")
+        ?? user.FindFirstValue("emails")
+        ?? user.FindFirstValue(ClaimTypes.Email)
+        ?? user.FindFirstValue("name")
+        ?? user.Identity?.Name;
+
     /// <summary>
     /// Returns true if the user has a role that grants access to sensitive operational
     /// payloads (raw DLQ payloads, full telemetry, audit event payloads).

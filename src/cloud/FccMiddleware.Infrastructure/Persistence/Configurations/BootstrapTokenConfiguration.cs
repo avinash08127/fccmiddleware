@@ -22,8 +22,13 @@ internal sealed class BootstrapTokenConfiguration : IEntityTypeConfiguration<Boo
         builder.Property(e => e.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(20)
             .HasDefaultValue(ProvisioningTokenStatus.ACTIVE).IsRequired();
         builder.Property(e => e.CreatedBy).HasColumnName("created_by").HasMaxLength(200).IsRequired();
+        builder.Property(e => e.CreatedByActorId).HasColumnName("created_by_actor_id").HasMaxLength(200);
+        builder.Property(e => e.CreatedByActorDisplay).HasColumnName("created_by_actor_display").HasMaxLength(200);
         builder.Property(e => e.ExpiresAt).HasColumnName("expires_at").IsRequired();
         builder.Property(e => e.UsedAt).HasColumnName("used_at");
+        builder.Property(e => e.RevokedAt).HasColumnName("revoked_at");
+        builder.Property(e => e.RevokedByActorId).HasColumnName("revoked_by_actor_id").HasMaxLength(200);
+        builder.Property(e => e.RevokedByActorDisplay).HasColumnName("revoked_by_actor_display").HasMaxLength(200);
         builder.Property(e => e.UsedByDeviceId).HasColumnName("used_by_device_id");
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();
         builder.Property(e => e.Environment).HasColumnName("environment").HasMaxLength(50);

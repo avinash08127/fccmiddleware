@@ -18,6 +18,7 @@ public sealed record SiteConfigResponse
     public required SyncDto Sync { get; init; }
     public required BufferDto Buffer { get; init; }
     public required LocalApiDto LocalApi { get; init; }
+    public required SiteHaDto SiteHa { get; init; }
     public required TelemetryDto Telemetry { get; init; }
     public required FiscalizationDto Fiscalization { get; init; }
     public required MappingsDto Mappings { get; init; }
@@ -42,6 +43,16 @@ public sealed record IdentityDto
     public required string Timezone { get; init; }
     public required string CurrencyCode { get; init; }
     public required string DeviceId { get; init; }
+
+    /// <summary>
+    /// Registration-time device class used by the multi-agent priority policy.
+    /// Expected values: ANDROID, DESKTOP.
+    /// </summary>
+    public required string DeviceClass { get; init; }
+
+    /// <summary>
+    /// Legacy compatibility field for older clients. New HA logic must use SiteHa.
+    /// </summary>
     public required bool IsPrimaryAgent { get; init; }
 }
 
@@ -147,6 +158,43 @@ public sealed record LocalApiDto
     public required string[] LanAllowCidrs { get; init; }
     public string? LanApiKeyRef { get; init; }
     public required int RateLimitPerMinute { get; init; }
+}
+
+public sealed record SiteHaDto
+{
+    public required bool Enabled { get; init; }
+    public required bool AutoFailoverEnabled { get; init; }
+    public required int Priority { get; init; }
+    public required string RoleCapability { get; init; }
+    public required string CurrentRole { get; init; }
+    public required int HeartbeatIntervalSeconds { get; init; }
+    public required int FailoverTimeoutSeconds { get; init; }
+    public required int MaxReplicationLagSeconds { get; init; }
+    public required string PeerDiscoveryMode { get; init; }
+    public required bool AllowFailback { get; init; }
+    public Guid? LeaderAgentId { get; init; }
+    public required long LeaderEpoch { get; init; }
+    public DateTimeOffset? LeaderSinceUtc { get; init; }
+    public required PeerDirectoryEntryDto[] PeerDirectory { get; init; }
+}
+
+public sealed record PeerDirectoryEntryDto
+{
+    public required Guid AgentId { get; init; }
+    public required string DeviceClass { get; init; }
+    public required string Status { get; init; }
+    public required string RoleCapability { get; init; }
+    public required int Priority { get; init; }
+    public required string CurrentRole { get; init; }
+    public string? PeerApiBaseUrl { get; init; }
+    public string? PeerApiAdvertisedHost { get; init; }
+    public int? PeerApiPort { get; init; }
+    public required bool PeerApiTlsEnabled { get; init; }
+    public required string[] Capabilities { get; init; }
+    public string? AppVersion { get; init; }
+    public DateTimeOffset? LastHeartbeatUtc { get; init; }
+    public long? LeaderEpochSeen { get; init; }
+    public int? LastReplicationLagSeconds { get; init; }
 }
 
 public sealed record TelemetryDto

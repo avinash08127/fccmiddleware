@@ -10,3 +10,4 @@ export * from './dlq.model';
 export * from './settings.model';
 export * from './bootstrap-token.model';
 export * from './adapter.model';
+export * from './agent-command.model';

@@ -3,9 +3,11 @@ package com.fccmiddleware.edge.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Context
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import androidx.core.content.ContextCompat
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.IntegrityChecker
 import com.fccmiddleware.edge.adapter.common.AgentFccConfig
@@ -26,12 +28,13 @@ import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.runtime.CadenceController
 import com.fccmiddleware.edge.runtime.FccRuntimeState
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
+import com.fccmiddleware.edge.sync.AgentCommandExecutor
+import com.fccmiddleware.edge.sync.AndroidInstallationSyncManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
 import com.fccmiddleware.edge.R
-import com.fccmiddleware.edge.ui.DecommissionedActivity
-import com.fccmiddleware.edge.ui.ProvisioningActivity
+import com.fccmiddleware.edge.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -79,6 +82,8 @@ class EdgeAgentForegroundService : Service() {
     private val ingestionOrchestrator: IngestionOrchestrator by inject()
     private val preAuthHandler: PreAuthHandler by inject()
     private val tokenProvider: DeviceTokenProvider by inject()
+    private val androidInstallationSyncManager: AndroidInstallationSyncManager by inject()
+    private val agentCommandExecutor: AgentCommandExecutor by inject()
     private val fileLogger: StructuredFileLogger by inject()
     private val localOverrideManager: LocalOverrideManager by inject()
     private val networkBinder: NetworkBinder by inject()
@@ -94,6 +99,60 @@ class EdgeAgentForegroundService : Service() {
         private const val TAG = "EdgeAgentFgService"
         /** AF-015: Max consecutive failures before a lifecycle monitor gives up. */
         private const val MAX_CONSECUTIVE_MONITOR_FAILURES = 10
+        private const val ACTION_IMMEDIATE_COMMAND_POLL = "com.fccmiddleware.edge.action.IMMEDIATE_COMMAND_POLL"
+        private const val ACTION_IMMEDIATE_CONFIG_POLL = "com.fccmiddleware.edge.action.IMMEDIATE_CONFIG_POLL"
+        private const val ACTION_SYNC_ANDROID_INSTALLATION = "com.fccmiddleware.edge.action.SYNC_ANDROID_INSTALLATION"
+        private const val EXTRA_SOURCE = "extra_source"
+        private const val EXTRA_TOKEN_OVERRIDE = "extra_token_override"
+
+        fun requestImmediateCommandPoll(context: Context, source: String) {
+            startForegroundServiceForAction(
+                context = context,
+                action = ACTION_IMMEDIATE_COMMAND_POLL,
+                source = source,
+            )
+        }
+
+        fun requestImmediateConfigPoll(context: Context, source: String) {
+            startForegroundServiceForAction(
+                context = context,
+                action = ACTION_IMMEDIATE_CONFIG_POLL,
+                source = source,
+            )
+        }
+
+        fun requestInstallationTokenSync(
+            context: Context,
+            source: String,
+            tokenOverride: String? = null,
+        ) {
+            startForegroundServiceForAction(
+                context = context,
+                action = ACTION_SYNC_ANDROID_INSTALLATION,
+                source = source,
+                tokenOverride = tokenOverride,
+            )
+        }
+
+        private fun startForegroundServiceForAction(
+            context: Context,
+            action: String,
+            source: String,
+            tokenOverride: String? = null,
+        ) {
+            val intent = Intent(context, EdgeAgentForegroundService::class.java).apply {
+                this.action = action
+                putExtra(EXTRA_SOURCE, source)
+                if (!tokenOverride.isNullOrBlank()) {
+                    putExtra(EXTRA_TOKEN_OVERRIDE, tokenOverride)
+                }
+            }
+
+            runCatching { ContextCompat.startForegroundService(context, intent) }
+                .onFailure { e ->
+                    AppLogger.e(TAG, "Failed to dispatch foreground-service action $action", e as? Exception)
+                }
+        }
     }
 
     override fun onCreate() {
@@ -107,9 +166,16 @@ class EdgeAgentForegroundService : Service() {
         startForeground(NOTIFICATION_ID, notification)
         AppLogger.i(TAG, "EdgeAgentForegroundService started in foreground")
 
-        // Skip re-initialisation if already running (T-004).
+        if (agentCommandExecutor.finalizeAckedResetIfNeeded("service_startup")) {
+            AppLogger.w(TAG, "Pending reset was finalized during service startup")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // Skip re-initialisation if already running (T-004), but still handle action intents.
         if (!serviceStarted.compareAndSet(false, true)) {
-            AppLogger.i(TAG, "onStartCommand: service already initialised — skipping duplicate setup")
+            handleActionIntent(intent)
+            AppLogger.i(TAG, "onStartCommand: service already initialised — handled action only")
             return START_STICKY
         }
 
@@ -154,6 +220,9 @@ class EdgeAgentForegroundService : Service() {
             odooWebSocketServer.start()
             cadenceController.start()
             observeConfigForRuntimeUpdates()
+            androidInstallationSyncManager.syncCurrentInstallation("app_startup")
+            handlePendingAgentControlSignals("startup")
+            handleActionIntent(intent)
         }
 
         // Monitor for re-provisioning requirement (refresh token expired).
@@ -374,18 +443,53 @@ class EdgeAgentForegroundService : Service() {
      * indicating why re-provisioning is needed, so the UI can show context.
      */
     private fun navigateToProvisioning() {
-        val intent = Intent(this, ProvisioningActivity::class.java).apply {
+        val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-            putExtra(ProvisioningActivity.EXTRA_REASON, ProvisioningActivity.REASON_TOKEN_EXPIRED)
         }
         startActivity(intent)
     }
 
     private fun navigateToDecommissioned() {
-        val intent = Intent(this, DecommissionedActivity::class.java).apply {
+        val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
         startActivity(intent)
+    }
+
+    private fun handlePendingAgentControlSignals(source: String) {
+        if (encryptedPrefs.pendingCommandHint) {
+            cadenceController.triggerImmediateCommandPoll("$source:pending_command_hint")
+        }
+        if (encryptedPrefs.pendingConfigHint) {
+            cadenceController.triggerImmediateConfigPoll("$source:pending_config_hint")
+        }
+    }
+
+    private fun handleActionIntent(intent: Intent?) {
+        val action = intent?.action ?: return
+        val source = intent.getStringExtra(EXTRA_SOURCE) ?: "unknown"
+
+        when (action) {
+            ACTION_IMMEDIATE_COMMAND_POLL -> {
+                encryptedPrefs.pendingCommandHint = true
+                cadenceController.triggerImmediateCommandPoll(source)
+            }
+
+            ACTION_IMMEDIATE_CONFIG_POLL -> {
+                encryptedPrefs.pendingConfigHint = true
+                cadenceController.triggerImmediateConfigPoll(source)
+            }
+
+            ACTION_SYNC_ANDROID_INSTALLATION -> {
+                appScope.launch {
+                    val tokenOverride = intent.getStringExtra(EXTRA_TOKEN_OVERRIDE)
+                    androidInstallationSyncManager.syncCurrentInstallation(
+                        reason = source,
+                        tokenOverride = tokenOverride,
+                    )
+                }
+            }
+        }
     }
 
     /**

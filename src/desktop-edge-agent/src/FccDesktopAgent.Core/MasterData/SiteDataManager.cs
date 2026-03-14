@@ -139,6 +139,22 @@ public sealed class SiteDataManager
         }
     }
 
+    public void Clear()
+    {
+        lock (_lock) _cached = null;
+
+        var path = GetFilePath();
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch (IOException ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete site-data.json during local reset");
+        }
+    }
+
     private static string GetFilePath() =>
         Path.Combine(AgentDataDirectory.Resolve(), FileName);
 }

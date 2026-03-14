@@ -122,6 +122,8 @@ public sealed class DeviceRegistrationServiceTests
     [InlineData("BOOTSTRAP_TOKEN_EXPIRED", RegistrationErrorCode.BootstrapTokenExpired)]
     [InlineData("BOOTSTRAP_TOKEN_ALREADY_USED", RegistrationErrorCode.BootstrapTokenAlreadyUsed)]
     [InlineData("ACTIVE_AGENT_EXISTS", RegistrationErrorCode.ActiveAgentExists)]
+    [InlineData("DEVICE_PENDING_APPROVAL", RegistrationErrorCode.DevicePendingApproval)]
+    [InlineData("DEVICE_QUARANTINED", RegistrationErrorCode.DeviceQuarantined)]
     [InlineData("SITE_NOT_FOUND", RegistrationErrorCode.SiteNotFound)]
     [InlineData("SITE_MISMATCH", RegistrationErrorCode.SiteMismatch)]
     public async Task RegisterAsync_Rejected_ReturnsCorrectErrorCode(string errorCode, RegistrationErrorCode expected)

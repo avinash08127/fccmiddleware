@@ -28,8 +28,38 @@ public sealed class DeviceRegistrationRequest
     [JsonPropertyName("agentVersion")]
     public required string AgentVersion { get; init; }
 
+    [JsonPropertyName("deviceClass")]
+    public string DeviceClass { get; init; } = "DESKTOP";
+
+    [JsonPropertyName("roleCapability")]
+    public string? RoleCapability { get; init; } = "PRIMARY_ELIGIBLE";
+
+    [JsonPropertyName("siteHaPriority")]
+    public int? SiteHaPriority { get; init; } = 10;
+
+    [JsonPropertyName("capabilities")]
+    public string[] Capabilities { get; init; } = ["FCC_CONTROL", "PEER_API", "TRANSACTION_BUFFER", "TELEMETRY"];
+
+    [JsonPropertyName("peerApi")]
+    public PeerApiRegistrationMetadata? PeerApi { get; init; }
+
     [JsonPropertyName("replacePreviousAgent")]
     public bool ReplacePreviousAgent { get; init; }
+}
+
+public sealed class PeerApiRegistrationMetadata
+{
+    [JsonPropertyName("baseUrl")]
+    public string? BaseUrl { get; init; }
+
+    [JsonPropertyName("advertisedHost")]
+    public string? AdvertisedHost { get; init; }
+
+    [JsonPropertyName("port")]
+    public int? Port { get; init; }
+
+    [JsonPropertyName("tlsEnabled")]
+    public bool TlsEnabled { get; init; }
 }
 
 /// <summary>
@@ -86,6 +116,8 @@ public enum RegistrationErrorCode
     BootstrapTokenRevoked,
     BootstrapTokenAlreadyUsed,
     ActiveAgentExists,
+    DevicePendingApproval,
+    DeviceQuarantined,
     SiteNotFound,
     SiteMismatch,
 }
@@ -118,6 +150,8 @@ internal static class RegistrationErrorCodeParser
         "BOOTSTRAP_TOKEN_REVOKED" => RegistrationErrorCode.BootstrapTokenRevoked,
         "BOOTSTRAP_TOKEN_ALREADY_USED" => RegistrationErrorCode.BootstrapTokenAlreadyUsed,
         "ACTIVE_AGENT_EXISTS" => RegistrationErrorCode.ActiveAgentExists,
+        "DEVICE_PENDING_APPROVAL" => RegistrationErrorCode.DevicePendingApproval,
+        "DEVICE_QUARANTINED" => RegistrationErrorCode.DeviceQuarantined,
         "SITE_NOT_FOUND" => RegistrationErrorCode.SiteNotFound,
         "SITE_MISMATCH" => RegistrationErrorCode.SiteMismatch,
         _ => RegistrationErrorCode.Unknown,

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using FccMiddleware.Application.Common;
+using FccMiddleware.Application.Notifications;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using MediatR;
@@ -20,11 +21,16 @@ public sealed class GenerateBootstrapTokenHandler
 
     private readonly IRegistrationDbContext _db;
     private readonly ILogger<GenerateBootstrapTokenHandler> _logger;
+    private readonly IEmailNotificationService _emailNotificationService;
 
-    public GenerateBootstrapTokenHandler(IRegistrationDbContext db, ILogger<GenerateBootstrapTokenHandler> logger)
+    public GenerateBootstrapTokenHandler(
+        IRegistrationDbContext db,
+        ILogger<GenerateBootstrapTokenHandler> logger,
+        IEmailNotificationService emailNotificationService)
     {
         _db = db;
         _logger = logger;
+        _emailNotificationService = emailNotificationService;
     }
 
     public async Task<Result<GenerateBootstrapTokenResult>> Handle(
@@ -68,6 +74,8 @@ public sealed class GenerateBootstrapTokenHandler
             TokenHash = tokenHash,
             Status = ProvisioningTokenStatus.ACTIVE,
             CreatedBy = request.CreatedBy,
+            CreatedByActorId = request.CreatedByActorId,
+            CreatedByActorDisplay = request.CreatedByActorDisplay ?? request.CreatedBy,
             ExpiresAt = expiresAt,
             CreatedAt = now,
             Environment = request.Environment
@@ -117,6 +125,9 @@ public sealed class GenerateBootstrapTokenHandler
                 if (createdToken is not null)
                 {
                     createdToken.Status = ProvisioningTokenStatus.REVOKED;
+                    createdToken.RevokedAt = DateTimeOffset.UtcNow;
+                    createdToken.RevokedByActorId = request.CreatedByActorId;
+                    createdToken.RevokedByActorDisplay = request.CreatedByActorDisplay ?? request.CreatedBy;
                     await _db.SaveChangesAsync(cancellationToken);
                 }
 
@@ -128,6 +139,25 @@ public sealed class GenerateBootstrapTokenHandler
 
         _logger.LogInformation("Bootstrap token generated for site {SiteCode}, expires at {ExpiresAt}",
             request.SiteCode, expiresAt);
+
+        // Send admin notification email (best-effort, do not fail the request)
+        try
+        {
+            await _emailNotificationService.SendBootstrapTokenGeneratedAsync(
+                new BootstrapTokenGeneratedEmail
+                {
+                    SiteCode = request.SiteCode,
+                    TokenId = token.Id,
+                    LegalEntityId = request.LegalEntityId,
+                    GeneratedBy = request.CreatedByActorDisplay ?? request.CreatedBy,
+                    ExpiresAt = expiresAt,
+                }, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to send bootstrap token notification email for site {SiteCode}", request.SiteCode);
+        }
 
         return Result<GenerateBootstrapTokenResult>.Success(new GenerateBootstrapTokenResult
         {

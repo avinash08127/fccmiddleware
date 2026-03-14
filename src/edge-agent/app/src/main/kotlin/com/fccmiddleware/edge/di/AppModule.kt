@@ -18,13 +18,18 @@ import com.fccmiddleware.edge.runtime.CadenceController
 import com.fccmiddleware.edge.runtime.FccRuntimeState
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import com.fccmiddleware.edge.security.KeystoreManager
+import com.fccmiddleware.edge.push.FirebasePushClient
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudUploadWorker
+import com.fccmiddleware.edge.sync.CommandPollWorker
 import com.fccmiddleware.edge.sync.ConfigPollWorker
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.fccmiddleware.edge.sync.HttpCloudApiClient
 import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
 import com.fccmiddleware.edge.sync.KeystoreDeviceTokenProvider
+import com.fccmiddleware.edge.sync.AgentCommandExecutor
+import com.fccmiddleware.edge.sync.AndroidAgentCommandExecutor
+import com.fccmiddleware.edge.sync.AndroidInstallationSyncManager
 import com.fccmiddleware.edge.adapter.common.FccAdapterFactory
 import com.fccmiddleware.edge.adapter.common.IFccAdapterFactory
 import com.fccmiddleware.edge.logging.AppLogger
@@ -42,6 +47,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import com.fccmiddleware.edge.ui.DiagnosticsViewModel
 import com.fccmiddleware.edge.ui.ProvisioningViewModel
+import com.fccmiddleware.edge.ui.SiteOverviewViewModel
 import org.koin.android.ext.koin.androidApplication
 import org.koin.android.ext.koin.androidContext
 import org.koin.androidx.viewmodel.dsl.viewModel
@@ -276,6 +282,32 @@ val appModule = module {
     single<IFccAdapterFactory> { FccAdapterFactory(networkBinder = get()) }
 
     // -------------------------------------------------------------------------
+    // Firebase / agent-control support
+    // -------------------------------------------------------------------------
+    single { FirebasePushClient(androidContext()) }
+    single {
+        AndroidInstallationSyncManager(
+            context = androidContext(),
+            encryptedPrefs = get(),
+            cloudApiClient = get(),
+            tokenProvider = get(),
+            firebasePushClient = get(),
+        )
+    }
+    single<AgentCommandExecutor> {
+        AndroidAgentCommandExecutor(
+            context = androidContext(),
+            configManager = get(),
+            configPollWorker = get(),
+            encryptedPrefs = get(),
+            tokenProvider = get(),
+            bufferDatabase = get(),
+            localOverrideManager = get(),
+            keystoreManager = get(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
     // Configuration
     // -------------------------------------------------------------------------
     single {
@@ -285,6 +317,14 @@ val appModule = module {
             cloudApiClient = get(),
             tokenProvider = get(),
             siteDataManager = get(),
+        )
+    }
+    single {
+        CommandPollWorker(
+            cloudApiClient = get(),
+            tokenProvider = get(),
+            commandExecutor = get(),
+            encryptedPrefs = get(),
         )
     }
 
@@ -300,6 +340,7 @@ val appModule = module {
             scope = get<CoroutineScope>(),
             preAuthHandler = get(),
             configPollWorker = get(),
+            commandPollWorker = get(),
             preAuthCloudForwardWorker = get(),
             tokenProvider = get(),
             cloudApiClient = get(),
@@ -309,6 +350,7 @@ val appModule = module {
             fileLogger = get(),
             keystoreManager = get(),
             encryptedPrefsManager = get(),
+            androidInstallationSyncManager = get(),
         )
     }
 
@@ -349,6 +391,13 @@ val appModule = module {
             siteDataManager = get(),
             bufferDatabase = get(),
             localOverrideManager = get(),
+        )
+    }
+    viewModel {
+        SiteOverviewViewModel(
+            connectivityManager = get(),
+            siteDataDao = get(),
+            fccRuntimeState = get(),
         )
     }
     viewModel {

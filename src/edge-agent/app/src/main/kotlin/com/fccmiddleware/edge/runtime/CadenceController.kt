@@ -18,8 +18,12 @@ import com.fccmiddleware.edge.security.KeystoreManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.CloudUploadWorker
 import com.fccmiddleware.edge.sync.CloudVersionCheckResult
+import com.fccmiddleware.edge.sync.CommandPollExecutionResult
+import com.fccmiddleware.edge.sync.CommandPollWorker
 import com.fccmiddleware.edge.sync.ConfigPollWorker
+import com.fccmiddleware.edge.sync.ConfigPollExecutionResult
 import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
+import com.fccmiddleware.edge.sync.AndroidInstallationSyncManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -59,6 +63,8 @@ class CadenceController(
     private val preAuthHandler: PreAuthHandler? = null,
     /** Config poll worker — polls cloud for config updates. Nullable until EA-3.3 wired. */
     private val configPollWorker: ConfigPollWorker? = null,
+    /** Command poll worker — polls cloud for pending agent-control commands. */
+    private val commandPollWorker: CommandPollWorker? = null,
     /** Pre-auth cloud forward worker — forwards unsynced pre-auth records to cloud. */
     private val preAuthCloudForwardWorker: PreAuthCloudForwardWorker? = null,
     /** Token provider — checked between worker calls to short-circuit on decommission. */
@@ -75,6 +81,8 @@ class CadenceController(
     private val keystoreManager: KeystoreManager? = null,
     /** AT-051: EncryptedPrefsManager for key rotation blob read/write and tracking. */
     private val encryptedPrefsManager: EncryptedPrefsManager? = null,
+    /** Best-effort Android installation token sync (FCM). */
+    private val androidInstallationSyncManager: AndroidInstallationSyncManager? = null,
     fccAdapter: IFccAdapter? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) {
@@ -93,6 +101,8 @@ class CadenceController(
         val syncedToOdooTickFrequency: Int = 2,
         /** Run config poll every N ticks. */
         val configPollTickFrequency: Int = 6,
+        /** Run command poll every N ticks while internet is reachable. */
+        val commandPollTickFrequency: Int = 2,
         /** Run telemetry report every N ticks. */
         val telemetryTickFrequency: Int = 4,
         /** AP-004: Run fiscalization retry every N ticks (~2 min at 30s base) to avoid
@@ -205,9 +215,10 @@ class CadenceController(
             val a = config.syncedToOdooTickFrequency.toLong().coerceAtLeast(1)
             val b = config.telemetryTickFrequency.toLong().coerceAtLeast(1)
             val c = config.configPollTickFrequency.toLong().coerceAtLeast(1)
-            val d = config.fiscalRetryTickFrequency.toLong().coerceAtLeast(1)
-            val e = config.cleanupTickFrequency.toLong().coerceAtLeast(1)
-            return lcm(a, lcm(b, lcm(c, lcm(d, e))))
+            val d = config.commandPollTickFrequency.toLong().coerceAtLeast(1)
+            val e = config.fiscalRetryTickFrequency.toLong().coerceAtLeast(1)
+            val f = config.cleanupTickFrequency.toLong().coerceAtLeast(1)
+            return lcm(a, lcm(b, lcm(c, lcm(d, lcm(e, f)))))
         }
 
         private fun gcd(a: Long, b: Long): Long = if (b == 0L) a else gcd(b, a % b)
@@ -349,6 +360,34 @@ class CadenceController(
         }
     }
 
+    fun triggerImmediateCommandPoll(source: String = "manual") {
+        scope.launch {
+            val state = connectivityManager.state.value
+            if (!state.hasInternet()) {
+                AppLogger.w(TAG, "Immediate command poll requested without internet (source=$source, state=$state)")
+                return@launch
+            }
+
+            val result = commandPollWorker?.pollCommands()
+            clearPendingCommandHintIfSatisfied(result)
+            AppLogger.i(TAG, "Immediate command poll finished (source=$source, result=${result ?: "unwired"})")
+        }
+    }
+
+    fun triggerImmediateConfigPoll(source: String = "manual") {
+        scope.launch {
+            val state = connectivityManager.state.value
+            if (!state.hasInternet()) {
+                AppLogger.w(TAG, "Immediate config poll requested without internet (source=$source, state=$state)")
+                return@launch
+            }
+
+            val result = configPollWorker?.pollConfig()
+            clearPendingConfigHintIfSatisfied(result)
+            AppLogger.i(TAG, "Immediate config poll finished (source=$source, result=${result ?: "unwired"})")
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Connectivity transition side effects per §5.4
     // M-10: Called only from StateFlow observation — no listener interface.
@@ -373,6 +412,17 @@ class CadenceController(
                     // Telemetry piggybacks on this recovery cycle
                     cloudUploadWorker.reportTelemetry()
                     cloudUploadWorker.reportDiagnosticLogs()
+                    if (encryptedPrefsManager?.pendingCommandHint == true) {
+                        val commandResult = commandPollWorker?.pollCommands()
+                        clearPendingCommandHintIfSatisfied(commandResult)
+                    }
+                    if (encryptedPrefsManager?.pendingConfigHint == true) {
+                        val configResult = configPollWorker?.pollConfig()
+                        clearPendingConfigHintIfSatisfied(configResult)
+                    }
+                    if (encryptedPrefsManager?.isAndroidInstallationSyncPending == true) {
+                        androidInstallationSyncManager?.syncCurrentInstallation("connectivity_recovery")
+                    }
                 }
             }
             ConnectivityState.FCC_UNREACHABLE -> {
@@ -462,6 +512,11 @@ class CadenceController(
             // Allow cloud operations (upload existing buffer, config poll, telemetry)
             // but skip FCC polling to prevent data format mismatches.
             if (state.hasInternet()) {
+                if (tickCount % config.commandPollTickFrequency == 0L) {
+                    val commandResult = commandPollWorker?.pollCommands()
+                    clearPendingCommandHintIfSatisfied(commandResult)
+                    if (isDecommissioned() || isReprovisioningRequired()) return
+                }
                 cloudUploadWorker.uploadPendingBatch()
                 if (isDecommissioned()) return
                 if (tickCount % config.telemetryTickFrequency == 0L) {
@@ -469,7 +524,11 @@ class CadenceController(
                     cloudUploadWorker.reportDiagnosticLogs()
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
-                    configPollWorker?.pollConfig()
+                    val configResult = configPollWorker?.pollConfig()
+                    clearPendingConfigHintIfSatisfied(configResult)
+                }
+                if (encryptedPrefsManager?.isAndroidInstallationSyncPending == true) {
+                    androidInstallationSyncManager?.syncCurrentInstallation("scheduled_tick")
                 }
             }
             return
@@ -477,6 +536,11 @@ class CadenceController(
 
         when (state) {
             ConnectivityState.FULLY_ONLINE -> {
+                if (tickCount % config.commandPollTickFrequency == 0L) {
+                    val commandResult = commandPollWorker?.pollCommands()
+                    clearPendingCommandHintIfSatisfied(commandResult)
+                    if (isDecommissioned() || isReprovisioningRequired()) return
+                }
                 ingestionOrchestrator.poll()
                 cloudUploadWorker.uploadPendingBatch()
                 if (isDecommissioned()) return
@@ -493,7 +557,11 @@ class CadenceController(
                     cloudUploadWorker.reportDiagnosticLogs()
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
-                    configPollWorker?.pollConfig()
+                    val configResult = configPollWorker?.pollConfig()
+                    clearPendingConfigHintIfSatisfied(configResult)
+                }
+                if (encryptedPrefsManager?.isAndroidInstallationSyncPending == true) {
+                    androidInstallationSyncManager?.syncCurrentInstallation("scheduled_tick")
                 }
             }
             ConnectivityState.INTERNET_DOWN -> {
@@ -502,6 +570,11 @@ class CadenceController(
             }
             ConnectivityState.FCC_UNREACHABLE -> {
                 // FCC unreachable: internet up — upload existing buffer, sync status from cloud
+                if (tickCount % config.commandPollTickFrequency == 0L) {
+                    val commandResult = commandPollWorker?.pollCommands()
+                    clearPendingCommandHintIfSatisfied(commandResult)
+                    if (isDecommissioned() || isReprovisioningRequired()) return
+                }
                 cloudUploadWorker.uploadPendingBatch()
                 if (isDecommissioned()) return
                 preAuthCloudForwardWorker?.forwardUnsyncedPreAuths()
@@ -517,7 +590,11 @@ class CadenceController(
                     cloudUploadWorker.reportDiagnosticLogs()
                 }
                 if (tickCount % config.configPollTickFrequency == 0L) {
-                    configPollWorker?.pollConfig()
+                    val configResult = configPollWorker?.pollConfig()
+                    clearPendingConfigHintIfSatisfied(configResult)
+                }
+                if (encryptedPrefsManager?.isAndroidInstallationSyncPending == true) {
+                    androidInstallationSyncManager?.syncCurrentInstallation("scheduled_tick")
                 }
             }
             ConnectivityState.FULLY_OFFLINE -> {
@@ -747,6 +824,38 @@ class CadenceController(
             transactionDao.countForLocalApi()
         } catch (e: Exception) {
             0
+        }
+    }
+
+    private fun clearPendingCommandHintIfSatisfied(result: CommandPollExecutionResult?) {
+        when (result) {
+            is CommandPollExecutionResult.Processed,
+            is CommandPollExecutionResult.Empty,
+            is CommandPollExecutionResult.Decommissioned,
+            null,
+            -> encryptedPrefsManager?.pendingCommandHint = false
+
+            is CommandPollExecutionResult.RateLimited,
+            is CommandPollExecutionResult.TransportFailure,
+            is CommandPollExecutionResult.Unavailable,
+            -> Unit
+        }
+    }
+
+    private fun clearPendingConfigHintIfSatisfied(result: ConfigPollExecutionResult?) {
+        when (result) {
+            is ConfigPollExecutionResult.Applied,
+            is ConfigPollExecutionResult.Unchanged,
+            is ConfigPollExecutionResult.Skipped,
+            is ConfigPollExecutionResult.Decommissioned,
+            null,
+            -> encryptedPrefsManager?.pendingConfigHint = false
+
+            is ConfigPollExecutionResult.RateLimited,
+            is ConfigPollExecutionResult.Rejected,
+            is ConfigPollExecutionResult.TransportFailure,
+            is ConfigPollExecutionResult.Unavailable,
+            -> Unit
         }
     }
 }

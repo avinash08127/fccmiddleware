@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using FccMiddleware.Api.AgentControl;
 using FccMiddleware.Api.Portal;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
@@ -21,11 +22,16 @@ public sealed class SitesController : PortalControllerBase
 {
     private readonly FccMiddlewareDbContext _db;
     private readonly PortalAccessResolver _accessResolver;
+    private readonly IAgentPushHintDispatcher _pushHintDispatcher;
 
-    public SitesController(FccMiddlewareDbContext db, PortalAccessResolver accessResolver)
+    public SitesController(
+        FccMiddlewareDbContext db,
+        PortalAccessResolver accessResolver,
+        IAgentPushHintDispatcher pushHintDispatcher)
     {
         _db = db;
         _accessResolver = accessResolver;
+        _pushHintDispatcher = pushHintDispatcher;
     }
 
     [HttpGet]
@@ -521,6 +527,11 @@ public sealed class SitesController : PortalControllerBase
         });
 
         await _db.SaveChangesAsync(cancellationToken);
+        await _pushHintDispatcher.SendConfigChangedHintsForSiteAsync(
+            site.LegalEntityId,
+            site.SiteCode,
+            config.ConfigVersion,
+            cancellationToken);
 
         return Ok(MapFccConfig(config));
     }

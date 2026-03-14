@@ -69,6 +69,8 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     public DbSet<AdapterDefaultConfig> AdapterDefaultConfigs => Set<AdapterDefaultConfig>();
     public DbSet<SiteAdapterOverride> SiteAdapterOverrides => Set<SiteAdapterOverride>();
     public DbSet<AgentRegistration> AgentRegistrations => Set<AgentRegistration>();
+    public DbSet<AgentCommand> AgentCommands => Set<AgentCommand>();
+    public DbSet<AgentInstallation> AgentInstallations => Set<AgentInstallation>();
     public DbSet<AgentTelemetrySnapshot> AgentTelemetrySnapshots => Set<AgentTelemetrySnapshot>();
     public DbSet<AgentDiagnosticLog> DiagnosticLogs => Set<AgentDiagnosticLog>();
     public DbSet<PortalSettings> PortalSettings => Set<PortalSettings>();
@@ -128,6 +130,9 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             var preAuth = modelBuilder.Entity<Domain.Entities.PreAuthRecord>();
             preAuth.Property(e => e.CustomerTaxId).HasConversion(converter);
             preAuth.Property(e => e.CustomerName).HasConversion(converter);
+
+            var installation = modelBuilder.Entity<AgentInstallation>();
+            installation.Property(e => e.RegistrationToken).HasConversion(converter);
         }
 
         // -------------------------------------------------------------------------
@@ -371,6 +376,14 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
 
+        modelBuilder.Entity<AgentCommand>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
+        modelBuilder.Entity<AgentInstallation>()
+            .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
+                || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+
         modelBuilder.Entity<AgentTelemetrySnapshot>()
             .HasQueryFilter(e => !_tenantProvider.CurrentLegalEntityId.HasValue
                 || e.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
@@ -486,13 +499,28 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         await Set<Site>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(s => s.SiteCode == siteCode, ct);
 
-    async Task<AgentRegistration?> IRegistrationDbContext.FindActiveAgentForSiteAsync(Guid siteId, CancellationToken ct) =>
+    async Task<List<AgentRegistration>> IRegistrationDbContext.FindActiveAgentsForSiteAsync(Guid siteId, CancellationToken ct) =>
         await Set<AgentRegistration>().IgnoreQueryFilters()
-            .FirstOrDefaultAsync(a => a.SiteId == siteId && a.IsActive, ct);
+            .Where(a => a.SiteId == siteId && a.Status == AgentRegistrationStatus.ACTIVE && a.IsActive)
+            .OrderBy(a => a.SiteHaPriority)
+            .ThenBy(a => a.RegisteredAt)
+            .ToListAsync(ct);
 
     async Task<AgentRegistration?> IRegistrationDbContext.FindAgentByIdAsync(Guid deviceId, CancellationToken ct) =>
         await Set<AgentRegistration>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(a => a.Id == deviceId, ct);
+
+    async Task<AgentRegistration?> IRegistrationDbContext.FindSuspendedAgentForSiteAndSerialAsync(
+        Guid siteId,
+        string deviceSerialNumber,
+        CancellationToken ct) =>
+        await Set<AgentRegistration>().IgnoreQueryFilters()
+            .Where(a =>
+                a.SiteId == siteId
+                && a.DeviceSerialNumber == deviceSerialNumber
+                && (a.Status == AgentRegistrationStatus.PENDING_APPROVAL || a.Status == AgentRegistrationStatus.QUARANTINED))
+            .OrderByDescending(a => a.CreatedAt)
+            .FirstOrDefaultAsync(ct);
 
     async Task<DeviceRefreshToken?> IRegistrationDbContext.FindRefreshTokenByHashAsync(string tokenHash, CancellationToken ct) =>
         await Set<DeviceRefreshToken>()
@@ -551,6 +579,13 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         Guid deviceId, CancellationToken ct) =>
         await Set<AgentRegistration>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(a => a.Id == deviceId, ct);
+
+    async Task<List<AgentRegistration>> IAgentConfigDbContext.GetSiteAgentsAsync(Guid siteId, CancellationToken ct) =>
+        await Set<AgentRegistration>().IgnoreQueryFilters()
+            .Where(agent => agent.SiteId == siteId)
+            .OrderBy(agent => agent.SiteHaPriority)
+            .ThenBy(agent => agent.RegisteredAt)
+            .ToListAsync(ct);
 
     async Task<AdapterDefaultConfig?> IAgentConfigDbContext.GetAdapterDefaultConfigAsync(
         Guid legalEntityId,

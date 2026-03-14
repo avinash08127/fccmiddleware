@@ -18,6 +18,14 @@ export const EDGE_AGENT_ROUTES: Routes = [
     canActivate: [roleGuard(WRITE_ROLES)],
   },
   {
+    path: 'token-history',
+    loadComponent: () =>
+      import('./token-history.component').then(
+        (m) => m.TokenHistoryComponent,
+      ),
+    canActivate: [roleGuard(ALL_ROLES)],
+  },
+  {
     path: ':id',
     loadComponent: () =>
       import('./agent-detail.component').then((m) => m.AgentDetailComponent),

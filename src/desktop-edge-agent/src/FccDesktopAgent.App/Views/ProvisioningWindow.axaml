@@ -18,6 +18,18 @@
                  FontWeight="SemiBold"
                  Margin="0,0,0,8" />
 
+      <Border x:Name="ProvisioningNoticeBorder"
+              IsVisible="False"
+              CornerRadius="6"
+              Padding="12"
+              Margin="0,0,0,12"
+              Background="#FEF3C7">
+        <TextBlock x:Name="ProvisioningNoticeText"
+                   TextWrapping="Wrap"
+                   FontSize="13"
+                   Foreground="#92400E" />
+      </Border>
+
       <!-- Step indicator bar -->
       <Grid ColumnDefinitions="*,*,*,*" Margin="0,4,0,0">
         <StackPanel x:Name="StepIndicator1" Spacing="2">

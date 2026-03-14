@@ -99,6 +99,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IDeviceTokenProvider, DeviceTokenProvider>();
         // T-DSK-010: Shared auth handler eliminates duplicated 401/refresh/retry logic across workers.
         services.AddSingleton<AuthenticatedCloudRequestHandler>();
+        services.AddSingleton<IAgentCommandStateStore, AgentCommandStateStore>();
         services.AddSingleton<ICloudSyncService, CloudUploadWorker>();
 
         // DEA-3.2: SYNCED_TO_ODOO status poller.
@@ -113,9 +114,13 @@ public static class ServiceCollectionExtensions
             sp => sp.GetRequiredService<ConfigManager>());
         services.AddSingleton<IPostConfigureOptions<AgentConfiguration>>(
             sp => sp.GetRequiredService<ConfigManager>());
-        services.AddSingleton<IConfigPoller, ConfigPollWorker>();
+        services.AddSingleton<ConfigPollWorker>();
+        services.AddSingleton<IConfigPoller>(sp => sp.GetRequiredService<ConfigPollWorker>());
         // T-DSK-016: Config save service — encapsulates SiteConfig construction and apply orchestration.
         services.AddSingleton<ConfigSaveService>();
+
+        services.AddSingleton<IAgentCommandExecutor, DesktopAgentCommandExecutor>();
+        services.AddSingleton<IAgentCommandPoller, CommandPollWorker>();
 
         // DEA-3.4: Telemetry reporter and error tracker.
         services.AddSingleton<IErrorCountTracker, ErrorCountTracker>();

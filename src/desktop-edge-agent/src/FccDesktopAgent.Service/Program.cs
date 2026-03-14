@@ -2,6 +2,7 @@ using FccDesktopAgent.Api;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Runtime;
 using FccDesktopAgent.Core.Security;
+using FccDesktopAgent.Core.Sync;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -47,6 +48,10 @@ try
     builder.WebHost.UseUrls($"http://0.0.0.0:{builder.Configuration["LocalApi:Port"] ?? "8585"}");
 
     var app = builder.Build();
+
+    var commandExecutor = app.Services.GetService<IAgentCommandExecutor>();
+    if (commandExecutor is not null)
+        await commandExecutor.FinalizeAckedActionIfNeededAsync("startup", CancellationToken.None);
 
     // ── Registration gate ────────────────────────────────────────────────────
     var registrationManager = app.Services.GetRequiredService<IRegistrationManager>();

@@ -321,28 +321,145 @@ CREATE UNIQUE INDEX ux_site_adapter_overrides_site_adapter
     ON site_adapter_overrides (site_id, adapter_key);
 
 CREATE TABLE agent_registrations (
-    id                      uuid            NOT NULL DEFAULT gen_random_uuid(),
-    site_id                 uuid            NOT NULL,
-    legal_entity_id         uuid            NOT NULL,
-    site_code               varchar(50)     NOT NULL,
-    device_serial_number    varchar(200)    NOT NULL,
-    device_model            varchar(100)    NOT NULL,
-    os_version              varchar(50)     NOT NULL,
-    agent_version           varchar(50)     NOT NULL,
-    is_active               boolean         NOT NULL DEFAULT true,
-    token_hash              varchar(500)    NOT NULL,
-    token_expires_at        timestamptz     NOT NULL,
-    last_seen_at            timestamptz,
-    registered_at           timestamptz     NOT NULL,
-    deactivated_at          timestamptz,
-    created_at              timestamptz     NOT NULL DEFAULT now(),
-    updated_at              timestamptz     NOT NULL DEFAULT now(),
+    id                              uuid            NOT NULL DEFAULT gen_random_uuid(),
+    site_id                         uuid            NOT NULL,
+    legal_entity_id                 uuid            NOT NULL,
+    site_code                       varchar(50)     NOT NULL,
+    device_serial_number            varchar(200)    NOT NULL,
+    device_model                    varchar(100)    NOT NULL,
+    os_version                      varchar(50)     NOT NULL,
+    agent_version                   varchar(50)     NOT NULL,
+    status                          varchar(40)     NOT NULL DEFAULT 'ACTIVE',
+    is_active                       boolean         NOT NULL DEFAULT true,
+    token_hash                      varchar(500),
+    token_expires_at                timestamptz,
+    last_seen_at                    timestamptz,
+    registered_at                   timestamptz     NOT NULL,
+    deactivated_at                  timestamptz,
+    suspension_reason_code          varchar(100),
+    suspension_reason               varchar(500),
+    replacement_for_device_id       uuid,
+    approval_granted_at             timestamptz,
+    approval_granted_by_actor_id    varchar(200),
+    approval_granted_by_actor_display varchar(200),
+    created_at                      timestamptz     NOT NULL DEFAULT now(),
+    updated_at                      timestamptz     NOT NULL DEFAULT now(),
     CONSTRAINT pk_agent_registrations PRIMARY KEY (id),
     CONSTRAINT fk_agent_reg_site FOREIGN KEY (site_id) REFERENCES sites (id),
-    CONSTRAINT fk_agent_reg_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id)
+    CONSTRAINT fk_agent_reg_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
+    CONSTRAINT fk_agent_reg_replacement_device FOREIGN KEY (replacement_for_device_id) REFERENCES agent_registrations (id),
+    CONSTRAINT chk_agent_registrations_status CHECK (status IN ('ACTIVE', 'PENDING_APPROVAL', 'QUARANTINED', 'DEACTIVATED'))
 );
 
-CREATE INDEX ix_agent_site ON agent_registrations (site_id, is_active);
+CREATE INDEX ix_agent_site ON agent_registrations (site_id, status);
+CREATE INDEX ix_agent_legal_entity_status_registered ON agent_registrations (legal_entity_id, status, registered_at);
+CREATE INDEX ix_agent_site_serial_status ON agent_registrations (site_id, device_serial_number, status);
+
+CREATE TABLE bootstrap_tokens (
+    id                       uuid            NOT NULL DEFAULT gen_random_uuid(),
+    legal_entity_id          uuid            NOT NULL,
+    site_code                varchar(50)     NOT NULL,
+    token_hash               varchar(128)    NOT NULL,
+    status                   varchar(20)     NOT NULL DEFAULT 'ACTIVE',
+    created_by               varchar(200)    NOT NULL,
+    created_by_actor_id      varchar(200),
+    created_by_actor_display varchar(200),
+    expires_at               timestamptz     NOT NULL,
+    used_at                  timestamptz,
+    revoked_at               timestamptz,
+    revoked_by_actor_id      varchar(200),
+    revoked_by_actor_display varchar(200),
+    used_by_device_id        uuid,
+    created_at               timestamptz     NOT NULL DEFAULT now(),
+    environment              varchar(50),
+    CONSTRAINT pk_bootstrap_tokens PRIMARY KEY (id),
+    CONSTRAINT fk_bootstrap_token_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
+    CONSTRAINT chk_bootstrap_tokens_status CHECK (status IN ('ACTIVE','USED','EXPIRED','REVOKED'))
+);
+
+CREATE UNIQUE INDEX ix_bootstrap_token_hash ON bootstrap_tokens (token_hash);
+CREATE INDEX ix_bootstrap_tokens_active ON bootstrap_tokens (site_code, legal_entity_id)
+    WHERE status = 'ACTIVE';
+
+CREATE TABLE device_refresh_tokens (
+    id                  uuid            NOT NULL DEFAULT gen_random_uuid(),
+    device_id           uuid            NOT NULL,
+    token_hash          varchar(128)    NOT NULL,
+    expires_at          timestamptz     NOT NULL,
+    revoked_at          timestamptz,
+    created_at          timestamptz     NOT NULL DEFAULT now(),
+    CONSTRAINT pk_device_refresh_tokens PRIMARY KEY (id),
+    CONSTRAINT fk_refresh_token_device FOREIGN KEY (device_id) REFERENCES agent_registrations (id)
+);
+
+CREATE UNIQUE INDEX ix_refresh_token_hash ON device_refresh_tokens (token_hash);
+CREATE INDEX ix_refresh_token_device ON device_refresh_tokens (device_id, revoked_at);
+
+CREATE TABLE agent_commands (
+    id                       uuid            NOT NULL DEFAULT gen_random_uuid(),
+    device_id                uuid            NOT NULL,
+    legal_entity_id          uuid            NOT NULL,
+    site_code                varchar(50)     NOT NULL,
+    command_type             varchar(50)     NOT NULL,
+    reason                   varchar(500)    NOT NULL,
+    payload_json             jsonb,
+    status                   varchar(30)     NOT NULL DEFAULT 'PENDING',
+    created_by_actor_id      varchar(200),
+    created_by_actor_display varchar(200),
+    created_at               timestamptz     NOT NULL DEFAULT now(),
+    expires_at               timestamptz     NOT NULL,
+    acked_at                 timestamptz,
+    handled_at_utc           timestamptz,
+    updated_at               timestamptz     NOT NULL DEFAULT now(),
+    attempt_count            int             NOT NULL DEFAULT 0,
+    last_error               varchar(1000),
+    result_json              jsonb,
+    failure_code             varchar(100),
+    failure_message          varchar(1000),
+    CONSTRAINT pk_agent_commands PRIMARY KEY (id),
+    CONSTRAINT fk_agent_command_device FOREIGN KEY (device_id) REFERENCES agent_registrations (id),
+    CONSTRAINT fk_agent_command_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
+    CONSTRAINT chk_agent_commands_type CHECK (command_type IN ('FORCE_CONFIG_PULL','RESET_LOCAL_STATE','DECOMMISSION')),
+    CONSTRAINT chk_agent_commands_status CHECK (status IN ('PENDING','DELIVERY_HINT_SENT','ACKED','FAILED','EXPIRED','CANCELLED'))
+);
+
+CREATE INDEX ix_agent_commands_device_status_created
+    ON agent_commands (device_id, status, created_at);
+
+CREATE INDEX ix_agent_commands_tenant_site_created
+    ON agent_commands (legal_entity_id, site_code, created_at);
+
+CREATE INDEX ix_agent_commands_device_expiry
+    ON agent_commands (device_id, expires_at);
+
+CREATE TABLE agent_installations (
+    id                             uuid            NOT NULL DEFAULT gen_random_uuid(),
+    device_id                      uuid            NOT NULL,
+    legal_entity_id                uuid            NOT NULL,
+    site_code                      varchar(50)     NOT NULL,
+    platform                       varchar(30)     NOT NULL,
+    push_provider                  varchar(30)     NOT NULL,
+    registration_token_ciphertext  varchar(8192)   NOT NULL,
+    token_hash                     varchar(128)    NOT NULL,
+    app_version                    varchar(50)     NOT NULL,
+    os_version                     varchar(50)     NOT NULL,
+    device_model                   varchar(100)    NOT NULL,
+    last_seen_at                   timestamptz     NOT NULL,
+    last_hint_sent_at              timestamptz,
+    created_at                     timestamptz     NOT NULL DEFAULT now(),
+    updated_at                     timestamptz     NOT NULL DEFAULT now(),
+    CONSTRAINT pk_agent_installations PRIMARY KEY (id),
+    CONSTRAINT fk_agent_installation_device FOREIGN KEY (device_id) REFERENCES agent_registrations (id),
+    CONSTRAINT fk_agent_installation_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
+    CONSTRAINT chk_agent_installations_platform CHECK (platform IN ('ANDROID')),
+    CONSTRAINT chk_agent_installations_push_provider CHECK (push_provider IN ('FCM'))
+);
+
+CREATE INDEX ix_agent_installations_device_platform
+    ON agent_installations (device_id, platform, push_provider);
+
+CREATE INDEX ix_agent_installations_token_hash
+    ON agent_installations (token_hash);
 
 CREATE TABLE agent_telemetry_snapshots (
     device_id                        uuid            NOT NULL,

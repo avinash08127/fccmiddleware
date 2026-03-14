@@ -317,20 +317,31 @@ CREATE TABLE IF NOT EXISTS agent_registrations (
     device_model            varchar(100)    NOT NULL,
     os_version              varchar(50)     NOT NULL,
     agent_version           varchar(50)     NOT NULL,
+    status                  varchar(40)     NOT NULL DEFAULT 'ACTIVE',
     is_active               boolean         NOT NULL DEFAULT true,
-    token_hash              varchar(500)    NOT NULL,
-    token_expires_at        timestamptz     NOT NULL,
+    token_hash              varchar(500),
+    token_expires_at        timestamptz,
     last_seen_at            timestamptz,
     registered_at           timestamptz     NOT NULL,
     deactivated_at          timestamptz,
+    suspension_reason_code  varchar(100),
+    suspension_reason       varchar(500),
+    replacement_for_device_id uuid,
+    approval_granted_at     timestamptz,
+    approval_granted_by_actor_id varchar(200),
+    approval_granted_by_actor_display varchar(200),
     created_at              timestamptz     NOT NULL DEFAULT now(),
     updated_at              timestamptz     NOT NULL DEFAULT now(),
     CONSTRAINT pk_agent_registrations PRIMARY KEY (id),
     CONSTRAINT fk_agent_reg_site FOREIGN KEY (site_id) REFERENCES sites (id),
-    CONSTRAINT fk_agent_reg_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id)
+    CONSTRAINT fk_agent_reg_legal_entity FOREIGN KEY (legal_entity_id) REFERENCES legal_entities (id),
+    CONSTRAINT fk_agent_reg_replacement_device FOREIGN KEY (replacement_for_device_id) REFERENCES agent_registrations (id),
+    CONSTRAINT chk_agent_registrations_status CHECK (status IN ('ACTIVE', 'PENDING_APPROVAL', 'QUARANTINED', 'DEACTIVATED'))
 );
 
-CREATE INDEX IF NOT EXISTS ix_agent_site ON agent_registrations (site_id, is_active);
+CREATE INDEX IF NOT EXISTS ix_agent_site ON agent_registrations (site_id, status);
+CREATE INDEX IF NOT EXISTS ix_agent_legal_entity_status_registered ON agent_registrations (legal_entity_id, status, registered_at);
+CREATE INDEX IF NOT EXISTS ix_agent_site_serial_status ON agent_registrations (site_id, device_serial_number, status);
 
 CREATE TABLE IF NOT EXISTS agent_telemetry_snapshots (
     device_id                        uuid            NOT NULL,

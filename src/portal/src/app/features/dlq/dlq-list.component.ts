@@ -1,4 +1,4 @@
-import { Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, effect, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -17,7 +17,7 @@ import { TooltipModule } from 'primeng/tooltip';
 import { MsalService } from '@azure/msal-angular';
 import { getCurrentAccount, hasAnyRequiredRole } from '../../core/auth/auth-state';
 import { DlqService } from '../../core/services/dlq.service';
-import { MasterDataService } from '../../core/services/master-data.service';
+import { LegalEntityStateService } from '../../core/services/legal-entity-state.service';
 import {
   DeadLetter,
   DeadLetterQueryParams,
@@ -25,7 +25,6 @@ import {
   DeadLetterReason,
   DeadLetterType,
 } from '../../core/models/dlq.model';
-import { LegalEntity } from '../../core/models/master-data.model';
 import { StatusBadgeComponent } from '../../shared/components/status-badge/status-badge.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { UtcDatePipe } from '../../shared/pipes/utc-date.pipe';
@@ -528,7 +527,7 @@ interface LoadRequest {
 })
 export class DlqListComponent {
   private readonly dlqService = inject(DlqService);
-  private readonly masterDataService = inject(MasterDataService);
+  private readonly leState = inject(LegalEntityStateService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
   private readonly msalService = inject(MsalService);
@@ -540,12 +539,9 @@ export class DlqListComponent {
 
   pageSize = 20;
 
-  // ── Legal entity ──────────────────────────────────────────────────────────
-  private readonly legalEntities = signal<LegalEntity[]>([]);
-  readonly selectedLegalEntityId = signal<string | null>(null);
-  readonly legalEntityOptions = computed(() =>
-    this.legalEntities().map((e) => ({ label: `${e.name} (${e.code})`, value: e.id })),
-  );
+  // ── Legal entity (shared) ─────────────────────────────────────────────────
+  readonly selectedLegalEntityId = this.leState.selectedId;
+  readonly legalEntityOptions = this.leState.options;
 
   // ── Filter state ──────────────────────────────────────────────────────────
   filterReason: DeadLetterReason | null = null;
@@ -589,10 +585,17 @@ export class DlqListComponent {
       }
     });
 
-    this.masterDataService
-      .getLegalEntities()
-      .pipe(takeUntilDestroyed())
-      .subscribe({ next: (entities) => this.legalEntities.set(entities) });
+    // Auto-load when the shared legal entity selection changes.
+    effect(() => {
+      const entityId = this.leState.selectedId();
+      if (entityId) {
+        this.listState.set(emptyListState());
+        this.selectedItems = [];
+        this.searched.set(false);
+        this.feedbackMessage.set(null);
+        this.triggerLoad(entityId, 0);
+      }
+    });
 
     this.load$
       .pipe(
@@ -626,14 +629,7 @@ export class DlqListComponent {
   // ── Event handlers ────────────────────────────────────────────────────────
 
   onLegalEntityChange(entityId: string | null): void {
-    this.selectedLegalEntityId.set(entityId);
-    this.listState.set(emptyListState());
-    this.selectedItems = [];
-    this.searched.set(false);
-    this.feedbackMessage.set(null);
-    if (entityId) {
-      this.triggerLoad(entityId, 0);
-    }
+    this.leState.select(entityId);
   }
 
   search(): void {

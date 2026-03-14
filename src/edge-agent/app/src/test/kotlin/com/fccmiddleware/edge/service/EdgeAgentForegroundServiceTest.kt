@@ -15,6 +15,8 @@ import com.fccmiddleware.edge.preauth.PreAuthHandler
 import com.fccmiddleware.edge.runtime.CadenceController
 import com.fccmiddleware.edge.runtime.FccRuntimeState
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
+import com.fccmiddleware.edge.sync.AgentCommandExecutor
+import com.fccmiddleware.edge.sync.AndroidInstallationSyncManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
@@ -67,6 +69,8 @@ class EdgeAgentForegroundServiceTest {
     private lateinit var ingestionOrchestrator: IngestionOrchestrator
     private lateinit var preAuthHandler: PreAuthHandler
     private lateinit var tokenProvider: DeviceTokenProvider
+    private lateinit var androidInstallationSyncManager: AndroidInstallationSyncManager
+    private lateinit var agentCommandExecutor: AgentCommandExecutor
     private lateinit var fileLogger: StructuredFileLogger
     private lateinit var localOverrideManager: LocalOverrideManager
     private lateinit var networkBinder: NetworkBinder
@@ -86,6 +90,8 @@ class EdgeAgentForegroundServiceTest {
         ingestionOrchestrator = mockk(relaxed = true)
         preAuthHandler = mockk(relaxed = true)
         tokenProvider = mockk(relaxed = true)
+        androidInstallationSyncManager = mockk(relaxed = true)
+        agentCommandExecutor = mockk(relaxed = true)
         fileLogger = mockk(relaxed = true)
         localOverrideManager = mockk(relaxed = true)
         networkBinder = mockk(relaxed = true)
@@ -114,6 +120,8 @@ class EdgeAgentForegroundServiceTest {
                 single { ingestionOrchestrator }
                 single { preAuthHandler }
                 single { tokenProvider }
+                single { androidInstallationSyncManager }
+                single { agentCommandExecutor }
                 single { fileLogger }
                 single { localOverrideManager }
                 single { networkBinder }

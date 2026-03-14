@@ -13,6 +13,11 @@ public interface IRegistrationManager
     bool IsDecommissioned { get; }
 
     /// <summary>
+    /// Returns whether the device is currently registered and should execute background work.
+    /// </summary>
+    bool IsRegistered { get; }
+
+    /// <summary>
     /// Loads the current registration state from disk.
     /// Returns a default (unregistered) state if no file exists.
     /// </summary>

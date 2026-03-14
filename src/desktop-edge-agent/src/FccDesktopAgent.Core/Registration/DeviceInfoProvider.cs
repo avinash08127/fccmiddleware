@@ -37,6 +37,10 @@ public static class DeviceInfoProvider
             DeviceModel = GetDeviceModel(),
             OsVersion = GetOsVersion(),
             AgentVersion = GetAgentVersion(),
+            DeviceClass = "DESKTOP",
+            RoleCapability = "PRIMARY_ELIGIBLE",
+            SiteHaPriority = 10,
+            Capabilities = ["FCC_CONTROL", "PEER_API", "TRANSACTION_BUFFER", "TELEMETRY"],
             ReplacePreviousAgent = replacePreviousAgent,
         };
 }

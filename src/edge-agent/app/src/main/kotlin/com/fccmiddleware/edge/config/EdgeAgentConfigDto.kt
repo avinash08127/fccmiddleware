@@ -30,6 +30,7 @@ data class EdgeAgentConfigDto(
     val sync: SyncDto,
     val buffer: BufferDto,
     val localApi: LocalApiDto,
+    val siteHa: SiteHaDto = SiteHaDto(),
     val telemetry: TelemetryDto,
     val fiscalization: FiscalizationDto,
     val websocket: WebSocketDto = WebSocketDto(),
@@ -55,6 +56,7 @@ data class IdentityDto(
     val timezone: String,
     val currencyCode: String,
     val deviceId: String,
+    val deviceClass: String = "ANDROID",
     val isPrimaryAgent: Boolean = true,
 )
 
@@ -160,6 +162,43 @@ data class LocalApiDto(
 )
 
 @Serializable
+data class SiteHaDto(
+    val enabled: Boolean = false,
+    val autoFailoverEnabled: Boolean = false,
+    val priority: Int = 100,
+    val roleCapability: String = "PRIMARY_ELIGIBLE",
+    val currentRole: String = "STANDBY_HOT",
+    val heartbeatIntervalSeconds: Int = 5,
+    val failoverTimeoutSeconds: Int = 30,
+    val maxReplicationLagSeconds: Int = 15,
+    val peerDiscoveryMode: String = "HYBRID",
+    val allowFailback: Boolean = false,
+    val leaderAgentId: String? = null,
+    val leaderEpoch: Long = 0,
+    val leaderSinceUtc: String? = null,
+    val peerDirectory: List<PeerDirectoryEntryDto> = emptyList(),
+)
+
+@Serializable
+data class PeerDirectoryEntryDto(
+    val agentId: String,
+    val deviceClass: String,
+    val status: String,
+    val roleCapability: String,
+    val priority: Int,
+    val currentRole: String,
+    val peerApiBaseUrl: String? = null,
+    val peerApiAdvertisedHost: String? = null,
+    val peerApiPort: Int? = null,
+    val peerApiTlsEnabled: Boolean = false,
+    val capabilities: List<String> = emptyList(),
+    val appVersion: String? = null,
+    val lastHeartbeatUtc: String? = null,
+    val leaderEpochSeen: Long? = null,
+    val lastReplicationLagSeconds: Int? = null,
+)
+
+@Serializable
 data class TelemetryDto(
     val telemetryIntervalSeconds: Int = 60,
     val logLevel: String = "INFO",
@@ -248,6 +287,7 @@ object EdgeAgentConfigJson {
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
+        coerceInputValues = true
     }
 
     fun decode(rawJson: String): EdgeAgentConfigDto = codec.decodeFromString(rawJson)
@@ -300,14 +340,17 @@ fun EdgeAgentConfigDto.toAgentFccConfig(
         posVersionId = fcc.posVersionId,
         reconnectBackoffMaxSeconds = fcc.reconnectBackoffMaxSeconds,
         configuredPumps = fcc.configuredPumps,
+        dppPorts = fcc.dppPorts,
         clientId = fcc.clientId,
         clientSecret = fcc.clientSecret,
         webhookSecret = fcc.webhookSecret,
         oauthTokenEndpoint = fcc.oauthTokenEndpoint,
+        advatecDeviceAddress = fcc.hostAddress,
         advatecDevicePort = fcc.advatecDevicePort,
         advatecWebhookToken = fcc.advatecWebhookToken,
         advatecEfdSerialNumber = fcc.advatecEfdSerialNumber,
         advatecCustIdType = fcc.advatecCustIdType,
+        advatecPumpMap = fcc.advatecPumpMap,
     )
 
     if (overrideManager == null || !overrideManager.hasAnyOverrides()) return baseConfig

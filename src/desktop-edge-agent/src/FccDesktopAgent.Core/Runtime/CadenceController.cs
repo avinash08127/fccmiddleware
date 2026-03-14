@@ -3,6 +3,7 @@ using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Ingestion;
 using FccDesktopAgent.Core.PreAuth;
+using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Sync;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -33,10 +34,12 @@ public sealed class CadenceController : BackgroundService
     private readonly IConnectivityMonitor _connectivity;
     private readonly IOptionsMonitor<AgentConfiguration> _config;
     private readonly ILogger<CadenceController> _logger;
+    private readonly IRegistrationManager? _registrationManager;
 
     // Optional workers — resolved at construction time; null if not yet registered.
     private readonly IIngestionOrchestrator? _ingestion;
     private readonly ICloudSyncService? _cloudSync;
+    private readonly IAgentCommandPoller? _commandPoller;
     private readonly ISyncedToOdooPoller? _syncedToOdooPoller;
     private readonly IConfigPoller? _configPoller;
     private readonly IConfigManager? _configManager;
@@ -67,8 +70,10 @@ public sealed class CadenceController : BackgroundService
         _connectivity = connectivity;
         _config = config;
         _logger = logger;
+        _registrationManager = (IRegistrationManager?)services.GetService(typeof(IRegistrationManager));
         _ingestion = (IIngestionOrchestrator?)services.GetService(typeof(IIngestionOrchestrator));
         _cloudSync = (ICloudSyncService?)services.GetService(typeof(ICloudSyncService));
+        _commandPoller = (IAgentCommandPoller?)services.GetService(typeof(IAgentCommandPoller));
         _syncedToOdooPoller = (ISyncedToOdooPoller?)services.GetService(typeof(ISyncedToOdooPoller));
         _configPoller = (IConfigPoller?)services.GetService(typeof(IConfigPoller));
         _configManager = (IConfigManager?)services.GetService(typeof(IConfigManager));
@@ -141,6 +146,18 @@ public sealed class CadenceController : BackgroundService
         var snapshot = _connectivity.Current;
         var config = _config.CurrentValue;
 
+        if (_registrationManager is not null && !_registrationManager.IsRegistered)
+        {
+            _logger.LogDebug("CadenceController tick {Tick}: runtime work skipped because device is not registered", _tick);
+            return;
+        }
+
+        if (_registrationManager?.IsDecommissioned == true)
+        {
+            _logger.LogDebug("CadenceController tick {Tick}: runtime work skipped because device is decommissioned", _tick);
+            return;
+        }
+
         _logger.LogDebug(
             "CadenceController tick {Tick}: state={State} mode={Mode} internet={Internet} fcc={Fcc}",
             _tick, snapshot.State, config.IngestionMode, snapshot.IsInternetUp, snapshot.IsFccUp);
@@ -186,6 +203,30 @@ public sealed class CadenceController : BackgroundService
         // Only when internet is up. Never skip past a failed record (CloudSyncService handles ordering).
         if (snapshot.IsInternetUp)
         {
+            if (_commandPoller is not null)
+            {
+                try
+                {
+                    var commandResult = await _commandPoller.PollAsync(ct);
+                    if (commandResult.CommandCount > 0 || commandResult.AckedCount > 0)
+                    {
+                        _logger.LogInformation(
+                            "Command poll tick {Tick}: {Commands} command(s), {Acked} ack(s)",
+                            _tick, commandResult.CommandCount, commandResult.AckedCount);
+                    }
+
+                    if (commandResult.HaltRequested)
+                    {
+                        _logger.LogWarning("Command poll tick {Tick}: runtime halt requested", _tick);
+                        return;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Command poll failed on tick {Tick}", _tick);
+                }
+            }
+
             if (_cloudSync is not null)
             {
                 try

@@ -351,7 +351,27 @@
       "Bash(find \"C:\\\\Users\\\\a0812\\\\fccmiddleware\" -type f \\\\\\( -name \"*.md\" -o -name \"*.json\" \\\\\\) | xargs grep -l \"SystemAdmin\\\\|OperationsManager\\\\|Auditor\" 2>/dev/null | head -10)",
       "Bash(cd \"C:\\\\Users\\\\a0812\\\\fccmiddleware\" && find . -type f -name \"*.cs\" -path \"*/Domain/Entities/*\" -exec basename {} \\\\; | sort)",
       "Bash(grep -r \"Identity\\\\|AspNetCore.Identity\" \"C:\\\\Users\\\\a0812\\\\fccmiddleware\\\\src\\\\cloud\" --include=\"*.cs\" --include=\"*.csproj\" 2>/dev/null | head -5)",
-      "Bash(find /c/Users/a0812/fccmiddleware/src/portal/src/app/features/transactions -name \"*.ts\" | xargs grep -l \"PreAuth\\\\|pre-auth\\\\|preauth\" -i)"
+      "Bash(find /c/Users/a0812/fccmiddleware/src/portal/src/app/features/transactions -name \"*.ts\" | xargs grep -l \"PreAuth\\\\|pre-auth\\\\|preauth\" -i)",
+      "Bash(find \"C:/Users/a0812/fccmiddleware/src/cloud\" -type f -name \"*.cs\" | xargs grep -l \"class Transaction\\\\|class ReconciliationRecord\" | head -20)",
+      "Bash(find \"C:/Users/a0812/fccmiddleware\" -type f \\\\\\( -name \"*.sql\" -o -name \"*schema*\" \\\\\\) 2>/dev/null | head -20)",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d fccmiddleware -f /c/Users/a0812/fccmiddleware/db/migrations/006-reconciliation-schema.sql 2>&1)",
+      "Bash(docker ps:*)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/cloud/FccMiddleware.Api -name \"*.cs\" | xargs grep -l \"PropertyNamingPolicy\\\\|PropertyNameCaseInsensitive\\\\|camelCase\\\\|JsonPropertyName\" | head -10)",
+      "Bash(grep -rn \"adapterKey\" /c/Users/a0812/fccmiddleware/src/portal/src/app/features/adapters/*.ts)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/portal/src/app -type f -name \"*.ts\" | xargs grep -l \"BehaviorSubject\\\\|ReplaySubject\" | head -10)",
+      "Bash(find /c/Users/a0812/fccmiddleware/src/portal/src/app -type f -name \"*.ts\" | xargs grep -l \"store\\\\|Store\\\\|state\" | grep -v node_modules | head -15)",
+      "Bash(PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d fccmiddleware -c \"\\\\dt bootstrap_tokens\" -c \"\\\\dt agent_commands\" -c \"\\\\dt agent_installations\" 2>&1)",
+      "Bash(dotnet dev-certs:*)",
+      "Bash(adb push:*)",
+      "Bash(\"$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe\" push:*)",
+      "Bash(\"$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe\" devices:*)",
+      "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/Users/a0812/fccmiddleware/export-cert.ps1 2>&1)",
+      "Bash(docker port:*)",
+      "Bash(netstat:*)",
+      "Bash(powershell.exe -Command \"Get-Process -Id 3372 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path | Format-List; Get-Process -Id 6008 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path | Format-List\" 2>&1)",
+      "Bash(\"$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe\" install:*)",
+      "Bash(find:*)",
+      "Bash(cd:*)"
     ]
   }
 }

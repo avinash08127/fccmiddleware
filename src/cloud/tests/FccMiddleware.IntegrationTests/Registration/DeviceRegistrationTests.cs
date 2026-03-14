@@ -50,25 +50,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     {
         await Task.WhenAll(_postgres.StartAsync(), _redis.StartAsync());
 
-        _factory = new WebApplicationFactory<Program>()
-            .WithWebHostBuilder(builder =>
-            {
-                builder.ConfigureAppConfiguration((_, cfg) =>
-                {
-                    cfg.AddInMemoryCollection(new Dictionary<string, string?>
-                    {
-                        ["ConnectionStrings:FccMiddleware"] = _postgres.GetConnectionString(),
-                        ["ConnectionStrings:Redis"]         = _redis.GetConnectionString(),
-                        ["DeviceJwt:SigningKey"]             = TestSigningKey,
-                        ["DeviceJwt:Issuer"]                 = TestIssuer,
-                        ["DeviceJwt:Audience"]               = TestAudience,
-                        ["PortalJwt:SigningKey"]             = TestPortalSigningKey,
-                        ["PortalJwt:Authority"]              = TestPortalIssuer,
-                        ["PortalJwt:Audience"]               = TestPortalAudience,
-                        ["PortalJwt:ClientId"]               = TestPortalAudience
-                    });
-                });
-            });
+        _factory = CreateFactory();
 
         _ = _factory.Server;
 
@@ -86,6 +68,37 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         await _factory.DisposeAsync();
         await Task.WhenAll(_postgres.StopAsync(), _redis.StopAsync());
     }
+
+    private WebApplicationFactory<Program> CreateFactory(IReadOnlyDictionary<string, string?>? overrides = null) =>
+        new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, cfg) =>
+                {
+                    var settings = new Dictionary<string, string?>
+                    {
+                        ["ConnectionStrings:FccMiddleware"] = _postgres.GetConnectionString(),
+                        ["ConnectionStrings:Redis"] = _redis.GetConnectionString(),
+                        ["DeviceJwt:SigningKey"] = TestSigningKey,
+                        ["DeviceJwt:Issuer"] = TestIssuer,
+                        ["DeviceJwt:Audience"] = TestAudience,
+                        ["PortalJwt:SigningKey"] = TestPortalSigningKey,
+                        ["PortalJwt:Authority"] = TestPortalIssuer,
+                        ["PortalJwt:Audience"] = TestPortalAudience,
+                        ["PortalJwt:ClientId"] = TestPortalAudience
+                    };
+
+                    if (overrides is not null)
+                    {
+                        foreach (var entry in overrides)
+                        {
+                            settings[entry.Key] = entry.Value;
+                        }
+                    }
+
+                    cfg.AddInMemoryCollection(settings);
+                });
+            });
 
     // ── Bootstrap Token Tests ──────────────────────────────────────────────
 
@@ -176,6 +189,8 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         body.GetProperty("siteConfig").GetProperty("configId").GetString().Should().Be(TestFccConfigId.ToString());
         body.GetProperty("siteConfig").GetProperty("configVersion").GetInt32().Should().Be(1);
         body.GetProperty("siteConfig").GetProperty("identity").GetProperty("siteCode").GetString().Should().Be(TestSiteCode);
+        body.GetProperty("siteConfig").GetProperty("identity").GetProperty("deviceClass").GetString().Should().Be("ANDROID");
+        body.GetProperty("siteConfig").GetProperty("siteHa").GetProperty("peerDirectory").GetArrayLength().Should().Be(1);
 
         // Verify JWT claims
         var jwt = body.GetProperty("deviceToken").GetString()!;
@@ -309,7 +324,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Register_ActiveAgentExists_WithoutReplace_Returns409()
+    public async Task Register_AllowsParallelActiveAgents_WithoutReplace_Returns201()
     {
         // Register first device
         var token1 = await GenerateBootstrapTokenAsync();
@@ -345,10 +360,14 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         msg2.Headers.Add("X-Provisioning-Token", token2);
         var second = await _client.SendAsync(msg2);
 
-        second.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        second.StatusCode.Should().Be(HttpStatusCode.Created);
 
-        var body = await second.Content.ReadFromJsonAsync<JsonElement>();
-        body.GetProperty("errorCode").GetString().Should().Be("ACTIVE_AGENT_EXISTS");
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var activeAgents = await db.AgentRegistrations.IgnoreQueryFilters()
+            .Where(agent => agent.SiteCode == TestSiteCode && agent.IsActive && agent.Status == AgentRegistrationStatus.ACTIVE)
+            .ToListAsync();
+        activeAgents.Should().HaveCount(2);
     }
 
     [Fact]
@@ -399,6 +418,173 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
             .FirstOrDefaultAsync(a => a.Id == firstDeviceId);
         oldAgent!.IsActive.Should().BeFalse();
         oldAgent.DeactivatedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Register_WorkflowEnabled_UnexpectedSerialReplacement_Returns409AndPersistsPendingRegistration()
+    {
+        using var workflowFactory = CreateFactory(new Dictionary<string, string?>
+        {
+            ["SuspiciousDeviceWorkflow:Enabled"] = "true",
+            ["SuspiciousDeviceWorkflow:HoldUnexpectedSerialReplacement"] = "true"
+        });
+        var workflowClient = workflowFactory.CreateClient();
+        SetPortalAuth(workflowClient, "FccAdmin", "portal-admin", TestLegalEntityId);
+
+        var (activeDeviceId, _, _) = await RegisterDeviceAsync(
+            workflowClient,
+            "SN-HOLD-ACTIVE-001",
+            replacePreviousAgent: false);
+
+        var heldBootstrapToken = await GenerateBootstrapTokenAsync(workflowClient);
+        var heldResponse = await SendRegistrationAsync(
+            workflowClient,
+            heldBootstrapToken,
+            "SN-HOLD-PENDING-001",
+            replacePreviousAgent: true);
+
+        heldResponse.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        var body = await heldResponse.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("DEVICE_PENDING_APPROVAL");
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+
+        var heldRegistration = await db.AgentRegistrations.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(agent => agent.DeviceSerialNumber == "SN-HOLD-PENDING-001");
+        heldRegistration.Should().NotBeNull();
+        heldRegistration!.Status.Should().Be(AgentRegistrationStatus.PENDING_APPROVAL);
+        heldRegistration.IsActive.Should().BeFalse();
+        heldRegistration.ReplacementForDeviceId.Should().Be(activeDeviceId);
+
+        var bootstrapToken = await db.BootstrapTokens.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(token => token.TokenHash == ComputeSha256Hex(heldBootstrapToken));
+        bootstrapToken.Should().NotBeNull();
+        bootstrapToken!.Status.Should().Be(ProvisioningTokenStatus.ACTIVE);
+        bootstrapToken.UsedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ApproveSuspiciousRegistration_RetryReplacement_ActivatesHeldDeviceAndConsumesOriginalToken()
+    {
+        using var workflowFactory = CreateFactory(new Dictionary<string, string?>
+        {
+            ["SuspiciousDeviceWorkflow:Enabled"] = "true",
+            ["SuspiciousDeviceWorkflow:HoldUnexpectedSerialReplacement"] = "true"
+        });
+        var workflowClient = workflowFactory.CreateClient();
+        SetPortalAuth(workflowClient, "FccAdmin", "portal-admin", TestLegalEntityId);
+
+        var (existingDeviceId, _, _) = await RegisterDeviceAsync(
+            workflowClient,
+            "SN-APPROVE-ACTIVE-001",
+            replacePreviousAgent: false);
+
+        var heldBootstrapToken = await GenerateBootstrapTokenAsync(workflowClient);
+        var heldResponse = await SendRegistrationAsync(
+            workflowClient,
+            heldBootstrapToken,
+            "SN-APPROVE-PENDING-001",
+            replacePreviousAgent: true);
+
+        heldResponse.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        Guid heldDeviceId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+            var heldRegistration = await db.AgentRegistrations.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(agent => agent.DeviceSerialNumber == "SN-APPROVE-PENDING-001");
+            heldRegistration.Should().NotBeNull();
+            heldRegistration!.Status.Should().Be(AgentRegistrationStatus.PENDING_APPROVAL);
+            heldDeviceId = heldRegistration.Id;
+        }
+
+        var approveResponse = await workflowClient.PostAsJsonAsync(
+            $"/api/v1/admin/agent/{heldDeviceId}/approve",
+            new { reason = "Approving replacement after field verification." });
+
+        approveResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var approveBody = await approveResponse.Content.ReadFromJsonAsync<JsonElement>();
+        approveBody.GetProperty("deviceId").GetString().Should().Be(heldDeviceId.ToString());
+        approveBody.GetProperty("status").GetString().Should().Be(AgentRegistrationStatus.PENDING_APPROVAL.ToString());
+
+        var retryResponse = await SendRegistrationAsync(
+            workflowClient,
+            heldBootstrapToken,
+            "SN-APPROVE-PENDING-001",
+            replacePreviousAgent: true);
+
+        retryResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        var retryBody = await retryResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid.Parse(retryBody.GetProperty("deviceId").GetString()!).Should().Be(heldDeviceId);
+
+        using var verificationScope = _factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+
+        var previousDevice = await verificationDb.AgentRegistrations.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(agent => agent.Id == existingDeviceId);
+        previousDevice.Should().NotBeNull();
+        previousDevice!.Status.Should().Be(AgentRegistrationStatus.DEACTIVATED);
+        previousDevice.IsActive.Should().BeFalse();
+
+        var activatedDevice = await verificationDb.AgentRegistrations.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(agent => agent.Id == heldDeviceId);
+        activatedDevice.Should().NotBeNull();
+        activatedDevice!.Status.Should().Be(AgentRegistrationStatus.ACTIVE);
+        activatedDevice.IsActive.Should().BeTrue();
+        activatedDevice.ApprovalGrantedAt.Should().NotBeNull();
+
+        var bootstrapToken = await verificationDb.BootstrapTokens.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(token => token.TokenHash == ComputeSha256Hex(heldBootstrapToken));
+        bootstrapToken.Should().NotBeNull();
+        bootstrapToken!.Status.Should().Be(ProvisioningTokenStatus.USED);
+        bootstrapToken.UsedByDeviceId.Should().Be(heldDeviceId);
+    }
+
+    [Fact]
+    public async Task Register_WorkflowEnabled_DeviceModelMismatch_Returns409AndPersistsQuarantinedRegistration()
+    {
+        using var workflowFactory = CreateFactory(new Dictionary<string, string?>
+        {
+            ["SuspiciousDeviceWorkflow:Enabled"] = "true",
+            ["SuspiciousDeviceWorkflow:QuarantineSecurityRuleMismatch"] = "true",
+            ["SuspiciousDeviceWorkflow:AllowedDeviceModels:0"] = "Approved Device"
+        });
+        var workflowClient = workflowFactory.CreateClient();
+        SetPortalAuth(workflowClient, "FccAdmin", "portal-admin", TestLegalEntityId);
+
+        var heldBootstrapToken = await GenerateBootstrapTokenAsync(workflowClient);
+        var response = await SendRegistrationAsync(
+            workflowClient,
+            heldBootstrapToken,
+            "SN-QUARANTINE-001",
+            deviceModel: "Unapproved Device",
+            replacePreviousAgent: false);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("errorCode").GetString().Should().Be("DEVICE_QUARANTINED");
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+
+        var heldRegistration = await db.AgentRegistrations.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(agent => agent.DeviceSerialNumber == "SN-QUARANTINE-001");
+        heldRegistration.Should().NotBeNull();
+        heldRegistration!.Status.Should().Be(AgentRegistrationStatus.QUARANTINED);
+        heldRegistration.IsActive.Should().BeFalse();
+        heldRegistration.SuspensionReasonCode.Should().Be("SECURITY_RULE_DEVICE_MODEL_MISMATCH");
+
+        var bootstrapToken = await db.BootstrapTokens.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(token => token.TokenHash == ComputeSha256Hex(heldBootstrapToken));
+        bootstrapToken.Should().NotBeNull();
+        bootstrapToken!.Status.Should().Be(ProvisioningTokenStatus.ACTIVE);
+        bootstrapToken.UsedAt.Should().BeNull();
     }
 
     // ── Token Refresh Tests ─────────────────────────────────────────────────
@@ -632,38 +818,36 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private async Task<string> GenerateBootstrapTokenAsync()
+    private async Task<string> GenerateBootstrapTokenAsync(HttpClient? client = null)
     {
-        SetPortalAuth("FccAdmin", "portal-admin", TestLegalEntityId);
+        var targetClient = client ?? _client;
+        SetPortalAuth(targetClient, "FccAdmin", "portal-admin", TestLegalEntityId);
         var request = new { siteCode = TestSiteCode, legalEntityId = TestLegalEntityId };
-        var response = await _client.PostAsJsonAsync("/api/v1/admin/bootstrap-tokens", request);
+        var response = await targetClient.PostAsJsonAsync("/api/v1/admin/bootstrap-tokens", request);
         response.StatusCode.Should().Be(HttpStatusCode.Created);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         return body.GetProperty("rawToken").GetString()!;
     }
 
-    private async Task<(Guid DeviceId, string DeviceToken, string RefreshToken)> RegisterDeviceAsync(string serialNumber)
+    private Task<(Guid DeviceId, string DeviceToken, string RefreshToken)> RegisterDeviceAsync(string serialNumber) =>
+        RegisterDeviceAsync(_client, serialNumber);
+
+    private async Task<(Guid DeviceId, string DeviceToken, string RefreshToken)> RegisterDeviceAsync(
+        HttpClient client,
+        string serialNumber,
+        string deviceModel = "Test Device",
+        bool replacePreviousAgent = true,
+        string? bootstrapToken = null,
+        string agentVersion = "1.0.0")
     {
-        // Each registration needs: deactivate old agent if present, so use replacePreviousAgent
-        var bootstrapToken = await GenerateBootstrapTokenAsync();
-
-        var registerRequest = new
-        {
-            siteCode = TestSiteCode,
-            deviceSerialNumber = serialNumber,
-            deviceModel = "Test Device",
-            osVersion = "12.0",
-            agentVersion = "1.0.0",
-            replacePreviousAgent = true
-        };
-
-        var msg = new HttpRequestMessage(HttpMethod.Post, "/api/v1/agent/register")
-        {
-            Content = JsonContent.Create(registerRequest)
-        };
-        msg.Headers.Add("X-Provisioning-Token", bootstrapToken);
-
-        var response = await _client.SendAsync(msg);
+        var rawBootstrapToken = bootstrapToken ?? await GenerateBootstrapTokenAsync(client);
+        var response = await SendRegistrationAsync(
+            client,
+            rawBootstrapToken,
+            serialNumber,
+            deviceModel,
+            replacePreviousAgent,
+            agentVersion);
         response.StatusCode.Should().Be(HttpStatusCode.Created);
 
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -674,13 +858,42 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
         return (deviceId, deviceToken, refreshToken);
     }
 
+    private Task<HttpResponseMessage> SendRegistrationAsync(
+        HttpClient client,
+        string bootstrapToken,
+        string serialNumber,
+        string deviceModel = "Test Device",
+        bool replacePreviousAgent = false,
+        string agentVersion = "1.0.0")
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/agent/register")
+        {
+            Content = JsonContent.Create(new
+            {
+                provisioningToken = bootstrapToken,
+                siteCode = TestSiteCode,
+                deviceSerialNumber = serialNumber,
+                deviceModel,
+                osVersion = "12.0",
+                agentVersion,
+                deviceClass = "ANDROID",
+                replacePreviousAgent
+            })
+        };
+
+        return client.SendAsync(request);
+    }
+
     private static string ComputeSha256Hex(string input)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    private void SetPortalAuth(string role, string oid, params Guid[] legalEntityIds)
+    private void SetPortalAuth(string role, string oid, params Guid[] legalEntityIds) =>
+        SetPortalAuth(_client, role, oid, legalEntityIds);
+
+    private static void SetPortalAuth(HttpClient client, string role, string oid, params Guid[] legalEntityIds)
     {
         var tokenHandler = new JwtSecurityTokenHandler();
         var key = Encoding.UTF8.GetBytes(TestPortalSigningKey);
@@ -702,7 +915,7 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
             SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256)
         });
 
-        _client.DefaultRequestHeaders.Authorization =
+        client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", tokenHandler.WriteToken(token));
     }
 

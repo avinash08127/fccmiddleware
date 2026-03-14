@@ -42,6 +42,9 @@ public sealed class RevokeBootstrapTokenHandler
                 "Bootstrap token has already expired.");
 
         token.Status = ProvisioningTokenStatus.REVOKED;
+        token.RevokedAt = now;
+        token.RevokedByActorId = request.RevokedByActorId;
+        token.RevokedByActorDisplay = request.RevokedByActorDisplay ?? request.RevokedBy;
 
         _db.AddAuditEvent(new AuditEvent
         {
@@ -57,6 +60,8 @@ public sealed class RevokeBootstrapTokenHandler
                 TokenId = token.Id,
                 SiteCode = token.SiteCode,
                 RevokedBy = request.RevokedBy,
+                RevokedByActorId = token.RevokedByActorId,
+                RevokedByActorDisplay = token.RevokedByActorDisplay,
                 RevokedAt = now,
             })
         });

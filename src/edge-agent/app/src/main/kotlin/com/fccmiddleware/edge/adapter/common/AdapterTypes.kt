@@ -282,6 +282,9 @@ data class AgentFccConfig(
     /** DOMS TCP: Comma-separated list of configured pump numbers (e.g., "1,2,3,4"). */
     val configuredPumps: String? = null,
 
+    /** DOMS TCP: Optional raw DPP port list delivered from cloud config. */
+    val dppPorts: String? = null,
+
     // ── Petronite OAuth2 fields ──────────────────────────────────────────────
 
     /** Petronite: OAuth2 client ID for Client Credentials flow. */
@@ -318,6 +321,9 @@ data class AgentFccConfig(
 
     /** Advatec: Default CustIdType for Customer submissions (1=TIN, 2=DL, 3=Voters, 4=Passport, 5=NID, 6=NIL). */
     val advatecCustIdType: Int? = null,
+
+    /** Advatec: Optional FCC-to-pump map JSON delivered from cloud config. */
+    val advatecPumpMap: String? = null,
 ) {
     override fun toString(): String = SensitiveFieldFilter.redactToString(this)
 }

@@ -1,6 +1,7 @@
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Security;
+using FccDesktopAgent.Core.Sync;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -40,6 +41,7 @@ public sealed class SetupOrchestrator
     private readonly IRegistrationManager? _registrationManager;
     private readonly IHttpClientFactory? _httpClientFactory;
     private readonly ICredentialStore? _credentialStore;
+    private readonly IAgentCommandStateStore? _commandStateStore;
     private readonly ILogger<SetupOrchestrator>? _logger;
     private readonly AgentConfiguration? _agentConfig;
 
@@ -49,6 +51,7 @@ public sealed class SetupOrchestrator
         _registrationManager = services?.GetService<IRegistrationManager>();
         _httpClientFactory = services?.GetService<IHttpClientFactory>();
         _credentialStore = services?.GetService<ICredentialStore>();
+        _commandStateStore = services?.GetService<IAgentCommandStateStore>();
         _logger = services?.GetService<ILogger<SetupOrchestrator>>();
         _agentConfig = services?.GetService<IOptions<AgentConfiguration>>()?.Value;
     }
@@ -364,6 +367,12 @@ public sealed class SetupOrchestrator
         _logger?.LogInformation("Host started after setup wizard");
     }
 
+    public async Task ClearOperatorNoticeAsync()
+    {
+        if (_commandStateStore is null) return;
+        await _commandStateStore.ClearNoticeAsync();
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static string GetErrorHint(RegistrationErrorCode code) => code switch
@@ -373,6 +382,8 @@ public sealed class SetupOrchestrator
         RegistrationErrorCode.BootstrapTokenInvalid => "\n\nThe token is not recognized. Please check you copied it correctly.",
         RegistrationErrorCode.BootstrapTokenRevoked => "\n\nThis token has been revoked by an administrator.",
         RegistrationErrorCode.ActiveAgentExists => "\n\nAnother agent is already registered at this site. Check 'Replace existing agent' to override.",
+        RegistrationErrorCode.DevicePendingApproval => "\n\nThis device has been held for operator approval. Ask the portal operator to approve it, then retry provisioning.",
+        RegistrationErrorCode.DeviceQuarantined => "\n\nThis device has been quarantined by a registration policy. Ask the portal operator to review or reject it before retrying.",
         RegistrationErrorCode.SiteNotFound => "\n\nThe site code was not found. Please check the site code.",
         RegistrationErrorCode.SiteMismatch => "\n\nThe site code does not match the token. Please verify both values.",
         _ => "",

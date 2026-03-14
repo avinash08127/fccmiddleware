@@ -230,6 +230,8 @@ public sealed class UserManagementController : ControllerBase
 
     private string? ResolveEmail() =>
         User.FindFirst("preferred_username")?.Value
+        ?? User.FindFirst("upn")?.Value
+        ?? User.FindFirst("unique_name")?.Value
         ?? User.FindFirst("email")?.Value
         ?? User.FindFirst("emails")?.Value
         ?? User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value;
