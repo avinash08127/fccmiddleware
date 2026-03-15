@@ -35,11 +35,24 @@ internal sealed class ApiKeyMiddleware
     {
         var configuredKey = _options.CurrentValue.ApiKey;
 
-        // No key configured → auth disabled (dev / unprovisioned). Warn and allow.
+        // S-DSK-027: Fail closed — refuse requests when no API key is configured.
+        // A missing key means the credential store was not populated during provisioning
+        // or failed to load at startup. Allowing requests without auth would expose the
+        // pre-auth and transaction APIs to any device on the LAN.
         if (string.IsNullOrWhiteSpace(configuredKey))
         {
-            _logger.LogWarning("LocalApi.ApiKey is not configured — authentication is DISABLED. Set LocalApi:ApiKey before production use.");
-            await _next(context);
+            _logger.LogWarning("LocalApi.ApiKey is not configured — rejecting request. " +
+                "Provision the agent or set LocalApi:ApiKey before production use.");
+
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsJsonAsync(new
+            {
+                errorCode = "AUTH_NOT_CONFIGURED",
+                message = "API key authentication is not yet configured. Complete agent provisioning.",
+                traceId = context.TraceIdentifier,
+                timestamp = DateTimeOffset.UtcNow
+            });
             return;
         }
 

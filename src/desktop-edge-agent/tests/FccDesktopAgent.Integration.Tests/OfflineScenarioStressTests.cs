@@ -186,6 +186,7 @@ public sealed class OfflineScenarioStressTests : IDisposable
             }),
             authHandler,
             registrationManager,
+            Substitute.For<IConfigManager>(),
             NullLogger<CloudUploadWorker>.Instance,
             ResiliencePipeline.Empty);
     }

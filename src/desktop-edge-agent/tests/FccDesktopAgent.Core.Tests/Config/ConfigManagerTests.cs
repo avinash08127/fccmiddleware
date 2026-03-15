@@ -68,16 +68,13 @@ public sealed class ConfigManagerTests : IDisposable
         SiteConfigFcc? fcc = null,
         SiteConfigRollout? rollout = null)
     {
-        return new SiteConfig
+        var baseConfig = TestSiteConfigFactory.Create(version, effectiveAt);
+        return baseConfig with
         {
-            ConfigVersion = version,
-            ConfigId = Guid.NewGuid().ToString(),
-            IssuedAtUtc = DateTimeOffset.UtcNow,
-            EffectiveAtUtc = effectiveAt ?? DateTimeOffset.UtcNow.AddMinutes(-1),
-            Sync = sync ?? new SiteConfigSync { ConfigPollIntervalSeconds = 60 },
-            Telemetry = telemetry ?? new SiteConfigTelemetry { TelemetryIntervalSeconds = 300 },
-            Fcc = fcc,
-            Rollout = rollout,
+            Sync = sync ?? baseConfig.Sync,
+            Telemetry = telemetry ?? baseConfig.Telemetry,
+            Fcc = fcc ?? baseConfig.Fcc,
+            Rollout = rollout ?? baseConfig.Rollout,
         };
     }
 
@@ -160,9 +157,8 @@ public sealed class ConfigManagerTests : IDisposable
     {
         var config = MakeSiteConfig(
             version: 1,
-            fcc: new SiteConfigFcc
+            fcc: TestSiteConfigFactory.Create().Fcc with
             {
-                Enabled = true,
                 Vendor = "Advatec",
                 HostAddress = "192.168.1.100",
                 Port = 8080,
@@ -180,16 +176,15 @@ public sealed class ConfigManagerTests : IDisposable
     public async Task PostConfigure_OverlaysCloudValues()
     {
         var siteConfig = MakeSiteConfig(
-            sync: new SiteConfigSync
+            sync: TestSiteConfigFactory.Create().Sync with
             {
                 UploadIntervalSeconds = 120,
                 UploadBatchSize = 100,
                 ConfigPollIntervalSeconds = 90,
             },
-            telemetry: new SiteConfigTelemetry { TelemetryIntervalSeconds = 600 },
-            fcc: new SiteConfigFcc
+            telemetry: TestSiteConfigFactory.Create().Telemetry with { TelemetryIntervalSeconds = 600 },
+            fcc: TestSiteConfigFactory.Create().Fcc with
             {
-                Enabled = true,
                 Vendor = "Radix",
                 HostAddress = "192.168.1.100",
                 Port = 8080,
@@ -249,13 +244,13 @@ public sealed class ConfigManagerTests : IDisposable
     {
         var config1 = MakeSiteConfig(
             version: 1,
-            fcc: new SiteConfigFcc { HostAddress = "192.168.1.100", Port = 8080 });
+            fcc: TestSiteConfigFactory.Create().Fcc with { HostAddress = "192.168.1.100", Port = 8080 });
         await _manager.ApplyConfigAsync(config1, ToJson(config1), "1", CancellationToken.None);
 
         var config2 = MakeSiteConfig(
             version: 2,
-            fcc: new SiteConfigFcc { HostAddress = "192.168.1.200", Port = 9090 },
-            rollout: new SiteConfigRollout { RequiresRestartSections = ["fcc"] });
+            fcc: TestSiteConfigFactory.Create().Fcc with { HostAddress = "192.168.1.200", Port = 9090 },
+            rollout: TestSiteConfigFactory.Create().Rollout with { RequiresRestartSections = ["fcc"] });
 
         var result = await _manager.ApplyConfigAsync(config2, ToJson(config2), "2", CancellationToken.None);
 
@@ -269,12 +264,12 @@ public sealed class ConfigManagerTests : IDisposable
     {
         var config1 = MakeSiteConfig(
             version: 1,
-            telemetry: new SiteConfigTelemetry { TelemetryIntervalSeconds = 300 });
+            telemetry: TestSiteConfigFactory.Create().Telemetry with { TelemetryIntervalSeconds = 300 });
         await _manager.ApplyConfigAsync(config1, ToJson(config1), "1", CancellationToken.None);
 
         var config2 = MakeSiteConfig(
             version: 2,
-            telemetry: new SiteConfigTelemetry { TelemetryIntervalSeconds = 600 });
+            telemetry: TestSiteConfigFactory.Create().Telemetry with { TelemetryIntervalSeconds = 600 });
 
         var result = await _manager.ApplyConfigAsync(config2, ToJson(config2), "2", CancellationToken.None);
 
@@ -352,9 +347,9 @@ public sealed class ConfigManagerTests : IDisposable
     public void ApplyHotReloadFields_SetsIngestionMode()
     {
         var target = new AgentConfiguration();
-        var source = new SiteConfig
+        var source = TestSiteConfigFactory.Create() with
         {
-            Fcc = new SiteConfigFcc { IngestionMode = "BUFFER_ALWAYS" },
+            Fcc = TestSiteConfigFactory.Create().Fcc with { IngestionMode = "BUFFER_ALWAYS" },
         };
 
         ConfigManager.ApplyHotReloadFields(target, source);
@@ -366,14 +361,71 @@ public sealed class ConfigManagerTests : IDisposable
     public void ApplyHotReloadFields_SetsBufferRetention()
     {
         var target = new AgentConfiguration();
-        var source = new SiteConfig
+        var source = TestSiteConfigFactory.Create() with
         {
-            Buffer = new SiteConfigBuffer { RetentionDays = 14, CleanupIntervalHours = 48 },
+            Buffer = TestSiteConfigFactory.Create().Buffer with { RetentionDays = 14, CleanupIntervalHours = 48 },
         };
 
         ConfigManager.ApplyHotReloadFields(target, source);
 
         target.RetentionDays.Should().Be(14);
         target.CleanupIntervalHours.Should().Be(48);
+    }
+
+    [Fact]
+    public void ApplyHotReloadFields_MapsAllSiteHaFields()
+    {
+        var target = new AgentConfiguration();
+        var source = TestSiteConfigFactory.Create() with
+        {
+            SiteHa = TestSiteConfigFactory.Create().SiteHa with
+            {
+                Enabled = true,
+                AutoFailoverEnabled = true,
+                Priority = 50,
+                RoleCapability = "STANDBY_ONLY",
+                CurrentRole = "STANDBY_HOT",
+                HeartbeatIntervalSeconds = 3,
+                FailoverTimeoutSeconds = 20,
+                MaxReplicationLagSeconds = 10,
+                ReplicationEnabled = true,
+                ProxyingEnabled = false,
+                LeaderEpoch = 42,
+                PeerApiPort = 9090,
+            },
+        };
+
+        ConfigManager.ApplyHotReloadFields(target, source);
+
+        target.SiteHaEnabled.Should().BeTrue();
+        target.AutoFailoverEnabled.Should().BeTrue();
+        target.SiteHaPriority.Should().Be(50);
+        target.RoleCapability.Should().Be("STANDBY_ONLY");
+        target.CurrentRole.Should().Be("STANDBY_HOT");
+        target.HeartbeatIntervalSeconds.Should().Be(3);
+        target.FailoverTimeoutSeconds.Should().Be(20);
+        target.MaxReplicationLagSeconds.Should().Be(10);
+        target.ReplicationEnabled.Should().BeTrue();
+        target.ProxyingEnabled.Should().BeFalse();
+        target.LeaderEpoch.Should().Be(42);
+        target.PeerApiPort.Should().Be(9090);
+    }
+
+    [Fact]
+    public void ApplyHotReloadFields_NullSiteHa_LeavesDefaults()
+    {
+        var target = new AgentConfiguration
+        {
+            SiteHaEnabled = false,
+            SiteHaPriority = 100,
+            LeaderEpoch = 0,
+        };
+        var source = TestSiteConfigFactory.Create() with { SiteHa = null! };
+
+        ConfigManager.ApplyHotReloadFields(target, source);
+
+        target.SiteHaEnabled.Should().BeFalse();
+        target.SiteHaPriority.Should().Be(100);
+        target.LeaderEpoch.Should().Be(0);
     }
 }

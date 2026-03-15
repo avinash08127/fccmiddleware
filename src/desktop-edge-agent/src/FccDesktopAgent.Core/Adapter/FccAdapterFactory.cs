@@ -71,19 +71,23 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
     private PetroniteAdapter GetOrCreatePetroniteAdapter(FccConnectionConfig config)
     {
         var fingerprint = $"{config.BaseUrl}|{config.ClientId}|{config.WebhookSecret}|{config.WebhookListenerPort}";
+        PetroniteAdapter? oldAdapter = null;
 
         lock (_petroniteLock)
         {
             if (_cachedPetroniteAdapter is not null && _cachedPetroniteFingerprint == fingerprint)
                 return _cachedPetroniteAdapter;
 
-            // Config changed or first creation — dispose old and create new.
-            _cachedPetroniteAdapter?.DisposeAsync().AsTask().GetAwaiter().GetResult();
-
+            oldAdapter = _cachedPetroniteAdapter;
             _cachedPetroniteAdapter = CreatePetroniteAdapter(config);
             _cachedPetroniteFingerprint = fingerprint;
-            return _cachedPetroniteAdapter;
         }
+
+        // Dispose old adapter outside the lock to avoid sync-over-async blocking
+        if (oldAdapter is not null)
+            _ = DisposeAdapterInBackgroundAsync(oldAdapter);
+
+        return _cachedPetroniteAdapter;
     }
 
     private PetroniteAdapter CreatePetroniteAdapter(FccConnectionConfig config)
@@ -115,23 +119,26 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
     private AdvatecAdapter GetOrCreateAdvatecAdapter(FccConnectionConfig config)
     {
         var fingerprint = $"{config.AdvatecDeviceAddress}|{config.AdvatecDevicePort}|{config.AdvatecWebhookToken}|{config.AdvatecWebhookListenerPort}";
+        AdvatecAdapter? oldAdapter = null;
 
         lock (_advatecLock)
         {
             if (_cachedAdvatecAdapter is not null && _cachedAdvatecFingerprint == fingerprint)
                 return _cachedAdvatecAdapter;
 
-            // H-05: Dispose the old adapter to release webhook listener and other resources.
-            // Previously the old adapter was silently abandoned, leaking HttpClient sockets.
-            _cachedAdvatecAdapter?.DisposeAsync().AsTask().GetAwaiter().GetResult();
-
+            oldAdapter = _cachedAdvatecAdapter;
             _cachedAdvatecAdapter = new AdvatecAdapter(
                 config,
                 _httpFactory,
                 _loggerFactory);
             _cachedAdvatecFingerprint = fingerprint;
-            return _cachedAdvatecAdapter;
         }
+
+        // Dispose old adapter outside the lock to avoid sync-over-async blocking
+        if (oldAdapter is not null)
+            _ = DisposeAdapterInBackgroundAsync(oldAdapter);
+
+        return _cachedAdvatecAdapter;
     }
 
     private DomsJplAdapter CreateDomsJplAdapter(FccConnectionConfig config)
@@ -154,5 +161,18 @@ public sealed class FccAdapterFactory : IFccAdapterFactory
             pumpNumberOffset: config.PumpNumberOffset,
             productCodeMapping: config.ProductCodeMapping,
             logger: _loggerFactory.CreateLogger<DomsJplAdapter>());
+    }
+
+    private async Task DisposeAdapterInBackgroundAsync(IAsyncDisposable adapter)
+    {
+        try
+        {
+            await adapter.DisposeAsync();
+        }
+        catch (Exception ex)
+        {
+            _loggerFactory.CreateLogger<FccAdapterFactory>()
+                .LogWarning(ex, "Failed to dispose old FCC adapter");
+        }
     }
 }

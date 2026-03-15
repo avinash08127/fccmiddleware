@@ -576,11 +576,12 @@ public sealed class AdvatecAdapter : IFccAdapter, IAsyncDisposable
         var odooOrderId = matchedPreAuth?.OdooOrderId;
         var preAuthId = matchedPreAuth?.PreAuthId;
 
+        // S-DSK-021: Do not log CustomerId (may contain customer tax ID — regulated PII).
         if (matchedPreAuth is null && !string.IsNullOrWhiteSpace(receipt.CustomerId))
         {
             _logger.LogDebug(
-                "Advatec receipt has CustomerId={CustomerId} but no matching pre-auth — Normal Order",
-                receipt.CustomerId);
+                "Advatec receipt has CustomerId present but no matching pre-auth — Normal Order on Pump={Pump}",
+                pumpNumber);
         }
 
         var now = DateTimeOffset.UtcNow;

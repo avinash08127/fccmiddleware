@@ -3,7 +3,8 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Security;
-using FccDesktopAgent.Core.Sync.Models;
+using FccMiddleware.Contracts.Common;
+using FccMiddleware.Contracts.Registration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -35,6 +36,10 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
     private readonly IOptions<AgentConfiguration> _config;
     private readonly ILogger<DeviceTokenProvider> _logger;
 
+    // P-DSK-007: Skip unnecessary staging recovery checks after the first successful check.
+    // Staging keys only exist during the brief window of an interrupted refresh (rare crash).
+    private volatile bool _stagingRecoveryAttempted;
+
     public DeviceTokenProvider(
         ICredentialStore store,
         IHttpClientFactory httpFactory,
@@ -49,9 +54,16 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
 
     public async Task<string?> GetTokenAsync(CancellationToken ct = default)
     {
-        var recovered = await TryRecoverStagedTokenBundleAsync(ct);
-        if (recovered is not null)
-            return recovered.DeviceToken;
+        // P-DSK-007: Only attempt staging recovery once — staging keys only exist
+        // during interrupted refresh (rare). Skip on subsequent calls to avoid a
+        // wasted credential store read per token access.
+        if (!_stagingRecoveryAttempted)
+        {
+            var recovered = await TryRecoverStagedTokenBundleAsync(ct);
+            _stagingRecoveryAttempted = true;
+            if (recovered is not null)
+                return recovered.DeviceToken;
+        }
 
         var bundle = await TryLoadActiveTokenBundleAsync(ct);
         if (bundle is not null)
@@ -104,10 +116,17 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
 
         var bundle = await TryLoadActiveTokenBundleAsync(ct);
         var refreshToken = bundle?.RefreshToken ?? await _store.GetSecretAsync(RefreshTokenKey, ct);
+        var deviceToken = bundle?.DeviceToken ?? await _store.GetSecretAsync(TokenKey, ct);
         if (string.IsNullOrWhiteSpace(refreshToken))
         {
             _logger.LogWarning("Token refresh skipped: no refresh token in credential store");
             return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(deviceToken))
+        {
+            _logger.LogWarning("Token refresh cannot proceed: no device token available to bind the refresh request");
+            throw new RefreshTokenExpiredException("Device token is missing; re-provisioning is required.");
         }
 
         var http = _httpFactory.CreateClient("cloud");
@@ -125,9 +144,11 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         try
         {
             await MarkRefreshPendingAsync(ct);
-            // S-DSK-016: Send only the refresh token — the device token is not needed
-            // for server-side rotation and exposing both maximizes risk if TLS is compromised.
-            response = await http.PostAsJsonAsync(url, new { refreshToken }, ct);
+            response = await http.PostAsJsonAsync(url, new RefreshTokenRequest
+            {
+                RefreshToken = refreshToken,
+                DeviceToken = deviceToken
+            }, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -135,20 +156,26 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
             return null;
         }
 
-        // Handle 403 DEVICE_DECOMMISSIONED
         if (response.StatusCode == HttpStatusCode.Forbidden)
         {
             await DeleteSecretBestEffortAsync(RefreshPendingKey, ct);
-            _logger.LogWarning("Token refresh returned 403 Forbidden — device may be decommissioned");
-            throw new DeviceDecommissionedException("Token refresh returned 403 Forbidden");
+            var error = await TryReadErrorAsync(response, ct);
+            if (string.Equals(error?.ErrorCode, "DEVICE_DECOMMISSIONED", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("Token refresh returned 403 DEVICE_DECOMMISSIONED");
+                throw new DeviceDecommissionedException(error?.Message ?? "Token refresh returned 403 DEVICE_DECOMMISSIONED");
+            }
+
+            _logger.LogWarning("Token refresh returned 403 {ErrorCode}", error?.ErrorCode ?? "FORBIDDEN");
+            throw new RefreshTokenExpiredException(error?.Message ?? "Token refresh returned 403 Forbidden");
         }
 
-        // Handle 401 — refresh token expired or revoked
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
             await DeleteSecretBestEffortAsync(RefreshPendingKey, ct);
-            _logger.LogWarning("Token refresh returned 401 Unauthorized — refresh token expired or revoked, re-provisioning required");
-            throw new RefreshTokenExpiredException("Token refresh returned 401 Unauthorized");
+            var error = await TryReadErrorAsync(response, ct);
+            _logger.LogWarning("Token refresh returned 401 {ErrorCode}", error?.ErrorCode ?? "UNAUTHORIZED");
+            throw new RefreshTokenExpiredException(error?.Message ?? "Token refresh returned 401 Unauthorized");
         }
 
         if (!response.IsSuccessStatusCode)
@@ -186,6 +213,18 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
 
         _logger.LogInformation("Device token refreshed successfully");
         return result.DeviceToken;
+    }
+
+    private static async Task<ErrorResponse?> TryReadErrorAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<ErrorResponse>(cancellationToken: ct);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task<StoredTokenBundle?> TryLoadActiveTokenBundleAsync(CancellationToken ct)
@@ -248,8 +287,13 @@ public sealed class DeviceTokenProvider : IDeviceTokenProvider
         return staged is null;
     }
 
-    private Task MarkRefreshPendingAsync(CancellationToken ct) =>
-        _store.SetSecretAsync(RefreshPendingKey, DateTimeOffset.UtcNow.ToString("O"), ct);
+    private Task MarkRefreshPendingAsync(CancellationToken ct)
+    {
+        // P-DSK-007: Reset the staging recovery flag when a new refresh starts,
+        // so the next GetTokenAsync will check for staged bundles again.
+        _stagingRecoveryAttempted = false;
+        return _store.SetSecretAsync(RefreshPendingKey, DateTimeOffset.UtcNow.ToString("O"), ct);
+    }
 
     private async Task CommitTokenBundleAsync(StoredTokenBundle bundle, CancellationToken ct)
     {

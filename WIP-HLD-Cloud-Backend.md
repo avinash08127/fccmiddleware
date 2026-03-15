@@ -34,7 +34,7 @@ The business problem is not just transaction capture. It is controlled, auditabl
 | Pre-Auth Record Storage | Store pre-auth records forwarded by Edge Agents for reconciliation matching |
 | Reconciliation | Match final dispense to pre-auth; calculate amount variance; flag exceptions |
 | Odoo Integration | Expose poll + acknowledge endpoints for Odoo to consume PENDING transactions |
-| Edge Agent Coordination | Config sync, status sync (SYNCED_TO_ODOO), version checks, telemetry, agent registration |
+| Edge Agent Coordination | Config sync, status sync (`SYNCED_TO_ODOO`), version checks, telemetry, multi-agent registration, peer directory bootstrap, and leader fencing |
 | Master Data Sync | Ingest legal entity, site, pump (with FCC pump number), nozzle (with Odoo↔FCC number mapping and product assignment), product, and operator reference data from Databricks/Odoo |
 | Configuration Runtime | Resolve legal-entity, site, FCC, fiscalization, tolerance, and routing settings |
 | Event Publishing & Audit | Publish audit and operational events for monitoring and downstream use; immutable event history |
@@ -89,7 +89,7 @@ The business problem is not just transaction capture. It is controlled, auditabl
 5. **Reconciliation Engine** — Match final dispenses to pre-auth by correlation ID or fallback heuristics; variance calculation; auto-approve within tolerance or flag for review.
 6. **Canonical Transaction Store** — Normalized transactions with status tracking and raw payload retention.
 7. **Odoo Polling & Acknowledgement** — Expose PENDING transactions; accept acknowledgement with `odooOrderId`; mark `SYNCED_TO_ODOO`.
-8. **Edge Agent Coordination** — Config sync, status sync, version checks, telemetry intake, agent registration.
+8. **Edge Agent Coordination** — Config sync, status sync, version checks, telemetry intake, multi-agent registration, peer directory bootstrap, and leader-fencing support.
 9. **Master Data Sync** — Idempotent upsert of legal entities, sites, pumps, products, operators from Databricks.
 10. **Event Publishing & Audit** — Domain events for audit trail and operational notifications; immutable append-only event store; S3 archive for long-term retention.
 11. **Health, Metrics, Tracing & Diagnostics** — Structured logging, distributed tracing, operational dashboards, health check endpoints.
@@ -249,11 +249,12 @@ Additionally, a **Background Worker Host** runs alongside the API:
 - **Stale Alert Worker**: Flags transactions PENDING beyond configurable threshold (e.g., 7 days) as `STALE_PENDING`.
 
 ### Edge Sync Module
-- **SYNCED_TO_ODOO Status Endpoint**: `GET /api/v1/transactions/synced-status?since={timestamp}` — returns transaction IDs confirmed as SYNCED_TO_ODOO. Edge Agents poll this.
-- **Config Endpoint**: `GET /api/v1/agent/config?siteCode={code}` — returns current FCC config, ingestion mode, poll intervals, etc.
+- **SYNCED_TO_ODOO Status Endpoint**: `GET /api/v1/transactions/synced-status?since={timestamp}` — returns transaction IDs confirmed as `SYNCED_TO_ODOO`. Edge Agents poll this.
+- **Config Endpoint**: `GET /api/v1/agent/config?siteCode={code}` — returns the current site snapshot including HA policy, peer directory bootstrap data, leader epoch, and runtime settings.
 - **Version Check**: `GET /api/v1/agent/version-check?version={v}` — returns compatibility status.
 - **Telemetry Endpoint**: `POST /api/v1/agent/telemetry` — accepts agent health data (FCC status, buffer depth, battery, storage, app version).
-- **Agent Registration**: `POST /api/v1/agent/register` — registers a new Edge Agent device for a site.
+- **Agent Registration**: `POST /api/v1/agent/register` — registers Android and desktop agents into the same site-agent registry, including device class, peer API metadata, capabilities, and HA priority.
+- **Leader Fencing**: authoritative Edge-originated writes carry `leaderEpoch`; stale epochs are rejected once site HA is enabled.
 
 ### Configuration Module
 - **Legal Entity Config**: Country, currency, timezone, fiscalization defaults. Read-only (synced from Databricks).

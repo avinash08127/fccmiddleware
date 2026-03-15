@@ -68,4 +68,7 @@ data class PumpStatus(
 
     /** When the pump state last changed. Null if vendor does not report. UTC ISO 8601 with trailing Z. */
     val lastChangedAtUtc: String? = null,
+
+    /** Extended supplemental status from FpStatus_3. Null when not included. */
+    val supplemental: PumpStatusSupplemental? = null,
 )

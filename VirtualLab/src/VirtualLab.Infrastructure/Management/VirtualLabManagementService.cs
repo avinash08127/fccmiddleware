@@ -622,6 +622,7 @@ public sealed class VirtualLabManagementService(
             BasicAuthPassword = source.BasicAuthPassword,
             DeliveryMode = source.DeliveryMode,
             PreAuthMode = source.PreAuthMode,
+            FccVendor = source.FccVendor,
             IsActive = request.Activate,
             CreatedAtUtc = now,
             UpdatedAtUtc = now,
@@ -1576,6 +1577,7 @@ public sealed class VirtualLabManagementService(
         site.BasicAuthPassword = request.BasicAuthPassword.Trim();
         site.DeliveryMode = request.DeliveryMode;
         site.PreAuthMode = request.PreAuthMode;
+        site.FccVendor = string.IsNullOrWhiteSpace(request.FccVendor) ? "Generic" : request.FccVendor.Trim();
         site.IsActive = request.IsActive;
         site.SettingsJson = SerializeSettings(request.Settings);
         site.UpdatedAtUtc = now;
@@ -1856,6 +1858,7 @@ public sealed class VirtualLabManagementService(
             BasicAuthPassword = site.BasicAuthPassword,
             DeliveryMode = site.DeliveryMode,
             PreAuthMode = site.PreAuthMode,
+            FccVendor = site.FccVendor,
             Settings = settings,
             ActiveProfile = ToProfileSummary(site.ActiveFccSimulatorProfile),
             Forecourt = new SiteForecourtSummaryView
@@ -1893,6 +1896,7 @@ public sealed class VirtualLabManagementService(
             BasicAuthPassword = summary.BasicAuthPassword,
             DeliveryMode = summary.DeliveryMode,
             PreAuthMode = summary.PreAuthMode,
+            FccVendor = summary.FccVendor,
             Settings = summary.Settings,
             ActiveProfile = summary.ActiveProfile,
             Forecourt = summary.Forecourt,
@@ -2213,6 +2217,7 @@ public sealed class VirtualLabManagementService(
             BasicAuthPassword = site.BasicAuthPassword,
             DeliveryMode = site.DeliveryMode,
             PreAuthMode = site.PreAuthMode,
+            FccVendor = site.FccVendor,
             SettingsJson = site.SettingsJson,
             IsActive = site.IsActive,
             CreatedAtUtc = site.CreatedAtUtc,
@@ -2481,6 +2486,7 @@ public sealed class VirtualLabManagementService(
             BasicAuthPassword = site.BasicAuthPassword,
             DeliveryMode = site.DeliveryMode,
             PreAuthMode = site.PreAuthMode,
+            FccVendor = site.FccVendor,
             SettingsJson = site.SettingsJson,
             IsActive = site.IsActive,
             CreatedAtUtc = site.CreatedAtUtc,

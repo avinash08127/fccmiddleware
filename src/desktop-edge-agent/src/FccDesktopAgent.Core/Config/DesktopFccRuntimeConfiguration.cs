@@ -57,9 +57,9 @@ internal static class DesktopFccRuntimeConfiguration
         if (vendor == FccVendor.Doms && IsTcp(config.Fcc.ConnectionProtocol))
         {
             if (string.IsNullOrWhiteSpace(config.Identity?.SiteCode)
-                || string.IsNullOrWhiteSpace(config.Identity?.LegalEntityId)
-                || string.IsNullOrWhiteSpace(config.Site?.Currency)
-                || string.IsNullOrWhiteSpace(config.Site?.Timezone))
+                || config.Identity?.LegalEntityId == Guid.Empty
+                || string.IsNullOrWhiteSpace(config.Identity?.CurrencyCode)
+                || string.IsNullOrWhiteSpace(config.Identity?.Timezone))
             {
                 error = "DOMS TCP requires siteCode, legalEntityId, currency, and timezone in site config.";
                 return false;
@@ -128,13 +128,13 @@ internal static class DesktopFccRuntimeConfiguration
                 StringComparer.OrdinalIgnoreCase);
 
         // Petronite webhook listener port: cloud config > local config > default (8090).
-        int? webhookListenerPort = fccSection?.WebhookListenerPort
-            ?? (agentConfig.PetroniteWebhookListenerPort > 0 ? agentConfig.PetroniteWebhookListenerPort : null);
+        int? webhookListenerPort =
+            agentConfig.PetroniteWebhookListenerPort > 0 ? agentConfig.PetroniteWebhookListenerPort : null;
 
         // Advatec: resolve device address/port and webhook fields from cloud config.
         var advatecDeviceAddress = fccSection?.HostAddress ?? "127.0.0.1";
         var advatecDevicePort = fccSection?.AdvatecDevicePort ?? fccSection?.Port ?? 5560;
-        var advatecWebhookListenerPort = fccSection?.AdvatecWebhookListenerPort;
+        int? advatecWebhookListenerPort = null;
         var advatecWebhookToken = fccSection?.AdvatecWebhookToken;
         var advatecEfdSerialNumber = fccSection?.AdvatecEfdSerialNumber;
         var advatecCustIdType = fccSection?.AdvatecCustIdType;
@@ -164,9 +164,11 @@ internal static class DesktopFccRuntimeConfiguration
             WebhookSecret: fccSection?.WebhookSecret,
             OAuthTokenEndpoint: fccSection?.OAuthTokenEndpoint,
             HeartbeatIntervalSeconds: fccSection?.HeartbeatIntervalSeconds,
-            LegalEntityId: siteConfig?.Identity?.LegalEntityId,
-            CurrencyCode: siteConfig?.Site?.Currency,
-            Timezone: siteConfig?.Site?.Timezone,
+            LegalEntityId: siteConfig?.Identity?.LegalEntityId is { } legalEntityId && legalEntityId != Guid.Empty
+                ? legalEntityId.ToString()
+                : null,
+            CurrencyCode: siteConfig?.Identity?.CurrencyCode,
+            Timezone: siteConfig?.Identity?.Timezone,
             PumpNumberOffset: siteConfig?.Mappings?.PumpNumberOffset ?? 0,
             ProductCodeMapping: productCodeMapping,
             WebhookListenerPort: webhookListenerPort,
@@ -177,9 +179,7 @@ internal static class DesktopFccRuntimeConfiguration
             AdvatecEfdSerialNumber: advatecEfdSerialNumber,
             AdvatecCustIdType: advatecCustIdType,
             AdvatecPumpMap: fccSection?.AdvatecPumpMap,
-            PreAuthTimeoutSeconds: fccSection?.PreAuthTimeoutSeconds,
-            FiscalReceiptTimeoutSeconds: fccSection?.FiscalReceiptTimeoutSeconds,
-            ApiRequestTimeoutSeconds: fccSection?.ApiRequestTimeoutSeconds);
+            PreAuthTimeoutSeconds: agentConfig.PreAuthTimeoutSeconds > 0 ? agentConfig.PreAuthTimeoutSeconds : null);
 
         return new ResolvedFccRuntimeConfiguration(vendor, connectionConfig);
     }

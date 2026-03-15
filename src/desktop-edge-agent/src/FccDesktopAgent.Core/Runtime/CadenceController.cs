@@ -44,6 +44,8 @@ public sealed class CadenceController : BackgroundService
     private readonly IConfigPoller? _configPoller;
     private readonly IConfigManager? _configManager;
     private readonly ITelemetryReporter? _telemetryReporter;
+    private readonly IOperationalDataCloudSyncService? _operationalDataSync;
+    private readonly IDiagnosticLogUploadService? _diagnosticLogUploadService;
     private readonly IVersionChecker? _versionChecker;
 
     // Wake-up gate: signalled by state-change events so the loop runs an immediate cycle
@@ -60,6 +62,10 @@ public sealed class CadenceController : BackgroundService
     // is below minimum supported. When false, FCC communication is disabled.
     // Defaults to true (fail-open) — FCC is allowed until explicit incompatibility is detected.
     private volatile bool _versionCompatible = true;
+
+    // P2-09: Set when a cloud response carries a newer X-Peer-Directory-Version,
+    // causing an immediate config poll on the next cadence cycle.
+    private volatile bool _immediateConfigPollRequested;
 
     public CadenceController(
         IConnectivityMonitor connectivity,
@@ -78,8 +84,14 @@ public sealed class CadenceController : BackgroundService
         _configPoller = (IConfigPoller?)services.GetService(typeof(IConfigPoller));
         _configManager = (IConfigManager?)services.GetService(typeof(IConfigManager));
         _telemetryReporter = (ITelemetryReporter?)services.GetService(typeof(ITelemetryReporter));
+        _operationalDataSync = (IOperationalDataCloudSyncService?)services.GetService(typeof(IOperationalDataCloudSyncService));
+        _diagnosticLogUploadService = (IDiagnosticLogUploadService?)services.GetService(typeof(IDiagnosticLogUploadService));
         _versionChecker = (IVersionChecker?)services.GetService(typeof(IVersionChecker));
         _scopeFactory = services.GetRequiredService<IServiceScopeFactory>();
+
+        // P2-09: Wire up peer directory staleness callback
+        if (_configManager is not null)
+            _configManager.OnPeerDirectoryStale = RequestImmediateConfigPoll;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -143,6 +155,26 @@ public sealed class CadenceController : BackgroundService
 
     private async Task RunCycleAsync(CancellationToken ct)
     {
+        // P2-09: Immediate config poll triggered by stale peer directory version
+        if (_immediateConfigPollRequested && _configPoller is not null)
+        {
+            _immediateConfigPollRequested = false;
+            var currentSnapshot = _connectivity.Current;
+            if (currentSnapshot.IsInternetUp)
+            {
+                try
+                {
+                    var applied = await _configPoller.PollAsync(ct);
+                    if (applied)
+                        _logger.LogInformation("Immediate config poll (peer directory stale): new configuration applied");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Immediate config poll (peer directory stale) failed");
+                }
+            }
+        }
+
         var snapshot = _connectivity.Current;
         var config = _config.CurrentValue;
 
@@ -243,6 +275,45 @@ public sealed class CadenceController : BackgroundService
             else
             {
                 _logger.LogDebug("Cloud upload tick {Tick}: cloud sync service not registered in DI — skipping", _tick);
+            }
+
+            if (_operationalDataSync is not null)
+            {
+                try
+                {
+                    var operationalData = await _operationalDataSync.SyncAsync(ct);
+                    if (operationalData.CapturedCount > 0 || operationalData.UploadedCount > 0)
+                    {
+                        _logger.LogInformation(
+                            "Operational data tick {Tick}: captured {Captured}, uploaded {Uploaded}",
+                            _tick,
+                            operationalData.CapturedCount,
+                            operationalData.UploadedCount);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Operational data sync failed on tick {Tick}", _tick);
+                }
+            }
+
+            if (_diagnosticLogUploadService is not null)
+            {
+                try
+                {
+                    var uploaded = await _diagnosticLogUploadService.UploadPendingAsync(ct);
+                    if (uploaded > 0)
+                    {
+                        _logger.LogInformation(
+                            "Diagnostic log upload tick {Tick}: {Count} entry(s) uploaded",
+                            _tick,
+                            uploaded);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Diagnostic log upload failed on tick {Tick}", _tick);
+                }
             }
 
             // ── SYNCED_TO_ODOO Status Poll ────────────────────────────────────
@@ -405,6 +476,23 @@ public sealed class CadenceController : BackgroundService
                 catch (ObjectDisposedException) { /* shutdown race — safe to ignore */ }
                 break;
         }
+    }
+
+    // ── Immediate config poll trigger (P2-09) ──────────────────────────────
+
+    /// <summary>
+    /// Request an immediate config poll on the next cadence cycle.
+    /// Called by sync workers when X-Peer-Directory-Version indicates staleness.
+    /// </summary>
+    public void RequestImmediateConfigPoll()
+    {
+        _immediateConfigPollRequested = true;
+        try
+        {
+            if (_wakeSignal.CurrentCount == 0)
+                _wakeSignal.Release();
+        }
+        catch (ObjectDisposedException) { /* shutdown race — safe to ignore */ }
     }
 
     // ── Startup version check ──────────────────────────────────────────────

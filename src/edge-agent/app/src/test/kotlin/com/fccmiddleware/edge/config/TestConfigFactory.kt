@@ -28,6 +28,7 @@ fun canonicalEdgeConfig(
         timezone = "Africa/Johannesburg",
         currencyCode = "ZAR",
         deviceId = "11111111-1111-1111-1111-111111111111",
+        deviceClass = "ANDROID",
         isPrimaryAgent = true,
     ),
     site = SiteDto(
@@ -68,6 +69,29 @@ fun canonicalEdgeConfig(
         localhostPort = 8585,
         enableLanApi = false,
         rateLimitPerMinute = 120,
+    ),
+    siteHa = SiteHaDto(
+        enabled = false,
+        autoFailoverEnabled = false,
+        priority = 100,
+        roleCapability = "PRIMARY_ELIGIBLE",
+        currentRole = "PRIMARY",
+        leaderAgentId = "11111111-1111-1111-1111-111111111111",
+        leaderEpoch = 1,
+        peerDirectoryVersion = 1,
+        peerDirectory = listOf(
+            PeerDirectoryEntryDto(
+                agentId = "11111111-1111-1111-1111-111111111111",
+                deviceClass = "ANDROID",
+                status = "ACTIVE",
+                roleCapability = "PRIMARY_ELIGIBLE",
+                priority = 100,
+                currentRole = "PRIMARY",
+                peerApiPort = 8585,
+                capabilities = listOf("FCC_CONTROL", "LOCALHOST_API", "LAN_PROXY", "TRANSACTION_BUFFER", "TELEMETRY"),
+                appVersion = "1.0.0",
+            ),
+        ),
     ),
     telemetry = TelemetryDto(
         telemetryIntervalSeconds = 60,

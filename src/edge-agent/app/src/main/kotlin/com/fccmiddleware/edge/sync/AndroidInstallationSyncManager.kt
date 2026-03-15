@@ -106,6 +106,16 @@ class AndroidInstallationSyncManager(
                         is CloudInstallationUpsertResult.Forbidden -> handleForbidden(retry.errorCode)
                         is CloudInstallationUpsertResult.Unauthorized ->
                             retryLater("installation_upsert_401_after_refresh")
+                        is CloudInstallationUpsertResult.NotFound -> {
+                            AppLogger.w(TAG, "Installation upsert 404 after refresh: ${retry.errorCode} — feature disabled, stopping retries")
+                            encryptedPrefs.isAndroidInstallationSyncPending = false
+                            AndroidInstallationSyncResult.Synced // Stop retrying permanently
+                        }
+                        is CloudInstallationUpsertResult.Conflict -> {
+                            AppLogger.e(TAG, "Installation upsert 409 after refresh: ${retry.errorCode} — ownership conflict, stopping retries")
+                            encryptedPrefs.isAndroidInstallationSyncPending = false
+                            AndroidInstallationSyncResult.Synced // Stop retrying permanently
+                        }
                         is CloudInstallationUpsertResult.TransportError ->
                             retryLater(retry.message)
                     }
@@ -113,6 +123,16 @@ class AndroidInstallationSyncManager(
             }
 
             is CloudInstallationUpsertResult.Forbidden -> handleForbidden(result.errorCode)
+            is CloudInstallationUpsertResult.NotFound -> {
+                AppLogger.w(TAG, "Installation upsert 404: ${result.errorCode} — feature disabled, stopping retries")
+                encryptedPrefs.isAndroidInstallationSyncPending = false
+                AndroidInstallationSyncResult.Synced
+            }
+            is CloudInstallationUpsertResult.Conflict -> {
+                AppLogger.e(TAG, "Installation upsert 409: ${result.errorCode} — ownership conflict, stopping retries")
+                encryptedPrefs.isAndroidInstallationSyncPending = false
+                AndroidInstallationSyncResult.Synced
+            }
             is CloudInstallationUpsertResult.TransportError -> retryLater(result.message)
         }
     }

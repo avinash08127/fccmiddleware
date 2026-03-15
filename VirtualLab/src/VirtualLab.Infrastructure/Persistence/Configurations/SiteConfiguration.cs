@@ -19,6 +19,7 @@ internal sealed class SiteConfiguration : IEntityTypeConfiguration<Site>
         builder.Property(x => x.ApiKeyValue).HasMaxLength(256);
         builder.Property(x => x.BasicAuthUsername).HasMaxLength(128);
         builder.Property(x => x.BasicAuthPassword).HasMaxLength(256);
+        builder.Property(x => x.FccVendor).HasMaxLength(32).HasDefaultValue("Generic");
         builder.Property(x => x.SettingsJson).HasColumnType("TEXT");
 
         builder.HasOne(x => x.LabEnvironment)

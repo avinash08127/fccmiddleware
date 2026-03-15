@@ -20,13 +20,18 @@ using VirtualLab.Infrastructure;
 using VirtualLab.Infrastructure.Auth;
 using VirtualLab.Infrastructure.Diagnostics;
 using VirtualLab.Infrastructure.DomsJpl;
+using VirtualLab.Infrastructure.Advatec;
+using VirtualLab.Infrastructure.DomsRest;
 using VirtualLab.Infrastructure.FccProfiles;
 using VirtualLab.Infrastructure.AdvatecSimulator;
+using VirtualLab.Infrastructure.Petronite;
 using VirtualLab.Infrastructure.PetroniteSimulator;
+using VirtualLab.Infrastructure.Radix;
 using VirtualLab.Infrastructure.RadixSimulator;
 using VirtualLab.Infrastructure.Persistence;
 using VirtualLab.Infrastructure.Persistence.Seed;
 using VirtualLab.Api.Hubs;
+using VirtualLab.Api.Diagnostics;
 using VirtualLab.Api;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -36,6 +41,7 @@ builder.Configuration.AddJsonFile(benchmarkSeedPath, optional: false, reloadOnCh
 builder.Services.Configure<BenchmarkSeedProfile>(builder.Configuration);
 builder.Services.AddVirtualLabApplication();
 builder.Services.AddVirtualLabInfrastructure(builder.Configuration);
+builder.Services.AddScoped<ApiDiagnosticProbeService>();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
@@ -52,7 +58,14 @@ await using (AsyncServiceScope scope = app.Services.CreateAsyncScope())
     IOptions<VirtualLabSeedOptions> seedOptions = scope.ServiceProvider.GetRequiredService<IOptions<VirtualLabSeedOptions>>();
     IVirtualLabSeedService seedService = scope.ServiceProvider.GetRequiredService<IVirtualLabSeedService>();
 
-    await dbContext.Database.MigrateAsync();
+    if (string.Equals(dbContext.Database.ProviderName, "Npgsql.EntityFrameworkCore.PostgreSQL", StringComparison.Ordinal))
+    {
+        await dbContext.Database.EnsureCreatedAsync();
+    }
+    else
+    {
+        await dbContext.Database.MigrateAsync();
+    }
 
     if (seedOptions.Value.ApplyOnStartup)
     {
@@ -239,9 +252,13 @@ app.MapGet("/api/dashboard", async (
 
 app.MapVirtualLabManagementEndpoints();
 app.MapDomsJplManagementEndpoints();
+app.MapDomsRestSimulatorEndpoints();
 app.MapRadixManagementEndpoints();
 app.MapPetroniteManagementEndpoints();
+app.MapPetroniteSimulatorEndpoints();
 app.MapAdvatecManagementEndpoints();
+app.MapAdvatecSimulatorEndpoints();
+app.MapRadixSimulatorEndpoints();
 
 app.MapGet("/api/fcc-profiles", async (IFccProfileService profileService, CancellationToken cancellationToken) =>
 {
@@ -790,9 +807,9 @@ app.MapPost("/api/callbacks/{targetKey}/history/{id:guid}/replay", async (
         : Results.Created($"/api/callbacks/{targetKey}/history/{result.CaptureId:D}", result);
 });
 
-app.MapGet("/api/diagnostics/latency", (int? iterations, DiagnosticProbeService probeService, ApiTimingStore timingStore) =>
+app.MapGet("/api/diagnostics/latency", async (int? iterations, ApiDiagnosticProbeService probeService, ApiTimingStore timingStore, CancellationToken cancellationToken) =>
 {
-    DiagnosticProbeResult probe = probeService.Run(iterations ?? 25);
+    DiagnosticProbeResult probe = await probeService.RunAsync(iterations ?? 25, cancellationToken);
     IReadOnlyDictionary<string, double> apiP95 = timingStore.GetP95ByRoute();
 
     return Results.Ok(new
@@ -820,13 +837,13 @@ app.MapGet("/api/diagnostics/latency", (int? iterations, DiagnosticProbeService 
     });
 });
 
-app.MapPost("/api/diagnostics/live-broadcast", async (IHubContext<LabLiveHub> hubContext) =>
+app.MapPost("/api/diagnostics/live-broadcast", async (string? correlationId, IHubContext<LabLiveHub> hubContext) =>
 {
     var payload = new
     {
         eventType = "forecourt-action",
         occurredAtUtc = DateTimeOffset.UtcNow,
-        correlationId = Guid.NewGuid().ToString("N"),
+        correlationId = string.IsNullOrWhiteSpace(correlationId) ? Guid.NewGuid().ToString("N") : correlationId,
     };
 
     await hubContext.Clients.All.SendAsync("lab-event", payload);

@@ -20,10 +20,12 @@ namespace FccMiddleware.Api.Controllers;
 public sealed class PreAuthController : ControllerBase
 {
     private readonly IMediator _mediator;
+    private readonly IAuthoritativeWriteFenceService _writeFence;
 
-    public PreAuthController(IMediator mediator)
+    public PreAuthController(IMediator mediator, IAuthoritativeWriteFenceService writeFence)
     {
         _mediator = mediator;
+        _writeFence = writeFence;
     }
 
     /// <summary>
@@ -56,6 +58,9 @@ public sealed class PreAuthController : ControllerBase
 
         // ── Extract JWT claims ────────────────────────────────────────────────
         var siteCode = User.FindFirstValue("site") ?? string.Empty;
+        var deviceId = User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirstValue("sub")
+            ?? string.Empty;
         var leiStr = User.FindFirstValue("lei") ?? string.Empty;
 
         if (!Guid.TryParse(leiStr, out var legalEntityId))
@@ -102,6 +107,30 @@ public sealed class PreAuthController : ControllerBase
                 "nozzleNumber must be greater than 0."));
         }
 
+        var fenceResult = await _writeFence.ValidateAsync(deviceId, siteCode, request.LeaderEpoch, cancellationToken);
+        if (!fenceResult.IsAllowed)
+        {
+            return fenceResult.StatusCode switch
+            {
+                StatusCodes.Status400BadRequest => BadRequest(BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details)),
+                StatusCodes.Status401Unauthorized => Unauthorized(BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details)),
+                StatusCodes.Status403Forbidden => StatusCode(StatusCodes.Status403Forbidden, BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details)),
+                _ => Conflict(BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details))
+            };
+        }
+
         var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
 
         var command = new ForwardPreAuthCommand
@@ -125,6 +154,7 @@ public sealed class PreAuthController : ControllerBase
             CustomerTaxId = request.CustomerTaxId,
             CustomerBusinessName = request.CustomerBusinessName,
             AttendantId = request.AttendantId,
+            LeaderEpoch = request.LeaderEpoch,
             CorrelationId = correlationId
         };
 

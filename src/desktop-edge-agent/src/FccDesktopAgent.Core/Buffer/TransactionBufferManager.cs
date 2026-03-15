@@ -48,6 +48,8 @@ public sealed class TransactionBufferManager
             IngestionSource = tx.IngestionSource,
             RawPayloadJson = tx.RawPayloadJson ?? string.Empty,
             CorrelationId = tx.CorrelationId,
+            PreAuthId = tx.PreAuthId,
+            OdooOrderId = tx.OdooOrderId,
             SchemaVersion = tx.SchemaVersion,
             CreatedAt = DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow

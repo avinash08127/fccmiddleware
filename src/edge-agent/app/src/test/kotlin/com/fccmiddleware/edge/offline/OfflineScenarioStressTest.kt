@@ -330,8 +330,8 @@ class OfflineScenarioStressTest {
         val uploadedDtos = requestSlot.captured.transactions
         for (i in 1 until uploadedDtos.size) {
             assertTrue(
-                "Upload order violated: ${uploadedDtos[i].ingestedAt} < ${uploadedDtos[i - 1].ingestedAt}",
-                uploadedDtos[i].ingestedAt >= uploadedDtos[i - 1].ingestedAt,
+                "Upload order violated: ${uploadedDtos[i].completedAt} < ${uploadedDtos[i - 1].completedAt}",
+                uploadedDtos[i].completedAt >= uploadedDtos[i - 1].completedAt,
             )
         }
     }
@@ -434,7 +434,7 @@ class OfflineScenarioStressTest {
 
         coEvery { cloudApiClient.uploadBatch(any(), any()) } answers {
             val req = firstArg<com.fccmiddleware.edge.sync.CloudUploadRequest>()
-            req.transactions.forEach { capturedOrders.add(it.ingestedAt) }
+            req.transactions.forEach { capturedOrders.add(it.completedAt) }
             CloudUploadResult.Success(
                 CloudUploadResponse(
                     results = req.transactions.map {

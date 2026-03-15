@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.adapter.doms.protocol
 
+import com.fccmiddleware.edge.adapter.common.TransactionInfoMask
 import com.fccmiddleware.edge.adapter.doms.model.DomsTransactionDto
 
 /**
@@ -19,6 +20,14 @@ object DomsSupParamParser {
      * @throws IllegalArgumentException if required fields are missing or invalid.
      */
     fun parse(data: Map<String, String>, bufferIndex: Int): DomsTransactionDto {
+        val infoMask = data["TransInfoMask"]?.toIntOrNull()?.let { mask ->
+            TransactionInfoMask.fromBits(mask).copy(
+                moneyDue = data["MoneyDue"]?.toLongOrNull(),
+                transSequenceNo = data["TransSeqNo"]?.toIntOrNull(),
+                transLockId = data["TransLockId"]?.toIntOrNull(),
+            )
+        }
+
         return DomsTransactionDto(
             transactionId = requireField(data, "TransId"),
             fpId = requireField(data, "FpId").toIntOrFail("FpId"),
@@ -30,6 +39,7 @@ object DomsSupParamParser {
             timestamp = requireField(data, "Timestamp"),
             attendantId = data["AttendantId"],
             bufferIndex = bufferIndex,
+            infoMask = infoMask,
         )
     }
 

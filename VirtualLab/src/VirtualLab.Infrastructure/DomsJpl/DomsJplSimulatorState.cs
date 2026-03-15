@@ -26,6 +26,21 @@ public sealed class DomsJplSimulatorState
     public ConcurrentDictionary<int, SimulatedDomsPreAuth> ActivePreAuths { get; } = new();
 
     /// <summary>
+    /// Unsupervised transactions waiting to be read by FpUnsupTrans_read_req.
+    /// </summary>
+    private readonly List<SimulatedDomsTransaction> _unsupervisedTransactions = [];
+
+    /// <summary>
+    /// Current fuel price set for the simulated site.
+    /// </summary>
+    public SimulatedPriceSet PriceSet { get; set; } = new();
+
+    /// <summary>
+    /// Accumulated pump totals keyed by pump number.
+    /// </summary>
+    public ConcurrentDictionary<int, SimulatedPumpTotals> PumpTotals { get; } = new();
+
+    /// <summary>
     /// Error injection configuration.
     /// </summary>
     public DomsErrorInjection ErrorInjection { get; set; } = new();
@@ -57,7 +72,10 @@ public sealed class DomsJplSimulatorState
         {
             PumpStates.Clear();
             _transactions.Clear();
+            _unsupervisedTransactions.Clear();
             ActivePreAuths.Clear();
+            PriceSet = new SimulatedPriceSet();
+            PumpTotals.Clear();
             ErrorInjection = new DomsErrorInjection();
             _connectedClientCount = 0;
             _totalMessagesProcessed = 0;
@@ -65,6 +83,7 @@ public sealed class DomsJplSimulatorState
             for (int i = 1; i <= pumpCount; i++)
             {
                 PumpStates[i] = DomsPumpState.Idle;
+                PumpTotals[i] = new SimulatedPumpTotals { PumpNumber = i };
             }
         }
     }
@@ -104,6 +123,32 @@ public sealed class DomsJplSimulatorState
         }
     }
 
+    public void InjectUnsupervisedTransaction(SimulatedDomsTransaction transaction)
+    {
+        lock (_lock)
+        {
+            _unsupervisedTransactions.Add(transaction);
+        }
+    }
+
+    public IReadOnlyList<SimulatedDomsTransaction> GetUnsupervisedTransactions()
+    {
+        lock (_lock)
+        {
+            return [.. _unsupervisedTransactions];
+        }
+    }
+
+    public int ClearUnsupervisedTransactions()
+    {
+        lock (_lock)
+        {
+            int count = _unsupervisedTransactions.Count;
+            _unsupervisedTransactions.Clear();
+            return count;
+        }
+    }
+
     public void SetPumpState(int pumpNumber, DomsPumpState state)
     {
         PumpStates[pumpNumber] = state;
@@ -121,7 +166,11 @@ public sealed class DomsJplSimulatorState
                 PumpStates = PumpStates.ToDictionary(kv => kv.Key, kv => kv.Value.ToString()),
                 TransactionCount = _transactions.Count,
                 Transactions = [.. _transactions],
+                UnsupervisedTransactionCount = _unsupervisedTransactions.Count,
+                UnsupervisedTransactions = [.. _unsupervisedTransactions],
                 ActivePreAuths = ActivePreAuths.ToDictionary(kv => kv.Key, kv => kv.Value),
+                PriceSet = PriceSet,
+                PumpTotals = PumpTotals.ToDictionary(kv => kv.Key, kv => kv.Value),
                 ErrorInjection = ErrorInjection,
             };
         }
@@ -208,6 +257,43 @@ public sealed class DomsSimulatorSnapshot
     public Dictionary<int, string> PumpStates { get; init; } = [];
     public int TransactionCount { get; init; }
     public List<SimulatedDomsTransaction> Transactions { get; init; } = [];
+    public int UnsupervisedTransactionCount { get; init; }
+    public List<SimulatedDomsTransaction> UnsupervisedTransactions { get; init; } = [];
     public Dictionary<int, SimulatedDomsPreAuth> ActivePreAuths { get; init; } = [];
+    public SimulatedPriceSet PriceSet { get; init; } = new();
+    public Dictionary<int, SimulatedPumpTotals> PumpTotals { get; init; } = [];
     public DomsErrorInjection ErrorInjection { get; init; } = new();
+}
+
+/// <summary>
+/// Simulated fuel price set maintained by the simulator.
+/// </summary>
+public sealed class SimulatedPriceSet
+{
+    public string PriceSetId { get; set; } = "01";
+    public Dictionary<string, SimulatedGradePrice> GradePrices { get; set; } = new()
+    {
+        ["01"] = new SimulatedGradePrice { GradeId = "01", GradeName = "UNL95", PriceMinorUnits = 4500, CurrencyCode = "TRY" },
+        ["02"] = new SimulatedGradePrice { GradeId = "02", GradeName = "DIESEL", PriceMinorUnits = 5000, CurrencyCode = "TRY" },
+    };
+    public DateTimeOffset LastUpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class SimulatedGradePrice
+{
+    public string GradeId { get; set; } = "";
+    public string GradeName { get; set; } = "";
+    public long PriceMinorUnits { get; set; }
+    public string CurrencyCode { get; set; } = "TRY";
+}
+
+/// <summary>
+/// Accumulated pump totals for shift reconciliation.
+/// </summary>
+public sealed class SimulatedPumpTotals
+{
+    public int PumpNumber { get; init; }
+    public long TotalVolumeMicrolitres { get; set; }
+    public long TotalAmountMinorUnits { get; set; }
+    public DateTimeOffset LastUpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }

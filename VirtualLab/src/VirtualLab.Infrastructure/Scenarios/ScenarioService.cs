@@ -16,7 +16,8 @@ public sealed class ScenarioService(
     VirtualLabDbContext dbContext,
     IForecourtSimulationService forecourtSimulationService,
     IPreAuthSimulationService preAuthSimulationService,
-    ICallbackCaptureService callbackCaptureService) : IScenarioService
+    ICallbackCaptureService callbackCaptureService,
+    ScenarioExecutionScope executionScope) : IScenarioService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -93,6 +94,8 @@ public sealed class ScenarioService(
         string runCorrelationId = BuildRunCorrelationId(definition.ScenarioKey, replaySeed);
         DateTimeOffset now = DateTimeOffset.UtcNow;
 
+        await PurgePriorRunArtifactsAsync(site.Id, definition.Id, replaySeed, cancellationToken);
+
         ScenarioRun run = new()
         {
             Id = Guid.NewGuid(),
@@ -129,6 +132,7 @@ public sealed class ScenarioService(
         SiteSnapshot snapshot = new(site.ActiveFccSimulatorProfileId, site.DeliveryMode, site.PreAuthMode);
         ScenarioExecutionContext context = new(run, definition, script, site, replaySeed);
         context.TrackCorrelation(run.CorrelationId);
+        using IDisposable execution = executionScope.Begin(run.Id, definition.ScenarioKey, site.SiteCode, replaySeed);
 
         try
         {
@@ -205,6 +209,7 @@ public sealed class ScenarioService(
         {
             await RestoreSetupAsync(site, snapshot, cancellationToken);
             await AttachArtifactsAsync(site.Id, run.Id, context.KnownCorrelationIds, cancellationToken);
+            string outputSignature = await ComputeOutputSignatureAsync(run.Id, cancellationToken);
 
             run.CompletedAtUtc = DateTimeOffset.UtcNow;
             run.ResultSummaryJson = JsonSerializer.Serialize(
@@ -216,6 +221,7 @@ public sealed class ScenarioService(
                     definition.Name,
                     run.Status,
                     replaySeed,
+                    outputSignature,
                     steps = context.Steps,
                     assertions = context.Assertions,
                     errors = context.Errors,
@@ -365,7 +371,7 @@ public sealed class ScenarioService(
 
                     if (operation == "expire")
                     {
-                        string preAuthId = await ResolveLatestPreAuthExternalIdAsync(context.Site.SiteCode, correlationId, cancellationToken);
+                        string preAuthId = await ResolveLatestPreAuthExternalIdAsync(context, correlationId, cancellationToken);
                         PreAuthSessionSummary? expired = await preAuthSimulationService.ExpireSessionAsync(
                             new PreAuthManualExpiryRequest
                             {
@@ -673,11 +679,11 @@ public sealed class ScenarioService(
 
         return kind switch
         {
-            "transaction-status" => await EvaluateTransactionStatusAssertionAsync(order, name, assertion, context.Site.Id, correlationId, cancellationToken),
-            "preauth-status" => await EvaluatePreAuthStatusAssertionAsync(order, name, assertion, context.Site.Id, correlationId, cancellationToken),
-            "callback-attempt-count" => await EvaluateCallbackAttemptAssertionAsync(order, name, assertion, context.Site.Id, correlationId, cancellationToken),
-            "callback-history-count" => await EvaluateCallbackHistoryAssertionAsync(order, name, assertion, correlationId, cancellationToken),
-            "log-count" => await EvaluateLogAssertionAsync(order, name, assertion, context.Site.Id, correlationId, cancellationToken),
+            "transaction-status" => await EvaluateTransactionStatusAssertionAsync(order, name, assertion, context, correlationId, cancellationToken),
+            "preauth-status" => await EvaluatePreAuthStatusAssertionAsync(order, name, assertion, context, correlationId, cancellationToken),
+            "callback-attempt-count" => await EvaluateCallbackAttemptAssertionAsync(order, name, assertion, context, correlationId, cancellationToken),
+            "callback-history-count" => await EvaluateCallbackHistoryAssertionAsync(order, name, assertion, context, correlationId, cancellationToken),
+            "log-count" => await EvaluateLogAssertionAsync(order, name, assertion, context, correlationId, cancellationToken),
             _ => throw new InvalidOperationException($"Unsupported scenario assertion kind '{assertion.Kind}'."),
         };
     }
@@ -686,11 +692,13 @@ public sealed class ScenarioService(
         int order,
         string name,
         ScenarioAssertionDefinition assertion,
-        Guid siteId,
+        ScenarioExecutionContext context,
         string? correlationId,
         CancellationToken cancellationToken)
     {
-        IQueryable<SimulatedTransaction> query = dbContext.SimulatedTransactions.AsNoTracking().Where(x => x.SiteId == siteId);
+        IQueryable<SimulatedTransaction> query = dbContext.SimulatedTransactions
+            .AsNoTracking()
+            .Where(x => x.SiteId == context.Site.Id && x.ScenarioRunId == context.Run.Id);
         if (!string.IsNullOrWhiteSpace(correlationId))
         {
             query = query.Where(x => x.CorrelationId == correlationId);
@@ -728,11 +736,13 @@ public sealed class ScenarioService(
         int order,
         string name,
         ScenarioAssertionDefinition assertion,
-        Guid siteId,
+        ScenarioExecutionContext context,
         string? correlationId,
         CancellationToken cancellationToken)
     {
-        IQueryable<PreAuthSession> query = dbContext.PreAuthSessions.AsNoTracking().Where(x => x.SiteId == siteId);
+        IQueryable<PreAuthSession> query = dbContext.PreAuthSessions
+            .AsNoTracking()
+            .Where(x => x.SiteId == context.Site.Id && x.ScenarioRunId == context.Run.Id);
         if (!string.IsNullOrWhiteSpace(correlationId))
         {
             query = query.Where(x => x.CorrelationId == correlationId);
@@ -770,13 +780,13 @@ public sealed class ScenarioService(
         int order,
         string name,
         ScenarioAssertionDefinition assertion,
-        Guid siteId,
+        ScenarioExecutionContext context,
         string? correlationId,
         CancellationToken cancellationToken)
     {
         IQueryable<CallbackAttempt> query = dbContext.CallbackAttempts
             .AsNoTracking()
-            .Where(x => x.SimulatedTransaction.SiteId == siteId);
+            .Where(x => x.SimulatedTransaction.SiteId == context.Site.Id && x.SimulatedTransaction.ScenarioRunId == context.Run.Id);
 
         if (!string.IsNullOrWhiteSpace(correlationId))
         {
@@ -814,21 +824,36 @@ public sealed class ScenarioService(
         int order,
         string name,
         ScenarioAssertionDefinition assertion,
+        ScenarioExecutionContext context,
         string? correlationId,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<CallbackHistoryItemView> history = await callbackCaptureService.ListHistoryAsync(
-            assertion.TargetKey ?? string.Empty,
-            200,
-            cancellationToken);
-
-        IReadOnlyList<CallbackHistoryItemView> filtered = history
+        IQueryable<LabEventLog> query = dbContext.LabEventLogs
+            .AsNoTracking()
             .Where(x =>
-                (string.IsNullOrWhiteSpace(correlationId) || x.CorrelationId == correlationId) &&
-                (!assertion.IsReplay.HasValue || x.IsReplay == assertion.IsReplay.Value))
-            .ToArray();
+                x.SiteId == context.Site.Id &&
+                x.ScenarioRunId == context.Run.Id &&
+                x.Category == "CallbackAttempt");
 
-        int actual = filtered.Count;
+        if (!string.IsNullOrWhiteSpace(correlationId))
+        {
+            query = query.Where(x => x.CorrelationId == correlationId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(assertion.TargetKey))
+        {
+            query = query.Where(x => ReadString(x.MetadataJson, "targetKey") == assertion.TargetKey);
+        }
+
+        List<LabEventLog> captures = await query.ToListAsync(cancellationToken);
+        if (assertion.IsReplay.HasValue)
+        {
+            captures = captures
+                .Where(x => ReadBool(x.MetadataJson, "isReplay") == assertion.IsReplay.Value)
+                .ToList();
+        }
+
+        int actual = captures.Count;
         int minimum = assertion.MinimumCount ?? assertion.ExpectedCount ?? 1;
         bool passed = assertion.ExpectedCount.HasValue ? actual == assertion.ExpectedCount.Value : actual >= minimum;
 
@@ -845,7 +870,14 @@ public sealed class ScenarioService(
                     assertion.TargetKey,
                     assertion.IsReplay,
                     actualCount = actual,
-                    captures = filtered.Select(x => new { x.Id, x.AuthOutcome, x.IsReplay, x.ResponseStatusCode }),
+                    captures = captures.Select(x => new
+                    {
+                        x.EventType,
+                        targetKey = ReadString(x.MetadataJson, "targetKey"),
+                        authOutcome = ReadString(x.MetadataJson, "authOutcome"),
+                        isReplay = ReadBool(x.MetadataJson, "isReplay"),
+                        responseStatusCode = ReadInt(x.MetadataJson, "responseStatusCode"),
+                    }),
                 },
                 JsonOptions));
     }
@@ -854,11 +886,13 @@ public sealed class ScenarioService(
         int order,
         string name,
         ScenarioAssertionDefinition assertion,
-        Guid siteId,
+        ScenarioExecutionContext context,
         string? correlationId,
         CancellationToken cancellationToken)
     {
-        IQueryable<LabEventLog> query = dbContext.LabEventLogs.AsNoTracking().Where(x => x.SiteId == siteId);
+        IQueryable<LabEventLog> query = dbContext.LabEventLogs
+            .AsNoTracking()
+            .Where(x => x.SiteId == context.Site.Id && x.ScenarioRunId == context.Run.Id);
         if (!string.IsNullOrWhiteSpace(correlationId))
         {
             query = query.Where(x => x.CorrelationId == correlationId);
@@ -896,6 +930,167 @@ public sealed class ScenarioService(
                 JsonOptions));
     }
 
+    private async Task PurgePriorRunArtifactsAsync(
+        Guid siteId,
+        Guid scenarioDefinitionId,
+        int replaySeed,
+        CancellationToken cancellationToken)
+    {
+        List<Guid> priorRunIds = await dbContext.ScenarioRuns
+            .Where(x => x.SiteId == siteId && x.ScenarioDefinitionId == scenarioDefinitionId && x.ReplaySeed == replaySeed)
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+
+        if (priorRunIds.Count == 0)
+        {
+            return;
+        }
+
+        List<CallbackAttempt> callbackAttempts = await dbContext.CallbackAttempts
+            .Where(x => x.SimulatedTransaction.ScenarioRunId.HasValue && priorRunIds.Contains(x.SimulatedTransaction.ScenarioRunId.Value))
+            .ToListAsync(cancellationToken);
+
+        List<LabEventLog> logs = await dbContext.LabEventLogs
+            .Where(x => x.ScenarioRunId.HasValue && priorRunIds.Contains(x.ScenarioRunId.Value))
+            .ToListAsync(cancellationToken);
+
+        List<SimulatedTransaction> transactions = await dbContext.SimulatedTransactions
+            .Where(x => x.ScenarioRunId.HasValue && priorRunIds.Contains(x.ScenarioRunId.Value))
+            .ToListAsync(cancellationToken);
+
+        List<PreAuthSession> sessions = await dbContext.PreAuthSessions
+            .Where(x => x.ScenarioRunId.HasValue && priorRunIds.Contains(x.ScenarioRunId.Value))
+            .ToListAsync(cancellationToken);
+
+        if (callbackAttempts.Count > 0)
+        {
+            dbContext.CallbackAttempts.RemoveRange(callbackAttempts);
+        }
+
+        if (logs.Count > 0)
+        {
+            dbContext.LabEventLogs.RemoveRange(logs);
+        }
+
+        if (transactions.Count > 0)
+        {
+            dbContext.SimulatedTransactions.RemoveRange(transactions);
+        }
+
+        if (sessions.Count > 0)
+        {
+            dbContext.PreAuthSessions.RemoveRange(sessions);
+        }
+
+        if (callbackAttempts.Count > 0 || logs.Count > 0 || transactions.Count > 0 || sessions.Count > 0)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    private async Task<string> ComputeOutputSignatureAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var preAuths = await dbContext.PreAuthSessions
+            .AsNoTracking()
+            .Where(x => x.ScenarioRunId == runId)
+            .OrderBy(x => x.CorrelationId)
+            .ThenBy(x => x.ExternalReference)
+            .Select(x => new
+            {
+                x.CorrelationId,
+                x.ExternalReference,
+                x.Mode,
+                x.Status,
+                PumpNumber = x.Pump != null ? x.Pump.PumpNumber : 0,
+                NozzleNumber = x.Nozzle != null ? x.Nozzle.NozzleNumber : 0,
+                x.ReservedAmount,
+                x.AuthorizedAmount,
+                x.FinalAmount,
+                x.FinalVolume,
+            })
+            .ToListAsync(cancellationToken);
+
+        var transactions = await dbContext.SimulatedTransactions
+            .AsNoTracking()
+            .Where(x => x.ScenarioRunId == runId)
+            .OrderBy(x => x.CorrelationId)
+            .ThenBy(x => x.ExternalTransactionId)
+            .Select(x => new
+            {
+                x.CorrelationId,
+                x.ExternalTransactionId,
+                x.DeliveryMode,
+                x.Status,
+                PumpNumber = x.Pump.PumpNumber,
+                NozzleNumber = x.Nozzle.NozzleNumber,
+                ProductCode = x.Product.ProductCode,
+                x.Volume,
+                x.UnitPrice,
+                x.TotalAmount,
+                PreAuthId = x.PreAuthSession != null ? x.PreAuthSession.ExternalReference : null,
+            })
+            .ToListAsync(cancellationToken);
+
+        var callbackAttempts = await dbContext.CallbackAttempts
+            .AsNoTracking()
+            .Where(x => x.SimulatedTransaction.ScenarioRunId == runId)
+            .OrderBy(x => x.CorrelationId)
+            .ThenBy(x => x.AttemptNumber)
+            .Select(x => new
+            {
+                x.CorrelationId,
+                TargetKey = x.CallbackTarget.TargetKey,
+                ExternalTransactionId = x.SimulatedTransaction.ExternalTransactionId,
+                x.AttemptNumber,
+                x.Status,
+                x.ResponseStatusCode,
+            })
+            .ToListAsync(cancellationToken);
+
+        List<LabEventLog> callbackCaptureLogs = await dbContext.LabEventLogs
+            .AsNoTracking()
+            .Where(x => x.ScenarioRunId == runId && x.Category == "CallbackAttempt")
+            .OrderBy(x => x.CorrelationId)
+            .ThenBy(x => x.EventType)
+            .ToListAsync(cancellationToken);
+
+        List<LabEventLog> logs = await dbContext.LabEventLogs
+            .AsNoTracking()
+            .Where(x => x.ScenarioRunId == runId && x.Category != "ScenarioRun")
+            .OrderBy(x => x.Category)
+            .ThenBy(x => x.EventType)
+            .ThenBy(x => x.CorrelationId)
+            .ToListAsync(cancellationToken);
+
+        string signatureSource = JsonSerializer.Serialize(
+            new
+            {
+                preAuths,
+                transactions,
+                callbackAttempts,
+                callbackCaptures = callbackCaptureLogs.Select(x => new
+                {
+                    x.CorrelationId,
+                    x.EventType,
+                    TargetKey = ReadString(x.MetadataJson, "targetKey"),
+                    AuthOutcome = ReadString(x.MetadataJson, "authOutcome"),
+                    IsReplay = ReadBool(x.MetadataJson, "isReplay"),
+                    ResponseStatusCode = ReadInt(x.MetadataJson, "responseStatusCode"),
+                }),
+                logs = logs.Select(x => new
+                {
+                    x.Category,
+                    x.EventType,
+                    x.CorrelationId,
+                    x.Message,
+                }),
+            },
+            JsonOptions);
+
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(signatureSource);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant()[..32];
+    }
+
     private async Task ApplySetupAsync(Site site, ScenarioSetupDefinition setup, CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(setup.ProfileKey))
@@ -925,25 +1120,56 @@ public sealed class ScenarioService(
             }
         }
 
-        if (setup.ClearActivePreAuth)
-        {
-            List<PreAuthSession> activeSessions = await dbContext.PreAuthSessions
-                .Where(x =>
-                    x.SiteId == site.Id &&
-                    (x.Status == PreAuthSessionStatus.Pending ||
-                     x.Status == PreAuthSessionStatus.Authorized ||
-                     x.Status == PreAuthSessionStatus.Dispensing))
-                .ToListAsync(cancellationToken);
-
-            foreach (PreAuthSession session in activeSessions)
-            {
-                session.Status = PreAuthSessionStatus.Cancelled;
-                session.CompletedAtUtc ??= DateTimeOffset.UtcNow;
-            }
-        }
+        await ClearSiteRuntimeArtifactsAsync(site.Id, setup.ClearActivePreAuth, cancellationToken);
 
         site.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task ClearSiteRuntimeArtifactsAsync(Guid siteId, bool clearActivePreAuth, CancellationToken cancellationToken)
+    {
+        List<CallbackAttempt> callbackAttempts = await dbContext.CallbackAttempts
+            .Where(x => x.SimulatedTransaction.SiteId == siteId)
+            .ToListAsync(cancellationToken);
+
+        List<SimulatedTransaction> transactions = await dbContext.SimulatedTransactions
+            .Where(x => x.SiteId == siteId)
+            .ToListAsync(cancellationToken);
+
+        IQueryable<PreAuthSession> sessionQuery = dbContext.PreAuthSessions.Where(x => x.SiteId == siteId);
+        if (!clearActivePreAuth)
+        {
+            sessionQuery = sessionQuery.Where(x =>
+                x.Status != PreAuthSessionStatus.Pending &&
+                x.Status != PreAuthSessionStatus.Authorized &&
+                x.Status != PreAuthSessionStatus.Dispensing);
+        }
+
+        List<PreAuthSession> sessions = await sessionQuery.ToListAsync(cancellationToken);
+
+        List<LabEventLog> logs = await dbContext.LabEventLogs
+            .Where(x => x.SiteId == siteId && x.Category != "ScenarioRun")
+            .ToListAsync(cancellationToken);
+
+        if (callbackAttempts.Count > 0)
+        {
+            dbContext.CallbackAttempts.RemoveRange(callbackAttempts);
+        }
+
+        if (logs.Count > 0)
+        {
+            dbContext.LabEventLogs.RemoveRange(logs);
+        }
+
+        if (transactions.Count > 0)
+        {
+            dbContext.SimulatedTransactions.RemoveRange(transactions);
+        }
+
+        if (sessions.Count > 0)
+        {
+            dbContext.PreAuthSessions.RemoveRange(sessions);
+        }
     }
 
     private async Task RestoreSetupAsync(Site site, SiteSnapshot snapshot, CancellationToken cancellationToken)
@@ -1027,7 +1253,7 @@ public sealed class ScenarioService(
     {
         List<string> ids = await dbContext.SimulatedTransactions
             .AsNoTracking()
-            .Where(x => x.SiteId == context.Site.Id && x.CorrelationId == correlationId)
+            .Where(x => x.SiteId == context.Site.Id && x.ScenarioRunId == context.Run.Id && x.CorrelationId == correlationId)
             .OrderByDescending(x => x.OccurredAtUtc)
             .Select(x => x.ExternalTransactionId)
             .ToListAsync(cancellationToken);
@@ -1050,7 +1276,7 @@ public sealed class ScenarioService(
             {
                 List<string> ids = await dbContext.SimulatedTransactions
                     .AsNoTracking()
-                    .Where(x => x.SiteId == context.Site.Id && x.CorrelationId == correlationId)
+                    .Where(x => x.SiteId == context.Site.Id && x.ScenarioRunId == context.Run.Id && x.CorrelationId == correlationId)
                     .OrderBy(x => x.OccurredAtUtc)
                     .Select(x => x.ExternalTransactionId)
                     .ToListAsync(cancellationToken);
@@ -1065,12 +1291,18 @@ public sealed class ScenarioService(
     }
 
     private async Task<string> ResolveLatestPreAuthExternalIdAsync(
-        string siteCode,
+        ScenarioExecutionContext context,
         string correlationId,
         CancellationToken cancellationToken)
     {
-        PreAuthSessionSummary? session = await preAuthSimulationService.GetSessionAsync(siteCode, correlationId, null, cancellationToken);
-        return session?.ExternalReference
+        string? externalReference = await dbContext.PreAuthSessions
+            .AsNoTracking()
+            .Where(x => x.SiteId == context.Site.Id && x.ScenarioRunId == context.Run.Id && x.CorrelationId == correlationId)
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .Select(x => x.ExternalReference)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return externalReference
             ?? throw new InvalidOperationException($"No pre-auth session was found for correlation '{correlationId}'.");
     }
 
@@ -1217,6 +1449,7 @@ public sealed class ScenarioService(
     private static ScenarioRunSummaryView MapRunSummary(ScenarioRun run)
     {
         using JsonDocument summary = JsonDocument.Parse(string.IsNullOrWhiteSpace(run.ResultSummaryJson) ? "{}" : run.ResultSummaryJson);
+        string outputSignature = ReadOutputSignature(run.ResultSummaryJson);
         int stepCount = summary.RootElement.TryGetProperty("steps", out JsonElement steps) && steps.ValueKind == JsonValueKind.Array
             ? steps.GetArrayLength()
             : 0;
@@ -1237,6 +1470,7 @@ public sealed class ScenarioService(
             run.CorrelationId,
             run.ReplaySeed,
             run.ReplaySignature,
+            outputSignature,
             run.Status,
             run.StartedAtUtc,
             run.CompletedAtUtc,
@@ -1248,6 +1482,7 @@ public sealed class ScenarioService(
     private static ScenarioRunDetailView MapRunDetail(ScenarioRun run)
     {
         using JsonDocument summary = JsonDocument.Parse(string.IsNullOrWhiteSpace(run.ResultSummaryJson) ? "{}" : run.ResultSummaryJson);
+        string outputSignature = ReadOutputSignature(run.ResultSummaryJson);
         IReadOnlyList<ScenarioStepResultView> steps = summary.RootElement.TryGetProperty("steps", out JsonElement stepsElement)
             ? JsonSerializer.Deserialize<IReadOnlyList<ScenarioStepResultView>>(stepsElement.GetRawText(), JsonOptions) ?? []
             : [];
@@ -1265,6 +1500,7 @@ public sealed class ScenarioService(
             run.CorrelationId,
             run.ReplaySeed,
             run.ReplaySignature,
+            outputSignature,
             run.Status,
             SafeJson(run.InputSnapshotJson),
             SafeJson(run.ResultSummaryJson),
@@ -1337,6 +1573,81 @@ public sealed class ScenarioService(
         catch (JsonException)
         {
             return JsonSerializer.Serialize(json, JsonOptions);
+        }
+    }
+
+    private static string? ReadString(string json, string propertyName)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty(propertyName, out JsonElement property))
+            {
+                return null;
+            }
+
+            return property.ValueKind switch
+            {
+                JsonValueKind.Null => null,
+                JsonValueKind.String => property.GetString(),
+                _ => property.GetRawText(),
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool ReadBool(string json, string propertyName)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.TryGetProperty(propertyName, out JsonElement property) &&
+                   property.ValueKind is JsonValueKind.True or JsonValueKind.False &&
+                   property.GetBoolean();
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static int? ReadInt(string json, string propertyName)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.TryGetProperty(propertyName, out JsonElement property) &&
+                   property.ValueKind == JsonValueKind.Number &&
+                   property.TryGetInt32(out int value)
+                ? value
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string ReadOutputSignature(string summaryJson)
+    {
+        try
+        {
+            using JsonDocument summary = JsonDocument.Parse(string.IsNullOrWhiteSpace(summaryJson) ? "{}" : summaryJson);
+            return summary.RootElement.TryGetProperty("outputSignature", out JsonElement value) &&
+                   value.ValueKind == JsonValueKind.String &&
+                   !string.IsNullOrWhiteSpace(value.GetString())
+                ? value.GetString()!
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
         }
     }
 

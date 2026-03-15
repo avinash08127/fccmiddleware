@@ -32,7 +32,7 @@ The agent runs on the HHT the attendant already carries — no additional hardwa
 | Cloud Sync | Upload buffered transactions, forward pre-auth records, send telemetry, pull config updates. |
 | SYNCED_TO_ODOO Lifecycle | Poll cloud for confirmed status. Stop serving confirmed transactions locally. |
 | Local REST API | Expose transaction queries, pump status, and pre-auth endpoints for Odoo POS on localhost. |
-| Multi-HHT Support | Expose LAN API for non-primary HHTs at the same station (API key authenticated). |
+| Multi-HHT Support | Participate in site-level active-standby HA, preserve localhost on every Android HHT, and expose authenticated peer/LAN APIs where required. |
 | Provisioning | QR code or manual setup. Cloud registration. Config download. |
 | Diagnostics | On-device screen for Site Supervisor. Connection status, buffer depth, manual pull. |
 | Connectivity Monitoring | Track internet and FCC LAN health independently. Drive mode transitions. |
@@ -47,7 +47,7 @@ The agent runs on the HHT the attendant already carries — no additional hardwa
 - Central reconciliation logic (cloud responsibility)
 - Enterprise user authentication (Entra ID handled by portal/cloud)
 - Odoo internal offline behavior beyond the documented integration points
-- Automatic multi-HHT failover in MVP
+- Automatic failover, epoch fencing, and warm-replica promotion logic beyond the current implementation baseline
 - Detailed Android UI screen designs
 
 ## 1.5 Primary Requirement Alignment
@@ -768,7 +768,7 @@ HHT-2, HHT-3 (Odoo POS Only):
 | **Embedded HTTP server** | Ktor | Lightweight, Kotlin-native, coroutine-based. Runs in-process. No separate container. Lower footprint than Netty or Spring Boot on Android. | Less ecosystem than Spring. Acceptable for the simple REST API surface. |
 | **Local database** | Room (SQLite, WAL mode) | Android-native. Compile-time query verification. WAL mode for crash resilience. Sufficient for 30K+ transactions. | No encryption by default (SQLCipher available if needed). No full-text search. |
 | **Background execution** | Android Foreground Service + Coroutines + shared cadence controller | Foreground service ensures OS does not kill the agent. Coroutines handle concurrent work. One cadence controller coalesces heartbeat, health, status sync, and replay triggers. | Foreground service notification is always visible to the attendant. Requires discipline to avoid turning the service into a collection of independent hot loops. |
-| **Single primary agent per site** | Configuration-based designation (not automatic election) | Simple. Avoids distributed consensus on Android devices. One HHT is provisioned as primary during setup. | No automatic failover. If primary HHT dies, manual re-provisioning needed. Automatic failover deferred to post-MVP. |
+| **Single primary agent per site** | Active-standby with epoch fencing and configuration-driven priority | Preserves one FCC owner at a time while allowing Desktop and Android agents to run in parallel with deterministic promotion rules. | Requires peer discovery, warm replication, and fencing before automatic failover can be enabled. |
 | **Ingestion mode as config** | Cloud-pushed configuration | Changing from CLOUD_DIRECT to RELAY or BUFFER_ALWAYS does not require APK update. Agent reads config on each sync cycle. | Agent must handle runtime config changes gracefully (e.g., mid-sync mode switch). |
 | **SQLite durable store-and-forward** | Room over SQLite, WAL mode | Simple, mature, and adequate for 30K+ retained records per device. | Careful schema evolution and corruption recovery are required. |
 | **Local API as Odoo offline integration contract** | Ktor localhost REST API | Keeps Odoo POS reading FCC-originated transaction facts during outages. | Local API compatibility becomes a release-critical contract. |
@@ -799,7 +799,7 @@ The requirements (OQ-1) resolved the Edge Agent technology as **native Kotlin/Ja
 3. DOMS FCC exposes a poll-able API over LAN (REST or TCP) with transaction fetch and pre-auth endpoints.
 4. Android 12 on the Urovo i9100 supports foreground services with the required permissions.
 5. Sure MDM can push APK updates to the HHT fleet reliably.
-6. Only one HHT per site needs to run the Edge Agent for MVP (multi-HHT failover is post-MVP).
+6. Desktop and Android agents may run in parallel at the same site, but only one eligible agent may hold `PRIMARY` at a time.
 7. Odoo POS can detect internet outage and switch to the local Edge Agent API — this capability exists or will be built by the Odoo team.
 8. Station LAN remains available independently of internet outages.
 9. Primary agent device remains powered and connected during most station operation.
@@ -812,7 +812,7 @@ The requirements (OQ-1) resolved the Edge Agent technology as **native Kotlin/Ja
 | **Android Doze / battery optimization** | OS may throttle background work, affecting FCC polling and cloud sync | Foreground service with persistent notification. Whitelist app from battery optimization. |
 | **WiFi LAN disconnection** | If station WiFi drops, FCC communication is lost | Heartbeat monitoring. Auto-reconnect. Alert Site Supervisor. Consider Ethernet via USB-C if WiFi is unreliable. |
 | **DOMS protocol complexity** | Unknown protocol details may require significant adapter development effort | Early PoC. FCC simulator for development. Obtain DOMS documentation ASAP. |
-| **Primary HHT failure at multi-HHT site** | All non-primary HHTs lose access to buffered transactions and pre-auth | Manual failover procedure (re-provision another HHT as primary). Automatic failover in post-MVP. |
+| **Primary agent failure at multi-agent site** | Loss of FCC ownership if no healthy standby can promote | Warm replication, deterministic priority election, epoch fencing, and operator alerts when no promotable standby exists. |
 | **SQLite corruption** | Power loss or force-kill may corrupt buffer | WAL mode mitigates this. Integrity check on startup. Backup corrupted DB. Start fresh buffer. Alert cloud for forensic retrieval. |
 | **QR code provisioning security** | QR code contains FCC credentials and cloud token | Use one-time provisioning tokens. Encrypt sensitive QR payload fields. Token expires after first use. |
 | **Multi-HHT LAN discovery** | Support workflow may become operationally messy if not tightly specified | Explicit IP configuration during provisioning. No auto-discovery in MVP. |
@@ -880,11 +880,11 @@ The requirements (OQ-1) resolved the Edge Agent technology as **native Kotlin/Ja
 | OQ-EA-4 | What is the available free storage on Urovo i9100 after OS and Odoo POS? | Buffer sizing validation | Assumed 500MB+ free. Needs verification on actual device. |
 | OQ-EA-5 | Can the Urovo i9100 reliably maintain WiFi connections to both the station LAN and internet simultaneously? | Dual-network requirement | Assumed yes (single WiFi connection to station LAN; internet via same WiFi or SIM). Needs hardware testing. |
 | OQ-EA-6 | How does Odoo POS detect internet outage and switch to the Edge Agent local API? Is this Odoo POS built-in, or must the Odoo team build this? | End-to-end offline flow depends on Odoo POS capability | Assumed Odoo team builds this. Edge Agent just exposes the API. |
-| OQ-EA-7 | For multi-HHT sites, how is the LAN API key distributed to non-primary HHTs? | Provisioning flow for secondary HHTs | Assumed API key is part of site provisioning. Distributed via QR code or manual entry on non-primary HHTs. |
+| OQ-EA-7 | How are peer credentials and LAN API keys distributed to standby agents? | Provisioning flow for secondary agents | Assume cloud-issued config carries peer bootstrap metadata and secret references; operational rotation workflow still needs to be finalized. |
 | OQ-EA-8 | Should SQLCipher be used for SQLite encryption at rest? What is the performance impact on Urovo i9100? | Security vs. performance trade-off | Assumed not required for MVP (Android sandbox provides file-level isolation). Evaluate post-MVP. |
 | OQ-EA-9 | Is the Urovo i9100 WiFi reliable enough for continuous FCC polling every 15-30 seconds? Any known WiFi stability issues? | Core agent reliability | Assumed WiFi is stable on the station LAN. Field testing required. |
 | OQ-EA-10 | Final confirmation: Kotlin/Java (per resolved OQ-1 in requirements) or .NET MAUI (per user preference for ".NET on edge")? | Entire technology stack and team skills | Followed resolved requirements: Kotlin/Java. See section 9.2 for comparison. |
-| OQ-EA-11 | What exact local-network discovery/configuration method will non-primary HHTs use to find the primary agent IP in offline mode? | Multi-HHT usability | Assumed explicit IP configuration during provisioning. |
+| OQ-EA-11 | What exact local-network discovery method will agents use to find the current leader on the station LAN? | Multi-agent usability and failover time | Assume hybrid discovery: cloud bootstrap peer directory plus LAN heartbeat/probe confirmation. |
 | OQ-EA-12 | Should the primary agent expose LAN API only on private WiFi, or is there any scenario where hotspot networking changes that assumption? | Security exposure | Assumed private WiFi only. |
 | OQ-EA-13 | Which FCC vendors require persistent sockets versus stateless polling, and how does that interact with Android background limits? | Adapter design and reliability | Needs vendor-by-vendor analysis. |
 | OQ-EA-14 | Is supervisor authentication on the local diagnostics screen delegated to Odoo user context, or handled with a separate local PIN/policy? | Local security model | To be decided. |

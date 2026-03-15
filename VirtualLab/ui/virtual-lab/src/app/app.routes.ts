@@ -6,6 +6,7 @@ import { FccProfilesComponent } from './features/fcc-profiles/fcc-profiles.compo
 import { ForecourtDesignerComponent } from './features/forecourt-designer/forecourt-designer.component';
 import { LiveConsoleComponent } from './features/live-console/live-console.component';
 import { PreauthConsoleComponent } from './features/preauth-console/preauth-console.component';
+import { ProductsComponent } from './features/products/products.component';
 import { TransactionsComponent } from './features/transactions/transactions.component';
 import { LogsComponent } from './features/logs/logs.component';
 import { ScenariosComponent } from './features/scenarios/scenarios.component';
@@ -19,6 +20,7 @@ export const routes: Routes = [
       { path: '', pathMatch: 'full', redirectTo: 'dashboard' },
       { path: 'dashboard', component: DashboardComponent, title: 'Dashboard' },
       { path: 'sites', component: SitesComponent, title: 'Sites' },
+      { path: 'products', component: ProductsComponent, title: 'Products' },
       { path: 'fcc-profiles', component: FccProfilesComponent, title: 'FCC Profiles' },
       {
         path: 'forecourt-designer',

@@ -28,6 +28,19 @@ public sealed partial class LogsPage : UserControl, IDisposable
             null, TimeSpan.Zero, TimeSpan.FromSeconds(10));
     }
 
+    // P-DSK-024: Pause the timer when the page is not visible to avoid unnecessary DB queries
+    protected override void OnAttachedToVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        _refreshTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(10));
+    }
+
+    protected override void OnDetachedFromVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
+    {
+        _refreshTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        base.OnDetachedFromVisualTree(e);
+    }
+
     private async Task LoadLogsAsync()
     {
         if (_services is null) return;

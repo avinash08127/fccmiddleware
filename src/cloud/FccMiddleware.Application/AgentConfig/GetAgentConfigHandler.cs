@@ -18,6 +18,7 @@ public sealed class GetAgentConfigHandler
     : IRequestHandler<GetAgentConfigQuery, Result<GetAgentConfigResult>>
 {
     private static readonly TimeSpan CacheDuration = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan HaCacheDuration = TimeSpan.FromSeconds(30);
 
     private readonly IAgentConfigDbContext _db;
     private readonly IConfiguration _configuration;
@@ -126,7 +127,10 @@ public sealed class GetAgentConfigHandler
             };
 
             cached = (fccConfig.ConfigVersion, config);
-            _cache.Set(cacheKey, cached, CacheDuration);
+            // P2-11: HA-enabled sites use a shorter cache TTL (30s) so peer directory
+            // changes surface faster in config responses.
+            var haEnabled = _configuration.GetSection("EdgeAgentDefaults:SiteHa").GetValue("Enabled", false);
+            _cache.Set(cacheKey, cached, haEnabled ? HaCacheDuration : CacheDuration);
         }
 
         // ETag comparison: return 304 if client already has the current version
@@ -144,6 +148,8 @@ public sealed class GetAgentConfigHandler
         var siteHa = BuildSiteHaDto(agent, siteAgents);
 
         // Stamp per-device Identity (records are immutable; `with` creates a shallow copy)
+        // P2-10: HA-enabled sites receive a reduced config poll interval (60s instead of default 300s)
+        // so agents detect peer directory changes faster as a Layer-3 fallback.
         var deviceConfig = cached.Config with
         {
             Identity = cached.Config.Identity with
@@ -152,7 +158,10 @@ public sealed class GetAgentConfigHandler
                 DeviceClass = agent.DeviceClass,
                 IsPrimaryAgent = string.Equals(siteHa.CurrentRole, "PRIMARY", StringComparison.Ordinal)
             },
-            SiteHa = siteHa
+            SiteHa = siteHa,
+            Sync = siteHa.Enabled
+                ? cached.Config.Sync with { ConfigPollIntervalSeconds = 60 }
+                : cached.Config.Sync
         };
 
         return Result<GetAgentConfigResult>.Success(new GetAgentConfigResult
@@ -177,7 +186,11 @@ public sealed class GetAgentConfigHandler
             PeerDiscoveryMode = "HYBRID",
             AllowFailback = false,
             LeaderEpoch = 0,
-            PeerDirectory = []
+            PeerDirectory = [],
+            PeerApiPort = 8586,
+            PeerSharedSecret = null,
+            ReplicationEnabled = true,
+            ProxyingEnabled = true
         };
 
     private static FccDto BuildFccDto(Domain.Entities.FccConfig fccConfig)
@@ -291,18 +304,16 @@ public sealed class GetAgentConfigHandler
         var maxReplicationLagSeconds = section.GetValue("MaxReplicationLagSeconds", 15);
         var peerDiscoveryMode = section["PeerDiscoveryMode"] ?? "HYBRID";
         var allowFailback = section.GetValue("AllowFailback", false);
+        var peerApiPort = section.GetValue("PeerApiPort", 8586);
+        var peerSharedSecret = section["PeerSharedSecret"];
+        var replicationEnabled = section.GetValue("ReplicationEnabled", true);
+        var proxyingEnabled = section.GetValue("ProxyingEnabled", true);
 
-        var activePeers = siteAgents
-            .Where(agent => agent.IsActive && agent.Status == AgentRegistrationStatus.ACTIVE)
-            .OrderBy(agent => agent.SiteHaPriority)
-            .ThenBy(agent => agent.RegisteredAt)
-            .ToList();
-
-        var leader = DetermineLeader(activePeers);
-        var currentRole = ResolvePeerRole(currentAgent, leader);
-        var leaderEpoch = activePeers.Count == 0
-            ? 0
-            : Math.Max(1, activePeers.Max(agent => agent.LeaderEpochSeen ?? 0));
+        var leadership = SiteHaLeadershipResolver.ResolveSnapshot(siteAgents);
+        var activePeers = leadership.ActivePeers;
+        var leader = leadership.Leader;
+        var currentRole = SiteHaLeadershipResolver.ResolveCurrentRole(currentAgent, leader);
+        var leaderEpoch = leadership.LeaderEpoch;
 
         var peerDirectory = activePeers
             .Select(peer => new PeerDirectoryEntryDto
@@ -312,7 +323,7 @@ public sealed class GetAgentConfigHandler
                 Status = peer.Status.ToString(),
                 RoleCapability = peer.RoleCapability,
                 Priority = peer.SiteHaPriority,
-                CurrentRole = ResolvePeerRole(peer, leader),
+                CurrentRole = SiteHaLeadershipResolver.ResolveCurrentRole(peer, leader),
                 PeerApiBaseUrl = peer.PeerApiBaseUrl,
                 PeerApiAdvertisedHost = peer.PeerApiAdvertisedHost,
                 PeerApiPort = peer.PeerApiPort,
@@ -340,36 +351,12 @@ public sealed class GetAgentConfigHandler
             LeaderAgentId = leader?.Id,
             LeaderEpoch = leaderEpoch,
             LeaderSinceUtc = leader?.RegisteredAt,
-            PeerDirectory = peerDirectory
+            PeerDirectory = peerDirectory,
+            PeerApiPort = currentAgent.PeerApiPort ?? peerApiPort,
+            PeerSharedSecret = peerSharedSecret,
+            ReplicationEnabled = replicationEnabled,
+            ProxyingEnabled = proxyingEnabled
         };
-    }
-
-    private static AgentRegistration? DetermineLeader(IReadOnlyList<AgentRegistration> activePeers) =>
-        activePeers
-            .Where(peer => !string.Equals(peer.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(peer => peer.SiteHaPriority)
-            .ThenBy(peer => string.Equals(peer.DeviceClass, "DESKTOP", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-            .ThenBy(peer => peer.RegisteredAt)
-            .FirstOrDefault();
-
-    private static string ResolvePeerRole(AgentRegistration peer, AgentRegistration? leader)
-    {
-        if (!peer.IsActive || peer.Status != AgentRegistrationStatus.ACTIVE)
-        {
-            return "OFFLINE";
-        }
-
-        if (!string.IsNullOrWhiteSpace(peer.CurrentRole))
-        {
-            return peer.CurrentRole!;
-        }
-
-        if (string.Equals(peer.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
-        {
-            return "READ_ONLY";
-        }
-
-        return leader?.Id == peer.Id ? "PRIMARY" : "STANDBY_HOT";
     }
 
     private static string[] DeserializeCapabilities(string? capabilitiesJson)

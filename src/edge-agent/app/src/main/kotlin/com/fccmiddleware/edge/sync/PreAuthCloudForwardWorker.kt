@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.sync
 
+import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
@@ -68,8 +69,14 @@ class PreAuthCloudForwardWorker(
     private val cloudApiClient: CloudApiClient? = null,
     private val tokenProvider: DeviceTokenProvider? = null,
     private val keystoreManager: KeystoreManager? = null,
+    private val configManager: ConfigManager? = null,
     val config: PreAuthCloudForwardWorkerConfig = PreAuthCloudForwardWorkerConfig(),
 ) {
+
+    /**
+     * P2-08: Callback invoked when a cloud response indicates the peer directory is stale.
+     */
+    var onPeerDirectoryStale: (() -> Unit)? = null
 
     companion object {
         private const val TAG = "PreAuthForwardWorker"
@@ -243,8 +250,10 @@ class PreAuthCloudForwardWorker(
             )
         }
         return when (val result = client.forwardPreAuth(request, token)) {
-            is CloudPreAuthForwardResult.Success ->
+            is CloudPreAuthForwardResult.Success -> {
+                checkPeerDirectoryVersion(result.peerDirectoryVersion)
                 ForwardAttemptResult.Success
+            }
 
             is CloudPreAuthForwardResult.Conflict ->
                 resolveConflict(record, result)
@@ -267,8 +276,10 @@ class PreAuthCloudForwardWorker(
                 }
                 AppLogger.i(TAG, "Token refreshed; retrying pre-auth forward")
                 when (val retryResult = client.forwardPreAuth(request, freshToken)) {
-                    is CloudPreAuthForwardResult.Success ->
+                    is CloudPreAuthForwardResult.Success -> {
+                        checkPeerDirectoryVersion(retryResult.peerDirectoryVersion)
                         ForwardAttemptResult.Success
+                    }
 
                     is CloudPreAuthForwardResult.Conflict ->
                         resolveConflict(record, retryResult)
@@ -284,6 +295,11 @@ class PreAuthCloudForwardWorker(
                     is CloudPreAuthForwardResult.Forbidden ->
                         resolveForbidden(retryResult.errorCode)
 
+                    is CloudPreAuthForwardResult.BadRequest -> {
+                        AppLogger.w(TAG, "Pre-auth forward 400 after retry: ${retryResult.errorCode}")
+                        ForwardAttemptResult.TransportFailure("400 Bad Request: ${retryResult.errorCode}")
+                    }
+
                     is CloudPreAuthForwardResult.TransportError ->
                         ForwardAttemptResult.TransportFailure(retryResult.message)
                 }
@@ -295,8 +311,26 @@ class PreAuthCloudForwardWorker(
             is CloudPreAuthForwardResult.Forbidden ->
                 resolveForbidden(result.errorCode)
 
+            is CloudPreAuthForwardResult.BadRequest -> {
+                AppLogger.w(TAG, "Pre-auth forward 400: ${result.errorCode}")
+                ForwardAttemptResult.TransportFailure("400 Bad Request: ${result.errorCode}")
+            }
+
             is CloudPreAuthForwardResult.TransportError ->
                 ForwardAttemptResult.TransportFailure(result.message)
+        }
+    }
+
+    /** P2-08: Check if cloud's peer directory version indicates staleness and trigger config refresh. */
+    private fun checkPeerDirectoryVersion(cloudVersion: Long?) {
+        val cm = configManager ?: return
+        if (cloudVersion == null) return
+        if (cm.isPeerDirectoryStale(cloudVersion)) {
+            AppLogger.i(TAG, "Peer directory stale: cloud=$cloudVersion > local=${cm.currentPeerDirectoryVersion}")
+            cm.updatePeerDirectoryVersion(cloudVersion)
+            onPeerDirectoryStale?.invoke()
+        } else {
+            cm.updatePeerDirectoryVersion(cloudVersion)
         }
     }
 
@@ -339,7 +373,8 @@ class PreAuthCloudForwardWorker(
 
     private suspend fun buildForwardRequest(record: PreAuthRecord): PreAuthForwardRequest {
         val customerTaxId = resolveCustomerTaxIdForForwarding(record)
-        return record.toForwardRequest(customerTaxId)
+        val leaderEpoch = configManager?.config?.value?.siteHa?.leaderEpoch?.takeIf { it > 0 }
+        return record.toForwardRequest(customerTaxId, leaderEpoch)
     }
 
     private suspend fun resolveCustomerTaxIdForForwarding(record: PreAuthRecord): String? {
@@ -356,7 +391,7 @@ class PreAuthCloudForwardWorker(
         }
     }
 
-    private fun PreAuthRecord.toForwardRequest(customerTaxId: String?): PreAuthForwardRequest =
+    private fun PreAuthRecord.toForwardRequest(customerTaxId: String?, leaderEpoch: Long?): PreAuthForwardRequest =
         PreAuthForwardRequest(
             siteCode = siteCode,
             odooOrderId = odooOrderId,
@@ -369,6 +404,7 @@ class PreAuthCloudForwardWorker(
             status = status.name,
             requestedAt = requestedAt,
             expiresAt = expiresAt,
+            leaderEpoch = leaderEpoch,
             fccCorrelationId = fccCorrelationId,
             fccAuthorizationCode = fccAuthorizationCode,
             // NET-008: Map vehicleNumber and customerBusinessName for cloud reconciliation.
@@ -376,6 +412,7 @@ class PreAuthCloudForwardWorker(
             customerName = customerName,
             customerTaxId = customerTaxId,
             customerBusinessName = customerBusinessName,
+            attendantId = attendantId,
         )
 
     // -------------------------------------------------------------------------

@@ -1,0 +1,18 @@
+{
+  "/simulator-api/edge": {
+    "target": "http://127.0.0.1:8585",
+    "secure": false,
+    "changeOrigin": true,
+    "pathRewrite": {
+      "^/simulator-api/edge": ""
+    }
+  },
+  "/simulator-api/cloud": {
+    "target": "http://localhost:5070",
+    "secure": false,
+    "changeOrigin": true,
+    "pathRewrite": {
+      "^/simulator-api/cloud": ""
+    }
+  }
+}

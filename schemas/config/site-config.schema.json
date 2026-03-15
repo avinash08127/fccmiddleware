@@ -17,6 +17,7 @@
     "sync",
     "buffer",
     "localApi",
+    "siteHa",
     "telemetry",
     "fiscalization",
     "mappings",
@@ -103,6 +104,9 @@
     },
     "localApi": {
       "$ref": "#/$defs/localApi"
+    },
+    "siteHa": {
+      "$ref": "#/$defs/siteHa"
     },
     "telemetry": {
       "$ref": "#/$defs/telemetry"
@@ -310,16 +314,6 @@
       },
       "then": {
         "properties": {
-          "identity": {
-            "properties": {
-              "isPrimaryAgent": {
-                "const": true
-              }
-            },
-            "required": [
-              "isPrimaryAgent"
-            ]
-          },
           "localApi": {
             "required": [
               "lanBindAddress",
@@ -400,6 +394,7 @@
         "timezone",
         "currencyCode",
         "deviceId",
+        "deviceClass",
         "isPrimaryAgent"
       ],
       "properties": {
@@ -440,6 +435,13 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 64
+        },
+        "deviceClass": {
+          "type": "string",
+          "enum": [
+            "ANDROID",
+            "DESKTOP"
+          ]
         },
         "isPrimaryAgent": {
           "type": "boolean"
@@ -844,6 +846,260 @@
           "type": "integer",
           "minimum": 10,
           "maximum": 6000
+        }
+      }
+    },
+    "siteHa": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "autoFailoverEnabled",
+        "priority",
+        "roleCapability",
+        "currentRole",
+        "heartbeatIntervalSeconds",
+        "failoverTimeoutSeconds",
+        "maxReplicationLagSeconds",
+        "peerDiscoveryMode",
+        "allowFailback",
+        "leaderAgentId",
+        "leaderEpoch",
+        "leaderSinceUtc",
+        "peerDirectory"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "autoFailoverEnabled": {
+          "type": "boolean"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "roleCapability": {
+          "type": "string",
+          "enum": [
+            "PRIMARY_ELIGIBLE",
+            "STANDBY_ONLY",
+            "READ_ONLY"
+          ]
+        },
+        "currentRole": {
+          "type": "string",
+          "enum": [
+            "PRIMARY",
+            "STANDBY_HOT",
+            "CANDIDATE",
+            "RECOVERING",
+            "READ_ONLY",
+            "OFFLINE"
+          ]
+        },
+        "heartbeatIntervalSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "failoverTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 300
+        },
+        "maxReplicationLagSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "peerDiscoveryMode": {
+          "type": "string",
+          "enum": [
+            "CLOUD_DIRECTORY",
+            "LAN_BROADCAST",
+            "HYBRID"
+          ]
+        },
+        "allowFailback": {
+          "type": "boolean"
+        },
+        "leaderAgentId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "leaderEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "leaderSinceUtc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "peerDirectory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/peerDirectoryEntry"
+          }
+        },
+        "peerApiPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8586,
+          "description": "Port for the peer-to-peer API (LAN-accessible). Default 8586."
+        },
+        "peerSharedSecret": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 256,
+          "description": "HMAC-SHA256 shared secret for peer API authentication."
+        },
+        "replicationEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Gates replication sync worker. Rollout: enable after connectivity is proven."
+        },
+        "proxyingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Gates localhost proxy for standby agents. Rollout: enable after replication is proven."
+        }
+      }
+    },
+    "peerDirectoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentId",
+        "deviceClass",
+        "status",
+        "roleCapability",
+        "priority",
+        "currentRole",
+        "peerApiBaseUrl",
+        "peerApiAdvertisedHost",
+        "peerApiPort",
+        "peerApiTlsEnabled",
+        "capabilities",
+        "appVersion",
+        "lastHeartbeatUtc",
+        "leaderEpochSeen",
+        "lastReplicationLagSeconds"
+      ],
+      "properties": {
+        "agentId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "deviceClass": {
+          "type": "string",
+          "enum": [
+            "ANDROID",
+            "DESKTOP"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ACTIVE",
+            "PENDING_APPROVAL",
+            "QUARANTINED",
+            "DEACTIVATED"
+          ]
+        },
+        "roleCapability": {
+          "type": "string",
+          "enum": [
+            "PRIMARY_ELIGIBLE",
+            "STANDBY_ONLY",
+            "READ_ONLY"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "currentRole": {
+          "type": "string",
+          "enum": [
+            "PRIMARY",
+            "STANDBY_HOT",
+            "CANDIDATE",
+            "RECOVERING",
+            "READ_ONLY",
+            "OFFLINE"
+          ]
+        },
+        "peerApiBaseUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "peerApiAdvertisedHost": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        },
+        "peerApiPort": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "peerApiTlsEnabled": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "appVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 50
+        },
+        "lastHeartbeatUtc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "leaderEpochSeen": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "lastReplicationLagSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 3600
         }
       }
     },

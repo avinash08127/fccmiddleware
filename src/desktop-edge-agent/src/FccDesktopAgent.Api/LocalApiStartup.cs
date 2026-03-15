@@ -44,6 +44,9 @@ public static class LocalApiStartup
             sp.GetRequiredService<CredentialStoreApiKeyPostConfigure>());
         services.AddSingleton<IHostedService>(sp =>
             sp.GetRequiredService<CredentialStoreApiKeyPostConfigure>());
+        // S-DSK-033: Allow ConfigSaveService to refresh the cached API key after rotation.
+        services.AddSingleton<IApiKeyRefresher>(sp =>
+            sp.GetRequiredService<CredentialStoreApiKeyPostConfigure>());
 
         // Configure System.Text.Json for all Minimal API responses:
         //   - camelCase field names (matches OpenAPI spec conventions)
@@ -96,6 +99,9 @@ public static class LocalApiStartup
         app.MapPumpStatusEndpoints();
         app.MapStatusEndpoints();
 
+        // ── Peer HA endpoints (HMAC-authenticated, no API key middleware) ──
+        app.MapPeerEndpoints();
+
         return app;
     }
 }
@@ -109,11 +115,14 @@ public static class LocalApiStartup
 /// <see cref="SemaphoreSlim"/>). By the time HTTP requests arrive and
 /// <see cref="IPostConfigureOptions{TOptions}.PostConfigure"/> is called, the key
 /// is already cached.
+///
+/// S-DSK-033: Supports live key refresh via <see cref="RefreshKeyAsync"/> so that
+/// API key rotation from the Configuration page takes effect without an agent restart.
 /// </summary>
-internal sealed class CredentialStoreApiKeyPostConfigure : IPostConfigureOptions<LocalApiOptions>, IHostedService
+internal sealed class CredentialStoreApiKeyPostConfigure : IPostConfigureOptions<LocalApiOptions>, IHostedService, IApiKeyRefresher
 {
     private readonly ICredentialStore _store;
-    private string? _cachedKey;
+    private volatile string? _cachedKey;
 
     public CredentialStoreApiKeyPostConfigure(ICredentialStore store) => _store = store;
 
@@ -128,5 +137,15 @@ internal sealed class CredentialStoreApiKeyPostConfigure : IPostConfigureOptions
     {
         if (!string.IsNullOrEmpty(_cachedKey))
             options.ApiKey = _cachedKey;
+    }
+
+    /// <summary>
+    /// S-DSK-033: Reloads the LAN API key from the credential store so that
+    /// the running API stack uses the new key immediately after rotation.
+    /// Called by <see cref="ConfigSaveService"/> after writing a new key.
+    /// </summary>
+    public async Task RefreshKeyAsync(CancellationToken ct = default)
+    {
+        _cachedKey = await _store.GetSecretAsync(CredentialKeys.LanApiKey, ct);
     }
 }

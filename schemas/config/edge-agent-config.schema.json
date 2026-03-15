@@ -18,6 +18,7 @@
     "sync",
     "buffer",
     "api",
+    "siteHa",
     "telemetry",
     "fiscalization"
   ],
@@ -68,12 +69,21 @@
       "additionalProperties": false,
       "required": [
         "deviceId",
+        "deviceClass",
         "isPrimaryAgent"
       ],
       "properties": {
         "deviceId": {
           "type": "string",
           "format": "uuid"
+        },
+        "deviceClass": {
+          "type": "string",
+          "enum": [
+            "ANDROID",
+            "DESKTOP"
+          ],
+          "default": "ANDROID"
         },
         "isPrimaryAgent": {
           "type": "boolean",
@@ -332,6 +342,100 @@
         }
       }
     },
+    "siteHa": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "autoFailoverEnabled",
+        "priority",
+        "roleCapability",
+        "heartbeatIntervalSeconds",
+        "failoverTimeoutSeconds",
+        "maxReplicationLagSeconds",
+        "peerDiscoveryMode",
+        "allowFailback"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "autoFailoverEnabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        },
+        "roleCapability": {
+          "type": "string",
+          "enum": [
+            "PRIMARY_ELIGIBLE",
+            "STANDBY_ONLY",
+            "READ_ONLY"
+          ],
+          "default": "PRIMARY_ELIGIBLE"
+        },
+        "heartbeatIntervalSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300,
+          "default": 5
+        },
+        "failoverTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 300,
+          "default": 30
+        },
+        "maxReplicationLagSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "default": 15
+        },
+        "peerDiscoveryMode": {
+          "type": "string",
+          "enum": [
+            "CLOUD_DIRECTORY",
+            "LAN_BROADCAST",
+            "HYBRID"
+          ],
+          "default": "HYBRID"
+        },
+        "allowFailback": {
+          "type": "boolean",
+          "default": false
+        },
+        "peerApiPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8586,
+          "description": "Port for the peer-to-peer API (LAN-accessible). Default 8586."
+        },
+        "peerSharedSecret": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 256,
+          "description": "HMAC-SHA256 shared secret for peer API authentication."
+        },
+        "replicationEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Gates replication sync worker. Rollout: enable after connectivity is proven."
+        },
+        "proxyingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Gates localhost proxy for standby agents. Rollout: enable after replication is proven."
+        }
+      }
+    },
     "telemetry": {
       "type": "object",
       "additionalProperties": false,
@@ -383,6 +487,70 @@
         "fiscalReceiptRequired": {
           "type": "boolean",
           "default": false
+        }
+      }
+    },
+    "pumpControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "transactionLimitsEnabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "defaultMaxTransactionsPerPump": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "default": 50
+        }
+      }
+    },
+    "priceManagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "syncToCloud": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "peripheralMonitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bnaReportingEnabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "dispenserInventoryEnabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "pollIntervalSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600,
+          "default": 300
         }
       }
     }

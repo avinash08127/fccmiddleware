@@ -23,7 +23,6 @@
             <ComboBoxItem Content="Uploaded" />
             <ComboBoxItem Content="SyncedToOdoo" />
             <ComboBoxItem Content="DuplicateConfirmed" />
-            <ComboBoxItem Content="Archived" />
           </ComboBox>
         </StackPanel>
         <StackPanel Spacing="4">
@@ -138,14 +137,23 @@
             <TextBlock x:Name="DetailCorrelationId" FontSize="12" />
           </StackPanel>
         </Grid>
+        <!-- S-DSK-028: Raw payload hidden by default — may contain sensitive FCC data (PINs, tax IDs) -->
         <StackPanel Spacing="4">
-          <TextBlock Text="Raw Payload" FontSize="11" Opacity="0.5" />
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock Text="Raw Payload" FontSize="11" Opacity="0.5" VerticalAlignment="Center" />
+            <Button x:Name="ToggleRawPayloadButton"
+                    Content="Show"
+                    FontSize="10"
+                    Padding="8,2"
+                    Click="OnToggleRawPayloadClicked" />
+          </StackPanel>
           <TextBox x:Name="DetailRawPayload"
                    IsReadOnly="True"
                    AcceptsReturn="True"
                    MaxHeight="200"
                    FontFamily="Consolas, Courier New, monospace"
-                   FontSize="11" />
+                   FontSize="11"
+                   IsVisible="False" />
         </StackPanel>
       </StackPanel>
     </Border>

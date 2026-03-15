@@ -35,6 +35,123 @@ export interface LabEnvironmentSummary {
   lastSeededAtUtc: string | null;
 }
 
+export interface LabEnvironmentRetentionSettings {
+  logRetentionDays: number;
+  callbackHistoryRetentionDays: number;
+  transactionRetentionDays: number;
+  preserveTimelineIntegrity: boolean;
+}
+
+export interface LabEnvironmentBackupSettings {
+  includeRuntimeDataByDefault: boolean;
+  includeScenarioRunsByDefault: boolean;
+}
+
+export interface LabEnvironmentTelemetrySettings {
+  emitMetrics: boolean;
+  emitActivities: boolean;
+}
+
+export interface LabEnvironmentSettings {
+  retention: LabEnvironmentRetentionSettings;
+  backup: LabEnvironmentBackupSettings;
+  telemetry: LabEnvironmentTelemetrySettings;
+}
+
+export interface LabEnvironmentLogCategory {
+  category: string;
+  defaultSeverity: string;
+  description: string;
+}
+
+export interface LabEnvironmentDetail extends LabEnvironmentSummary {
+  seedVersion: number;
+  deterministicSeed: number;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+  settings: LabEnvironmentSettings;
+  logCategories: LabEnvironmentLogCategory[];
+}
+
+export interface LabEnvironmentUpsertRequest {
+  name: string;
+  description: string;
+  settings: LabEnvironmentSettings;
+}
+
+export interface LabEnvironmentPruneRequest {
+  dryRun: boolean;
+  logRetentionDays?: number | null;
+  callbackHistoryRetentionDays?: number | null;
+  transactionRetentionDays?: number | null;
+  preserveTimelineIntegrity?: boolean | null;
+}
+
+export interface LabEnvironmentPruneResult {
+  labEnvironmentId: string;
+  environmentKey: string;
+  dryRun: boolean;
+  executedAtUtc: string;
+  logCutoffUtc: string | null;
+  callbackCutoffUtc: string | null;
+  transactionCutoffUtc: string | null;
+  logsRemoved: number;
+  callbackAttemptsRemoved: number;
+  transactionsRemoved: number;
+  preAuthSessionsRemoved: number;
+  scenarioRunsPreserved: number;
+}
+
+export interface LabEnvironmentExportPackage {
+  formatVersion: number;
+  exportedAtUtc: string;
+  includesRuntimeData: boolean;
+  environment: {
+    id: string;
+    key: string;
+    name: string;
+    description: string;
+    settingsJson: string;
+    seedVersion: number;
+    deterministicSeed: number;
+    createdAtUtc: string;
+    updatedAtUtc: string;
+    lastSeededAtUtc: string | null;
+  };
+  profiles: unknown[];
+  products: unknown[];
+  sites: unknown[];
+  callbackTargets: unknown[];
+  pumps: unknown[];
+  nozzles: unknown[];
+  scenarioDefinitions: unknown[];
+  scenarioRuns: unknown[];
+  preAuthSessions: unknown[];
+  transactions: unknown[];
+  callbackAttempts: unknown[];
+  logs: unknown[];
+}
+
+export interface LabEnvironmentImportRequest {
+  replaceExisting: boolean;
+  package: LabEnvironmentExportPackage;
+}
+
+export interface LabEnvironmentImportResult {
+  labEnvironmentId: string;
+  environmentKey: string;
+  replaceExisting: boolean;
+  siteCount: number;
+  profileCount: number;
+  productCount: number;
+  scenarioDefinitionCount: number;
+  scenarioRunCount: number;
+  transactionCount: number;
+  preAuthSessionCount: number;
+  callbackAttemptCount: number;
+  logCount: number;
+}
+
 export interface SiteFiscalizationSettings {
   mode: string;
   requireCustomerTaxId: boolean;
@@ -87,6 +204,8 @@ export interface CallbackTargetRecord {
   isActive: boolean;
 }
 
+export type FccVendor = 'Generic' | 'DOMS_REST' | 'DOMS_JPL' | 'PETRONITE' | 'ADVATEC' | 'RADIX';
+
 export interface SiteListItem {
   id: string;
   labEnvironmentId: string;
@@ -103,6 +222,7 @@ export interface SiteListItem {
   basicAuthPassword: string;
   deliveryMode: TransactionDeliveryMode;
   preAuthMode: PreAuthFlowMode;
+  fccVendor: FccVendor;
   settings: SiteSettings;
   activeProfile: FccProfileSummary;
   forecourt: SiteForecourtSummary;
@@ -176,6 +296,17 @@ export interface ProductView {
   assignedNozzleCount: number;
 }
 
+export interface ProductUpsertRequest {
+  labEnvironmentId: string;
+  productCode: string;
+  name: string;
+  grade: string;
+  colorHex: string;
+  unitPrice: number;
+  currencyCode: string;
+  isActive: boolean;
+}
+
 export interface SiteDetail extends SiteListItem {
   forecourtConfiguration: SiteForecourtView;
   callbackTargets: CallbackTargetRecord[];
@@ -210,6 +341,7 @@ export interface SiteUpsertRequest {
   basicAuthPassword: string;
   deliveryMode: TransactionDeliveryMode;
   preAuthMode: PreAuthFlowMode;
+  fccVendor: FccVendor;
   isActive: boolean;
   settings: SiteSettings;
   callbackTargets?: CallbackTargetUpsertRequest[] | null;
@@ -639,6 +771,7 @@ export interface ScenarioScriptSetupRecord {
   profileKey: string | null;
   deliveryMode: TransactionDeliveryMode | null;
   preAuthMode: PreAuthFlowMode | null;
+  fccVendor: FccVendor | null;
 }
 
 export interface ScenarioActionRecord {
@@ -700,6 +833,7 @@ export interface ScenarioRunSummaryRecord {
   correlationId: string;
   replaySeed: number;
   replaySignature: string;
+  outputSignature: string;
   status: ScenarioRunStatus;
   startedAtUtc: string;
   completedAtUtc: string | null;
@@ -752,6 +886,7 @@ export interface ScenarioRunDetailRecord {
   correlationId: string;
   replaySeed: number;
   replaySignature: string;
+  outputSignature: string;
   status: ScenarioRunStatus;
   inputSnapshotJson: string;
   resultSummaryJson: string;
@@ -930,8 +1065,26 @@ export interface LabPreAuthActionResult {
 export class LabApiService {
   private readonly http = inject(HttpClient);
 
-  getLabEnvironment(): Observable<LabEnvironmentSummary> {
-    return this.http.get<LabEnvironmentSummary>(this.url('/api/lab-environment'));
+  getLabEnvironment(): Observable<LabEnvironmentDetail> {
+    return this.http.get<LabEnvironmentDetail>(this.url('/api/lab-environment'));
+  }
+
+  updateLabEnvironment(request: LabEnvironmentUpsertRequest): Observable<LabEnvironmentDetail> {
+    return this.http.put<LabEnvironmentDetail>(this.url('/api/lab-environment'), request);
+  }
+
+  pruneLabEnvironment(request: LabEnvironmentPruneRequest): Observable<LabEnvironmentPruneResult> {
+    return this.http.post<LabEnvironmentPruneResult>(this.url('/api/lab-environment/prune'), request);
+  }
+
+  exportLabEnvironment(includeRuntimeData = true): Observable<LabEnvironmentExportPackage> {
+    return this.http.get<LabEnvironmentExportPackage>(this.url('/api/lab-environment/export'), {
+      params: { includeRuntimeData },
+    });
+  }
+
+  importLabEnvironment(request: LabEnvironmentImportRequest): Observable<LabEnvironmentImportResult> {
+    return this.http.post<LabEnvironmentImportResult>(this.url('/api/lab-environment/import'), request);
   }
 
   getDashboard(): Observable<DashboardSummary> {
@@ -987,6 +1140,18 @@ export class LabApiService {
     return this.http.get<ProductView[]>(this.url('/api/products'), {
       params: { includeInactive },
     });
+  }
+
+  createProduct(request: ProductUpsertRequest): Observable<ProductView> {
+    return this.http.post<ProductView>(this.url('/api/products'), request);
+  }
+
+  updateProduct(id: string, request: ProductUpsertRequest): Observable<ProductView> {
+    return this.http.put<ProductView>(this.url(`/api/products/${id}`), request);
+  }
+
+  archiveProduct(id: string): Observable<ProductView> {
+    return this.http.delete<ProductView>(this.url(`/api/products/${id}`));
   }
 
   getProfiles(): Observable<FccProfileSummary[]> {

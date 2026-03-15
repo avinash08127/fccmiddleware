@@ -98,6 +98,158 @@ public static class DomsJplManagementEndpoints
             });
         });
 
+        // ---- Phase 7: Peripheral push endpoints ----
+
+        group.MapPost("/push-bna-report", async (
+            PushBnaReportRequest request,
+            DomsJplSimulatorService simulatorService,
+            CancellationToken cancellationToken) =>
+        {
+            var payload = new
+            {
+                type = "EptBnaReport",
+                terminalId = request.TerminalId ?? "BNA-01",
+                notesAccepted = request.NotesAccepted ?? 0,
+                occurredAtUtc = DateTimeOffset.UtcNow,
+            };
+
+            await simulatorService.SendUnsolicitedPushAsync("EptBnaReport", payload, cancellationToken);
+
+            return Results.Accepted(value: new
+            {
+                message = "BNA report pushed to active clients.",
+                payload,
+            });
+        });
+
+        group.MapPost("/push-dispenser-install", async (
+            PushDispenserInstallRequest request,
+            DomsJplSimulatorService simulatorService,
+            CancellationToken cancellationToken) =>
+        {
+            var payload = new
+            {
+                type = "DispenserInstallData",
+                dispenserId = request.DispenserId ?? "DISP-01",
+                model = request.Model ?? "Wayne Helix 6000",
+                occurredAtUtc = DateTimeOffset.UtcNow,
+            };
+
+            await simulatorService.SendUnsolicitedPushAsync("DispenserInstallData", payload, cancellationToken);
+
+            return Results.Accepted(value: new
+            {
+                message = "Dispenser install data pushed to active clients.",
+                payload,
+            });
+        });
+
+        group.MapPost("/push-ept-info", async (
+            PushEptInfoRequest request,
+            DomsJplSimulatorService simulatorService,
+            CancellationToken cancellationToken) =>
+        {
+            var payload = new
+            {
+                type = "EptInfo",
+                terminalId = request.TerminalId ?? "EPT-01",
+                version = request.Version ?? "1.0.0",
+                occurredAtUtc = DateTimeOffset.UtcNow,
+            };
+
+            await simulatorService.SendUnsolicitedPushAsync("EptInfo", payload, cancellationToken);
+
+            return Results.Accepted(value: new
+            {
+                message = "EPT info pushed to active clients.",
+                payload,
+            });
+        });
+
+        // ---- Phase 7: Unsupervised transaction injection ----
+
+        group.MapPost("/inject-unsupervised-transaction", (InjectTransactionRequest request, DomsJplSimulatorState state) =>
+        {
+            SimulatedDomsTransaction transaction = new()
+            {
+                TransactionId = request.TransactionId ?? Guid.NewGuid().ToString("N"),
+                PumpNumber = request.PumpNumber ?? 1,
+                NozzleNumber = request.NozzleNumber ?? 1,
+                ProductCode = request.ProductCode ?? "UNL95",
+                Volume = request.Volume ?? 25.00m,
+                Amount = request.Amount ?? 100.00m,
+                UnitPrice = request.UnitPrice ?? 4.00m,
+                CurrencyCode = request.CurrencyCode ?? "TRY",
+                OccurredAtUtc = request.OccurredAtUtc ?? DateTimeOffset.UtcNow,
+                TransactionSequence = request.TransactionSequence ?? 1,
+                AttendantId = request.AttendantId,
+            };
+
+            state.InjectUnsupervisedTransaction(transaction);
+
+            return Results.Created($"/api/doms-jpl/state", new
+            {
+                message = "Unsupervised transaction injected.",
+                transactionId = transaction.TransactionId,
+                pumpNumber = transaction.PumpNumber,
+                amount = transaction.Amount,
+                volume = transaction.Volume,
+                bufferCount = state.GetUnsupervisedTransactions().Count,
+            });
+        });
+
+        // ---- Phase 7: Price set management ----
+
+        group.MapPost("/set-prices", (SetPricesRequest request, DomsJplSimulatorState state) =>
+        {
+            if (request.Grades is { Count: > 0 })
+            {
+                foreach (var grade in request.Grades)
+                {
+                    if (!string.IsNullOrEmpty(grade.GradeId))
+                    {
+                        state.PriceSet.GradePrices[grade.GradeId] = new SimulatedGradePrice
+                        {
+                            GradeId = grade.GradeId,
+                            GradeName = grade.GradeName ?? grade.GradeId,
+                            PriceMinorUnits = grade.PriceMinorUnits ?? 0,
+                            CurrencyCode = grade.CurrencyCode ?? "TRY",
+                        };
+                    }
+                }
+
+                state.PriceSet.LastUpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+
+            return Results.Ok(new
+            {
+                message = "Price set updated.",
+                priceSet = state.PriceSet,
+            });
+        });
+
+        // ---- Phase 7: Pump totals management ----
+
+        group.MapPost("/set-pump-totals", (SetPumpTotalsRequest request, DomsJplSimulatorState state) =>
+        {
+            int pumpNumber = request.PumpNumber ?? 1;
+            state.PumpTotals[pumpNumber] = new SimulatedPumpTotals
+            {
+                PumpNumber = pumpNumber,
+                TotalVolumeMicrolitres = request.TotalVolumeMicrolitres ?? 0,
+                TotalAmountMinorUnits = request.TotalAmountMinorUnits ?? 0,
+                LastUpdatedAtUtc = DateTimeOffset.UtcNow,
+            };
+
+            return Results.Ok(new
+            {
+                message = $"Pump {pumpNumber} totals set.",
+                pumpNumber,
+                totalVolumeMicrolitres = request.TotalVolumeMicrolitres ?? 0,
+                totalAmountMinorUnits = request.TotalAmountMinorUnits ?? 0,
+            });
+        });
+
         group.MapPost("/reset", (DomsJplSimulatorState state, IOptions<DomsJplSimulatorOptions> simulatorOptions) =>
         {
             int pumpCount = simulatorOptions.Value.PumpCount;
@@ -118,6 +270,7 @@ public static class DomsJplManagementEndpoints
             CancellationToken cancellationToken) =>
         {
             string messageType = request.MessageType ?? "FpStatusChange";
+            object pushPayload = request;
 
             // Apply the state change if it's a pump state change
             if (string.Equals(messageType, "FpStatusChange", StringComparison.OrdinalIgnoreCase) &&
@@ -133,19 +286,36 @@ public static class DomsJplManagementEndpoints
             // If it's a transaction-available notification, inject a transaction
             if (string.Equals(messageType, "TransactionAvailable", StringComparison.OrdinalIgnoreCase))
             {
-                state.InjectTransaction(new SimulatedDomsTransaction
+                SimulatedDomsTransaction transaction = new()
                 {
+                    TransactionId = Guid.NewGuid().ToString("N"),
                     PumpNumber = request.PumpNumber ?? 1,
                     Amount = request.Amount ?? 100.00m,
                     Volume = request.Volume ?? 25.00m,
-                });
+                };
+
+                state.InjectTransaction(transaction);
+                pushPayload = new
+                {
+                    messageType,
+                    transaction.TransactionId,
+                    transaction.PumpNumber,
+                    transaction.NozzleNumber,
+                    transaction.Amount,
+                    transaction.Volume,
+                    transaction.ProductCode,
+                    transaction.UnitPrice,
+                    transaction.CurrencyCode,
+                    transaction.TransactionSequence,
+                    transaction.OccurredAtUtc,
+                };
             }
 
-            await simulatorService.SendUnsolicitedPushAsync(messageType, request, cancellationToken);
+            await simulatorService.SendUnsolicitedPushAsync(messageType, pushPayload, cancellationToken);
 
             return Results.Accepted(value: new
             {
-                message = $"Push notification '{messageType}' queued.",
+                message = $"Push notification '{messageType}' delivered to active clients when connected.",
                 messageType,
                 connectedClients = state.ConnectedClientCount,
             });
@@ -197,4 +367,44 @@ public sealed class PushNotificationRequest
     public string? State { get; init; }
     public decimal? Amount { get; init; }
     public decimal? Volume { get; init; }
+}
+
+// ---- Phase 7: Peripheral push request DTOs ----
+
+public sealed class PushBnaReportRequest
+{
+    public string? TerminalId { get; init; }
+    public int? NotesAccepted { get; init; }
+}
+
+public sealed class PushDispenserInstallRequest
+{
+    public string? DispenserId { get; init; }
+    public string? Model { get; init; }
+}
+
+public sealed class PushEptInfoRequest
+{
+    public string? TerminalId { get; init; }
+    public string? Version { get; init; }
+}
+
+public sealed class SetPricesRequest
+{
+    public List<SetGradePriceItem>? Grades { get; init; }
+}
+
+public sealed class SetGradePriceItem
+{
+    public string? GradeId { get; init; }
+    public string? GradeName { get; init; }
+    public long? PriceMinorUnits { get; init; }
+    public string? CurrencyCode { get; init; }
+}
+
+public sealed class SetPumpTotalsRequest
+{
+    public int? PumpNumber { get; init; }
+    public long? TotalVolumeMicrolitres { get; init; }
+    public long? TotalAmountMinorUnits { get; init; }
 }

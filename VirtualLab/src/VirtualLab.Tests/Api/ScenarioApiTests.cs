@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 
 namespace VirtualLab.Tests.Api;
 
@@ -33,10 +34,30 @@ public sealed class ScenarioApiTests
 
         using JsonDocument firstRunDocument = JsonDocument.Parse(firstRunBody);
         string firstReplaySignature = firstRunDocument.RootElement.GetProperty("replaySignature").GetString()!;
+        string firstOutputSignature = firstRunDocument.RootElement.GetProperty("outputSignature").GetString()!;
         Guid firstRunId = firstRunDocument.RootElement.GetProperty("id").GetGuid();
         Assert.Equal("Completed", firstRunDocument.RootElement.GetProperty("status").GetString());
         Assert.True(firstRunDocument.RootElement.GetProperty("steps").GetArrayLength() >= 5);
         Assert.True(firstRunDocument.RootElement.GetProperty("assertions").GetArrayLength() >= 2);
+
+        (string[] firstTransactionIds, string[] firstPreAuthIds) = await factory.WithDbContextAsync(async dbContext =>
+        {
+            string[] transactionIds = await dbContext.SimulatedTransactions
+                .AsNoTracking()
+                .Where(x => x.ScenarioRunId == firstRunId)
+                .OrderBy(x => x.ExternalTransactionId)
+                .Select(x => x.ExternalTransactionId)
+                .ToArrayAsync();
+
+            string[] preAuthIds = await dbContext.PreAuthSessions
+                .AsNoTracking()
+                .Where(x => x.ScenarioRunId == firstRunId)
+                .OrderBy(x => x.ExternalReference)
+                .Select(x => x.ExternalReference)
+                .ToArrayAsync();
+
+            return (transactionIds, preAuthIds);
+        });
 
         using HttpResponseMessage secondRunResponse = await client.PostAsJsonAsync(
             "/api/scenarios/run",
@@ -50,13 +71,38 @@ public sealed class ScenarioApiTests
 
         using JsonDocument secondRunDocument = JsonDocument.Parse(secondRunBody);
         Assert.Equal(firstReplaySignature, secondRunDocument.RootElement.GetProperty("replaySignature").GetString());
+        Assert.Equal(firstOutputSignature, secondRunDocument.RootElement.GetProperty("outputSignature").GetString());
         Assert.Equal("Completed", secondRunDocument.RootElement.GetProperty("status").GetString());
+
+        Guid secondRunId = secondRunDocument.RootElement.GetProperty("id").GetGuid();
+        (string[] secondTransactionIds, string[] secondPreAuthIds) = await factory.WithDbContextAsync(async dbContext =>
+        {
+            string[] transactionIds = await dbContext.SimulatedTransactions
+                .AsNoTracking()
+                .Where(x => x.ScenarioRunId == secondRunId)
+                .OrderBy(x => x.ExternalTransactionId)
+                .Select(x => x.ExternalTransactionId)
+                .ToArrayAsync();
+
+            string[] preAuthIds = await dbContext.PreAuthSessions
+                .AsNoTracking()
+                .Where(x => x.ScenarioRunId == secondRunId)
+                .OrderBy(x => x.ExternalReference)
+                .Select(x => x.ExternalReference)
+                .ToArrayAsync();
+
+            return (transactionIds, preAuthIds);
+        });
+
+        Assert.Equal(firstTransactionIds, secondTransactionIds);
+        Assert.Equal(firstPreAuthIds, secondPreAuthIds);
 
         using HttpResponseMessage runDetailResponse = await client.GetAsync($"/api/scenarios/runs/{firstRunId}");
         string runDetailBody = await runDetailResponse.Content.ReadAsStringAsync();
         Assert.Equal(HttpStatusCode.OK, runDetailResponse.StatusCode);
         Assert.Contains("Acknowledged", runDetailBody, StringComparison.Ordinal);
         Assert.Contains("contractValidation", runDetailBody, StringComparison.Ordinal);
+        Assert.Contains(firstOutputSignature, runDetailBody, StringComparison.Ordinal);
 
         using HttpResponseMessage exportResponse = await client.GetAsync("/api/scenarios/export");
         string exportBody = await exportResponse.Content.ReadAsStringAsync();

@@ -48,10 +48,16 @@ internal sealed class BufferedTransactionConfiguration : IEntityTypeConfiguratio
         builder.Property(t => t.LastUploadAttemptAt).HasConversion(Converters.Optional);
         builder.Property(t => t.OrderUuid).HasMaxLength(128);
         builder.Property(t => t.OdooOrderId).HasMaxLength(128);
+        builder.Property(t => t.PreAuthId).HasMaxLength(36);
         builder.Property(t => t.PaymentId).HasMaxLength(128);
         builder.Property(t => t.AcknowledgedAt).HasConversion(Converters.Optional);
         builder.Property(t => t.FiscalStatus).IsRequired().HasMaxLength(16).HasDefaultValue("NONE");
         builder.Property(t => t.LastFiscalAttemptAt).HasConversion(Converters.Optional);
+
+        // Replication columns
+        builder.Property(t => t.ReplicationSeq).HasDefaultValue(0L);
+        builder.Property(t => t.SourceAgentId).HasMaxLength(36);
+        builder.Property(t => t.ReplicatedAt).HasConversion(Converters.Optional);
 
         // ix_bt_dedup — UNIQUE(FccTransactionId, SiteCode)
         builder.HasIndex(t => new { t.FccTransactionId, t.SiteCode })
@@ -70,6 +76,10 @@ internal sealed class BufferedTransactionConfiguration : IEntityTypeConfiguratio
         // ix_bt_cleanup — cleanup sweep by age
         builder.HasIndex(t => new { t.SyncStatus, t.UpdatedAt })
             .HasDatabaseName("ix_bt_cleanup");
+
+        // ix_bt_repl_seq — replication sequence scan
+        builder.HasIndex(t => t.ReplicationSeq)
+            .HasDatabaseName("ix_bt_repl_seq");
     }
 }
 
@@ -109,6 +119,11 @@ internal sealed class PreAuthRecordConfiguration : IEntityTypeConfiguration<PreA
         builder.Property(p => p.ExpiredAt).HasConversion(Converters.Optional);
         builder.Property(p => p.FailedAt).HasConversion(Converters.Optional);
 
+        // Replication columns
+        builder.Property(p => p.ReplicationSeq).HasDefaultValue(0L);
+        builder.Property(p => p.SourceAgentId).HasMaxLength(36);
+        builder.Property(p => p.ReplicatedAt).HasConversion(Converters.Optional);
+
         var activeStatuses = string.Join("','", PreAuthStateMachine.ActiveStatusNames);
 
         // ix_par_idemp — UNIQUE(OdooOrderId, SiteCode) for active records only
@@ -124,6 +139,10 @@ internal sealed class PreAuthRecordConfiguration : IEntityTypeConfiguration<PreA
         // ix_par_expiry — expiry worker scan
         builder.HasIndex(p => new { p.Status, p.ExpiresAt })
             .HasDatabaseName("ix_par_expiry");
+
+        // ix_par_repl_seq — replication sequence scan
+        builder.HasIndex(p => p.ReplicationSeq)
+            .HasDatabaseName("ix_par_repl_seq");
     }
 }
 
@@ -204,5 +223,126 @@ internal sealed class AuditLogEntryConfiguration : IEntityTypeConfiguration<Audi
         // ix_al_time — time-based query / cleanup
         builder.HasIndex(a => a.CreatedAt)
             .HasDatabaseName("ix_al_time");
+    }
+}
+
+internal sealed class PumpLimitConfiguration : IEntityTypeConfiguration<PumpLimit>
+{
+    public void Configure(EntityTypeBuilder<PumpLimit> builder)
+    {
+        builder.ToTable("pump_limits");
+        builder.HasKey(l => l.Id);
+        builder.Property(l => l.Id).ValueGeneratedOnAdd();
+        builder.Property(l => l.Status).IsRequired().HasMaxLength(16);
+        builder.Property(l => l.UpdatedAt).HasConversion(Converters.Required);
+        builder.HasIndex(l => l.FpId).IsUnique().HasDatabaseName("ix_pl_fpid");
+    }
+}
+
+internal sealed class PumpBlockHistoryConfiguration : IEntityTypeConfiguration<PumpBlockHistory>
+{
+    public void Configure(EntityTypeBuilder<PumpBlockHistory> builder)
+    {
+        builder.ToTable("pump_block_history");
+        builder.HasKey(h => h.Id);
+        builder.Property(h => h.Id).ValueGeneratedOnAdd();
+        builder.Property(h => h.ActionType).IsRequired().HasMaxLength(16);
+        builder.Property(h => h.Source).IsRequired().HasMaxLength(32);
+        builder.Property(h => h.Note).HasMaxLength(256);
+        builder.Property(h => h.Timestamp).HasConversion(Converters.Required);
+        builder.Property(h => h.SyncedAtUtc).HasConversion(Converters.Optional);
+        builder.HasIndex(h => new { h.FpId, h.Timestamp }).HasDatabaseName("ix_pbh_fp_time");
+        builder.HasIndex(h => h.IsSynced).HasDatabaseName("ix_pbh_synced");
+    }
+}
+
+internal sealed class AttendantPumpCountConfiguration : IEntityTypeConfiguration<AttendantPumpCount>
+{
+    public void Configure(EntityTypeBuilder<AttendantPumpCount> builder)
+    {
+        builder.ToTable("attendant_pump_counts");
+        builder.HasKey(a => a.Id);
+        builder.Property(a => a.Id).ValueGeneratedOnAdd();
+        builder.Property(a => a.SessionId).IsRequired().HasMaxLength(64);
+        builder.Property(a => a.EmpTagNo).IsRequired().HasMaxLength(64);
+        builder.Property(a => a.CreatedAt).HasConversion(Converters.Required);
+        builder.Property(a => a.UpdatedAt).HasConversion(Converters.Required);
+        builder.HasIndex(a => new { a.SessionId, a.PumpNumber }).IsUnique().HasDatabaseName("ix_apc_session_pump");
+    }
+}
+
+internal sealed class BufferedBnaReportConfiguration : IEntityTypeConfiguration<BufferedBnaReport>
+{
+    public void Configure(EntityTypeBuilder<BufferedBnaReport> builder)
+    {
+        builder.ToTable("bna_reports");
+        builder.HasKey(b => b.Id);
+        builder.Property(b => b.Id).ValueGeneratedOnAdd();
+        builder.Property(b => b.TerminalId).IsRequired().HasMaxLength(64);
+        builder.Property(b => b.ReportedAtUtc).HasConversion(Converters.Required);
+        builder.Property(b => b.CreatedAt).HasConversion(Converters.Required);
+        builder.HasIndex(b => b.IsSynced).HasDatabaseName("ix_bna_synced");
+    }
+}
+
+internal sealed class BufferedPumpTotalsSnapshotConfiguration : IEntityTypeConfiguration<BufferedPumpTotalsSnapshot>
+{
+    public void Configure(EntityTypeBuilder<BufferedPumpTotalsSnapshot> builder)
+    {
+        builder.ToTable("pump_totals_snapshots");
+        builder.HasKey(t => t.Id);
+        builder.Property(t => t.Id).ValueGeneratedOnAdd();
+        builder.Property(t => t.CurrencyCode).IsRequired().HasMaxLength(8);
+        builder.Property(t => t.ObservedAtUtc).HasConversion(Converters.Required);
+        builder.Property(t => t.SyncedAtUtc).HasConversion(Converters.Optional);
+        builder.Property(t => t.CreatedAt).HasConversion(Converters.Required);
+        builder.HasIndex(t => t.IsSynced).HasDatabaseName("ix_pts_synced");
+        builder.HasIndex(t => new { t.PumpNumber, t.ObservedAtUtc }).HasDatabaseName("ix_pts_pump_time");
+    }
+}
+
+internal sealed class BufferedPriceSnapshotConfiguration : IEntityTypeConfiguration<BufferedPriceSnapshot>
+{
+    public void Configure(EntityTypeBuilder<BufferedPriceSnapshot> builder)
+    {
+        builder.ToTable("price_snapshots_buffer");
+        builder.HasKey(p => p.Id);
+        builder.Property(p => p.Id).ValueGeneratedOnAdd();
+        builder.Property(p => p.PriceSetId).IsRequired().HasMaxLength(32);
+        builder.Property(p => p.GradeId).IsRequired().HasMaxLength(64);
+        builder.Property(p => p.GradeName).IsRequired().HasMaxLength(128);
+        builder.Property(p => p.CurrencyCode).IsRequired().HasMaxLength(8);
+        builder.Property(p => p.ObservedAtUtc).HasConversion(Converters.Required);
+        builder.Property(p => p.SyncedAtUtc).HasConversion(Converters.Optional);
+        builder.Property(p => p.CreatedAt).HasConversion(Converters.Required);
+        builder.HasIndex(p => p.IsSynced).HasDatabaseName("ix_psb_synced");
+        builder.HasIndex(p => new { p.GradeId, p.ObservedAtUtc }).HasDatabaseName("ix_psb_grade_time");
+    }
+}
+
+internal sealed class DiagnosticLogCursorRecordConfiguration : IEntityTypeConfiguration<DiagnosticLogCursorRecord>
+{
+    public void Configure(EntityTypeBuilder<DiagnosticLogCursorRecord> builder)
+    {
+        builder.ToTable("diagnostic_log_cursor");
+        builder.HasKey(c => c.Id);
+        builder.Property(c => c.FilePath).HasMaxLength(512);
+        builder.Property(c => c.UpdatedAt).HasConversion(Converters.Required);
+    }
+}
+
+internal sealed class ReplicationStateRecordConfiguration : IEntityTypeConfiguration<ReplicationStateRecord>
+{
+    public void Configure(EntityTypeBuilder<ReplicationStateRecord> builder)
+    {
+        builder.ToTable("replication_state");
+        builder.HasKey(r => r.Id);
+
+        builder.Property(r => r.PrimaryAgentId).HasMaxLength(36);
+        builder.Property(r => r.ConfigVersion).HasMaxLength(64);
+
+        builder.Property(r => r.LastSnapshotAt).HasConversion(Converters.Optional);
+        builder.Property(r => r.LastDeltaSyncAt).HasConversion(Converters.Optional);
+        builder.Property(r => r.UpdatedAt).HasConversion(Converters.Required);
     }
 }

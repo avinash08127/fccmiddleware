@@ -71,6 +71,17 @@ public sealed class PreAuthRecord
 
     public string SchemaVersion { get; set; } = "1.0";
 
+    // ── Replication (Multi-Agent HA) ──────────────────────────────────────
+
+    /// <summary>Monotonic replication sequence assigned by the primary. Default 0 (unassigned).</summary>
+    public long ReplicationSeq { get; set; }
+
+    /// <summary>Agent ID that originally created this record. Null for pre-replication records.</summary>
+    public string? SourceAgentId { get; set; }
+
+    /// <summary>When this record was replicated from the primary. Null for locally-created records.</summary>
+    public DateTimeOffset? ReplicatedAt { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

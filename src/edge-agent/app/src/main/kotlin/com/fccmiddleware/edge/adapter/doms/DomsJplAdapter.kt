@@ -35,7 +35,7 @@ class DomsJplAdapter(
     /** Optional callback invoked on the raw TCP socket before connect().
      *  Used to bind FCC traffic to WiFi via Android Network.bindSocket(). */
     private val socketBinder: ((java.net.Socket) -> Unit)? = null,
-) : IFccAdapter, IFccConnectionLifecycle, Closeable {
+) : IFccAdapter, IFccConnectionLifecycle, IFccPumpControl, IFccPriceManagement, IFccTotalsProvider, Closeable {
 
     override val pumpStatusCapability = PumpStatusCapability.LIVE
 
@@ -303,6 +303,96 @@ class DomsJplAdapter(
         return true
     }
 
+    // ── IFccPumpControl ─────────────────────────────────────────────────────
+
+    override suspend fun emergencyStop(fpId: Int): PumpControlResult {
+        if (!isConnected) return PumpControlResult(success = false, errorMessage = "DOMS TCP not connected")
+        return try {
+            val request = DomsPumpControlHandler.buildEmergencyStopRequest(fpId)
+            val response = tcpClient.sendAndReceive(request, DomsPumpControlHandler.EMERGENCY_STOP_RESPONSE)
+            DomsPumpControlHandler.validateControlResponse(response)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "emergencyStop failed for fpId=$fpId: ${e.message}")
+            PumpControlResult(success = false, errorMessage = "Emergency stop failed: ${e.message}")
+        }
+    }
+
+    override suspend fun cancelEmergencyStop(fpId: Int): PumpControlResult {
+        if (!isConnected) return PumpControlResult(success = false, errorMessage = "DOMS TCP not connected")
+        return try {
+            val request = DomsPumpControlHandler.buildCancelEmergencyStopRequest(fpId)
+            val response = tcpClient.sendAndReceive(request, DomsPumpControlHandler.CANCEL_EMERGENCY_STOP_RESPONSE)
+            DomsPumpControlHandler.validateControlResponse(response)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "cancelEmergencyStop failed for fpId=$fpId: ${e.message}")
+            PumpControlResult(success = false, errorMessage = "Cancel emergency stop failed: ${e.message}")
+        }
+    }
+
+    override suspend fun closePump(fpId: Int): PumpControlResult {
+        if (!isConnected) return PumpControlResult(success = false, errorMessage = "DOMS TCP not connected")
+        return try {
+            val request = DomsPumpControlHandler.buildCloseRequest(fpId)
+            val response = tcpClient.sendAndReceive(request, DomsPumpControlHandler.CLOSE_RESPONSE)
+            DomsPumpControlHandler.validateControlResponse(response)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "closePump failed for fpId=$fpId: ${e.message}")
+            PumpControlResult(success = false, errorMessage = "Close pump failed: ${e.message}")
+        }
+    }
+
+    override suspend fun openPump(fpId: Int): PumpControlResult {
+        if (!isConnected) return PumpControlResult(success = false, errorMessage = "DOMS TCP not connected")
+        return try {
+            val request = DomsPumpControlHandler.buildOpenRequest(fpId)
+            val response = tcpClient.sendAndReceive(request, DomsPumpControlHandler.OPEN_RESPONSE)
+            DomsPumpControlHandler.validateControlResponse(response)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "openPump failed for fpId=$fpId: ${e.message}")
+            PumpControlResult(success = false, errorMessage = "Open pump failed: ${e.message}")
+        }
+    }
+
+    // ── IFccPriceManagement ─────────────────────────────────────────────────
+
+    override suspend fun getCurrentPrices(): PriceSetSnapshot? {
+        if (!isConnected) return null
+        return try {
+            val request = DomsPriceHandler.buildPriceSetRequest()
+            val response = tcpClient.sendAndReceive(request, DomsPriceHandler.PRICE_SET_RESPONSE)
+            DomsPriceHandler.parsePriceSetResponse(response, config.currencyCode)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "getCurrentPrices failed: ${e.message}")
+            null
+        }
+    }
+
+    override suspend fun updatePrices(command: PriceUpdateCommand): PriceUpdateResult {
+        if (!isConnected) return PriceUpdateResult(success = false, errorMessage = "DOMS TCP not connected")
+        return try {
+            val request = DomsPriceHandler.buildPriceUpdateRequest(command)
+            val response = tcpClient.sendAndReceive(request, DomsPriceHandler.PRICE_UPDATE_RESPONSE)
+            DomsPriceHandler.validatePriceUpdateResponse(response)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "updatePrices failed: ${e.message}")
+            PriceUpdateResult(success = false, errorMessage = "Price update failed: ${e.message}")
+        }
+    }
+
+    // ── IFccTotalsProvider ──────────────────────────────────────────────────
+
+    override suspend fun getPumpTotals(): List<PumpTotals> {
+        if (!isConnected) return emptyList()
+        return try {
+            val request = DomsTotalsHandler.buildTotalsRequest()
+            val response = tcpClient.sendAndReceive(request, DomsTotalsHandler.TOTALS_RESPONSE)
+            DomsTotalsHandler.parseTotalsResponse(response, config.currencyCode, config.pumpNumberOffset)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "getPumpTotals failed: ${e.message}")
+            emptyList()
+        }
+    }
+
     // ── Unsolicited message handling ─────────────────────────────────────────
 
     private fun handleUnsolicitedMessage(message: com.fccmiddleware.edge.adapter.doms.jpl.JplMessage) {
@@ -341,6 +431,25 @@ class DomsJplAdapter(
                     volumeMicrolitres = DomsCanonicalMapper.centilitresToMicrolitres(volumeCl),
                     amountMinorUnits = DomsCanonicalMapper.domsAmountToMinorUnits(amountX10),
                 )
+            }
+            "EptBnaReport" -> {
+                val terminalId = message.data["TerminalId"] ?: return
+                val notesAccepted = message.data["NotesAccepted"]?.toIntOrNull() ?: return
+                eventListener?.onBnaReport(terminalId, notesAccepted)
+            }
+            "DispenserInstallData" -> {
+                val dispenserId = message.data["DispenserId"] ?: return
+                val model = message.data["Model"] ?: return
+                eventListener?.onDispenserInstallData(dispenserId, model)
+            }
+            "EptInfo" -> {
+                val terminalId = message.data["TerminalId"] ?: return
+                val version = message.data["Version"] ?: return
+                eventListener?.onEptInfoReceived(terminalId, version)
+            }
+            "FcPriceSetChanged" -> {
+                val priceSetId = message.data["PriceSetId"] ?: return
+                eventListener?.onPriceChanged(priceSetId)
             }
         }
     }

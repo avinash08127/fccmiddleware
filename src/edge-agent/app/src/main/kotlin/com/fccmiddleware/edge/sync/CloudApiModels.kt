@@ -3,6 +3,7 @@ package com.fccmiddleware.edge.sync
 import com.fccmiddleware.edge.security.Sensitive
 import com.fccmiddleware.edge.security.SensitiveFieldFilter
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 // ---------------------------------------------------------------------------
@@ -14,6 +15,8 @@ import kotlinx.serialization.json.JsonObject
 data class CloudUploadRequest(
     /** Batch of canonical transactions in ascending completedAt order. Max 500. */
     val transactions: List<CloudTransactionDto>,
+    /** Current site leader epoch for cloud stale-writer fencing. */
+    val leaderEpoch: Long? = null,
     /** Batch-level idempotency key. Cloud caches results keyed by this ID. */
     val uploadBatchId: String? = null,
 )
@@ -21,18 +24,18 @@ data class CloudUploadRequest(
 /**
  * Edge Agent → Cloud upload DTO.
  *
- * Mirrors the cloud-side CanonicalTransaction schema v1 field-for-field.
+ * Aligned 1:1 with the cloud-side [UploadTransactionRecord] contract.
  * Money fields: Long minor units. Timestamps: ISO 8601 UTC. UUIDs: String.
  */
 @Serializable
 data class CloudTransactionDto(
-    /** Middleware-generated UUID (local buffer id). */
-    val id: String,
-
     /** Opaque FCC transaction ID. Dedup key together with siteCode. */
     val fccTransactionId: String,
 
     val siteCode: String,
+
+    /** FCC vendor name (enum string). */
+    val fccVendor: String,
 
     val pumpNumber: Int,
 
@@ -58,40 +61,14 @@ data class CloudTransactionDto(
     /** ISO 8601 UTC dispense completion. */
     val completedAt: String,
 
-    /** FCC vendor name (enum string). */
-    val fccVendor: String,
+    /** FCC-side pre-auth correlation ID echoed on the final dispense when available. */
+    val fccCorrelationId: String? = null,
 
-    /** Legal entity owning the site. Denormalised for row-level scoping. */
-    val legalEntityId: String,
-
-    /** Transaction lifecycle status (PENDING until cloud confirms). */
-    val status: String,
-
-    /** Which ingestion path delivered this transaction (EDGE_UPLOAD). */
-    val ingestionSource: String,
-
-    /** ISO 8601 UTC when Edge Agent first persisted this transaction. */
-    val ingestedAt: String,
-
-    /** ISO 8601 UTC of last status change. */
-    val updatedAt: String,
-
-    val schemaVersion: Int,
-
-    /** Always false for Edge-uploaded records; cloud performs dedup check. */
-    val isDuplicate: Boolean = false,
-
-    /** Trace correlation ID. */
-    val correlationId: String,
+    /** Odoo order ID echoed by the FCC when available. */
+    val odooOrderId: String? = null,
 
     val fiscalReceiptNumber: String? = null,
     val attendantId: String? = null,
-
-    /**
-     * Raw FCC payload JSON. Sent to cloud for archival when present.
-     * Cloud will convert to rawPayloadRef (S3 URI) and drop the inline payload.
-     */
-    val rawPayloadJson: String? = null,
 )
 
 // ---------------------------------------------------------------------------
@@ -172,16 +149,24 @@ sealed class CloudConfigPollResult {
         val rawJson: String,
         /** ETag header value (configVersion as string). */
         val etag: String?,
+        /** Cloud's peer directory version from X-Peer-Directory-Version header. */
+        val peerDirectoryVersion: Long? = null,
     ) : CloudConfigPollResult()
 
-    /** HTTP 304 — config unchanged since last poll. */
-    data object NotModified : CloudConfigPollResult()
+    /** HTTP 304 — config unchanged since last poll. Peer directory version still captured. */
+    data class NotModified(
+        /** Cloud's peer directory version from X-Peer-Directory-Version header. */
+        val peerDirectoryVersion: Long? = null,
+    ) : CloudConfigPollResult()
 
     /** HTTP 401 — token expired; caller should refresh and retry. */
     data object Unauthorized : CloudConfigPollResult()
 
     /** HTTP 403 — forbidden (possibly decommissioned). */
     data class Forbidden(val errorCode: String?) : CloudConfigPollResult()
+
+    /** HTTP 404 — config or device not found (permanent error, do not retry). */
+    data class NotFound(val errorCode: String?, val message: String?) : CloudConfigPollResult()
 
     /** M-15: HTTP 429 — rate limited by cloud. */
     data class RateLimited(val retryAfterSeconds: Long?) : CloudConfigPollResult()
@@ -338,6 +323,12 @@ sealed class CloudRegistrationResult {
     /** HTTP 400/409 — bad request or conflict (token used, site mismatch, etc.). */
     data class Rejected(val errorCode: String, val message: String) : CloudRegistrationResult()
 
+    /** HTTP 401 — invalid or expired provisioning token (permanent, do not retry). */
+    data object Unauthorized : CloudRegistrationResult()
+
+    /** HTTP 429 — rate limited. */
+    data class RateLimited(val retryAfterSeconds: Long?) : CloudRegistrationResult()
+
     /** Network or unexpected HTTP error. */
     data class TransportError(val message: String) : CloudRegistrationResult()
 }
@@ -388,6 +379,8 @@ enum class AgentCommandType {
     FORCE_CONFIG_PULL,
     RESET_LOCAL_STATE,
     DECOMMISSION,
+    PLANNED_SWITCHOVER,
+    REFRESH_CONFIG,
 }
 
 @Serializable
@@ -418,7 +411,7 @@ data class EdgeCommandDto(
     val commandType: AgentCommandType,
     val status: AgentCommandStatus,
     val reason: String,
-    val payload: JsonObject? = null,
+    val payload: JsonElement? = null,
     val createdAt: String,
     val expiresAt: String,
 )
@@ -429,7 +422,7 @@ data class CommandAckRequest(
     val handledAtUtc: String? = null,
     val failureCode: String? = null,
     val failureMessage: String? = null,
-    val result: JsonObject? = null,
+    val result: JsonElement? = null,
 )
 
 @Serializable
@@ -441,9 +434,15 @@ data class CommandAckResponse(
 )
 
 sealed class CloudCommandPollResult {
-    data class Success(val response: EdgeCommandPollResponse) : CloudCommandPollResult()
+    data class Success(
+        val response: EdgeCommandPollResponse,
+        /** Cloud's peer directory version from X-Peer-Directory-Version header. */
+        val peerDirectoryVersion: Long? = null,
+    ) : CloudCommandPollResult()
     data object Unauthorized : CloudCommandPollResult()
     data class Forbidden(val errorCode: String?) : CloudCommandPollResult()
+    /** HTTP 404 — FEATURE_DISABLED (permanent, do not retry). */
+    data class NotFound(val errorCode: String?, val message: String?) : CloudCommandPollResult()
     data class RateLimited(val retryAfterSeconds: Long?) : CloudCommandPollResult()
     data class TransportError(val message: String) : CloudCommandPollResult()
 }
@@ -452,6 +451,8 @@ sealed class CloudCommandAckResult {
     data class Success(val response: CommandAckResponse) : CloudCommandAckResult()
     data object Unauthorized : CloudCommandAckResult()
     data class Forbidden(val errorCode: String?) : CloudCommandAckResult()
+    /** HTTP 404 — COMMAND_NOT_FOUND (permanent, do not retry). */
+    data class NotFound(val errorCode: String?, val message: String?) : CloudCommandAckResult()
     data class Conflict(val errorCode: String?, val message: String?) : CloudCommandAckResult()
     data class TransportError(val message: String) : CloudCommandAckResult()
 }
@@ -475,6 +476,10 @@ sealed class CloudInstallationUpsertResult {
     data object Success : CloudInstallationUpsertResult()
     data object Unauthorized : CloudInstallationUpsertResult()
     data class Forbidden(val errorCode: String?) : CloudInstallationUpsertResult()
+    /** HTTP 404 — FEATURE_DISABLED (permanent, do not retry). */
+    data class NotFound(val errorCode: String?, val message: String?) : CloudInstallationUpsertResult()
+    /** HTTP 409 — INSTALLATION_OWNERSHIP_CONFLICT (permanent, do not retry). */
+    data class Conflict(val errorCode: String?, val message: String?) : CloudInstallationUpsertResult()
     data class TransportError(val message: String) : CloudInstallationUpsertResult()
 }
 
@@ -526,6 +531,8 @@ data class PreAuthForwardRequest(
     val requestedAt: String,
     /** ISO 8601 UTC. */
     val expiresAt: String,
+    /** Current site leader epoch for cloud stale-writer fencing. */
+    val leaderEpoch: Long? = null,
     val fccCorrelationId: String? = null,
     val fccAuthorizationCode: String? = null,
     val vehicleNumber: String? = null,
@@ -552,13 +559,20 @@ data class PreAuthForwardResponse(
 /** Result of calling POST /api/v1/preauth. */
 sealed class CloudPreAuthForwardResult {
     /** HTTP 200/201 — pre-auth record created or updated on cloud. */
-    data class Success(val response: PreAuthForwardResponse) : CloudPreAuthForwardResult()
+    data class Success(
+        val response: PreAuthForwardResponse,
+        /** Cloud's peer directory version from X-Peer-Directory-Version header. */
+        val peerDirectoryVersion: Long? = null,
+    ) : CloudPreAuthForwardResult()
 
     /** HTTP 401 — token expired; caller should refresh and retry. */
     data object Unauthorized : CloudPreAuthForwardResult()
 
     /** HTTP 403 — forbidden (possibly decommissioned). */
     data class Forbidden(val errorCode: String?) : CloudPreAuthForwardResult()
+
+    /** HTTP 400 — validation failure (permanent, do not retry). */
+    data class BadRequest(val errorCode: String?, val message: String?) : CloudPreAuthForwardResult()
 
     /** M-15: HTTP 429 — rate limited by cloud. */
     data class RateLimited(val retryAfterSeconds: Long?) : CloudPreAuthForwardResult()
@@ -598,6 +612,12 @@ sealed class CloudVersionCheckResult {
     /** HTTP 401 — token expired; caller should refresh and retry. */
     data object Unauthorized : CloudVersionCheckResult()
 
+    /** HTTP 400 — validation error (e.g. missing agentVersion param). */
+    data class BadRequest(val errorCode: String?, val message: String?) : CloudVersionCheckResult()
+
+    /** HTTP 500 — server-side configuration error. */
+    data class ServerError(val message: String) : CloudVersionCheckResult()
+
     /** Network or unexpected HTTP error. */
     data class TransportError(val message: String) : CloudVersionCheckResult()
 }
@@ -612,6 +632,12 @@ sealed class CloudTelemetryResult {
 
     /** HTTP 403 — forbidden (possibly decommissioned). */
     data class Forbidden(val errorCode: String?) : CloudTelemetryResult()
+
+    /** HTTP 400 — malformed payload (permanent, do not retry). */
+    data class BadRequest(val errorCode: String?, val message: String?) : CloudTelemetryResult()
+
+    /** HTTP 404 — device not found (permanent, do not retry). */
+    data class NotFound(val errorCode: String?, val message: String?) : CloudTelemetryResult()
 
     /** M-15: HTTP 429 — rate limited by cloud. */
     data class RateLimited(val retryAfterSeconds: Long?) : CloudTelemetryResult()
@@ -635,4 +661,66 @@ data class DiagnosticLogUploadRequest(
     val legalEntityId: String,
     val uploadedAtUtc: String,
     val logEntries: List<String>,
+)
+
+// ---------------------------------------------------------------------------
+// Site data uploads (Phase 8) — BNA, totals, prices, pump control history
+// ---------------------------------------------------------------------------
+
+/** POST /api/v1/sites/{siteCode}/bna-reports */
+@Serializable
+data class BnaReportBatchUpload(
+    val reports: List<BnaReportUploadItem>,
+)
+
+@Serializable
+data class BnaReportUploadItem(
+    val terminalId: String? = null,
+    val notesAccepted: Int = 0,
+    val reportedAtUtc: String? = null,
+)
+
+/** POST /api/v1/sites/{siteCode}/pump-totals */
+@Serializable
+data class PumpTotalsBatchUpload(
+    val totals: List<PumpTotalsUploadItem>,
+)
+
+@Serializable
+data class PumpTotalsUploadItem(
+    val pumpNumber: Int,
+    val totalVolumeMicrolitres: Long,
+    val totalAmountMinorUnits: Long,
+    val observedAtUtc: String? = null,
+)
+
+/** POST /api/v1/sites/{siteCode}/pump-control-history */
+@Serializable
+data class PumpControlHistoryBatchUpload(
+    val events: List<PumpControlHistoryUploadItem>,
+)
+
+@Serializable
+data class PumpControlHistoryUploadItem(
+    val pumpNumber: Int,
+    val actionType: String? = null,
+    val source: String? = null,
+    val note: String? = null,
+    val actionAtUtc: String? = null,
+)
+
+/** POST /api/v1/sites/{siteCode}/price-snapshots */
+@Serializable
+data class PriceSnapshotBatchUpload(
+    val snapshots: List<PriceSnapshotUploadItem>,
+)
+
+@Serializable
+data class PriceSnapshotUploadItem(
+    val priceSetId: String? = null,
+    val gradeId: String? = null,
+    val gradeName: String? = null,
+    val priceMinorUnits: Long = 0,
+    val currencyCode: String? = null,
+    val observedAtUtc: String? = null,
 )

@@ -47,6 +47,9 @@ internal sealed class SiteConfiguration : IEntityTypeConfiguration<Site>
         builder.Property(e => e.SyncedAt).HasColumnName("synced_at").IsRequired();
         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()").IsRequired();
         builder.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("now()").IsRequired();
+        builder.Property(e => e.PeerDirectoryVersion).HasColumnName("peer_directory_version").HasDefaultValue(0L).IsRequired();
+        builder.Property(e => e.HaLeaderEpoch).HasColumnName("ha_leader_epoch").HasDefaultValue(0L).IsRequired();
+        builder.Property(e => e.HaLeaderAgentId).HasColumnName("ha_leader_agent_id");
 
         builder.HasOne(e => e.LegalEntity)
             .WithMany(le => le.Sites)

@@ -72,6 +72,12 @@ class CloudUploadWorker(
     private val configManager: ConfigManager,
 ) {
 
+    /**
+     * P2-08: Callback invoked when a cloud response indicates the peer directory is stale.
+     * Wired by [CadenceController] to trigger [CadenceController.triggerImmediateConfigPoll].
+     */
+    var onPeerDirectoryStale: (() -> Unit)? = null
+
     companion object {
         private const val TAG = "CloudUploadWorker"
         private const val DECOMMISSIONED_ERROR_CODE = "DEVICE_DECOMMISSIONED"
@@ -342,6 +348,14 @@ class CloudUploadWorker(
                     AppLogger.w(TAG, "Telemetry forbidden: ${result.errorCode}")
                 }
 
+                is CloudTelemetryResult.BadRequest -> {
+                    AppLogger.w(TAG, "Telemetry rejected (400): ${result.errorCode} — ${result.message}")
+                }
+
+                is CloudTelemetryResult.NotFound -> {
+                    AppLogger.w(TAG, "Telemetry device not found (404): ${result.errorCode}")
+                }
+
                 is CloudTelemetryResult.TransportError -> {
                     AppLogger.w(TAG, "Telemetry submission failed: ${result.message}")
                 }
@@ -414,6 +428,10 @@ class CloudUploadWorker(
                 }
                 is CloudDiagnosticLogResult.Forbidden ->
                     AppLogger.w(TAG, "Diagnostic log upload forbidden: ${result.errorCode}")
+                is CloudDiagnosticLogResult.BadRequest ->
+                    AppLogger.w(TAG, "Diagnostic log upload rejected (400): ${result.errorCode}")
+                is CloudDiagnosticLogResult.NotFound ->
+                    AppLogger.w(TAG, "Diagnostic log upload device not found (404): ${result.errorCode}")
                 is CloudDiagnosticLogResult.TransportError ->
                     AppLogger.w(TAG, "Diagnostic log upload failed: ${result.message}")
             }
@@ -596,7 +614,11 @@ class CloudUploadWorker(
     ): UploadAttemptResult {
         val request = buildUploadRequest(batch, provider)
         return when (val result = client.uploadBatch(request, token)) {
-            is CloudUploadResult.Success -> UploadAttemptResult.Success(result.response)
+            is CloudUploadResult.Success -> {
+                // P2-08: Check peer directory version from upload response
+                checkPeerDirectoryVersion(result.peerDirectoryVersion)
+                UploadAttemptResult.Success(result.response)
+            }
 
             is CloudUploadResult.Unauthorized -> {
                 // Attempt one token refresh then retry
@@ -617,13 +639,20 @@ class CloudUploadWorker(
                 }
                 AppLogger.i(TAG, "Token refreshed; retrying upload batch")
                 when (val retryResult = client.uploadBatch(request, freshToken)) {
-                    is CloudUploadResult.Success -> UploadAttemptResult.Success(retryResult.response)
+                    is CloudUploadResult.Success -> {
+                        checkPeerDirectoryVersion(retryResult.peerDirectoryVersion)
+                        UploadAttemptResult.Success(retryResult.response)
+                    }
                     is CloudUploadResult.Unauthorized ->
                         UploadAttemptResult.TransportFailure("401 Unauthorized after token refresh retry")
                     is CloudUploadResult.Forbidden ->
                         resolveForbidden(retryResult.errorCode)
                     is CloudUploadResult.RateLimited ->
                         UploadAttemptResult.RateLimited(retryResult.retryAfterSeconds)
+                    is CloudUploadResult.Conflict -> {
+                        AppLogger.w(TAG, "Upload 409 conflict after retry: ${retryResult.errorCode} — ${retryResult.message}")
+                        UploadAttemptResult.TransportFailure("409 Conflict: ${retryResult.errorCode} — HA fencing rejected upload")
+                    }
                     is CloudUploadResult.PayloadTooLarge ->
                         UploadAttemptResult.PayloadTooLarge
                     is CloudUploadResult.TransportError ->
@@ -639,8 +668,25 @@ class CloudUploadWorker(
 
             is CloudUploadResult.Forbidden -> resolveForbidden(result.errorCode)
 
+            is CloudUploadResult.Conflict -> {
+                AppLogger.w(TAG, "Upload 409 conflict: ${result.errorCode} — ${result.message}")
+                UploadAttemptResult.TransportFailure("409 Conflict: ${result.errorCode} — HA fencing rejected upload")
+            }
+
             is CloudUploadResult.TransportError ->
                 UploadAttemptResult.TransportFailure(result.message)
+        }
+    }
+
+    /** P2-08: Check if cloud's peer directory version indicates staleness and trigger config refresh. */
+    private fun checkPeerDirectoryVersion(cloudVersion: Long?) {
+        if (cloudVersion == null) return
+        if (configManager.isPeerDirectoryStale(cloudVersion)) {
+            AppLogger.i(TAG, "Peer directory stale: cloud=$cloudVersion > local=${configManager.currentPeerDirectoryVersion}")
+            configManager.updatePeerDirectoryVersion(cloudVersion)
+            onPeerDirectoryStale?.invoke()
+        } else {
+            configManager.updatePeerDirectoryVersion(cloudVersion)
         }
     }
 
@@ -859,18 +905,20 @@ class CloudUploadWorker(
         val batchId = java.util.UUID.randomUUID().toString()
         // AP-003: Only include raw payloads when config opts in via buffer.persistRawPayloads.
         val includeRawPayload = configManager.config.value?.buffer?.persistRawPayloads ?: false
+        val leaderEpoch = configManager.config.value?.siteHa?.leaderEpoch?.takeIf { it > 0 }
         AppLogger.i(TAG, "Upload batch: batchId=$batchId records=${batch.size}")
         return CloudUploadRequest(
             transactions = batch.map { tx -> tx.toDto(legalEntityId, includeRawPayload) },
+            leaderEpoch = leaderEpoch,
             uploadBatchId = batchId,
         )
     }
 
     private fun BufferedTransaction.toDto(legalEntityId: String, includeRawPayload: Boolean): CloudTransactionDto =
         CloudTransactionDto(
-            id = id,
             fccTransactionId = fccTransactionId,
             siteCode = siteCode,
+            fccVendor = fccVendor,
             pumpNumber = pumpNumber,
             nozzleNumber = nozzleNumber,
             productCode = productCode,
@@ -880,20 +928,10 @@ class CloudUploadWorker(
             currencyCode = currencyCode,
             startedAt = startedAt,
             completedAt = completedAt,
-            fccVendor = fccVendor,
-            legalEntityId = legalEntityId,
-            status = status,
-            ingestionSource = ingestionSource,
-            ingestedAt = createdAt,   // createdAt = ingestedAt per BufferManager.toEntity()
-            updatedAt = updatedAt,
-            schemaVersion = schemaVersion,
-            isDuplicate = false,
-            correlationId = correlationId,
+            fccCorrelationId = fccCorrelationId,
+            odooOrderId = odooOrderId,
             fiscalReceiptNumber = fiscalReceiptNumber,
             attendantId = attendantId,
-            // AP-003: Only include raw payload when config opts in (buffer.persistRawPayloads).
-            // Canonical fields are sufficient for cloud processing; raw payloads add 2-5 KB per record.
-            rawPayloadJson = if (includeRawPayload) rawPayloadJson else null,
         )
 
     /**

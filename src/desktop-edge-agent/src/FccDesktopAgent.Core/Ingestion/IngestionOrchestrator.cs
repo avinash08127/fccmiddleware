@@ -429,7 +429,7 @@ public sealed class IngestionOrchestrator : IIngestionOrchestrator
     {
         // Only activate for FCC_DIRECT mode with Advatec vendor
         if (siteConfig?.Fiscalization?.Mode is not "FCC_DIRECT"
-            || !string.Equals(siteConfig.Fiscalization.Vendor, "ADVATEC", StringComparison.OrdinalIgnoreCase))
+            || !string.Equals(siteConfig.Fcc?.Vendor, "ADVATEC", StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }

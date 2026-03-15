@@ -82,7 +82,7 @@ public sealed class RegisterDeviceHandler
 
         if (!TryResolveHaMetadata(request, out var haMetadata, out var haError))
         {
-            return Result<RegisterDeviceResult>.Failure(haError!.Code, haError.Message);
+            return Result<RegisterDeviceResult>.Failure(haError!.Value.Code, haError.Value.Message);
         }
 
         var activeAgents = await _db.FindActiveAgentsForSiteAsync(site.Id, cancellationToken);
@@ -146,6 +146,26 @@ public sealed class RegisterDeviceHandler
         if (replacementTarget is not null && replacementTarget.Id != sameSerialActiveAgent?.Id)
         {
             await DeactivateExistingAgent(replacementTarget, now, cancellationToken);
+            site.PeerDirectoryVersion++;
+
+            // P2-07: Enqueue REFRESH_CONFIG for remaining active agents after deactivation
+            foreach (var peer in activeAgents.Where(a => a.Id != replacementTarget.Id && a.IsActive))
+            {
+                _db.AddAgentCommand(new AgentCommand
+                {
+                    Id = Guid.NewGuid(),
+                    DeviceId = peer.Id,
+                    LegalEntityId = site.LegalEntityId,
+                    SiteCode = request.SiteCode,
+                    CommandType = AgentCommandType.REFRESH_CONFIG,
+                    Reason = $"Peer directory changed: agent {replacementTarget.Id} deactivated",
+                    Status = AgentCommandStatus.PENDING,
+                    CreatedAt = now,
+                    ExpiresAt = now.AddMinutes(10),
+                    UpdatedAt = now,
+                });
+            }
+
             _logger.LogInformation(
                 "Deactivated existing agent {OldDeviceId} for site {SiteCode} (approvedReplacement={ApprovedReplacement})",
                 replacementTarget.Id,
@@ -252,7 +272,9 @@ public sealed class RegisterDeviceHandler
                 },
                 ReusedExistingIdentity = sameSerialActiveAgent is not null,
                 ReplacedPreviousAgent = replacementTarget is not null && replacementTarget.Id != sameSerialActiveAgent?.Id,
-                ReplacedDeviceId = replacementTarget is not null && replacementTarget.Id != sameSerialActiveAgent?.Id ? replacementTarget.Id : null,
+                ReplacedDeviceId = replacementTarget is not null && replacementTarget.Id != sameSerialActiveAgent?.Id
+                    ? (Guid?)replacementTarget.Id
+                    : null,
                 ActiveAgentCountAtRegistration = activeAgents.Count,
                 RegisteredAt = now,
                 SuspiciousRegistrationApprovedAt = suspendedRegistration?.ApprovalGrantedAt
@@ -277,6 +299,27 @@ public sealed class RegisterDeviceHandler
                 UsedAt = now
             })
         });
+
+        site.PeerDirectoryVersion++;
+
+        // P2-07: Enqueue REFRESH_CONFIG for all other active agents at the site
+        // so they detect the new peer directory and refresh their config.
+        foreach (var peer in activeAgents.Where(a => a.Id != deviceId && a.IsActive))
+        {
+            _db.AddAgentCommand(new AgentCommand
+            {
+                Id = Guid.NewGuid(),
+                DeviceId = peer.Id,
+                LegalEntityId = site.LegalEntityId,
+                SiteCode = request.SiteCode,
+                CommandType = AgentCommandType.REFRESH_CONFIG,
+                Reason = $"Peer directory changed: new agent {deviceId} registered",
+                Status = AgentCommandStatus.PENDING,
+                CreatedAt = now,
+                ExpiresAt = now.AddMinutes(10),
+                UpdatedAt = now,
+            });
+        }
 
         var saved = await _db.TrySaveChangesAsync(cancellationToken);
         if (!saved)
@@ -574,7 +617,7 @@ public sealed class RegisterDeviceHandler
         }
 
         var requestedRoleCapability = NormalizeRoleCapability(request.RoleCapability);
-        if (request.RoleCapability is not null && requestedRoleCapability is null)
+        if (!string.IsNullOrWhiteSpace(request.RoleCapability) && requestedRoleCapability is null)
         {
             error = ("INVALID_ROLE_CAPABILITY",
                 $"Role capability '{request.RoleCapability}' is not supported.");

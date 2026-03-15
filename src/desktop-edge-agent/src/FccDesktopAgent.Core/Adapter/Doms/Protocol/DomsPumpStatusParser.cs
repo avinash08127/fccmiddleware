@@ -71,6 +71,9 @@ public static class DomsPumpStatusParser
             ? nid
             : 1;
 
+        // Extract supplemental parameters when present (FpStatus_3 extended data)
+        PumpStatusSupplemental? supplemental = TryParseSupplemental(data);
+
         return
         [
             new PumpStatus
@@ -87,7 +90,98 @@ public static class DomsPumpStatusParser
                 CurrentVolumeLitres = data.TryGetValue("CurrentVolume", out var vol) ? vol : null,
                 CurrentAmount = data.TryGetValue("CurrentAmount", out var amt) ? amt : null,
                 UnitPrice = data.TryGetValue("UnitPrice", out var up) ? up : null,
+                Supplemental = supplemental,
             }
         ];
+    }
+
+    /// <summary>
+    /// Attempt to extract supplemental parameters from JPL data.
+    /// Returns null if no supplemental fields are present (backwards compatible).
+    /// </summary>
+    private static PumpStatusSupplemental? TryParseSupplemental(IReadOnlyDictionary<string, string> data)
+    {
+        // Check if any supplemental fields exist
+        bool hasAny = data.ContainsKey("FpAvailableGrades") ||
+                      data.ContainsKey("FpAvailableStorageModules") ||
+                      data.ContainsKey("FpGradeOptionNo") ||
+                      data.ContainsKey("FpFuellingVolumeExt") ||
+                      data.ContainsKey("FpFuellingMoneyExt") ||
+                      data.ContainsKey("AttendantAccountId") ||
+                      data.ContainsKey("FpBlockingStatus") ||
+                      data.ContainsKey("FpOperationModeNo") ||
+                      data.ContainsKey("PgId") ||
+                      data.ContainsKey("NozzleTagReaderId") ||
+                      data.ContainsKey("FpAlarmStatus") ||
+                      data.ContainsKey("NozzleDetailId");
+
+        if (!hasAny)
+            return null;
+
+        return new PumpStatusSupplemental
+        {
+            AvailableStorageModules = ParseIntList(data, "FpAvailableStorageModules"),
+            AvailableGrades = ParseIntList(data, "FpAvailableGrades"),
+            GradeOptionNo = ParseIntOrNull(data, "FpGradeOptionNo"),
+            FuellingVolumeExtended = ParseLongOrNull(data, "FpFuellingVolumeExt"),
+            FuellingMoneyExtended = ParseLongOrNull(data, "FpFuellingMoneyExt"),
+            AttendantAccountId = data.TryGetValue("AttendantAccountId", out var attId) ? attId : null,
+            BlockingStatus = data.TryGetValue("FpBlockingStatus", out var bs) ? bs : null,
+            NozzleDetail = ParseNozzleDetail(data),
+            OperationModeNo = ParseIntOrNull(data, "FpOperationModeNo"),
+            PriceGroupId = ParseIntOrNull(data, "PgId"),
+            NozzleTagReaderId = data.TryGetValue("NozzleTagReaderId", out var ntr) ? ntr : null,
+            AlarmStatus = data.TryGetValue("FpAlarmStatus", out var alarm) ? alarm : null,
+            MinPresetValues = ParseLongList(data, "FpMinPresetValues"),
+        };
+    }
+
+    private static int? ParseIntOrNull(IReadOnlyDictionary<string, string> data, string key)
+        => data.TryGetValue(key, out var val) && int.TryParse(val, out var result) ? result : null;
+
+    private static long? ParseLongOrNull(IReadOnlyDictionary<string, string> data, string key)
+        => data.TryGetValue(key, out var val) && long.TryParse(val, out var result) ? result : null;
+
+    private static IReadOnlyList<int>? ParseIntList(IReadOnlyDictionary<string, string> data, string key)
+    {
+        if (!data.TryGetValue(key, out var val) || string.IsNullOrWhiteSpace(val))
+            return null;
+
+        var items = val.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        List<int> result = [];
+        foreach (var item in items)
+        {
+            if (int.TryParse(item, out var parsed))
+                result.Add(parsed);
+        }
+
+        return result.Count > 0 ? result : null;
+    }
+
+    private static IReadOnlyList<long>? ParseLongList(IReadOnlyDictionary<string, string> data, string key)
+    {
+        if (!data.TryGetValue(key, out var val) || string.IsNullOrWhiteSpace(val))
+            return null;
+
+        var items = val.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        List<long> result = [];
+        foreach (var item in items)
+        {
+            if (long.TryParse(item, out var parsed))
+                result.Add(parsed);
+        }
+
+        return result.Count > 0 ? result : null;
+    }
+
+    private static NozzleDetail? ParseNozzleDetail(IReadOnlyDictionary<string, string> data)
+    {
+        if (!data.TryGetValue("NozzleDetailId", out var idStr) || !int.TryParse(idStr, out var id))
+            return null;
+
+        return new NozzleDetail(
+            Id: id,
+            AsciiCode: data.TryGetValue("NozzleDetailAsciiCode", out var ac) ? ac : null,
+            AsciiChar: data.TryGetValue("NozzleDetailAsciiChar", out var ach) ? ach : null);
     }
 }

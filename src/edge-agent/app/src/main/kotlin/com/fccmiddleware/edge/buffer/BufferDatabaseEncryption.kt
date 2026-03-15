@@ -213,6 +213,9 @@ object BufferDatabaseFactory {
                 BufferDatabase.MIGRATION_6_7,
                 BufferDatabase.MIGRATION_7_8,
                 BufferDatabase.MIGRATION_8_9,
+                BufferDatabase.MIGRATION_9_10,
+                BufferDatabase.MIGRATION_10_11,
+                BufferDatabase.MIGRATION_11_12,
             )
             // Transactions are re-uploaded from the buffer, so destructive recovery
             // is preferable to a crash-loop on a corrupted or unexpected schema.

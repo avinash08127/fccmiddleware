@@ -96,6 +96,47 @@ public sealed class AgentConfiguration
     public int StatusPollIntervalSeconds { get; set; } = 300;
 
     /// <summary>
+    /// Current site leader epoch from cloud config.
+    /// Carried on authoritative cloud writes when multi-agent fencing is enabled.
+    /// </summary>
+    public long LeaderEpoch { get; set; }
+
+    // ── Multi-Agent HA ──────────────────────────────────────────────────────
+
+    /// <summary>Port for the peer-to-peer API (LAN-accessible). Default 8586.</summary>
+    public int PeerApiPort { get; set; } = 8586;
+
+    /// <summary>Whether site HA is enabled for this agent.</summary>
+    public bool SiteHaEnabled { get; set; }
+
+    /// <summary>Whether automatic failover is enabled.</summary>
+    public bool AutoFailoverEnabled { get; set; }
+
+    /// <summary>HA priority (lower = higher priority for leadership). Default 100.</summary>
+    public int SiteHaPriority { get; set; } = 100;
+
+    /// <summary>Role capability: PRIMARY_ELIGIBLE, STANDBY_ONLY, READ_ONLY.</summary>
+    public string RoleCapability { get; set; } = "PRIMARY_ELIGIBLE";
+
+    /// <summary>Current runtime role: PRIMARY, STANDBY_HOT, RECOVERING, READ_ONLY, OFFLINE.</summary>
+    public string CurrentRole { get; set; } = "PRIMARY";
+
+    /// <summary>Heartbeat interval in seconds for peer discovery. Default 5.</summary>
+    public int HeartbeatIntervalSeconds { get; set; } = 5;
+
+    /// <summary>Seconds before a missed-heartbeat peer is considered failed. Default 30.</summary>
+    public int FailoverTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>Maximum acceptable replication lag in seconds. Default 15.</summary>
+    public int MaxReplicationLagSeconds { get; set; } = 15;
+
+    /// <summary>Whether replication between primary and standby is enabled. Default true when HA enabled.</summary>
+    public bool ReplicationEnabled { get; set; } = true;
+
+    /// <summary>Whether standby agents proxy requests to the primary. Default true when HA enabled.</summary>
+    public bool ProxyingEnabled { get; set; } = true;
+
+    /// <summary>
     /// Petronite webhook listener port (default 8090). The local HTTP server that receives
     /// transaction callbacks from the Petronite bot. Cloud config takes precedence if set.
     /// </summary>
@@ -123,6 +164,35 @@ public sealed class AgentConfiguration
 
     /// <summary>Interval in seconds for per-connection pump status broadcasts.</summary>
     public int WebSocketPumpStatusBroadcastIntervalSeconds { get; set; } = 3;
+
+    // ── DOMS Feature Control (Phase 8) ────────────────────────────────────
+
+    /// <summary>Whether pump control operations (emergency stop, close/open) are enabled.</summary>
+    public bool PumpControlEnabled { get; set; } = true;
+
+    /// <summary>Whether per-pump transaction limits are enforced.</summary>
+    public bool TransactionLimitsEnabled { get; set; } = true;
+
+    /// <summary>Default maximum transactions per pump per session before auto-block.</summary>
+    public int DefaultMaxTransactionsPerPump { get; set; } = 50;
+
+    /// <summary>Whether price management (read/update) is enabled.</summary>
+    public bool PriceManagementEnabled { get; set; } = true;
+
+    /// <summary>Whether price changes are synced to cloud.</summary>
+    public bool PriceSyncToCloud { get; set; } = true;
+
+    /// <summary>Whether BNA report forwarding to cloud is enabled.</summary>
+    public bool BnaReportingEnabled { get; set; } = true;
+
+    /// <summary>Whether dispenser inventory tracking is enabled.</summary>
+    public bool DispenserInventoryEnabled { get; set; } = true;
+
+    /// <summary>Whether pump totals polling is enabled.</summary>
+    public bool TotalsEnabled { get; set; } = true;
+
+    /// <summary>Pump totals poll interval in seconds.</summary>
+    public int TotalsPollIntervalSeconds { get; set; } = 300;
 
     // ── Local Override Properties ───────────────────────────────────────────
 

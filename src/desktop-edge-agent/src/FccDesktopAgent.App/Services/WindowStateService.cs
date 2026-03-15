@@ -35,7 +35,9 @@ internal static class WindowStateService
             var dir = Path.GetDirectoryName(StatePath)!;
             Directory.CreateDirectory(dir);
             var json = JsonSerializer.Serialize(state, WindowStateJsonContext.Default.WindowState);
-            File.WriteAllText(StatePath, json);
+            // P-DSK-003: Use async write to avoid blocking UI thread during OnClosing.
+            // Fire-and-forget is acceptable here since Save is non-fatal.
+            File.WriteAllTextAsync(StatePath, json).ConfigureAwait(false);
         }
         catch
         {

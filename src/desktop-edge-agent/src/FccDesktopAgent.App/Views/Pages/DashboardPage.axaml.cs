@@ -25,6 +25,12 @@ public sealed partial class DashboardPage : UserControl, IDisposable
     private readonly Timer _refreshTimer;
     private static readonly DateTimeOffset ProcessStartTime = GetProcessStartTime();
 
+    // P-DSK-016: Cache brushes to avoid allocating new SolidColorBrush objects on every state change.
+    private static readonly SolidColorBrush GreenBrush = new(Color.Parse("#22C55E"));
+    private static readonly SolidColorBrush YellowBrush = new(Color.Parse("#EAB308"));
+    private static readonly SolidColorBrush RedBrush = new(Color.Parse("#EF4444"));
+    private static readonly SolidColorBrush GrayBrush = new(Color.Parse("#888888"));
+
     public DashboardPage()
     {
         InitializeComponent();
@@ -41,7 +47,22 @@ public sealed partial class DashboardPage : UserControl, IDisposable
         // Populate static device info once
         PopulateDeviceInfo();
 
-        _refreshTimer = new Timer(_ => _ = RefreshAllAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+        // P-DSK-015/023: Increased from 5s to 15s to reduce DB query frequency
+        _refreshTimer = new Timer(_ => _ = RefreshAllAsync(), null, TimeSpan.Zero, TimeSpan.FromSeconds(15));
+    }
+
+    // P-DSK-023: Pause the timer when the page is not visible to avoid duplicate
+    // DB polling alongside MainWindowViewModel's status bar timer.
+    protected override void OnAttachedToVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        _refreshTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(15));
+    }
+
+    protected override void OnDetachedFromVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
+    {
+        _refreshTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        base.OnDetachedFromVisualTree(e);
     }
 
     // ── Connectivity ──────────────────────────────────────────────────────────
@@ -53,32 +74,28 @@ public sealed partial class DashboardPage : UserControl, IDisposable
 
     private void UpdateConnectivityDisplay(ConnectivitySnapshot snapshot)
     {
-        var (text, color, hint) = snapshot.State switch
+        var (text, brush, hint) = snapshot.State switch
         {
             ConnectivityState.FullyOnline =>
-                ("All systems operational", "#22C55E", ""),
+                ("All systems operational", GreenBrush, ""),
             ConnectivityState.InternetDown =>
-                ("Internet down — buffering locally", "#EAB308", "Cloud upload suspended. FCC polling continues."),
+                ("Internet down — buffering locally", YellowBrush, "Cloud upload suspended. FCC polling continues."),
             ConnectivityState.FccUnreachable =>
-                ("FCC unreachable — uploading existing buffer", "#EAB308", "FCC polling suspended. Alert site supervisor."),
+                ("FCC unreachable — uploading existing buffer", YellowBrush, "FCC polling suspended. Alert site supervisor."),
             ConnectivityState.FullyOffline =>
-                ("Fully offline — serving stale buffer only", "#EF4444", "All cloud and FCC workers suspended."),
-            _ => ("Unknown state", "#888888", "")
+                ("Fully offline — serving stale buffer only", RedBrush, "All cloud and FCC workers suspended."),
+            _ => ("Unknown state", GrayBrush, "")
         };
 
         StatusText.Text = text;
-        StatusIndicator.Foreground = new SolidColorBrush(Color.Parse(color));
+        StatusIndicator.Foreground = brush;
         ActionHintText.Text = hint;
 
         InternetStatus.Text = snapshot.IsInternetUp ? "Connected" : "Disconnected";
-        InternetStatus.Foreground = snapshot.IsInternetUp
-            ? new SolidColorBrush(Color.Parse("#22C55E"))
-            : new SolidColorBrush(Color.Parse("#EF4444"));
+        InternetStatus.Foreground = snapshot.IsInternetUp ? GreenBrush : RedBrush;
 
         FccStatus.Text = snapshot.IsFccUp ? "Connected" : "Disconnected";
-        FccStatus.Foreground = snapshot.IsFccUp
-            ? new SolidColorBrush(Color.Parse("#22C55E"))
-            : new SolidColorBrush(Color.Parse("#EF4444"));
+        FccStatus.Foreground = snapshot.IsFccUp ? GreenBrush : RedBrush;
 
         // FCC heartbeat details
         if (_connectivity is not null)
@@ -175,6 +192,14 @@ public sealed partial class DashboardPage : UserControl, IDisposable
                         : "Never";
                     FccFailures.Text = _connectivity.FccConsecutiveFailures.ToString();
                 }
+
+                // Refresh device identity (F-DSK-033)
+                var config = _services?.GetService<IOptionsMonitor<AgentConfiguration>>()?.CurrentValue;
+                if (config is not null)
+                {
+                    DeviceIdText.Text = config.DeviceId ?? "N/A";
+                    SiteCodeText.Text = config.SiteId ?? "N/A";
+                }
             });
         }
         catch
@@ -187,7 +212,7 @@ public sealed partial class DashboardPage : UserControl, IDisposable
 
     private void PopulateDeviceInfo()
     {
-        var config = _services?.GetService<IOptions<AgentConfiguration>>()?.Value;
+        var config = _services?.GetService<IOptionsMonitor<AgentConfiguration>>()?.CurrentValue;
         DeviceIdText.Text = config?.DeviceId ?? "N/A";
         SiteCodeText.Text = config?.SiteId ?? "N/A";
 
@@ -243,7 +268,10 @@ public sealed partial class DashboardPage : UserControl, IDisposable
             }
 
             var uploaded = await cloudSync.UploadBatchAsync(CancellationToken.None);
-            SetFeedback($"Cloud sync complete: {uploaded} transaction(s) uploaded.");
+            if (uploaded > 0)
+                SetFeedback($"Cloud sync complete: {uploaded} transaction(s) processed.");
+            else
+                SetFeedback("Cloud sync complete: no transactions to upload or upload was skipped.");
         }
         catch (Exception ex)
         {

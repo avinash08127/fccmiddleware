@@ -4,7 +4,6 @@ using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.MasterData;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Security;
-using FccDesktopAgent.Core.Sync.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -98,6 +97,7 @@ public sealed class DesktopAgentCommandExecutor : IAgentCommandExecutor
             AgentCommandType.FORCE_CONFIG_PULL => await ExecuteForceConfigPullAsync(command, ct),
             AgentCommandType.RESET_LOCAL_STATE => await ExecuteResetLocalStateAsync(command, ct),
             AgentCommandType.DECOMMISSION => await ExecuteDecommissionAsync(command, ct),
+            AgentCommandType.REFRESH_CONFIG => await ExecuteRefreshConfigAsync(command, ct),
             _ => Failure(command, "COMMAND_NOT_SUPPORTED", $"Unsupported command type {command.CommandType}")
         };
     }
@@ -189,6 +189,50 @@ public sealed class DesktopAgentCommandExecutor : IAgentCommandExecutor
                 unavailable.Reason),
 
             _ => Failure(command, ConfigPullFailedCode, "Config pull failed")
+        };
+    }
+
+    private async Task<AgentCommandExecutionResult> ExecuteRefreshConfigAsync(
+        EdgeCommandItem command,
+        CancellationToken ct)
+    {
+        var result = await _configPollWorker.PollWithDetailsAsync(ct);
+        return result switch
+        {
+            ConfigPollExecutionResult.Applied applied => Success(
+                command,
+                new Dictionary<string, object?> { ["appliedConfigVersion"] = applied.ConfigVersion }),
+
+            ConfigPollExecutionResult.Unchanged unchanged => Success(
+                command,
+                new Dictionary<string, object?> { ["currentConfigVersion"] = unchanged.CurrentConfigVersion }),
+
+            ConfigPollExecutionResult.Skipped skipped => Success(
+                command,
+                new Dictionary<string, object?> { ["currentConfigVersion"] = skipped.ConfigVersion }),
+
+            ConfigPollExecutionResult.Rejected rejected => Failure(
+                command,
+                rejected.Reason,
+                "Config refresh rejected by local validation",
+                new Dictionary<string, object?> { ["configVersion"] = rejected.ConfigVersion }),
+
+            ConfigPollExecutionResult.Decommissioned => Failure(
+                command,
+                DeviceDecommissionedCode,
+                "Device was decommissioned during config refresh"),
+
+            ConfigPollExecutionResult.TransportFailure transport => Failure(
+                command,
+                ConfigPullFailedCode,
+                transport.Message),
+
+            ConfigPollExecutionResult.Unavailable unavailable => Failure(
+                command,
+                ConfigPullUnavailableCode,
+                unavailable.Reason),
+
+            _ => Failure(command, ConfigPullFailedCode, "Config refresh failed")
         };
     }
 

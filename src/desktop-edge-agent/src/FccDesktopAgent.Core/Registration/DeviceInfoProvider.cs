@@ -1,5 +1,8 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using FccDesktopAgent.Core.Config;
 
 namespace FccDesktopAgent.Core.Registration;
 
@@ -28,7 +31,10 @@ public static class DeviceInfoProvider
 
     /// <summary>Builds a <see cref="DeviceRegistrationRequest"/> with device info pre-populated.</summary>
     public static DeviceRegistrationRequest BuildRequest(
-        string provisioningToken, string siteCode, bool replacePreviousAgent = false) =>
+        string provisioningToken,
+        string siteCode,
+        bool replacePreviousAgent = false,
+        AgentConfiguration? agentConfig = null) =>
         new()
         {
             ProvisioningToken = provisioningToken,
@@ -41,6 +47,41 @@ public static class DeviceInfoProvider
             RoleCapability = "PRIMARY_ELIGIBLE",
             SiteHaPriority = 10,
             Capabilities = ["FCC_CONTROL", "PEER_API", "TRANSACTION_BUFFER", "TELEMETRY"],
+            PeerApi = BuildPeerApiMetadata(agentConfig),
             ReplacePreviousAgent = replacePreviousAgent,
         };
+
+    private static PeerApiRegistrationMetadata? BuildPeerApiMetadata(AgentConfiguration? agentConfig)
+    {
+        var port = agentConfig?.PeerApiPort is > 0 ? agentConfig.PeerApiPort : 8586;
+        var host = GetLocalIpAddress();
+        if (string.IsNullOrWhiteSpace(host))
+            return null;
+
+        return new PeerApiRegistrationMetadata
+        {
+            BaseUrl = $"http://{host}:{port}",
+            AdvertisedHost = host,
+            Port = port,
+            TlsEnabled = false
+        };
+    }
+
+    private static string? GetLocalIpAddress()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(nic => nic.OperationalStatus == OperationalStatus.Up
+                              && nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
+                .FirstOrDefault(addr => addr.Address.AddressFamily == AddressFamily.InterNetwork)
+                ?.Address
+                .ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

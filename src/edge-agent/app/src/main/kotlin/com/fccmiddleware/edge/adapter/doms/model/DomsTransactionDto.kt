@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.adapter.doms.model
 
+import com.fccmiddleware.edge.adapter.common.TransactionInfoMask
 import kotlinx.serialization.Serializable
 
 /** Raw DOMS transaction data from the supervised buffer (FpSupTrans response). */
@@ -19,4 +20,5 @@ data class DomsTransactionDto(
     val timestamp: String,
     val attendantId: String? = null,
     val bufferIndex: Int,
+    val infoMask: TransactionInfoMask? = null,
 )

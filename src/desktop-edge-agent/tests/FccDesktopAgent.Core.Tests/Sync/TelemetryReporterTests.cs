@@ -7,7 +7,6 @@ using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Sync;
-using FccDesktopAgent.Core.Sync.Models;
 // ReSharper disable AccessToDisposedClosure
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
@@ -35,6 +34,7 @@ public sealed class TelemetryReporterTests : IDisposable
     private readonly IErrorCountTracker _errorTracker;
     private readonly FakeHttpMessageHandler _httpHandler;
     private readonly IHttpClientFactory _httpFactory;
+    private readonly IConfigManager _configManager;
     private readonly AgentConfiguration _config;
 
     public TelemetryReporterTests()
@@ -55,7 +55,7 @@ public sealed class TelemetryReporterTests : IDisposable
 
         _connectivity = Substitute.For<IConnectivityMonitor>();
         _connectivity.Current.Returns(new ConnectivitySnapshot(
-            ConnectivityState.FullyOnline, true, true, DateTimeOffset.UtcNow));
+            FccDesktopAgent.Core.Connectivity.ConnectivityState.FullyOnline, true, true, DateTimeOffset.UtcNow));
         _connectivity.LastFccSuccessAtUtc.Returns(DateTimeOffset.UtcNow.AddMinutes(-1));
         _connectivity.FccConsecutiveFailures.Returns(0);
 
@@ -66,13 +66,16 @@ public sealed class TelemetryReporterTests : IDisposable
         _httpFactory.CreateClient("cloud")
             .Returns(_ => new HttpClient(_httpHandler));
 
+        _configManager = Substitute.For<IConfigManager>();
+
         _config = new AgentConfiguration
         {
-            DeviceId = "device-001",
+            DeviceId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             SiteId = "site-001",
+            LegalEntityId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             CloudBaseUrl = "https://api.example.com",
             FccBaseUrl = "http://192.168.1.100:8080",
-            FccVendor = FccVendor.Doms,
+            FccVendor = FccDesktopAgent.Core.Adapter.Common.FccVendor.Doms,
             UploadBatchSize = 50,
             TelemetryIntervalSeconds = 300,
         };
@@ -110,6 +113,7 @@ public sealed class TelemetryReporterTests : IDisposable
             authHandler,
             registrationManager,
             _errorTracker,
+            _configManager,
             NullLogger<TelemetryReporter>.Instance);
     }
 
@@ -165,10 +169,10 @@ public sealed class TelemetryReporterTests : IDisposable
 
         payload.Should().NotBeNull();
         payload!.SchemaVersion.Should().Be("1.0");
-        payload.DeviceId.Should().Be("device-001");
+        payload.DeviceId.Should().Be(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
         payload.SiteCode.Should().Be("site-001");
         payload.SequenceNumber.Should().Be(1);
-        payload.ConnectivityState.Should().Be("FULLY_ONLINE");
+        payload.ConnectivityState.Should().Be(CloudConnectivityState.FULLY_ONLINE);
     }
 
     [Fact]
@@ -329,7 +333,7 @@ public sealed class TelemetryReporterTests : IDisposable
 
         payload!.FccHealth.Should().NotBeNull();
         payload.FccHealth.IsReachable.Should().BeTrue();
-        payload.FccHealth.FccVendor.Should().Be("DOMS");
+        payload.FccHealth.FccVendor.Should().Be(CloudFccVendor.DOMS);
         payload.FccHealth.FccHost.Should().Be("192.168.1.100");
         payload.FccHealth.FccPort.Should().Be(8080);
         payload.FccHealth.ConsecutiveHeartbeatFailures.Should().Be(0);
@@ -420,17 +424,20 @@ public sealed class TelemetryReporterTests : IDisposable
         // Test each connectivity state mapping
         var states = new[]
         {
-            (ConnectivityState.FullyOnline, "FULLY_ONLINE"),
-            (ConnectivityState.InternetDown, "INTERNET_DOWN"),
-            (ConnectivityState.FccUnreachable, "FCC_UNREACHABLE"),
-            (ConnectivityState.FullyOffline, "FULLY_OFFLINE"),
+            (FccDesktopAgent.Core.Connectivity.ConnectivityState.FullyOnline, CloudConnectivityState.FULLY_ONLINE),
+            (FccDesktopAgent.Core.Connectivity.ConnectivityState.InternetDown, CloudConnectivityState.INTERNET_DOWN),
+            (FccDesktopAgent.Core.Connectivity.ConnectivityState.FccUnreachable, CloudConnectivityState.FCC_UNREACHABLE),
+            (FccDesktopAgent.Core.Connectivity.ConnectivityState.FullyOffline, CloudConnectivityState.FULLY_OFFLINE),
         };
 
         foreach (var (state, expected) in states)
         {
             _connectivity.Current.Returns(new ConnectivitySnapshot(
-                state, state != ConnectivityState.InternetDown && state != ConnectivityState.FullyOffline,
-                state != ConnectivityState.FccUnreachable && state != ConnectivityState.FullyOffline,
+                state,
+                state != FccDesktopAgent.Core.Connectivity.ConnectivityState.InternetDown
+                    && state != FccDesktopAgent.Core.Connectivity.ConnectivityState.FullyOffline,
+                state != FccDesktopAgent.Core.Connectivity.ConnectivityState.FccUnreachable
+                    && state != FccDesktopAgent.Core.Connectivity.ConnectivityState.FullyOffline,
                 DateTimeOffset.UtcNow));
 
             var reporter = CreateReporter();
@@ -438,8 +445,7 @@ public sealed class TelemetryReporterTests : IDisposable
 
             var body = _httpHandler.LastRequestBody!;
             var payload = JsonSerializer.Deserialize<TelemetryPayload>(body);
-            payload!.ConnectivityState.Should().Be(expected,
-                $"state {state} should map to {expected}");
+            payload!.ConnectivityState.Should().Be(expected, $"state {state} should map to {expected}");
         }
     }
 
@@ -460,7 +466,7 @@ public sealed class TelemetryReporterTests : IDisposable
         StartedAt = DateTimeOffset.UtcNow.AddMinutes(-10),
         CompletedAt = DateTimeOffset.UtcNow.AddMinutes(-5),
         FccVendor = "DOMS",
-        Status = TransactionStatus.Pending,
+        Status = FccDesktopAgent.Core.Adapter.Common.TransactionStatus.Pending,
         SyncStatus = syncStatus,
         IngestionSource = "EdgeUpload",
         RawPayloadJson = "{}",

@@ -165,7 +165,8 @@ public sealed class SetupOrchestrator
             var request = DeviceInfoProvider.BuildRequest(
                 provisioningToken: token,
                 siteCode: siteCode,
-                replacePreviousAgent: replaceExisting);
+                replacePreviousAgent: replaceExisting,
+                agentConfig: _agentConfig);
 
             var result = await _registrationService.RegisterAsync(cloudUrl, request, ct);
 
@@ -179,7 +180,7 @@ public sealed class SetupOrchestrator
                     StateAlreadyPersisted = true;
                     CloudUrl = cloudUrl;
                     SiteCode = siteCode;
-                    DeviceId = success.Response.DeviceId;
+                    DeviceId = success.Response.DeviceId.ToString();
                     Environment = environment ?? string.Empty;
 
                     var siteConfig = success.Response.SiteConfig;
@@ -227,9 +228,12 @@ public sealed class SetupOrchestrator
 
     public async Task<ConnectionTestResults> RunConnectionTestsAsync()
     {
-        var cloud = await TestCloudConnectivityAsync();
-        var fcc = await TestFccConnectivityAsync();
-        return new(cloud, fcc);
+        // P-DSK-004: Run both tests concurrently — they are independent.
+        // Halves worst-case wait from 20s to ~10s when both endpoints are unreachable.
+        var cloudTask = TestCloudConnectivityAsync();
+        var fccTask = TestFccConnectivityAsync();
+        await Task.WhenAll(cloudTask, fccTask);
+        return new(cloudTask.Result, fccTask.Result);
     }
 
     private async Task<TestOutcome> TestCloudConnectivityAsync()
@@ -308,7 +312,12 @@ public sealed class SetupOrchestrator
 
     public void ResolveApiKey()
     {
-        ApiKey = _agentConfig?.FccApiKey ?? Guid.NewGuid().ToString("N");
+        // F-DSK-049: Treat blank as missing — FccApiKey defaults to string.Empty (non-null),
+        // so the ?? fallback never runs without this check.
+        var existingKey = _agentConfig?.FccApiKey;
+        ApiKey = string.IsNullOrWhiteSpace(existingKey)
+            ? Guid.NewGuid().ToString("N")
+            : existingKey;
     }
 
     public int GetLocalApiPort() => _agentConfig?.LocalApiPort ?? 8585;

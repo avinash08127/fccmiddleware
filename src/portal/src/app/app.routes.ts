@@ -6,6 +6,15 @@ export const routes: Routes = [
   // MSAL redirect handler — must be at root level
   { path: 'auth', component: MsalRedirectComponent },
 
+  // Public Odoo simulator — intentionally outside the protected shell
+  {
+    path: 'odoo-simulator',
+    loadComponent: () =>
+      import('./features/odoo-simulator/odoo-simulator.component').then(
+        (m) => m.OdooSimulatorComponent
+      ),
+  },
+
   // Access-denied landing
   {
     path: 'access-denied',

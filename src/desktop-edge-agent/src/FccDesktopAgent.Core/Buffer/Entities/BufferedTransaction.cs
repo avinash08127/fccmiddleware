@@ -72,6 +72,9 @@ public sealed class BufferedTransaction
     /// <summary>Odoo order ID stamped by acknowledge. Null until acknowledged.</summary>
     public string? OdooOrderId { get; set; }
 
+    /// <summary>Originating pre-authorization ID for reconciliation. Null if not pre-authorized.</summary>
+    public string? PreAuthId { get; set; }
+
     /// <summary>Whether Odoo has added this transaction to the POS cart.</summary>
     public bool AddToCart { get; set; }
 
@@ -94,6 +97,17 @@ public sealed class BufferedTransaction
 
     /// <summary>NONE | PENDING | SUCCESS | DEAD_LETTER</summary>
     public string FiscalStatus { get; set; } = "NONE";
+
+    // ── Replication (Multi-Agent HA) ──────────────────────────────────────
+
+    /// <summary>Monotonic replication sequence assigned by the primary. Default 0 (unassigned).</summary>
+    public long ReplicationSeq { get; set; }
+
+    /// <summary>Agent ID that originally created this record. Null for pre-replication records.</summary>
+    public string? SourceAgentId { get; set; }
+
+    /// <summary>When this record was replicated from the primary. Null for locally-created records.</summary>
+    public DateTimeOffset? ReplicatedAt { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;

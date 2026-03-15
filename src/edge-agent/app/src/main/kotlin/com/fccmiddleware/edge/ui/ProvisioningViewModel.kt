@@ -68,6 +68,14 @@ class ProvisioningViewModel(
                         _registrationState.value = RegistrationState.Error(
                             "Registration rejected: ${result.errorCode} — ${result.message}"
                         )
+                    is CloudRegistrationResult.Unauthorized ->
+                        _registrationState.value = RegistrationState.Error(
+                            "Invalid or expired provisioning token. Please scan a new QR code."
+                        )
+                    is CloudRegistrationResult.RateLimited ->
+                        _registrationState.value = RegistrationState.Error(
+                            "Too many registration attempts. Please wait and try again."
+                        )
                     is CloudRegistrationResult.TransportError ->
                         _registrationState.value = RegistrationState.Error(
                             "Network error: ${result.message}. Check connectivity and try again."
@@ -110,7 +118,7 @@ class ProvisioningViewModel(
                 "TELEMETRY",
             ),
             peerApi = com.fccmiddleware.edge.sync.PeerApiRegistrationMetadata(
-                port = 8585,
+                port = 8586,
                 tlsEnabled = false,
             ),
         )

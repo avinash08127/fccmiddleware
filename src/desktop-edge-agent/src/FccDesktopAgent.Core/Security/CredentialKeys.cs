@@ -38,4 +38,7 @@ public static class CredentialKeys
 
     /// <summary>Radix SHA-1 signing shared secret (S-DSK-012).</summary>
     public const string RadixSharedSecret = "fcc:radix_shared_secret";
+
+    /// <summary>HMAC-SHA256 shared secret for peer-to-peer HA authentication.</summary>
+    public const string PeerSharedSecret = "peer:shared_secret";
 }

@@ -188,6 +188,15 @@ public sealed class GetAgentConfigHandlerTests
         public Task<FccConfig?> GetFccConfigWithSiteDataAsync(string siteCode, Guid legalEntityId, CancellationToken ct) =>
             Task.FromResult(_fccConfig);
 
+        public Task<AdapterDefaultConfig?> GetAdapterDefaultConfigAsync(Guid legalEntityId, string adapterKey, CancellationToken ct) =>
+            Task.FromResult<AdapterDefaultConfig?>(null);
+
+        public Task<SiteAdapterOverride?> GetSiteAdapterOverrideAsync(Guid siteId, string adapterKey, CancellationToken ct) =>
+            Task.FromResult<SiteAdapterOverride?>(null);
+
+        public Task<List<AgentRegistration>> GetSiteAgentsAsync(Guid siteId, CancellationToken ct) =>
+            Task.FromResult(_agent is null ? [] : new List<AgentRegistration> { _agent });
+
         public Task<AgentRegistration?> FindAgentByDeviceIdAsync(Guid deviceId, CancellationToken ct) =>
             Task.FromResult(_agent);
     }

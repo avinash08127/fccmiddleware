@@ -37,6 +37,8 @@ public sealed class DeviceRegistrationServiceTests
             NullLogger<DeviceRegistrationService>.Instance);
     }
 
+    private static SiteConfig CreateSiteConfig(int version = 1) => TestSiteConfigFactory.Create(version);
+
     private static DeviceRegistrationRequest CreateRequest() => new()
     {
         ProvisioningToken = "test-token",
@@ -50,15 +52,18 @@ public sealed class DeviceRegistrationServiceTests
     [Fact]
     public async Task RegisterAsync_Success_StoresTokensAndIdentity()
     {
+        var deviceId = Guid.NewGuid();
+        var legalEntityId = Guid.NewGuid();
         var response = new DeviceRegistrationResponse
         {
-            DeviceId = "device-abc",
+            DeviceId = deviceId,
             DeviceToken = "jwt-token",
             RefreshToken = "refresh-token",
             TokenExpiresAt = DateTimeOffset.UtcNow.AddHours(24),
             SiteCode = "SITE-001",
-            LegalEntityId = "le-123",
+            LegalEntityId = legalEntityId,
             RegisteredAt = DateTimeOffset.UtcNow,
+            SiteConfig = CreateSiteConfig(),
         };
 
         _httpHandler.SetResponse(HttpStatusCode.Created, response);
@@ -69,7 +74,7 @@ public sealed class DeviceRegistrationServiceTests
 
         result.Should().BeOfType<RegistrationResult.Success>();
         var success = (RegistrationResult.Success)result;
-        success.Response.DeviceId.Should().Be("device-abc");
+        success.Response.DeviceId.Should().Be(deviceId);
 
         // Verify tokens were stored
         await _tokenProvider.Received(1).StoreTokensAsync("jwt-token", "refresh-token", Arg.Any<CancellationToken>());
@@ -78,7 +83,7 @@ public sealed class DeviceRegistrationServiceTests
         await _registrationManager.Received(1).SaveStateAsync(
             Arg.Is<RegistrationState>(s =>
                 s.IsRegistered &&
-                s.DeviceId == "device-abc" &&
+                s.DeviceId == deviceId.ToString() &&
                 s.SiteCode == "SITE-001" &&
                 s.CloudBaseUrl == CloudUrl),
             Arg.Any<CancellationToken>());
@@ -87,18 +92,14 @@ public sealed class DeviceRegistrationServiceTests
     [Fact]
     public async Task RegisterAsync_Success_WithSiteConfig_AppliesConfig()
     {
-        var siteConfig = new SiteConfig
-        {
-            ConfigVersion = 1,
-            ConfigId = "cfg-1",
-        };
+        var siteConfig = CreateSiteConfig();
         var response = new DeviceRegistrationResponse
         {
-            DeviceId = "device-abc",
+            DeviceId = Guid.NewGuid(),
             DeviceToken = "jwt-token",
             RefreshToken = "refresh-token",
             SiteCode = "SITE-001",
-            LegalEntityId = "le-123",
+            LegalEntityId = Guid.NewGuid(),
             RegisteredAt = DateTimeOffset.UtcNow,
             SiteConfig = siteConfig,
         };
@@ -128,10 +129,12 @@ public sealed class DeviceRegistrationServiceTests
     [InlineData("SITE_MISMATCH", RegistrationErrorCode.SiteMismatch)]
     public async Task RegisterAsync_Rejected_ReturnsCorrectErrorCode(string errorCode, RegistrationErrorCode expected)
     {
-        var errorResponse = new RegistrationErrorResponse
+        var errorResponse = new ErrorResponse
         {
             ErrorCode = errorCode,
             Message = "Test error",
+            TraceId = "trace-1",
+            Timestamp = DateTimeOffset.UtcNow.ToString("O"),
         };
         _httpHandler.SetResponse(HttpStatusCode.BadRequest, errorResponse);
 

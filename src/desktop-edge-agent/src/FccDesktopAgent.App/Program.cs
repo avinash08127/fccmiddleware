@@ -3,6 +3,7 @@ using FccDesktopAgent.Api;
 using FccDesktopAgent.Api.Endpoints;
 using FccDesktopAgent.App;
 using FccDesktopAgent.App.Services;
+using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Runtime;
@@ -67,6 +68,11 @@ try
     var wsCertPath = wsConfig.GetValue<string?>("CertificatePath");
     var apiPort = int.TryParse(builder.Configuration["LocalApi:Port"], out var parsedApiPort) ? parsedApiPort : 8585;
 
+    // Multi-Agent HA: Peer API port (LAN-accessible, bound to 0.0.0.0)
+    var haSection = builder.Configuration.GetSection("Agent");
+    var siteHaEnabled = haSection.GetValue<bool>("SiteHaEnabled");
+    var peerApiPort = haSection.GetValue<int?>("PeerApiPort") ?? 8586;
+
     // S-DSK-002 + S-DSK-005: Kestrel endpoint configuration uses IConfigureOptions
     // so the WebSocket TLS certificate password can be read from ICredentialStore
     // instead of plaintext config. The password variable is scoped to
@@ -79,6 +85,13 @@ try
             if (wsEnabled && wsPort != apiPort)
                 ConfigureWebSocketTls(options, wsPort, wsUseTls, wsCertPath, wsConfig,
                     sp.GetService<ICredentialStore>());
+
+            // Multi-Agent HA: Peer API on a separate port, bound to 0.0.0.0 (LAN-accessible)
+            if (siteHaEnabled && peerApiPort != apiPort)
+            {
+                options.ListenAnyIP(peerApiPort);
+                Log.Information("Peer HA API endpoint configured on port {Port} (0.0.0.0)", peerApiPort);
+            }
         }));
 
     var webApp = builder.Build();
@@ -194,7 +207,10 @@ static string GetLogPath()
         "FccDesktopAgent",
         "logs",
         "agent-.log");
-    Directory.CreateDirectory(Path.GetDirectoryName(logDir)!);
+    var logDirectory = Path.GetDirectoryName(logDir)!;
+    Directory.CreateDirectory(logDirectory);
+    // S-DSK-032: Apply restrictive permissions to log directory (owner-only on Unix)
+    AgentDataDirectory.SetRestrictivePermissions(logDirectory);
     return logDir;
 }
 

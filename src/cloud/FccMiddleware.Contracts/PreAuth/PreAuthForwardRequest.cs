@@ -25,6 +25,7 @@ public sealed record PreAuthForwardRequest
     public required string Status { get; init; }
     public required DateTimeOffset RequestedAt { get; init; }
     public required DateTimeOffset ExpiresAt { get; init; }
+    public long? LeaderEpoch { get; init; }
     [MaxLength(200)]
     public string? FccCorrelationId { get; init; }
     [MaxLength(200)]

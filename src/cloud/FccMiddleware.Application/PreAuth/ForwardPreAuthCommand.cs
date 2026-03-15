@@ -31,5 +31,6 @@ public sealed record ForwardPreAuthCommand : IRequest<Result<ForwardPreAuthResul
     public string? CustomerTaxId { get; init; }
     public string? CustomerBusinessName { get; init; }
     public string? AttendantId { get; init; }
+    public long? LeaderEpoch { get; init; }
     public required Guid CorrelationId { get; init; }
 }

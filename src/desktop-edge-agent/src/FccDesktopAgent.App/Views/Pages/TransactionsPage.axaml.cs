@@ -7,6 +7,7 @@ using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.App.Views.Pages;
 
@@ -14,10 +15,14 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
 {
     private const int PageSize = 50;
     private readonly IServiceProvider? _services;
+    private readonly ILogger<TransactionsPage>? _logger;
     private readonly Timer _refreshTimer;
 
     private int _currentPage;
     private int _totalCount;
+
+    // P-DSK-022: Cache total count, only refresh on filter change or explicit load
+    private bool _totalCountDirty = true;
 
     // Filter state
     private SyncStatus? _statusFilter;
@@ -29,10 +34,24 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
     {
         InitializeComponent();
         _services = AgentAppContext.ServiceProvider;
+        _logger = _services?.GetService<ILoggerFactory>()?.CreateLogger<TransactionsPage>();
 
         // Auto-refresh every 10 seconds
         _refreshTimer = new Timer(_ => Dispatcher.UIThread.Post(() => _ = LoadPageAsync()),
             null, TimeSpan.Zero, TimeSpan.FromSeconds(10));
+    }
+
+    // P-DSK-019: Pause the timer when the page is not visible to avoid unnecessary DB queries
+    protected override void OnAttachedToVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        _refreshTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(10));
+    }
+
+    protected override void OnDetachedFromVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
+    {
+        _refreshTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        base.OnDetachedFromVisualTree(e);
     }
 
     // ── Data loading ──────────────────────────────────────────────────────────
@@ -61,7 +80,12 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
             if (_dateTo.HasValue)
                 query = query.Where(t => t.CompletedAt <= _dateTo.Value);
 
-            _totalCount = await query.CountAsync();
+            // P-DSK-022: Only refresh total count when filters change to avoid duplicate DB round-trip
+            if (_totalCountDirty)
+            {
+                _totalCount = await query.CountAsync();
+                _totalCountDirty = false;
+            }
 
             var rows = await query
                 .OrderByDescending(t => t.CompletedAt)
@@ -95,9 +119,10 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
             PrevButton.IsEnabled = _currentPage > 0;
             NextButton.IsEnabled = (_currentPage + 1) * PageSize < _totalCount;
         }
-        catch
+        catch (Exception ex)
         {
-            // Non-fatal
+            _logger?.LogError(ex, "Error loading transactions page");
+            PageInfoText.Text = "Error loading transactions";
         }
     }
 
@@ -132,11 +157,15 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
         _dateFrom = null;
         _dateTo = null;
         _currentPage = 0;
+        _totalCountDirty = true;
         _ = LoadPageAsync();
     }
 
     private void ApplyFilters()
     {
+        // P-DSK-022: Mark total count dirty so it refreshes with new filters
+        _totalCountDirty = true;
+
         // Sync status filter
         _statusFilter = StatusFilter.SelectedIndex switch
         {
@@ -144,7 +173,6 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
             2 => SyncStatus.Uploaded,
             3 => SyncStatus.SyncedToOdoo,
             4 => SyncStatus.DuplicateConfirmed,
-            5 => SyncStatus.Archived,
             _ => null
         };
 
@@ -153,11 +181,11 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
 
         // Date range
         _dateFrom = DateFromPicker.SelectedDate.HasValue
-            ? new DateTimeOffset(DateFromPicker.SelectedDate.Value.DateTime, TimeSpan.Zero)
+            ? new DateTimeOffset(DateFromPicker.SelectedDate.Value.DateTime, DateTimeOffset.Now.Offset)
             : null;
 
         _dateTo = DateToPicker.SelectedDate.HasValue
-            ? new DateTimeOffset(DateToPicker.SelectedDate.Value.DateTime.AddDays(1).AddTicks(-1), TimeSpan.Zero)
+            ? new DateTimeOffset(DateToPicker.SelectedDate.Value.DateTime.AddDays(1).AddTicks(-1), DateTimeOffset.Now.Offset)
             : null;
 
         _currentPage = 0;
@@ -204,7 +232,18 @@ public sealed partial class TransactionsPage : UserControl, IDisposable
         DetailUploadAttempts.Text = row.UploadAttempts.ToString();
         DetailLastError.Text = row.LastUploadError ?? "None";
         DetailCorrelationId.Text = row.CorrelationId ?? "N/A";
+        // S-DSK-028: Store raw payload but keep it hidden until explicitly revealed.
         DetailRawPayload.Text = row.RawPayloadJson ?? "";
+        DetailRawPayload.IsVisible = false;
+        ToggleRawPayloadButton.Content = "Show";
+    }
+
+    // S-DSK-028: Toggle visibility of raw payload to prevent inadvertent PII exposure.
+    private void OnToggleRawPayloadClicked(object? sender, RoutedEventArgs e)
+    {
+        var isVisible = DetailRawPayload.IsVisible;
+        DetailRawPayload.IsVisible = !isVisible;
+        ToggleRawPayloadButton.Content = isVisible ? "Show" : "Hide";
     }
 
     private void OnCloseDetailClicked(object? sender, RoutedEventArgs e)

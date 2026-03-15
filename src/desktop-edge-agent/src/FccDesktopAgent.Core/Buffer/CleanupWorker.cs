@@ -85,6 +85,12 @@ public sealed class CleanupWorker : BackgroundService
             .Where(t => t.SyncStatus == SyncStatus.DeadLetter && t.UpdatedAt < cutoff)
             .ExecuteDeleteAsync(ct);
 
+        // F-DSK-041: Delete Archived records past retention (no code transitions to
+        // Archived, but records may be set manually via DB — clean them up regardless).
+        var archivedDeleted = await db.Transactions
+            .Where(t => t.SyncStatus == SyncStatus.Archived && t.UpdatedAt < cutoff)
+            .ExecuteDeleteAsync(ct);
+
         // 2. Delete terminal pre-auth records older than retention period
         var terminalStatuses = new[]
         {
@@ -103,9 +109,9 @@ public sealed class CleanupWorker : BackgroundService
             .ExecuteDeleteAsync(ct);
 
         _logger.LogInformation(
-            "Cleanup completed: {TxDeleted} synced, {DupDeleted} duplicate, {DeadLetterDeleted} dead-lettered transactions, " +
-            "{PreAuthDeleted} terminal pre-auths, {AuditDeleted} audit entries deleted, " +
-            "{StaleReverted} stale uploaded reverted to pending (retention={RetentionDays}d)",
-            txDeleted, dupDeleted, deadLetterDeleted, preAuthDeleted, auditDeleted, staleReverted, retentionDays);
+            "Cleanup completed: {TxDeleted} synced, {DupDeleted} duplicate, {DeadLetterDeleted} dead-lettered, " +
+            "{ArchivedDeleted} archived transactions, {PreAuthDeleted} terminal pre-auths, " +
+            "{AuditDeleted} audit entries deleted, {StaleReverted} stale uploaded reverted to pending (retention={RetentionDays}d)",
+            txDeleted, dupDeleted, deadLetterDeleted, archivedDeleted, preAuthDeleted, auditDeleted, staleReverted, retentionDays);
     }
 }

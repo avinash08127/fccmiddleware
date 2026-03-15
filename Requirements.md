@@ -991,10 +991,12 @@ The Edge Agent exposes a **REST API on localhost** (e.g., `http://localhost:8585
 ## REQ-15.8: Multi-HHT Site Handling
 
 - Busy sites may have **multiple HHTs** (one per attendant).
-- Only **one HHT per site acts as the primary Edge Agent** for FCC communication (configuration choice, not automatic election — for MVP simplicity).
-- **All HHTs must see the same transaction data**. Attendants always select pump and nozzle when creating orders (pre-auth or normal orders). Non-primary HHTs must be able to query the primary Edge Agent over the station LAN.
-- The primary agent's LAN API must be accessible to other HHTs on the same WiFi (not just localhost). Non-primary HHT requests require an API key.
-- **Failover (Post-MVP)**: Manual promotion of a secondary HHT to primary if the primary goes offline. Automatic failover is deferred.
+- One Desktop Edge Agent and one or more Android Edge Agents may run in parallel at the same site.
+- Exactly **one eligible online agent** must hold the `PRIMARY` role at a time. All other participating agents must be `STANDBY_HOT`, `RECOVERING`, or `READ_ONLY`.
+- **All HHTs must see the same transaction data**. Attendants always select pump and nozzle when creating orders (pre-auth or normal orders). Every Android HHT continues to talk to `localhost`; standby devices proxy or serve replicated data as appropriate.
+- Default leader preference is **Desktop first, then Android agents by configured priority**, but the policy must remain configuration-driven per site.
+- Automatic failover must promote a warm, healthy standby within **30 seconds** of confirmed primary failure.
+- A recovered former primary rejoins as standby. It must **not auto-preempt** the current leader.
 
 ## REQ-15.9: Connectivity Detection and Mode Switching
 
@@ -1007,10 +1009,11 @@ The Edge Agent exposes a **REST API on localhost** (e.g., `http://localhost:8585
 ## REQ-15.10: Security
 
 - FCC credentials stored **encrypted** on the HHT (Android Keystore).
-- Local API binds to localhost by default (primary HHT, same-device-only access).
-- When LAN access is enabled for other HHTs: API requires an **API key** provisioned during setup.
+- Local API binds to localhost by default on every Android device; peer/LAN exposure is an explicitly enabled HA capability.
+- When LAN access is enabled for peer devices: API requires an **API key** or signed peer credentials provisioned during setup.
 - Cloud-to-agent communication uses mutual TLS or API key authentication.
 - Agent authenticates to cloud middleware with a device-level service token. No Odoo user credentials stored.
+- Authoritative agent-to-cloud writes must carry the current **leader epoch** once HA fencing is enabled. Stale epochs must be rejected.
 
 ## REQ-15.11: Provisioning and Configuration
 
@@ -1047,7 +1050,7 @@ The Edge Agent exposes a **REST API on localhost** (e.g., `http://localhost:8585
 - BR-15.2: Buffered transactions must survive Edge Agent restarts (persisted SQLite, WAL mode).
 - BR-15.3: Catch-up and replay must be idempotent — cloud middleware handles deduplication (REQ-13).
 - BR-15.4: Mode transitions (online/offline/recovery) must be automatic — no manual intervention required.
-- BR-15.5: All HHTs at a site must have access to the same transaction data (via primary agent's LAN API).
+- BR-15.5: All HHTs at a site must have access to the same transaction data while preserving the Android localhost contract on every device.
 - BR-15.6: FCC adapter logic runs on-device (Kotlin/Java). The Edge Agent is self-contained for FCC communication.
 - BR-15.7: Buffer must be sized for a minimum of 30 days × 1,000 transactions/day on the Urovo i9100.
 - BR-15.8: The `ingestionMode` is config-driven and pushed from the cloud middleware. Changing it must not require an APK update or manual device intervention.
@@ -1055,6 +1058,8 @@ The Edge Agent exposes a **REST API on localhost** (e.g., `http://localhost:8585
 - BR-15.10: Pre-auth requests from Odoo POS must always be routed to the Edge Agent local API, regardless of `ingestionMode` or internet availability.
 - BR-15.11: The Edge Agent must queue pre-auth records to the Cloud Middleware for reconciliation. If offline, it must retry with exponential backoff when internet returns.
 - BR-15.12: The Edge Agent must poll the Cloud Middleware for `SYNCED_TO_ODOO` status and must not offer transactions already confirmed as `SYNCED_TO_ODOO` to Odoo POS via the local API.
+- BR-15.13: Site high-availability must use epoch-based leader fencing to prevent stale primaries from performing authoritative writes after failover.
+- BR-15.14: Automatic promotion is allowed only when standby replication lag is within the configured threshold and the warm replica is complete.
 
 ## Acceptance Criteria
 
@@ -1062,13 +1067,15 @@ The Edge Agent exposes a **REST API on localhost** (e.g., `http://localhost:8585
 - AC-15.2: Transactions buffered during an internet outage are uploaded to the cloud on reconnection without data loss.
 - AC-15.3: Odoo POS on the same HHT can fetch transactions from the Edge Agent local API in offline mode. Transactions already `SYNCED_TO_ODOO` are excluded from results.
 - AC-15.4: No duplicate Odoo orders are created after cloud-path processing and Edge Agent catch-up, thanks to deduplication and `SYNCED_TO_ODOO` status checking.
-- AC-15.5: Non-primary HHTs at the same site can query the primary agent's LAN API and see the same transaction data.
+- AC-15.5: Non-primary HHTs at the same site can use their local Android agent facade and still see the same transaction data without manual primary IP entry.
 - AC-15.6: QR code provisioning correctly configures the agent for a new site deployment.
 - AC-15.7: Agent updates can be pushed and applied via Sure MDM without data loss.
 - AC-15.8: In `RELAY` mode, the agent immediately forwards transactions to cloud when online and seamlessly falls back to buffering when cloud becomes unreachable — with no data loss or manual action.
 - AC-15.9: Changing `ingestionMode` via cloud config push takes effect on the agent without requiring an APK update.
 - AC-15.10: Pre-auth requests submitted offline (via Edge Agent) are correctly queued and forwarded to the cloud when internet returns, enabling proper reconciliation.
 - AC-15.11: In `CLOUD_DIRECT` mode, the Edge Agent's catch-up LAN poll detects and uploads a transaction that the FCC failed to push to the cloud directly.
+- AC-15.12: Automatic failover completes within 30 seconds of confirmed primary failure with no buffered transaction loss and no duplicate pre-auth execution.
+- AC-15.13: A stale former primary attempting an authoritative cloud write after failover is rejected by leader epoch fencing.
 
 ------------------------------------------------------------------------
 

@@ -67,27 +67,22 @@ public static class OdooWsBridge
             await wsServer.HandleConnectionAsync(ws, context.RequestAborted);
         });
 
-        // Also accept at root path for legacy compatibility
-        app.Map("/", async context =>
-        {
-            if (!context.WebSockets.IsWebSocketRequest)
+        // Accept WebSocket at root path for legacy compatibility — exact path match only.
+        // Non-WebSocket requests fall through to the normal pipeline (health, API, etc.).
+        app.MapWhen(
+            context => context.Request.Path == "/" && context.WebSockets.IsWebSocketRequest,
+            rootApp => rootApp.Run(async context =>
             {
-                // Non-WebSocket requests to "/" fall through to the normal API
-                context.Response.StatusCode = StatusCodes.Status200OK;
-                await context.Response.WriteAsync("FCC Desktop Edge Agent");
-                return;
-            }
+                // F-DSK-012: Validate API key on the HTTP upgrade request.
+                if (!ValidateApiKey(context, apiOptions, logger))
+                    return;
 
-            // F-DSK-012: Validate API key on the HTTP upgrade request.
-            if (!ValidateApiKey(context, apiOptions, logger))
-                return;
+                using var ws = await context.WebSockets.AcceptWebSocketAsync();
+                logger.LogInformation("WebSocket upgrade accepted at root from {RemoteIp}",
+                    context.Connection.RemoteIpAddress);
 
-            using var ws = await context.WebSockets.AcceptWebSocketAsync();
-            logger.LogInformation("WebSocket upgrade accepted at root from {RemoteIp}",
-                context.Connection.RemoteIpAddress);
-
-            await wsServer.HandleConnectionAsync(ws, context.RequestAborted);
-        });
+                await wsServer.HandleConnectionAsync(ws, context.RequestAborted);
+            }));
 
         logger.LogInformation("Odoo WebSocket server mapped at /ws and / (port configured in Kestrel)");
 
@@ -107,9 +102,13 @@ public static class OdooWsBridge
     {
         var configuredKey = apiOptions.CurrentValue.ApiKey;
 
-        // No key configured → auth disabled (dev / unprovisioned)
+        // S-DSK-027: Fail closed — reject WebSocket upgrades when no API key is configured.
         if (string.IsNullOrWhiteSpace(configuredKey))
-            return true;
+        {
+            logger.LogWarning("WebSocket upgrade rejected — no API key configured. Complete agent provisioning.");
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            return false;
+        }
 
         // Check header first, then query parameter
         var providedKey = context.Request.Headers.TryGetValue("X-Api-Key", out var headerKey)

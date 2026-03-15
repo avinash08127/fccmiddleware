@@ -58,7 +58,7 @@ import com.fccmiddleware.edge.buffer.entity.SyncState
         LocalPump::class,
         LocalNozzle::class,
     ],
-    version = 9,
+    version = 12,
     exportSchema = true
 )
 @TypeConverters(PreAuthStatusConverters::class)
@@ -229,6 +229,41 @@ abstract class BufferDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE pre_auth_records ADD COLUMN vehicle_number TEXT")
                 db.execSQL("ALTER TABLE pre_auth_records ADD COLUMN customer_business_name TEXT")
+            }
+        }
+
+        /**
+         * Migration 9 → 10: P2-08 — Add peer_directory_version to sync_state.
+         *
+         * Tracks cloud's peer directory version so agents detect staleness across restarts.
+         */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sync_state ADD COLUMN peer_directory_version INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * Migration 10 → 11: Add fcc_correlation_id to buffered_transactions.
+         *
+         * Stores the FCC-side pre-auth correlation ID echoed on the final dispense,
+         * enabling cloud reconciliation between pre-auth and transaction records.
+         */
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE buffered_transactions ADD COLUMN fcc_correlation_id TEXT")
+            }
+        }
+
+        /**
+         * Migration 11 → 12: Add attendant_id to pre_auth_records.
+         *
+         * Stores the Odoo attendant/operator user ID so it can be forwarded to cloud
+         * for reconciliation. Nullable so existing records are unaffected.
+         */
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE pre_auth_records ADD COLUMN attendant_id TEXT")
             }
         }
 

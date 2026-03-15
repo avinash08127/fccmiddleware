@@ -1,6 +1,6 @@
 import { inject } from '@angular/core';
 import { HttpInterceptorFn, HttpErrorResponse } from '@angular/common/http';
-import { catchError, switchMap, throwError, from, of } from 'rxjs';
+import { catchError, throwError } from 'rxjs';
 import { Router } from '@angular/router';
 import { MessageService } from 'primeng/api';
 import { MsalService } from '@azure/msal-angular';
@@ -13,49 +13,28 @@ export const apiInterceptor: HttpInterceptorFn = (req, next) => {
   const logger = inject(LoggingService);
   const msal = inject(MsalService);
 
-  const absoluteUrl = `${environment.apiBaseUrl}${req.url}`;
+  const absoluteUrl = isAbsoluteUrl(req.url)
+    ? req.url
+    : `${environment.apiBaseUrl}${req.url}`;
 
-  // Acquire token and attach it before sending the request
-  const account = msal.instance.getActiveAccount() ?? msal.instance.getAllAccounts()[0];
-  const token$ = account
-    ? from(msal.instance.acquireTokenSilent({
-        scopes: [`${environment.msalClientId}/.default`],
-        account,
-      })).pipe(catchError(() => of(null)))
-    : of(null);
+  const apiReq = req.clone({ url: absoluteUrl });
 
-  return token$.pipe(
-    switchMap((tokenResult) => {
-      const headers: Record<string, string> = {};
-      if (tokenResult?.accessToken) {
-        headers['Authorization'] = `Bearer ${tokenResult.accessToken}`;
-      }
-      const apiReq = req.clone({ url: absoluteUrl, setHeaders: headers });
-      return next(apiReq);
-    }),
+  return next(apiReq).pipe(
     catchError((error: HttpErrorResponse) => {
       if (error.status === 401) {
-        logger.warn('ApiInterceptor', 'Received 401 — attempting MSAL token refresh', {
+        logger.warn('ApiInterceptor', 'Received 401 — token missing or rejected by API', {
           url: req.url,
         });
-        // L-3: Use MSAL redirect flow instead of page reload to preserve form state
+
         const account = msal.instance.getActiveAccount() ?? msal.instance.getAllAccounts()[0];
         if (account) {
-          msal.acquireTokenSilent({
-            scopes: [`${environment.msalClientId}/.default`],
+          msal.acquireTokenRedirect({
+            scopes: [environment.msalApiScope],
             account,
-          }).subscribe({
-            error: () => {
-              // Silent refresh failed — redirect to login
-              msal.acquireTokenRedirect({
-                scopes: [`${environment.msalClientId}/.default`],
-              });
-            },
           });
         } else {
-          // No account — redirect to login
-          msal.acquireTokenRedirect({
-            scopes: [`${environment.msalClientId}/.default`],
+          msal.loginRedirect({
+            scopes: [environment.msalApiScope],
           });
         }
       } else if (error.status === 403) {
@@ -81,7 +60,12 @@ export const apiInterceptor: HttpInterceptorFn = (req, next) => {
           statusText: error.statusText,
         });
       }
+
       return throwError(() => error);
     })
   );
 };
+
+function isAbsoluteUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}

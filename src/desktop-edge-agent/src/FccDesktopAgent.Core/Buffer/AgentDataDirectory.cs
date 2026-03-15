@@ -65,7 +65,7 @@ public static class AgentDataDirectory
     /// from reading the SQLite database, credential files, or logs.
     /// On Windows, %LOCALAPPDATA% is already per-user; on Unix, chmod 700.
     /// </summary>
-    internal static void SetRestrictivePermissions(string directoryPath)
+    public static void SetRestrictivePermissions(string directoryPath)
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {

@@ -4,7 +4,6 @@ using FccDesktopAgent.Core.MasterData;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.Sync;
-using FccDesktopAgent.Core.Sync.Models;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -54,7 +53,7 @@ public sealed class AgentCommandExecutorTests : IDisposable
             _stateStore,
             Substitute.For<IServiceScopeFactory>(),
             new LocalOverrideManager(NullLogger<LocalOverrideManager>.Instance, _tempDir),
-            new SiteDataManager(NullLogger<SiteDataManager>.Instance),
+            new SiteDataManager(Substitute.For<IServiceScopeFactory>(), NullLogger<SiteDataManager>.Instance),
             Substitute.For<ICredentialStore>(),
             NullLogger<DesktopAgentCommandExecutor>.Instance);
     }

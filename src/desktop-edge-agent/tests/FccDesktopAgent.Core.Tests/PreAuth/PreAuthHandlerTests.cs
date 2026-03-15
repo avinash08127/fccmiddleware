@@ -104,21 +104,17 @@ public sealed class PreAuthHandlerTests : IDisposable
         string? sharedSecret = null,
         int? usnCode = null,
         int? authPort = null) =>
-        new()
+        TestSiteConfigFactory.Create() with
         {
-            Identity = new SiteConfigIdentity
+            Identity = TestSiteConfigFactory.Create().Identity with
             {
                 SiteCode = "SITE-A",
-                LegalEntityId = "LE-001",
+                LegalEntityId = Guid.Parse("33333333-3333-3333-3333-333333333333"),
+                CurrencyCode = "ETB",
+                Timezone = "Africa/Addis_Ababa"
             },
-            Site = new SiteConfigSite
+            Fcc = TestSiteConfigFactory.Create().Fcc with
             {
-                Currency = "ETB",
-                Timezone = "Africa/Addis_Ababa",
-            },
-            Fcc = new SiteConfigFcc
-            {
-                Enabled = true,
                 Vendor = vendor,
                 ConnectionProtocol = connectionProtocol,
                 HostAddress = hostAddress,
@@ -127,7 +123,7 @@ public sealed class PreAuthHandlerTests : IDisposable
                 UsnCode = usnCode,
                 AuthPort = authPort,
             },
-            Mappings = new SiteConfigMappings
+            Mappings = TestSiteConfigFactory.Create().Mappings with
             {
                 PumpNumberOffset = 0,
             },

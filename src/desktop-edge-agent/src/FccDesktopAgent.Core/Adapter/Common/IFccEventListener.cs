@@ -33,6 +33,33 @@ public interface IFccEventListener
     /// The controller should mark FCC as unreachable and trigger reconnect.
     /// </summary>
     void OnConnectionLost(string reason);
+
+    // ── Peripheral device events (G-01, G-02) ────────────────────────────
+
+    /// <summary>
+    /// BNA (Banknote Acceptor) report received from the FCC.
+    /// Ported from legacy EptBnaReport peripheral message (DPP port 5006).
+    /// Default no-op so existing listeners don't break.
+    /// </summary>
+    void OnBnaReport(BnaReport report) { }
+
+    /// <summary>
+    /// Dispenser installation data received from the FCC.
+    /// Ported from legacy DispenserInstallData peripheral message (DPP port 5006).
+    /// </summary>
+    void OnDispenserInstallData(DispenserInfo info) { }
+
+    /// <summary>
+    /// EPT terminal info received from the FCC.
+    /// Ported from legacy EptInfo peripheral message (DPP port 5006).
+    /// </summary>
+    void OnEptInfoReceived(EptTerminalInfo info) { }
+
+    /// <summary>
+    /// Price set changed on the FCC.
+    /// Ported from legacy ChangeFcPriceSet peripheral message (DPP port 5006).
+    /// </summary>
+    void OnPriceChanged(string? priceSetId) { }
 }
 
 /// <summary>

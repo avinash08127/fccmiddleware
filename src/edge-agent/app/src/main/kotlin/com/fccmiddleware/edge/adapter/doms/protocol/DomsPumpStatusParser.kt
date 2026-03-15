@@ -1,8 +1,10 @@
 package com.fccmiddleware.edge.adapter.doms.protocol
 
+import com.fccmiddleware.edge.adapter.common.NozzleDetail
 import com.fccmiddleware.edge.adapter.common.PumpState
 import com.fccmiddleware.edge.adapter.common.PumpStatus
 import com.fccmiddleware.edge.adapter.common.PumpStatusSource
+import com.fccmiddleware.edge.adapter.common.PumpStatusSupplemental
 import com.fccmiddleware.edge.adapter.doms.jpl.JplMessage
 import com.fccmiddleware.edge.adapter.doms.model.DomsFpMainState
 
@@ -64,6 +66,9 @@ object DomsPumpStatusParser {
 
         val nozzleId = data["NozzleId"]?.toIntOrNull() ?: 1
 
+        // Extract supplemental parameters when present (FpStatus_3 extended data)
+        val supplemental = tryParseSupplemental(data)
+
         return listOf(
             PumpStatus(
                 siteCode = siteCode,
@@ -78,7 +83,60 @@ object DomsPumpStatusParser {
                 currentVolumeLitres = data["CurrentVolume"],
                 currentAmount = data["CurrentAmount"],
                 unitPrice = data["UnitPrice"],
+                supplemental = supplemental,
             )
+        )
+    }
+
+    /**
+     * Attempt to extract supplemental parameters from JPL data.
+     * Returns null if no supplemental fields are present (backwards compatible).
+     */
+    private fun tryParseSupplemental(data: Map<String, String>): PumpStatusSupplemental? {
+        val hasAny = listOf(
+            "FpAvailableGrades", "FpAvailableStorageModules", "FpGradeOptionNo",
+            "FpFuellingVolumeExt", "FpFuellingMoneyExt", "AttendantAccountId",
+            "FpBlockingStatus", "FpOperationModeNo", "PgId",
+            "NozzleTagReaderId", "FpAlarmStatus", "NozzleDetailId",
+        ).any { data.containsKey(it) }
+
+        if (!hasAny) return null
+
+        return PumpStatusSupplemental(
+            availableStorageModules = parseIntList(data, "FpAvailableStorageModules"),
+            availableGrades = parseIntList(data, "FpAvailableGrades"),
+            gradeOptionNo = data["FpGradeOptionNo"]?.toIntOrNull(),
+            fuellingVolumeExtended = data["FpFuellingVolumeExt"]?.toLongOrNull(),
+            fuellingMoneyExtended = data["FpFuellingMoneyExt"]?.toLongOrNull(),
+            attendantAccountId = data["AttendantAccountId"],
+            blockingStatus = data["FpBlockingStatus"],
+            nozzleDetail = parseNozzleDetail(data),
+            operationModeNo = data["FpOperationModeNo"]?.toIntOrNull(),
+            priceGroupId = data["PgId"]?.toIntOrNull(),
+            nozzleTagReaderId = data["NozzleTagReaderId"],
+            alarmStatus = data["FpAlarmStatus"],
+            minPresetValues = parseLongList(data, "FpMinPresetValues"),
+        )
+    }
+
+    private fun parseIntList(data: Map<String, String>, key: String): List<Int>? {
+        val raw = data[key]?.takeIf { it.isNotBlank() } ?: return null
+        val result = raw.split(",").mapNotNull { it.trim().toIntOrNull() }
+        return result.ifEmpty { null }
+    }
+
+    private fun parseLongList(data: Map<String, String>, key: String): List<Long>? {
+        val raw = data[key]?.takeIf { it.isNotBlank() } ?: return null
+        val result = raw.split(",").mapNotNull { it.trim().toLongOrNull() }
+        return result.ifEmpty { null }
+    }
+
+    private fun parseNozzleDetail(data: Map<String, String>): NozzleDetail? {
+        val id = data["NozzleDetailId"]?.toIntOrNull() ?: return null
+        return NozzleDetail(
+            id = id,
+            asciiCode = data["NozzleDetailAsciiCode"],
+            asciiChar = data["NozzleDetailAsciiChar"],
         )
     }
 }

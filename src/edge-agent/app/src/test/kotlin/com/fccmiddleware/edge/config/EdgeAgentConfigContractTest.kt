@@ -20,8 +20,10 @@ class EdgeAgentConfigContractTest {
         assertEquals("1.0", parsed.schemaVersion)
         assertEquals(9, parsed.configVersion)
         assertEquals("SITE-001", parsed.identity.siteCode)
+        assertEquals("ANDROID", parsed.identity.deviceClass)
         assertEquals("DOMS", parsed.fcc.vendor)
         assertEquals(8585, parsed.localApi.localhostPort)
+        assertEquals(1, parsed.siteHa.leaderEpoch)
     }
 
     @Test
@@ -67,6 +69,15 @@ class EdgeAgentConfigContractTest {
         assertEquals(2, runtimeConfig.advatecCustIdType)
         assertEquals("{\"SERIAL-1\":4}", runtimeConfig.advatecPumpMap)
         assertEquals("2001,2002", runtimeConfig.dppPorts)
+    }
+
+    @Test
+    fun `peerDirectoryVersion is parsed from config JSON`() {
+        val rawJson = canonicalEdgeConfigJson()
+
+        val parsed = EdgeAgentConfigJson.decode(rawJson)
+
+        assertEquals(1L, parsed.siteHa.peerDirectoryVersion)
     }
 
     @Test

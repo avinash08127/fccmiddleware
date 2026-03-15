@@ -1,3 +1,5 @@
+using FccDesktopAgent.Core.Adapter.Common;
+
 namespace FccDesktopAgent.Core.Adapter.Doms.Model;
 
 /// <summary>
@@ -19,4 +21,6 @@ public sealed record DomsJplTransactionDto(
     long UnitPriceX10,
     string Timestamp,
     string? AttendantId,
-    int BufferIndex);
+    int BufferIndex,
+    /// <summary>G-05: Transaction info mask flags from supervised buffer. Null if not available.</summary>
+    TransactionInfoMask? InfoMask = null);

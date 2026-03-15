@@ -47,6 +47,10 @@ data class SyncState(
     @ColumnInfo(name = "telemetry_sequence")
     val telemetrySequence: Long = 0L,
 
+    /** Cloud's peer directory version — tracked so agents detect peer list staleness across restarts. */
+    @ColumnInfo(name = "peer_directory_version", defaultValue = "0")
+    val peerDirectoryVersion: Long = 0L,
+
     /** ISO 8601 UTC */
     @ColumnInfo(name = "updated_at")
     val updatedAt: String,

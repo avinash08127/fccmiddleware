@@ -18,6 +18,14 @@ public sealed class AgentDbContext : DbContext
     public DbSet<SyncStateRecord> SyncStates => Set<SyncStateRecord>();
     public DbSet<AgentConfigRecord> AgentConfigs => Set<AgentConfigRecord>();
     public DbSet<AuditLogEntry> AuditLog => Set<AuditLogEntry>();
+    public DbSet<ReplicationStateRecord> ReplicationStates => Set<ReplicationStateRecord>();
+    public DbSet<PumpLimit> PumpLimits => Set<PumpLimit>();
+    public DbSet<PumpBlockHistory> PumpBlockHistory => Set<PumpBlockHistory>();
+    public DbSet<AttendantPumpCount> AttendantPumpCounts => Set<AttendantPumpCount>();
+    public DbSet<BufferedBnaReport> BnaReports => Set<BufferedBnaReport>();
+    public DbSet<BufferedPumpTotalsSnapshot> PumpTotalsSnapshots => Set<BufferedPumpTotalsSnapshot>();
+    public DbSet<BufferedPriceSnapshot> PriceSnapshots => Set<BufferedPriceSnapshot>();
+    public DbSet<DiagnosticLogCursorRecord> DiagnosticLogCursors => Set<DiagnosticLogCursorRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

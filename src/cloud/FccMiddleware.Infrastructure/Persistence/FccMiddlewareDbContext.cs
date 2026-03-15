@@ -102,6 +102,14 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     public DbSet<PortalRole>              PortalRoles              => Set<PortalRole>();
     public DbSet<PortalUserLegalEntity>   PortalUserLegalEntities  => Set<PortalUserLegalEntity>();
 
+    // -------------------------------------------------------------------------
+    // Phase 8 – operational data (BNA, pump totals, prices, pump control)
+    // -------------------------------------------------------------------------
+    public DbSet<BnaReportRecord> BnaReports => Set<BnaReportRecord>();
+    public DbSet<PumpTotalsRecord> PumpTotals => Set<PumpTotalsRecord>();
+    public DbSet<PriceSnapshotRecord> PriceSnapshots => Set<PriceSnapshotRecord>();
+    public DbSet<PumpControlHistoryRecord> PumpControlHistory => Set<PumpControlHistoryRecord>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -134,6 +142,41 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
             var installation = modelBuilder.Entity<AgentInstallation>();
             installation.Property(e => e.RegistrationToken).HasConversion(converter);
         }
+
+        // -------------------------------------------------------------------------
+        // Phase 8 – operational data table mappings
+        // -------------------------------------------------------------------------
+        modelBuilder.Entity<BnaReportRecord>(e =>
+        {
+            e.ToTable("bna_reports");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.SiteCode, x.LegalEntityId });
+            e.HasQueryFilter(x => !_tenantProvider.CurrentLegalEntityId.HasValue || x.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+        });
+
+        modelBuilder.Entity<PumpTotalsRecord>(e =>
+        {
+            e.ToTable("pump_totals");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.SiteCode, x.PumpNumber, x.LegalEntityId });
+            e.HasQueryFilter(x => !_tenantProvider.CurrentLegalEntityId.HasValue || x.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+        });
+
+        modelBuilder.Entity<PriceSnapshotRecord>(e =>
+        {
+            e.ToTable("price_snapshots");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.SiteCode, x.LegalEntityId });
+            e.HasQueryFilter(x => !_tenantProvider.CurrentLegalEntityId.HasValue || x.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+        });
+
+        modelBuilder.Entity<PumpControlHistoryRecord>(e =>
+        {
+            e.ToTable("pump_control_history");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.SiteCode, x.PumpNumber, x.LegalEntityId });
+            e.HasQueryFilter(x => !_tenantProvider.CurrentLegalEntityId.HasValue || x.LegalEntityId == _tenantProvider.CurrentLegalEntityId.Value);
+        });
 
         // -------------------------------------------------------------------------
         // Multi-tenancy: global query filters on LegalEntityId.
@@ -543,6 +586,9 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
     void IRegistrationDbContext.AddAuditEvent(AuditEvent auditEvent) =>
         AuditEvents.Add(auditEvent);
 
+    void IRegistrationDbContext.AddAgentCommand(AgentCommand command) =>
+        AgentCommands.Add(command);
+
     async Task<bool> IRegistrationDbContext.TrySaveChangesAsync(CancellationToken ct)
     {
         try
@@ -600,6 +646,23 @@ public class FccMiddlewareDbContext : DbContext, IIngestDbContext, IDeduplicatio
         CancellationToken ct) =>
         await Set<SiteAdapterOverride>().IgnoreQueryFilters()
             .FirstOrDefaultAsync(item => item.SiteId == siteId && item.AdapterKey == adapterKey, ct);
+
+    async Task<Site?> IAgentConfigDbContext.GetSiteByIdAsync(Guid siteId, CancellationToken ct) =>
+        await Set<Site>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.Id == siteId, ct);
+
+    async Task IAgentConfigDbContext.UpdateSiteHaLeaderAsync(
+        Guid siteId, Guid leaderAgentId, long epoch, CancellationToken ct)
+    {
+        var site = await Set<Site>().IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.Id == siteId, ct);
+        if (site is not null)
+        {
+            site.HaLeaderAgentId = leaderAgentId;
+            site.HaLeaderEpoch = epoch;
+            await SaveChangesAsync(ct);
+        }
+    }
 
     // -------------------------------------------------------------------------
     // ITelemetryDbContext implementation

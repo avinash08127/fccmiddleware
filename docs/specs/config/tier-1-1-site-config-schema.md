@@ -42,6 +42,7 @@
 | `sync` | Yes | Cloud | Hot-reload | Cloud upload, polling, and replay behavior. |
 | `buffer` | Yes | Cloud | Hot-reload | Local retention and cleanup settings. |
 | `localApi` | Yes | Cloud | Restart-required | Local/LAN API exposure and security settings. |
+| `siteHa` | Yes | Cloud | Hot-reload | Site high-availability policy, peer directory bootstrap, and leader-fencing metadata. |
 | `telemetry` | Yes | Cloud | Hot-reload | Health-reporting interval and verbosity settings. |
 | `fiscalization` | Yes | Cloud | Hot-reload | Fiscalization mode and customer-tax requirements. |
 | `mappings` | Yes | Cloud | Hot-reload | Product and pump/nozzle canonical mappings. |
@@ -52,12 +53,13 @@
 | Section | Key fields | Description |
 |---|---|---|
 | `sourceRevision` | `databricksSyncAtUtc`, `siteMasterRevision`, `fccConfigRevision`, `portalChangeId` | Traceability fields showing which upstream revisions produced this snapshot. |
-| `identity` | `legalEntityId`, `legalEntityCode`, `siteId`, `siteCode`, `siteName`, `timezone`, `currencyCode`, `deviceId`, `isPrimaryAgent` | Stable identity and tenancy values for the registered agent. |
+| `identity` | `legalEntityId`, `legalEntityCode`, `siteId`, `siteCode`, `siteName`, `timezone`, `currencyCode`, `deviceId`, `deviceClass`, `isPrimaryAgent` | Stable identity and tenancy values for the registered agent. `isPrimaryAgent` remains a compatibility field; new HA behavior is driven by `siteHa`. |
 | `site` | `isActive`, `operatingModel`, `connectivityMode`, `odooSiteId`, `companyTaxPayerId`, `operatorName`, `operatorTaxPayerId` | Site-level business settings and tax identity values. |
 | `fcc` | `enabled`, `fccId`, `vendor`, `model`, `version`, `connectionProtocol`, `hostAddress`, `port`, `credentialRef`, `credentialRevision`, `secretEnvelope`, `transactionMode`, `ingestionMode`, `pullIntervalSeconds`, `catchUpPullIntervalSeconds`, `hybridCatchUpIntervalSeconds`, `heartbeatIntervalSeconds`, `heartbeatTimeoutSeconds`, `pushSourceIpAllowList` | FCC connectivity, credentials reference, and ingestion behavior. |
 | `sync` | `cloudBaseUrl`, `uploadBatchSize`, `uploadIntervalSeconds`, `syncedStatusPollIntervalSeconds`, `configPollIntervalSeconds`, `cursorStrategy`, `maxReplayBackoffSeconds`, `initialReplayBackoffSeconds`, `maxRecordsPerUploadWindow` | Cloud communication cadence and replay controls. |
 | `buffer` | `retentionDays`, `stalePendingDays`, `maxRecords`, `cleanupIntervalHours`, `persistRawPayloads` | Local SQLite retention, stale detection, and cleanup settings. |
 | `localApi` | `localhostPort`, `enableLanApi`, `lanBindAddress`, `lanAllowCidrs`, `lanApiKeyRef`, `rateLimitPerMinute` | Local and LAN API listener configuration. |
+| `siteHa` | `enabled`, `autoFailoverEnabled`, `priority`, `roleCapability`, `currentRole`, `heartbeatIntervalSeconds`, `failoverTimeoutSeconds`, `maxReplicationLagSeconds`, `peerDiscoveryMode`, `allowFailback`, `leaderAgentId`, `leaderEpoch`, `leaderSinceUtc`, `peerDirectory[]` | Site-level active-standby policy, per-device priority, current leader metadata, and bootstrap peer directory used before LAN discovery converges. |
 | `telemetry` | `telemetryIntervalSeconds`, `logLevel`, `includeDiagnosticsLogs`, `metricsWindowSeconds` | Edge telemetry cadence and diagnostics verbosity. |
 | `fiscalization` | `mode`, `taxAuthorityEndpoint`, `requireCustomerTaxId`, `fiscalReceiptRequired` | Fiscalization and tax data collection settings. |
 | `mappings` | `priceDecimalPlaces`, `volumeUnit`, `products`, `nozzles` | Canonical mapping data needed for normalization and local operations. `nozzles` is an array of `{ odooPumpNumber, fccPumpNumber, odooNozzleNumber, fccNozzleNumber, productCode }` — one entry per active nozzle at the site. The Edge Agent caches this array in its local `nozzles` Room table and uses it to translate Odoo POS pump/nozzle numbers into FCC pump/nozzle numbers before sending every pre-auth command to the FCC. |
@@ -68,6 +70,8 @@
 - Edge must reject configs with unsupported `schemaVersion`.
 - `fcc` settings may remain populated when the site is disconnected, but the agent must not use them while `connectivityMode = DISCONNECTED`.
 - `credentialRef` and `lanApiKeyRef` are opaque references; secrets should not be logged.
+- `siteHa.peerDirectory` is authoritative bootstrap data from the cloud control plane, not a proof of current LAN reachability. Runtime peer health must still be established through heartbeat/peer probes.
+- `siteHa.leaderEpoch` must increase monotonically whenever leadership changes. Authoritative cloud writes from agents must carry the current epoch once fencing is enabled.
 - Restart-required sections must not be partially applied.
 - `mappings.nozzles` must not be empty for connected sites. If a nozzle entry is missing, pre-auth for that pump/nozzle combination will fail with `NOZZLE_MAPPING_NOT_FOUND`. This is a config error — raise an alert and investigate master data sync.
 - `mappings.nozzles` entries must be unique by `(odooPumpNumber, odooNozzleNumber)` within the site. Duplicate entries must be rejected during config validation on the Edge Agent.

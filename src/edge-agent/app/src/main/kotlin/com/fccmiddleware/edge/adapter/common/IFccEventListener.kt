@@ -49,6 +49,37 @@ interface IFccEventListener {
      * @param reason Human-readable description of the disconnection cause.
      */
     fun onConnectionLost(reason: String)
+
+    /**
+     * A BNA (Banknote Acceptor) report has been received from an EPT terminal.
+     *
+     * @param terminalId The EPT terminal that reported.
+     * @param notesAccepted Number of banknotes accepted.
+     */
+    fun onBnaReport(terminalId: String, notesAccepted: Int) {}
+
+    /**
+     * Dispenser install data has been received (hardware discovery).
+     *
+     * @param dispenserId The dispenser identifier.
+     * @param model The dispenser model string.
+     */
+    fun onDispenserInstallData(dispenserId: String, model: String) {}
+
+    /**
+     * EPT terminal info has been received.
+     *
+     * @param terminalId The EPT terminal identifier.
+     * @param version The EPT firmware/software version.
+     */
+    fun onEptInfoReceived(terminalId: String, version: String) {}
+
+    /**
+     * The active price set on the FCC has changed.
+     *
+     * @param priceSetId The new active price set identifier.
+     */
+    fun onPriceChanged(priceSetId: String) {}
 }
 
 /**

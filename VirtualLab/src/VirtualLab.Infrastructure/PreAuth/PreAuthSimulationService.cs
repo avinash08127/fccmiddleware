@@ -10,12 +10,14 @@ using VirtualLab.Domain.Models;
 using VirtualLab.Domain.Profiles;
 using VirtualLab.Infrastructure.FccProfiles;
 using VirtualLab.Infrastructure.Persistence;
+using VirtualLab.Infrastructure.Scenarios;
 
 namespace VirtualLab.Infrastructure.PreAuth;
 
 public sealed class PreAuthSimulationService(
     VirtualLabDbContext dbContext,
-    IContractValidationService contractValidationService) : IPreAuthSimulationService
+    IContractValidationService contractValidationService,
+    ScenarioExecutionScope scenarioExecutionScope) : IPreAuthSimulationService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -223,10 +225,16 @@ public sealed class PreAuthSimulationService(
             }
         }
 
-        string preAuthId = string.IsNullOrWhiteSpace(payload.PreAuthId)
-            ? $"PA-{Guid.NewGuid():N}"[..11].ToUpperInvariant()
-            : payload.PreAuthId;
         string correlationId = ResolveCorrelationId(payload, request);
+        ScenarioRuntimeContext? scenarioContext = ResolveScenarioContext(context.Site.SiteCode);
+        string preAuthId = string.IsNullOrWhiteSpace(payload.PreAuthId)
+            ? scenarioContext is null
+                ? $"PA-{Guid.NewGuid():N}"[..11].ToUpperInvariant()
+                : scenarioContext.CreatePreAuthExternalId(
+                    payload.PumpNumber!.Value,
+                    payload.NozzleNumber!.Value,
+                    scenarioContext.NextPreAuthSequence(payload.PumpNumber.Value, payload.NozzleNumber.Value, correlationId))
+            : payload.PreAuthId;
         string canonicalRequest = Serialize(new
         {
             siteCode = context.Site.SiteCode,
@@ -1450,6 +1458,14 @@ public sealed class PreAuthSimulationService(
             session.CanonicalResponseJson,
             responseValidation,
             session.TimelineJson);
+    }
+
+    private ScenarioRuntimeContext? ResolveScenarioContext(string siteCode)
+    {
+        ScenarioRuntimeContext? context = scenarioExecutionScope.Current;
+        return context is not null && string.Equals(context.SiteCode, siteCode, StringComparison.OrdinalIgnoreCase)
+            ? context
+            : null;
     }
 
     private sealed record SiteProfileContext(Site Site, FccProfileRecord Profile)

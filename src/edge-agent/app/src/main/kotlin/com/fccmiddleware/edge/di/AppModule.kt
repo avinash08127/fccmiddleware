@@ -37,6 +37,14 @@ import com.fccmiddleware.edge.registration.RegistrationHandler
 import com.fccmiddleware.edge.logging.LogLevel
 import com.fccmiddleware.edge.logging.PlatformLogBridge
 import com.fccmiddleware.edge.logging.StructuredFileLogger
+import com.fccmiddleware.edge.peer.PeerApiServer
+import com.fccmiddleware.edge.peer.PeerCoordinator
+import com.fccmiddleware.edge.peer.PeerHttpClient
+import com.fccmiddleware.edge.replication.ElectionCoordinator
+import com.fccmiddleware.edge.replication.RecoveryManager
+import com.fccmiddleware.edge.replication.ReplicationSequenceAssignor
+import com.fccmiddleware.edge.replication.ReplicationSyncWorker
+import com.fccmiddleware.edge.replication.StandbyReadinessGate
 import com.fccmiddleware.edge.sync.TelemetryReporter
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
 import androidx.security.crypto.MasterKey
@@ -112,7 +120,7 @@ val appModule = module {
     single { KeystoreManager() }
     single { MasterKey.Builder(androidContext()).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build() }
     single { EncryptedPrefsManager(androidContext(), get()) }
-    single { ConfigManager(agentConfigDao = get(), keystoreManager = get(), encryptedPrefsManager = get()) }
+    single { ConfigManager(agentConfigDao = get(), keystoreManager = get(), encryptedPrefsManager = get(), syncStateDao = get()) }
     single { LocalOverrideManager(androidContext(), get(), get()) }
     single { SiteDataManager(siteDataDao = get()) }
     single { FccRuntimeState() }
@@ -273,6 +281,7 @@ val appModule = module {
             cloudApiClient = get(),
             tokenProvider = get(),
             keystoreManager = get(),
+            configManager = get(),
         )
     }
 
@@ -325,6 +334,75 @@ val appModule = module {
             tokenProvider = get(),
             commandExecutor = get(),
             encryptedPrefs = get(),
+            configManager = get(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Peer HA — HTTP client, coordinator, API server, replication components
+    // -------------------------------------------------------------------------
+    // P2-12: LAN UDP peer announcement — broadcast on startup and after registration
+    single { com.fccmiddleware.edge.peer.LanPeerAnnouncer(configManager = get(), encryptedPrefsManager = get()) }
+
+    // P2-13: LAN UDP peer listener — listens for announcements from other agents
+    single {
+        com.fccmiddleware.edge.peer.LanPeerListener(
+            configManager = get(),
+            encryptedPrefsManager = get(),
+            peerCoordinator = get(),
+        )
+    }
+
+    single { PeerHttpClient(configManager = get(), networkBinder = get()) }
+    single {
+        PeerCoordinator(
+            peerHttpClient = get(),
+            configManager = get(),
+            encryptedPrefsManager = get(),
+            fileLogger = get(),
+        )
+    }
+    single { PeerApiServer(configManager = get(), peerCoordinator = get()) }
+    single { ReplicationSequenceAssignor() }
+    single { StandbyReadinessGate(peerCoordinator = get(), configManager = get()) }
+    single {
+        ReplicationSyncWorker(
+            peerHttpClient = get(),
+            peerCoordinator = get(),
+            syncStateDao = get(),
+            sequenceAssignor = get(),
+            fileLogger = get(),
+        )
+    }
+    single {
+        ElectionCoordinator(
+            peerCoordinator = get(),
+            peerHttpClient = get(),
+            configManager = get(),
+            encryptedPrefsManager = get(),
+            standbyReadinessGate = get(),
+            fileLogger = get(),
+        )
+    }
+    single {
+        RecoveryManager(
+            peerCoordinator = get(),
+            configManager = get(),
+            encryptedPrefsManager = get(),
+            standbyReadinessGate = get(),
+            fileLogger = get(),
+        )
+    }
+    single {
+        com.fccmiddleware.edge.replication.PlannedSwitchoverHandler(
+            peerCoordinator = get(),
+            peerHttpClient = get(),
+        )
+    }
+    single {
+        com.fccmiddleware.edge.api.PrimaryProxyClient(
+            peerHttpClient = get(),
+            configManager = get(),
         )
     }
 
@@ -351,6 +429,11 @@ val appModule = module {
             keystoreManager = get(),
             encryptedPrefsManager = get(),
             androidInstallationSyncManager = get(),
+            peerCoordinator = get(),
+            replicationSyncWorker = get(),
+            electionCoordinator = get(),
+            recoveryManager = get(),
+            configManager = get(),
         )
     }
 
@@ -391,6 +474,7 @@ val appModule = module {
             siteDataManager = get(),
             bufferDatabase = get(),
             localOverrideManager = get(),
+            lanPeerAnnouncer = get(),
         )
     }
     viewModel {

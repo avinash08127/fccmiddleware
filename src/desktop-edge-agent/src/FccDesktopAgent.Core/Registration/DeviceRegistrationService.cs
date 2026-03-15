@@ -2,8 +2,10 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using FccDesktopAgent.Core.Config;
+using FccDesktopAgent.Core.Peer;
 using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.Sync;
+using FccMiddleware.Contracts.Common;
 using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.Core.Registration;
@@ -25,6 +27,7 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
     private readonly IDeviceTokenProvider _tokenProvider;
     private readonly IRegistrationManager _registrationManager;
     private readonly IConfigManager _configManager;
+    private readonly LanPeerAnnouncer? _lanPeerAnnouncer;
     private readonly ILogger<DeviceRegistrationService> _logger;
 
     public DeviceRegistrationService(
@@ -32,12 +35,14 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
         IDeviceTokenProvider tokenProvider,
         IRegistrationManager registrationManager,
         IConfigManager configManager,
-        ILogger<DeviceRegistrationService> logger)
+        ILogger<DeviceRegistrationService> logger,
+        LanPeerAnnouncer? lanPeerAnnouncer = null)
     {
         _httpFactory = httpFactory;
         _tokenProvider = tokenProvider;
         _registrationManager = registrationManager;
         _configManager = configManager;
+        _lanPeerAnnouncer = lanPeerAnnouncer;
         _logger = logger;
     }
 
@@ -105,7 +110,7 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
             return new RegistrationResult.TransportError("Invalid registration response format");
         }
 
-        if (result is null || string.IsNullOrEmpty(result.DeviceId))
+        if (result is null || result.DeviceId == Guid.Empty)
         {
             return new RegistrationResult.TransportError("Registration response missing required fields");
         }
@@ -119,9 +124,9 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
         {
             IsRegistered = true,
             IsDecommissioned = false,
-            DeviceId = result.DeviceId,
+            DeviceId = result.DeviceId.ToString(),
             SiteCode = result.SiteCode,
-            LegalEntityId = result.LegalEntityId,
+            LegalEntityId = result.LegalEntityId.ToString(),
             CloudBaseUrl = cloudBaseUrl,
             RegisteredAt = result.RegisteredAt,
             DeviceSerialNumber = request.DeviceSerialNumber,
@@ -138,19 +143,49 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
             var configVersion = result.SiteConfig.ConfigVersion > 0
                 ? result.SiteConfig.ConfigVersion.ToString()
                 : "bootstrap-1";
-            await _configManager.ApplyConfigAsync(result.SiteConfig, configJson, configVersion, ct);
+            var applyResult = await _configManager.ApplyConfigAsync(result.SiteConfig, configJson, configVersion, ct);
+            if (applyResult.Outcome != ConfigApplyOutcome.Applied)
+            {
+                var message = applyResult.Outcome switch
+                {
+                    ConfigApplyOutcome.Rejected => applyResult.ErrorMessage ?? "Bootstrap site config failed validation.",
+                    ConfigApplyOutcome.NotYetEffective => "Bootstrap site config is not yet effective.",
+                    ConfigApplyOutcome.StaleVersion => "Bootstrap site config version is stale.",
+                    _ => "Bootstrap site config could not be applied."
+                };
+
+                _logger.LogError(
+                    "Registration succeeded but bootstrap config was not applied (outcome={Outcome}, version={Version}): {Message}",
+                    applyResult.Outcome,
+                    configVersion,
+                    message);
+
+                return new RegistrationResult.TransportError(
+                    $"Registration succeeded but bootstrap config was not applied: {message}");
+            }
+
             _logger.LogInformation("Bootstrap site config applied (version {Version})", configVersion);
 
             // M-09: Sync equipment data immediately so the local API has pump/nozzle
             // info before the first config poll (potentially 60+ seconds away).
             try
             {
-                _registrationManager.SyncSiteData(result.SiteConfig);
+                await _registrationManager.SyncSiteDataAsync(result.SiteConfig);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Site data sync failed after registration — will populate on first config poll");
             }
+        }
+
+        // P2-12: Broadcast UDP peer announcement after registration so LAN peers discover us
+        try
+        {
+            _lanPeerAnnouncer?.Broadcast();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "LAN peer announcement after registration failed");
         }
 
         _logger.LogInformation(
@@ -168,9 +203,9 @@ public sealed class DeviceRegistrationService : IDeviceRegistrationService
 
         try
         {
-            var errorBody = await response.Content.ReadFromJsonAsync<RegistrationErrorResponse>(JsonOptions, ct);
-            errorCode = errorBody?.ErrorCode ?? "UNKNOWN";
-            message = errorBody?.Message ?? $"HTTP {(int)response.StatusCode}";
+            var errorBody = await response.Content.ReadFromJsonAsync<ErrorResponse>(JsonOptions, ct);
+            errorCode = errorBody.GetErrorCode();
+            message = errorBody.GetMessage((int)response.StatusCode);
         }
         catch
         {

@@ -35,19 +35,22 @@ public sealed class TransactionsController : ControllerBase
     private readonly ILogger<TransactionsController> _logger;
     private readonly IObservabilityMetrics _metrics;
     private readonly IServiceScopeFactory _serviceScopeFactory;
+    private readonly IAuthoritativeWriteFenceService _writeFence;
 
     public TransactionsController(
         IMediator mediator,
         ISiteFccConfigProvider siteFccConfigProvider,
         ILogger<TransactionsController> logger,
         IObservabilityMetrics metrics,
-        IServiceScopeFactory serviceScopeFactory)
+        IServiceScopeFactory serviceScopeFactory,
+        IAuthoritativeWriteFenceService writeFence)
     {
         _mediator = mediator;
         _siteFccConfigProvider = siteFccConfigProvider;
         _logger = logger;
         _metrics = metrics;
         _serviceScopeFactory = serviceScopeFactory;
+        _writeFence = writeFence;
     }
 
     /// <summary>
@@ -789,6 +792,30 @@ public sealed class TransactionsController : ControllerBase
                 "All transactions must belong to the authenticated device's site."));
         }
 
+        var fenceResult = await _writeFence.ValidateAsync(deviceId, siteCode, request.LeaderEpoch, cancellationToken);
+        if (!fenceResult.IsAllowed)
+        {
+            return fenceResult.StatusCode switch
+            {
+                StatusCodes.Status400BadRequest => BadRequest(BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details)),
+                StatusCodes.Status401Unauthorized => Unauthorized(BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details)),
+                StatusCodes.Status403Forbidden => StatusCode(StatusCodes.Status403Forbidden, BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details)),
+                _ => Conflict(BuildError(
+                    fenceResult.ErrorCode!,
+                    fenceResult.Message!,
+                    fenceResult.Details))
+            };
+        }
+
         var correlationId = CorrelationIdMiddleware.GetCorrelationId(HttpContext);
 
         var command = new UploadTransactionBatchCommand
@@ -816,7 +843,8 @@ public sealed class TransactionsController : ControllerBase
             DeviceSiteCode = siteCode,
             DeviceId       = deviceId,
             CorrelationId  = correlationId,
-            UploadBatchId  = request.UploadBatchId
+            UploadBatchId  = request.UploadBatchId,
+            LeaderEpoch    = request.LeaderEpoch
         };
 
         var result = await _mediator.Send(command, cancellationToken);
@@ -829,7 +857,8 @@ public sealed class TransactionsController : ControllerBase
                 Outcome             = r.Outcome,
                 TransactionId       = r.TransactionId,
                 OriginalTransactionId = r.OriginalTransactionId,
-                ErrorCode           = r.ErrorCode
+                ErrorCode           = r.ErrorCode,
+                ErrorMessage        = r.ErrorMessage
             }).ToList(),
             AcceptedCount  = result.Results.Count(r => r.Outcome == "ACCEPTED"),
             DuplicateCount = result.Results.Count(r => r.Outcome == "DUPLICATE"),

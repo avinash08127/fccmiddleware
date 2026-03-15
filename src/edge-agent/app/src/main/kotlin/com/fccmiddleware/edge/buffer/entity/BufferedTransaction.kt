@@ -105,6 +105,10 @@ data class BufferedTransaction(
     @ColumnInfo(name = "correlation_id")
     val correlationId: String,
 
+    /** FCC-side pre-auth correlation ID echoed on the final dispense when available. */
+    @ColumnInfo(name = "fcc_correlation_id")
+    val fccCorrelationId: String? = null,
+
     @ColumnInfo(name = "upload_attempts")
     val uploadAttempts: Int = 0,
 

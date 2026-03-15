@@ -32,6 +32,8 @@ import com.fccmiddleware.edge.sync.AgentCommandExecutor
 import com.fccmiddleware.edge.sync.AndroidInstallationSyncManager
 import com.fccmiddleware.edge.sync.CloudApiClient
 import com.fccmiddleware.edge.sync.DeviceTokenProvider
+import com.fccmiddleware.edge.peer.PeerApiServer
+import com.fccmiddleware.edge.peer.PeerCoordinator
 import com.fccmiddleware.edge.websocket.OdooWebSocketServer
 import com.fccmiddleware.edge.R
 import com.fccmiddleware.edge.ui.MainActivity
@@ -88,6 +90,10 @@ class EdgeAgentForegroundService : Service() {
     private val localOverrideManager: LocalOverrideManager by inject()
     private val networkBinder: NetworkBinder by inject()
     private val odooWebSocketServer: OdooWebSocketServer by inject()
+    private val peerApiServer: PeerApiServer by inject()
+    private val peerCoordinator: PeerCoordinator by inject()
+    private val lanPeerAnnouncer: com.fccmiddleware.edge.peer.LanPeerAnnouncer by inject()
+    private val lanPeerListener: com.fccmiddleware.edge.peer.LanPeerListener by inject()
     private val integrityChecker: IntegrityChecker by inject()
 
     @Volatile
@@ -218,6 +224,22 @@ class EdgeAgentForegroundService : Service() {
 
             localApiServer.start()
             odooWebSocketServer.start()
+
+            // HA: Initialize peer coordinator and start peer API server if HA is enabled
+            val bootHaConfig = configManager.config.value?.siteHa
+            if (bootHaConfig != null && bootHaConfig.enabled) {
+                peerCoordinator.initializeFromConfig()
+                peerApiServer.start()
+                // P2-12: Broadcast UDP peer announcement on startup so LAN peers discover us immediately
+                lanPeerAnnouncer.broadcast()
+                // P2-13: Start listening for UDP peer announcements from other agents
+                lanPeerListener.onNewPeerDiscovered = {
+                    cadenceController.triggerImmediateConfigPoll("lan_peer_discovered")
+                }
+                lanPeerListener.start(appScope)
+                AppLogger.i(TAG, "HA enabled: peer API server started, coordinator initialized, LAN listener active")
+            }
+
             cadenceController.start()
             observeConfigForRuntimeUpdates()
             androidInstallationSyncManager.syncCurrentInstallation("app_startup")
@@ -255,6 +277,8 @@ class EdgeAgentForegroundService : Service() {
         connectivityManager.stop()
         networkBinder.stop()
         localApiServer.stop()
+        peerApiServer.stop()
+        lanPeerListener.stop()
         odooWebSocketServer.stop()
         fileLogger.close()
         // LR-004: Use cancelChildren() instead of cancel() so the Koin singleton scope

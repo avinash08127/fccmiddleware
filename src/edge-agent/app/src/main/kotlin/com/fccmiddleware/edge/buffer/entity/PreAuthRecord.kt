@@ -128,4 +128,8 @@ data class PreAuthRecord(
     /** NET-008: B2B customer business name for reconciliation. */
     @ColumnInfo(name = "customer_business_name")
     val customerBusinessName: String? = null,
+
+    /** Odoo user ID of the fuel attendant, if captured. */
+    @ColumnInfo(name = "attendant_id")
+    val attendantId: String? = null,
 )

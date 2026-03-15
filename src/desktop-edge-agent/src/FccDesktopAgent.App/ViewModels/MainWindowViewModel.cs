@@ -54,9 +54,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IDisposable
             UpdateOperatorNotice(_commandStateStore.Load());
         }
 
+        // P-DSK-001: Increased from 5s to 15s to reduce scope/context allocations
         _statusTimer = new Timer(
             _ => _ = RefreshStatusBarAsync(),
-            null, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+            null, TimeSpan.Zero, TimeSpan.FromSeconds(15));
     }
 
     // ── Status Bar Properties ────────────────────────────────────────────────

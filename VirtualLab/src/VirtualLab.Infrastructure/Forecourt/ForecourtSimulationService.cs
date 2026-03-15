@@ -10,13 +10,15 @@ using VirtualLab.Domain.Models;
 using VirtualLab.Domain.Profiles;
 using VirtualLab.Infrastructure.FccProfiles;
 using VirtualLab.Infrastructure.Persistence;
+using VirtualLab.Infrastructure.Scenarios;
 
 namespace VirtualLab.Infrastructure.Forecourt;
 
 public sealed class ForecourtSimulationService(
     VirtualLabDbContext dbContext,
     CallbackDeliveryService callbackDeliveryService,
-    IContractValidationService contractValidationService) : IForecourtSimulationService
+    IContractValidationService contractValidationService,
+    ScenarioExecutionScope scenarioExecutionScope) : IForecourtSimulationService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -790,15 +792,21 @@ public sealed class ForecourtSimulationService(
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        int sequence = await dbContext.SimulatedTransactions
-            .CountAsync(x => x.NozzleId == context.Nozzle.Id, cancellationToken) + 1;
-        int seed = context.Environment.DeterministicSeed;
-        Guid transactionId = seed == 0
-            ? Guid.NewGuid()
-            : CreateDeterministicGuid($"transaction:{seed}:{context.Site.SiteCode}:{context.Pump.PumpNumber}:{context.Nozzle.NozzleNumber}:{sequence}");
-        string externalTransactionId = seed == 0
-            ? $"TX-{Guid.NewGuid():N}"[..11].ToUpperInvariant()
-            : $"TX-{seed:D6}-{context.Pump.PumpNumber:D2}{context.Nozzle.NozzleNumber:D2}-{sequence:D4}";
+        ScenarioRuntimeContext? scenarioContext = ResolveScenarioContext(context.Site.SiteCode);
+        int sequence = scenarioContext is null
+            ? await dbContext.SimulatedTransactions.CountAsync(x => x.NozzleId == context.Nozzle.Id, cancellationToken) + 1
+            : scenarioContext.NextTransactionSequence(context.Pump.PumpNumber, context.Nozzle.NozzleNumber, state.CorrelationId);
+        int seed = scenarioContext?.ReplaySeed ?? context.Environment.DeterministicSeed;
+        Guid transactionId = scenarioContext is not null
+            ? scenarioContext.CreateDeterministicGuid($"transaction:{context.Pump.PumpNumber}:{context.Nozzle.NozzleNumber}:{sequence}")
+            : seed == 0
+                ? Guid.NewGuid()
+                : CreateDeterministicGuid($"transaction:{seed}:{context.Site.SiteCode}:{context.Pump.PumpNumber}:{context.Nozzle.NozzleNumber}:{sequence}");
+        string externalTransactionId = scenarioContext is not null
+            ? scenarioContext.CreateTransactionExternalId(context.Pump.PumpNumber, context.Nozzle.NozzleNumber, sequence)
+            : seed == 0
+                ? $"TX-{Guid.NewGuid():N}"[..11].ToUpperInvariant()
+                : $"TX-{seed:D6}-{context.Pump.PumpNumber:D2}{context.Nozzle.NozzleNumber:D2}-{sequence:D4}";
         string correlationId = state.CorrelationId;
         string occurredAtText = now.ToString("O");
         string deliveryCursor = $"{now.UtcTicks:D20}:{externalTransactionId}";
@@ -946,6 +954,14 @@ public sealed class ForecourtSimulationService(
         }
 
         return transaction;
+    }
+
+    private ScenarioRuntimeContext? ResolveScenarioContext(string siteCode)
+    {
+        ScenarioRuntimeContext? context = scenarioExecutionScope.Current;
+        return context is not null && string.Equals(context.SiteCode, siteCode, StringComparison.OrdinalIgnoreCase)
+            ? context
+            : null;
     }
 
     private Task<IReadOnlyList<PushTransactionAttemptSummary>> PushTransactionsInternalAsync(

@@ -74,6 +74,9 @@ data class CanonicalTransaction(
     /** Trace correlation ID for observability. */
     val correlationId: String,
 
+    /** FCC-side pre-auth correlation ID echoed on the final dispense when available. */
+    val fccCorrelationId: String? = null,
+
     /** Fiscal receipt reference if FCC fiscalizes directly. Null otherwise. */
     val fiscalReceiptNumber: String? = null,
 

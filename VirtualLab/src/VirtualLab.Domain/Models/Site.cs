@@ -19,6 +19,8 @@ public sealed class Site
     public string BasicAuthPassword { get; set; } = string.Empty;
     public TransactionDeliveryMode DeliveryMode { get; set; }
     public PreAuthFlowMode PreAuthMode { get; set; }
+    /// <summary>Advisory vendor label: Generic, DOMS_REST, DOMS_JPL, PETRONITE, ADVATEC, RADIX.</summary>
+    public string FccVendor { get; set; } = "Generic";
     public string SettingsJson { get; set; } = "{}";
     public bool IsActive { get; set; } = true;
     public DateTimeOffset CreatedAtUtc { get; set; }

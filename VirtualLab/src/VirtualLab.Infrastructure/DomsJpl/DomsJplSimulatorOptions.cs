@@ -9,4 +9,7 @@ public sealed class DomsJplSimulatorOptions
     public int PumpCount { get; set; } = 4;
     public int HeartbeatTimeoutSeconds { get; set; } = 90;
     public bool EnableUnsolicitedPush { get; set; } = false;
+
+    /// <summary>Default site code for bridging pre-auth sessions to PreAuthSimulationService.</summary>
+    public string? DefaultSiteCode { get; set; } = "SITE001";
 }

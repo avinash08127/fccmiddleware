@@ -485,6 +485,7 @@ try
     builder.Services.AddScoped<IDiagnosticLogsDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IPreAuthDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
     builder.Services.AddScoped<IReconciliationDbContext>(sp => sp.GetRequiredService<FccMiddlewareDbContext>());
+    builder.Services.AddScoped<IAuthoritativeWriteFenceService, AuthoritativeWriteFenceService>();
     builder.Services.AddSingleton<IObservabilityMetrics, CloudWatchEmfMetricSink>();
     builder.Services.AddHttpClient<IAgentPushHintSender, FirebasePushHintSender>();
     builder.Services.AddScoped<IAgentPushHintDispatcher, AgentPushHintDispatcher>();
@@ -582,6 +583,7 @@ try
     app.UseAuthentication();
     app.UseMiddleware<PortalRoleEnrichmentMiddleware>();
     app.UseMiddleware<DeviceActiveCheckMiddleware>();
+    app.UsePeerDirectoryVersionHeader();
     app.UseMiddleware<TenantScopeMiddleware>();
     app.UseAuthorization();
 

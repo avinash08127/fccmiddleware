@@ -358,6 +358,7 @@
 - **Module:** FCC Device Integration
 - **Severity:** Medium
 - **Category:** Sensitive data written to logs
+- **Status:** FIXED
 - **Description:** `AdvatecAdapter.TryMatchPreAuth` logs `CustomerId` (which is the customer's tax ID) at `Information` level during receipt correlation (lines 464-467). The `SendPreAuthAsync` method logs `OdooOrderId` and `CorrelationId` which are non-sensitive, but the correlation logs include PII from the `ActivePreAuth` record. The `SensitiveDataDestructuringPolicy` only redacts properties annotated with `[SensitiveData]` on class definitions — it does not redact string interpolation arguments in structured log templates. Customer tax IDs are regulated personal data in many jurisdictions (GDPR, TRA in Tanzania).
 - **Evidence:**
   - `AdvatecAdapter.cs:464-467` — `_logger.LogInformation("... CustomerId=...")` — logs customer tax ID at Information level
@@ -365,6 +366,7 @@
   - `PreAuthHandler.cs:137-139` — `CustomerName` and `CustomerTaxId` stored in DB but should not appear in logs
 - **Impact:** Customer tax IDs and names in log files, which may be accessible to support staff, log aggregation systems, or backup media. Violates data minimization principles.
 - **Recommended Fix:** Remove `CustomerId` from log template arguments. Log only the pump number and correlation ID. If debugging requires customer data, use `LogDebug` with a redacted format (e.g., last 4 characters only).
+- **Fix Applied:** Removed `CustomerId` from the `LogDebug` template in `AdvatecAdapter.cs`. The log now includes only `Pump={Pump}` instead of `CustomerId={CustomerId}`, preventing customer tax ID exposure in log files.
 
 ---
 
@@ -373,6 +375,7 @@
 - **Module:** FCC Device Integration
 - **Severity:** Medium
 - **Category:** Weak authentication flows
+- **Status:** FIXED
 - **Description:** `AdvatecWebhookListener` validates the webhook authentication token to ensure only the configured Advatec device can send receipt callbacks. If the token comparison uses standard `string.Equals` (like the Radix signature validation in S-DSK-014), it is vulnerable to timing side-channel attacks. An attacker on the LAN who can send HTTP requests to the webhook listener port could determine the token character by character through precise response timing measurements. This is the same class of vulnerability as the Radix signature comparison (S-DSK-014), but applied to the webhook authentication boundary.
 - **Evidence:**
   - `AdvatecWebhookListener.cs` — webhook token validation
@@ -380,6 +383,7 @@
   - Pattern established in S-DSK-014 — standard string comparison is timing-vulnerable
 - **Impact:** An attacker on the station LAN could forge webhook callbacks by determining the token through timing analysis, injecting fake receipt data into the transaction buffer.
 - **Recommended Fix:** Use `CryptographicOperations.FixedTimeEquals` for webhook token comparison, matching the pattern from `ApiKeyMiddleware`.
+- **Fix Applied:** Replaced `string.Equals(providedToken, _webhookToken, StringComparison.Ordinal)` with `CryptographicOperations.FixedTimeEquals` on UTF-8 byte representations in `AdvatecWebhookListener.cs`. The null/empty check is performed first (short-circuit is safe for empty tokens), followed by constant-time comparison for non-empty tokens.
 
 ---
 
@@ -388,6 +392,7 @@
 - **Module:** FCC Device Integration
 - **Severity:** Medium
 - **Category:** Insecure storage of credentials
+- **Status:** FIXED
 - **Description:** `DomsAdapter.BuildRequest` unconditionally adds the FCC API key to every request via `request.Headers.Add("X-API-Key", _config.ApiKey)` (line 259). The FCC base URL is user-configurable and there is no enforcement that it uses HTTPS. While FCC communication occurs over the station LAN (reducing interception risk), the API key is sent in cleartext HTTP headers if the FCC URL is `http://`. The `CloudUrlGuard.IsSecure()` check is only applied to cloud URLs, not FCC URLs. On shared or multi-tenant LANs (e.g., fuel station with customer WiFi), HTTP traffic containing the API key could be captured.
 - **Evidence:**
   - `DomsAdapter.cs:259` — `request.Headers.Add("X-API-Key", _config.ApiKey)` — always sent
@@ -395,6 +400,7 @@
   - No `FccUrlGuard.IsSecure()` equivalent for FCC URLs
 - **Impact:** FCC API key exposure on LANs where HTTP traffic can be sniffed. The key grants full access to the Forecourt Controller's transaction and pump operations.
 - **Recommended Fix:** Add a warning log when the FCC base URL does not use HTTPS. Consider enforcing HTTPS for FCC connections in production environments, with an explicit override for development/testing.
+- **Fix Applied:** Added HTTPS scheme check in `DomsAdapter.BuildRequest`. When the FCC base URL does not use HTTPS, a warning is logged once (using `_fccHttpWarningLogged` flag to avoid log spam) alerting that the X-API-Key header will be sent without TLS encryption.
 
 ---
 
@@ -405,6 +411,7 @@
 - **Module:** Site Master Data
 - **Severity:** Medium
 - **Category:** Weak authentication flows
+- **Status:** FIXED
 - **Description:** `ConfigurationPage.OnRegenerateApiKeyClicked` (line 226) generates a new local API key using `Guid.NewGuid().ToString("N")`. While .NET GUIDs (v4) use a CSPRNG internally on modern runtimes, the GUID format reserves 6 bits for version/variant fields, yielding only 122 bits of entropy from 128 bits of output. More importantly, the GUID format is recognizable and may be treated as a non-secret identifier by logging systems or monitoring tools. A proper API key should use `RandomNumberGenerator.GetBytes` for guaranteed cryptographic randomness and higher entropy density.
 - **Evidence:**
   - `ConfigurationPage.axaml.cs:226` — `var newKey = Guid.NewGuid().ToString("N")` — 32 hex chars, 122 bits entropy
@@ -412,6 +419,7 @@
   - `ApiKeyMiddleware.cs` — compares this key on every local API request
 - **Impact:** The API key has slightly reduced entropy (122 vs 256 bits) and a recognizable format that may bypass log redaction rules. While 122 bits is sufficient against brute force, it does not follow security best practices for API key generation.
 - **Recommended Fix:** Replace with `Convert.ToHexString(RandomNumberGenerator.GetBytes(32))` for a 256-bit key with full entropy. This also eliminates the recognizable GUID format.
+- **Fix Applied:** Replaced `Guid.NewGuid().ToString("N")` with `Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant()` in `ConfigurationPage.OnRegenerateApiKeyClicked`. The new key has full 256-bit entropy from a CSPRNG and a non-recognizable hex format.
 
 ---
 
@@ -420,6 +428,7 @@
 - **Module:** Site Master Data
 - **Severity:** Medium
 - **Category:** Sensitive data written to logs
+- **Status:** FIXED
 - **Description:** `ConfigurationPage.axaml` (line 178) displays the FCC API key in a standard `TextBox` with `IsReadOnly="True"`. The key is fully visible in cleartext on screen. The field is marked `[SensitiveData]` in `AgentConfiguration` (line 68) and stored securely in the platform credential store, but the UI renders it without masking. A regenerated key (line 226) is also displayed in cleartext before the user saves. Anyone viewing the operator screen (shoulder surfing, screen recording, remote desktop) can read the full API key.
 - **Evidence:**
   - `ConfigurationPage.axaml:178` — `<TextBox x:Name="CfgApiKey" IsReadOnly="True" FontSize="12" FontFamily="Consolas, monospace" />`
@@ -427,6 +436,7 @@
   - `AgentConfiguration.cs:68` — `[SensitiveData] public string FccApiKey` — marked as sensitive
 - **Impact:** The API key is exposed to anyone with visual access to the configuration screen. In a fuel station environment with shared operator terminals, this enables unauthorized API access.
 - **Recommended Fix:** Use a `PasswordBox` or mask the key by default (e.g., show only the last 4 characters). Add a "Show" toggle button for operators who need to copy the key.
+- **Fix Applied:** Already addressed by S-DSK-017: `PasswordChar="&#x2022;"` (bullet) is applied to the `CfgApiKey` TextBox, with a Show/Hide toggle button and 10-second auto-hide. This finding is a duplicate of S-DSK-017.
 
 ---
 
@@ -435,6 +445,7 @@
 - **Module:** Site Master Data
 - **Severity:** Medium
 - **Category:** Insecure file storage
+- **Status:** FIXED
 - **Description:** `LocalOverrideManager` stores FCC host/port overrides in `overrides.json` in the agent data directory. While the directory has restrictive permissions (owner-only on Unix, per-user on Windows via %LOCALAPPDATA%), any process running as the same OS user can modify this file. A malicious process could overwrite `FccHost` to redirect FCC API calls to an attacker-controlled server, capturing API keys (sent as X-API-Key headers) and injecting fake transaction data. The override takes effect silently on the next adapter connection cycle.
 - **Evidence:**
   - `LocalOverrideManager.cs:33` — `_filePath = Path.Combine(AgentDataDirectory.Resolve(), OverridesFileName)`
@@ -443,6 +454,7 @@
   - `DesktopFccRuntimeConfiguration.cs:177-180` — `ResolveBaseUrl` reads overrides for FCC URL construction
 - **Impact:** A same-user malicious process can redirect all FCC communication to an attacker-controlled endpoint, capturing the API key and injecting fake pump status or transaction data.
 - **Recommended Fix:** Add an HMAC or digital signature to `overrides.json` using a key from the platform credential store. Verify integrity on read. Log a security warning when overrides are modified outside the application.
+- **Fix Applied:** Already addressed by S-DSK-018: HMAC-SHA256 integrity protection was added to `LocalOverrideManager`. A 256-bit HMAC key is stored in the platform credential store, and `overrides.hmac` is validated using `CryptographicOperations.FixedTimeEquals` on every load. This finding is a duplicate of S-DSK-018.
 
 ---
 
@@ -451,12 +463,14 @@
 - **Module:** Pre-Authorization
 - **Severity:** Critical
 - **Category:** Weak authentication flows
+- **Status:** FIXED
 - **Description:** The embedded local API correctly inserts `ApiKeyMiddleware` before `MapPreAuthEndpoints`, but the middleware explicitly fails open when `LocalApi.ApiKey` is blank. In that state it logs a warning and forwards the request anyway. Because `/api/v1/preauth` is the LAN control surface that creates and cancels forecourt authorizations, a missing credential-store value turns the entire pre-auth API into an unauthenticated network endpoint.
 - **Evidence:**
   - `ApiKeyMiddleware.cs:38-43` — blank key logs "authentication is DISABLED" and still calls `_next(context)`
   - `LocalApiStartup.cs:90-95` — `ApiKeyMiddleware` wraps `app.MapPreAuthEndpoints()`
 - **Impact:** Any device that can reach the local API port can submit or cancel pre-authorizations when the LAN API key is absent after provisioning, misconfiguration, or startup credential-store failure.
 - **Recommended Fix:** Fail closed. Refuse to start the local API without a loaded LAN API key, or return `503 Service Unavailable` from the middleware until the key is available from the credential store.
+- **Fix Applied:** Changed `ApiKeyMiddleware` to fail closed: when no API key is configured, requests are now rejected with HTTP 503 (Service Unavailable) and an `AUTH_NOT_CONFIGURED` error code instead of being allowed through. The same fail-closed behavior was applied to `OdooWsBridge.ValidateApiKey` for WebSocket upgrade requests.
 
 ---
 
@@ -467,6 +481,7 @@
 - **Module:** Transaction Management
 - **Severity:** Medium
 - **Category:** Sensitive data exposure
+- **Status:** FIXED
 - **Description:** `TransactionsPage.axaml` (lines 142-148) renders the full `RawPayloadJson` in a read-only TextBox within the transaction detail panel. The raw FCC payload is the unprocessed JSON received from the fuel controller and may contain vendor-specific fields not intended for display: attendant PINs, vehicle identification numbers, customer tax IDs, internal FCC sequence tokens, or diagnostic data. Any operator with access to the desktop agent UI can view this data. The `RawPayloadJson` field is also stored unfiltered in SQLite (BufferedTransaction.cs:57) and transmitted to cloud in the upload payload (CloudUploadWorker.cs:387).
 - **Evidence:**
   - `TransactionsPage.axaml:142-148` — `<TextBox x:Name="DetailRawPayload" IsReadOnly="True" ...>`
@@ -475,12 +490,14 @@
   - `CloudUploadWorker.cs:387` — `RawPayloadJson = t.RawPayloadJson` — sent to cloud unfiltered
 - **Impact:** Sensitive FCC data visible to any operator with desktop agent access. If the workstation is shared or screen-shared during support calls, sensitive data could be inadvertently exposed.
 - **Recommended Fix:** Either redact sensitive fields from `RawPayloadJson` before display (apply a field-level filter matching `[SensitiveData]` attributes), or restrict the raw payload view to a diagnostic/admin mode that requires elevated permissions.
+- **Fix Applied:** Raw payload is now hidden by default in `TransactionsPage.axaml` (`IsVisible="False"`). A "Show/Hide" toggle button (`OnToggleRawPayloadClicked`) allows operators to explicitly reveal the payload when needed. The payload is re-hidden each time a new transaction is selected in `ShowDetail()`.
 
 ### S-DSK-029
 - **Title:** WebSocket TLS certificate password stored in plain text configuration
 - **Module:** Transaction Management
 - **Severity:** High
 - **Category:** Insecure storage of credentials
+- **Status:** FIXED
 - **Description:** `WebSocketServerOptions.CertificatePassword` (OdooWebSocketServer.cs:288) stores the PFX certificate password as a plain string in the configuration model. This value is typically loaded from `appsettings.json` or environment variables and persisted on disk in clear text. The certificate password protects the private key used for WSS TLS — if compromised, an attacker can impersonate the WebSocket server for man-in-the-middle attacks on the Odoo POS to agent communication channel.
 - **Evidence:**
   - `OdooWebSocketServer.cs:288` — `public string? CertificatePassword { get; set; }` — plain string
@@ -489,12 +506,14 @@
   - No DPAPI/credential store integration for certificate password
 - **Impact:** Certificate private key password exposed in configuration files on disk. Compromised password enables TLS impersonation of the WebSocket server on the LAN.
 - **Recommended Fix:** Load the certificate password from the Windows Credential Manager (DPAPI) or a platform keystore instead of plain configuration. Apply `[SensitiveData]` attribute to ensure the value is excluded from logs and telemetry.
+- **Fix Applied:** Already addressed by S-DSK-002 and S-DSK-013: `[SensitiveData]` attribute is applied to `WebSocketServerOptions.CertificatePassword`, and the certificate password is loaded from `ICredentialStore` via `CredentialKeys.WsCertPassword`. This finding is a duplicate.
 
 ### S-DSK-030
 - **Title:** WebSocket receive loop has no message size limit or rate limiting — vulnerable to resource exhaustion
 - **Module:** Transaction Management
 - **Severity:** Medium
 - **Category:** Improper permissions handling
+- **Status:** FIXED
 - **Description:** `OdooWebSocketServer.ReceiveLoopAsync` (lines 102-121) reads WebSocket messages in a loop using a 4096-byte buffer and a `StringBuilder` that grows unbounded until `EndOfMessage` is received. A malicious or misconfigured client can send a single WebSocket frame with `EndOfMessage = false` and stream megabytes of data, causing `StringBuilder` to consume unbounded memory. Additionally, there is no rate limiting on message frequency — a client can flood the server with rapid small messages, each creating a new `OdooWsMessageHandler`, scoped `AgentDbContext`, and database query. The `MaxConnections` limit (line 60) only caps concurrent connections, not per-connection message rate.
 - **Evidence:**
   - `OdooWebSocketServer.cs:107` — `var sb = new StringBuilder()` — new unbounded builder per message
@@ -503,6 +522,7 @@
   - `OdooWsMessageHandler.cs:139-140` — each message creates new handler + scoped DbContext
 - **Impact:** A single malicious WebSocket client can exhaust agent memory via oversized messages or cause database contention via message flooding, degrading service for legitimate Odoo POS clients.
 - **Recommended Fix:** Add a maximum message size check (e.g., 64 KB) in the receive loop — abort the connection if exceeded. Implement per-connection rate limiting (e.g., token bucket at 20 messages/second) to prevent flooding.
+- **Fix Applied:** Already addressed by S-DSK-020: `MaxMessageSize` constant (1 MB) was added to `OdooWebSocketServer`. The `ReceiveLoopAsync` loop checks `sb.Length` after each chunk append and closes the connection with `WebSocketCloseStatus.PolicyViolation` if the limit is exceeded. This finding is a duplicate of S-DSK-020.
 
 ---
 
@@ -511,6 +531,7 @@
 - **Module:** Cloud Sync
 - **Severity:** High
 - **Category:** Weak authentication flows
+- **Status:** FIXED
 - **Description:** The DI container registers a named client `cloud` with TLS 1.2/1.3 enforcement and `CertificatePinValidator`. Every other cloud worker uses that exact name. `CloudUploadWorker` alone calls `CreateClient("Cloud")` with a capital `C`. Because the upload path no longer matches the registered name, the transaction-upload call path can run without the intended pinned handler and with behavior that differs from the rest of the cloud-sync module.
 - **Evidence:**
   - `ServiceCollectionExtensions.cs:74-84` — only `AddHttpClient("cloud", ...)` is registered with TLS and certificate pinning
@@ -521,6 +542,7 @@
   - `TelemetryReporter.cs:99` — telemetry uses `_httpFactory.CreateClient("cloud")`
 - **Impact:** The most sensitive cloud call in the desktop agent, transaction upload, can miss the certificate-pinning policy that the rest of the agent relies on. That weakens transport authentication exactly where transaction payloads and raw FCC data are sent.
 - **Recommended Fix:** Change `CloudUploadWorker` to use `CreateClient("cloud")` and add a regression test that verifies the worker uses the configured cloud client name and timeout/pinning policy.
+- **Fix Applied:** Changed `CloudUploadWorker.cs` from `CreateClient("Cloud")` to `CreateClient("cloud")` to match the registered named client with TLS 1.2+ enforcement and certificate pinning configured in `ServiceCollectionExtensions`.
 
 ---
 
@@ -529,6 +551,7 @@
 - **Module:** Monitoring & Diagnostics
 - **Severity:** Medium
 - **Category:** Insecure file storage
+- **Status:** FIXED
 - **Description:** The desktop agent writes rolling Serilog files under `LocalApplicationData/FccDesktopAgent/logs`, but that path is created with a plain `Directory.CreateDirectory(...)` call. Unlike the SQLite/data directory, the log directory does not go through `AgentDataDirectory.SetRestrictivePermissions(...)` or any equivalent ACL hardening. On Unix-like deployments, the resulting permissions fall back to the process umask and can leave diagnostic logs readable by other local users.
 - **Evidence:**
   - `Program.cs:27-32` - bootstrap logger writes to `GetLogPath()`
@@ -537,6 +560,7 @@
   - `AgentDataDirectory.cs:10-12` and `AgentDataDirectory.cs:63-80` - protected data directory explicitly applies owner-only permissions, including for files such as logs, but the log path helper does not reuse that logic
 - **Impact:** On shared Linux/macOS workstations, another local user can read operational logs that may contain device/site identifiers, connectivity failures, endpoint details, and other diagnostic data.
 - **Recommended Fix:** Create the logs directory through `AgentDataDirectory.Resolve()` or apply the same restrictive-permissions helper before opening the Serilog file sink. Keep the Windows `LocalAppData` location, but harden the Unix path to owner-only access.
+- **Fix Applied:** Added `AgentDataDirectory.SetRestrictivePermissions(logDirectory)` call in `Program.cs:GetLogPath()` after `Directory.CreateDirectory`. The log directory now receives the same owner-only permissions (chmod 700 on Unix) as the protected data directory. `SetRestrictivePermissions` was changed from `internal` to `public` to allow access from the App project.
 
 ---
 
@@ -545,6 +569,7 @@
 - **Module:** Odoo Integration
 - **Severity:** High
 - **Category:** Weak authentication flows
+- **Status:** FIXED
 - **Description:** The Configuration page now regenerates and saves `CredentialKeys.LanApiKey`, but the running API stack does not reload that credential. `CredentialStoreApiKeyPostConfigure` reads the key once in `StartAsync()` into `_cachedKey`, then every later `PostConfigure()` call reuses the cached value. Both the REST middleware and the WebSocket upgrade guard continue validating requests against that startup snapshot. The UI reports "Settings saved and applied" for a key-only change and does not force a restart, so operators can believe the new key is live while the old key still works.
 - **Evidence:**
   - `ConfigSaveService.cs:87-92` — key rotation writes the new LAN API key only to the credential store
@@ -554,3 +579,4 @@
   - `ConfigurationPage.axaml.cs:138-152` — successful save path does not require restart for a key-only change
 - **Impact:** A compromised old LAN key remains valid until the agent process restarts. At the same time, Odoo POS terminals updated with the new key can fail against a still-running agent, creating a security gap and an avoidable outage during key rotation.
 - **Recommended Fix:** Replace the startup-only cache with a live key provider that can refresh after credential-store writes, or explicitly require and trigger an agent restart whenever the LAN API key changes. In either case, make the UI state clear that the old key is not revoked until reload completes.
+- **Fix Applied:** Three changes: (1) Added `IApiKeyRefresher` interface in `FccDesktopAgent.Core.Security` with a `RefreshKeyAsync` method. (2) `CredentialStoreApiKeyPostConfigure` now implements `IApiKeyRefresher` — the `_cachedKey` field is `volatile` and `RefreshKeyAsync` reloads it from the credential store. Registered as `IApiKeyRefresher` singleton in DI. (3) `ConfigSaveService` accepts an optional `IApiKeyRefresher` dependency and calls `RefreshKeyAsync` immediately after writing a new LAN API key to the credential store. The old key is revoked immediately without requiring an agent restart.

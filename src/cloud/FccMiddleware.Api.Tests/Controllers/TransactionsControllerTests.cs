@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Json;
 using FccMiddleware.Api.Controllers;
+using FccMiddleware.Api.Infrastructure;
 using FccMiddleware.Application.Common;
 using FccMiddleware.Application.Ingestion;
 using FccMiddleware.Application.Observability;
@@ -10,6 +11,7 @@ using FccMiddleware.Domain.Enums;
 using MediatR;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
 
@@ -21,6 +23,21 @@ public sealed class TransactionsControllerTests
     private readonly ISiteFccConfigProvider _siteFccConfigProvider = Substitute.For<ISiteFccConfigProvider>();
     private readonly ILogger<TransactionsController> _logger = Substitute.For<ILogger<TransactionsController>>();
     private readonly IObservabilityMetrics _metrics = Substitute.For<IObservabilityMetrics>();
+    private readonly IServiceScopeFactory _serviceScopeFactory = Substitute.For<IServiceScopeFactory>();
+    private readonly IAuthoritativeWriteFenceService _writeFence = Substitute.For<IAuthoritativeWriteFenceService>();
+
+    public TransactionsControllerTests()
+    {
+        _writeFence.ValidateAsync(Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(AuthoritativeWriteFenceResult.Allow()));
+
+        var services = new ServiceCollection();
+        services.AddSingleton(_mediator);
+        var provider = services.BuildServiceProvider();
+        var scope = Substitute.For<IServiceScope>();
+        scope.ServiceProvider.Returns(provider);
+        _serviceScopeFactory.CreateScope().Returns(scope);
+    }
 
     [Fact]
     public async Task Ingest_BulkWrappedPayload_ReturnsBatchResultsAndSendsEachTransaction()
@@ -228,9 +245,116 @@ public sealed class TransactionsControllerTests
         await _mediator.DidNotReceive().Send(Arg.Any<IngestTransactionCommand>(), Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task Upload_WhenWriteFenceRejects_ReturnsConflictAndSkipsMediator()
+    {
+        var deviceId = Guid.Parse("60000000-0000-0000-0000-000000000001");
+        _writeFence.ValidateAsync(
+                deviceId.ToString(),
+                "SITE-A",
+                4,
+                Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(AuthoritativeWriteFenceResult.Reject(
+                StatusCodes.Status409Conflict,
+                "CONFLICT.STALE_LEADER_EPOCH",
+                "stale epoch")));
+
+        var controller = CreateController(
+            new Claim(ClaimTypes.NameIdentifier, deviceId.ToString()),
+            new Claim("site", "SITE-A"),
+            new Claim("lei", Guid.Parse("60000000-0000-0000-0000-000000000002").ToString()));
+
+        var request = new UploadRequest
+        {
+            LeaderEpoch = 4,
+            Transactions =
+            [
+                new UploadTransactionRecord
+                {
+                    FccTransactionId = "UPLOAD-STALE-001",
+                    SiteCode = "SITE-A",
+                    FccVendor = "DOMS",
+                    PumpNumber = 1,
+                    NozzleNumber = 1,
+                    ProductCode = "PMS",
+                    VolumeMicrolitres = 1_000_000,
+                    AmountMinorUnits = 1_000,
+                    UnitPriceMinorPerLitre = 1_000,
+                    CurrencyCode = "GHS",
+                    StartedAt = DateTimeOffset.Parse("2026-03-11T14:10:00Z"),
+                    CompletedAt = DateTimeOffset.Parse("2026-03-11T14:11:00Z")
+                }
+            ]
+        };
+
+        var actionResult = await controller.Upload(request, CancellationToken.None);
+
+        var conflict = actionResult.Should().BeOfType<ConflictObjectResult>().Subject;
+        var error = conflict.Value.Should().BeOfType<ErrorResponse>().Subject;
+        error.ErrorCode.Should().Be("CONFLICT.STALE_LEADER_EPOCH");
+
+        await _mediator.DidNotReceive().Send(Arg.Any<UploadTransactionBatchCommand>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Upload_ResponseIncludesPeerDirectoryVersionHeader_ViaMiddleware()
+    {
+        // The X-Peer-Directory-Version header is set by PeerDirectoryVersionMiddleware,
+        // not by the controller itself. This test verifies the middleware adds the header
+        // when a resolved agent and site with a peer directory version are present.
+        var agent = new Domain.Entities.AgentRegistration
+        {
+            Id = Guid.Parse("70000000-0000-0000-0000-000000000001"),
+            SiteId = Guid.Parse("70000000-0000-0000-0000-000000000002"),
+            LegalEntityId = Guid.Parse("70000000-0000-0000-0000-000000000003"),
+            SiteCode = "SITE-PDV",
+            DeviceSerialNumber = "SER-PDV",
+            DeviceModel = "DESKTOP",
+            OsVersion = "test",
+            AgentVersion = "1.0.0",
+            DeviceClass = "DESKTOP",
+            RoleCapability = "PRIMARY_ELIGIBLE",
+            SiteHaPriority = 10,
+            LeaderEpochSeen = 1,
+            Status = Domain.Enums.AgentRegistrationStatus.ACTIVE,
+            IsActive = true,
+            RegisteredAt = DateTimeOffset.UtcNow,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+
+        var site = new Domain.Entities.Site
+        {
+            Id = agent.SiteId,
+            SiteCode = "SITE-PDV",
+            LegalEntityId = agent.LegalEntityId,
+            PeerDirectoryVersion = 42,
+        };
+
+        var db = Substitute.For<Application.Registration.IRegistrationDbContext>();
+        db.FindSiteBySiteCodeAsync("SITE-PDV", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<Domain.Entities.Site?>(site));
+
+        bool nextCalled = false;
+        var middleware = new Infrastructure.PeerDirectoryVersionMiddleware(_ =>
+        {
+            nextCalled = true;
+            return Task.CompletedTask;
+        });
+
+        var httpContext = new DefaultHttpContext();
+        httpContext.Items[Infrastructure.DeviceActiveCheckMiddleware.ResolvedDeviceKey] = agent;
+
+        await middleware.InvokeAsync(httpContext, db);
+
+        nextCalled.Should().BeTrue();
+        httpContext.Response.Headers.TryGetValue("X-Peer-Directory-Version", out var headerValues).Should().BeTrue();
+        headerValues.ToString().Should().Be("42");
+    }
+
     private TransactionsController CreateController(params Claim[] claims)
     {
-        var controller = new TransactionsController(_mediator, _siteFccConfigProvider, _logger, _metrics)
+        var controller = new TransactionsController(_mediator, _siteFccConfigProvider, _logger, _metrics, _serviceScopeFactory, _writeFence)
         {
             ControllerContext = new ControllerContext
             {

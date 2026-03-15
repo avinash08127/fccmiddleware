@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text.Json;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
@@ -85,14 +86,22 @@ public sealed class ConfigPollWorker : IConfigPoller
         if (!result.IsSuccess)
             return new ConfigPollExecutionResult.TransportFailure(result.Error?.Message ?? "config poll failed");
 
-        // null = 304 Not Modified
         var response = result.Value;
         if (response is null)
+            return new ConfigPollExecutionResult.TransportFailure("config poll failed");
+
+        if (response.Outcome == ConfigPollHttpOutcome.NotModified)
             return new ConfigPollExecutionResult.Unchanged(ParseCurrentConfigVersion());
+
+        if (response.Outcome == ConfigPollHttpOutcome.NotFound)
+        {
+            return new ConfigPollExecutionResult.Unavailable(
+                response.Message ?? "cloud site config is not available for this device");
+        }
 
         // Apply the new config
         var applyResult = await _configManager.ApplyConfigAsync(
-            response.Config, response.RawJson, response.ConfigVersion, ct);
+            response.Config!, response.RawJson!, response.ConfigVersion!, ct);
 
         return applyResult.Outcome switch
         {
@@ -124,11 +133,13 @@ public sealed class ConfigPollWorker : IConfigPoller
 
         var response = await http.SendAsync(request, ct);
 
+        PeerDirectoryVersionHelper.CheckAndTrigger(response, _configManager, _logger);
+
         // 304 Not Modified — config unchanged, no re-parse needed
         if (response.StatusCode == HttpStatusCode.NotModified)
         {
             _logger.LogDebug("Config poll: 304 Not Modified (version {Version})", currentVersion);
-            return null;
+            return ConfigPollResponse.NotModified();
         }
 
         if (response.StatusCode == HttpStatusCode.Unauthorized)
@@ -144,9 +155,13 @@ public sealed class ConfigPollWorker : IConfigPoller
 
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
+            var error = await TryReadErrorAsync(response, ct);
+            var message = error?.Message ?? "Cloud config is missing for this device.";
             _logger.LogError(
-                "Config poll: 404 — no config found for this device (re-registration may be required)");
-            return null;
+                "Config poll: 404 {ErrorCode} — {Message}",
+                error?.ErrorCode ?? "NOT_FOUND",
+                message);
+            return ConfigPollResponse.NotFound(error?.ErrorCode, message);
         }
 
         response.EnsureSuccessStatusCode();
@@ -156,16 +171,13 @@ public sealed class ConfigPollWorker : IConfigPoller
         var siteConfig = JsonSerializer.Deserialize<SiteConfig>(rawJson, JsonOptions);
 
         if (siteConfig is null)
-        {
-            _logger.LogWarning("Config poll: failed to deserialize response body");
-            return null;
-        }
+            throw new HttpRequestException("Config poll returned an empty or invalid config payload.");
 
         // Extract config version from ETag header or from the config body
         var etag = response.Headers.ETag?.Tag?.Trim('"');
         var configVersion = etag ?? siteConfig.ConfigVersion.ToString();
 
-        return new ConfigPollResponse(siteConfig, rawJson, configVersion);
+        return ConfigPollResponse.Success(siteConfig, rawJson, configVersion);
     }
 
     private ConfigPollExecutionResult.Applied BuildAppliedResult(int configVersion)
@@ -178,6 +190,41 @@ public sealed class ConfigPollWorker : IConfigPoller
     {
         return int.TryParse(_configManager.CurrentConfigVersion, out var version) ? version : null;
     }
+
+    private static async Task<ErrorResponse?> TryReadErrorAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<ErrorResponse>(cancellationToken: ct);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
-internal sealed record ConfigPollResponse(SiteConfig Config, string RawJson, string ConfigVersion);
+internal enum ConfigPollHttpOutcome
+{
+    Success,
+    NotModified,
+    NotFound,
+}
+
+internal sealed record ConfigPollResponse(
+    ConfigPollHttpOutcome Outcome,
+    SiteConfig? Config = null,
+    string? RawJson = null,
+    string? ConfigVersion = null,
+    string? ErrorCode = null,
+    string? Message = null)
+{
+    public static ConfigPollResponse Success(SiteConfig config, string rawJson, string configVersion) =>
+        new(ConfigPollHttpOutcome.Success, config, rawJson, configVersion);
+
+    public static ConfigPollResponse NotModified() =>
+        new(ConfigPollHttpOutcome.NotModified);
+
+    public static ConfigPollResponse NotFound(string? errorCode, string? message) =>
+        new(ConfigPollHttpOutcome.NotFound, ErrorCode: errorCode, Message: message);
+}

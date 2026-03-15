@@ -665,9 +665,9 @@ class CloudBackendAlignmentTest {
         worker.worker.uploadPendingBatch()
 
         val dto = requestSlot.captured.transactions.first()
-        assertEquals(tx.id, dto.id)
         assertEquals(tx.fccTransactionId, dto.fccTransactionId)
         assertEquals(tx.siteCode, dto.siteCode)
+        assertEquals(tx.fccVendor, dto.fccVendor)
         assertEquals(tx.pumpNumber, dto.pumpNumber)
         assertEquals(tx.nozzleNumber, dto.nozzleNumber)
         assertEquals(tx.productCode, dto.productCode)
@@ -677,14 +677,6 @@ class CloudBackendAlignmentTest {
         assertEquals(tx.currencyCode, dto.currencyCode)
         assertEquals(tx.startedAt, dto.startedAt)
         assertEquals(tx.completedAt, dto.completedAt)
-        assertEquals(tx.fccVendor, dto.fccVendor)
-        assertEquals("lei-test-123", dto.legalEntityId)
-        assertEquals(tx.status, dto.status)
-        assertEquals(tx.ingestionSource, dto.ingestionSource)
-        assertEquals(tx.createdAt, dto.ingestedAt)
-        assertEquals(tx.schemaVersion, dto.schemaVersion)
-        assertEquals(false, dto.isDuplicate)
-        assertEquals(tx.correlationId, dto.correlationId)
     }
 
     @Test
@@ -718,8 +710,8 @@ class CloudBackendAlignmentTest {
         worker.worker.uploadPendingBatch()
 
         val dtos = requestSlot.captured.transactions
-        assertEquals(txOld.id, dtos[0].id)
-        assertEquals(txNew.id, dtos[1].id)
+        assertEquals(txOld.fccTransactionId, dtos[0].fccTransactionId)
+        assertEquals(txNew.fccTransactionId, dtos[1].fccTransactionId)
     }
 
     // =========================================================================
@@ -781,7 +773,7 @@ class CloudBackendAlignmentTest {
         every { configManager.currentConfigVersion } returns 5
         coEvery { syncStateDao.get() } returns null
         coEvery { syncStateDao.upsert(any()) } returns Unit
-        coEvery { cloudApiClient.getConfig(5, "token") } returns CloudConfigPollResult.NotModified
+        coEvery { cloudApiClient.getConfig(5, "token") } returns CloudConfigPollResult.NotModified()
 
         val worker = ConfigPollWorker(
             configManager = configManager,

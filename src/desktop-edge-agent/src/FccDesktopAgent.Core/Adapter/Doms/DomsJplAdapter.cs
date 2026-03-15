@@ -21,7 +21,8 @@ namespace FccDesktopAgent.Core.Adapter.Doms;
 /// Fetch: lock -> read -> clear supervised buffer.
 /// Pre-auth: authorize_Fp_req / deauthorize_Fp_req JPL messages.
 /// </summary>
-public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IAsyncDisposable
+public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IFccPumpControl,
+    IFccPriceManagement, IFccTotalsProvider, IAsyncDisposable
 {
     /// <inheritdoc />
     public PumpStatusCapability PumpStatusCapability => PumpStatusCapability.Live;
@@ -334,6 +335,131 @@ public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IAsyn
     public Task<bool> AcknowledgeTransactionsAsync(IReadOnlyList<string> transactionIds, CancellationToken ct)
         => Task.FromResult(true);
 
+    // -- IFccPumpControl (G-03: ported from legacy ForecourtClient) ───────────
+
+    /// <inheritdoc/>
+    public async Task<PumpControlResult> EmergencyStopAsync(int fpId, CancellationToken ct)
+    {
+        if (!IsConnected) return new PumpControlResult(false, "Not connected");
+        try
+        {
+            var request = DomsPumpControlHandler.BuildEmergencyStopRequest(fpId);
+            var response = await _tcpClient.SendAsync(request, DomsPumpControlHandler.EmergencyStopResponse, ct);
+            return DomsPumpControlHandler.ValidateControlResponse(response);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "DOMS EmergencyStop failed for FP={FpId}", fpId);
+            return new PumpControlResult(false, ex.Message);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<PumpControlResult> CancelEmergencyStopAsync(int fpId, CancellationToken ct)
+    {
+        if (!IsConnected) return new PumpControlResult(false, "Not connected");
+        try
+        {
+            var request = DomsPumpControlHandler.BuildCancelEmergencyStopRequest(fpId);
+            var response = await _tcpClient.SendAsync(request, DomsPumpControlHandler.CancelEmergencyStopResponse, ct);
+            return DomsPumpControlHandler.ValidateControlResponse(response);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "DOMS CancelEmergencyStop failed for FP={FpId}", fpId);
+            return new PumpControlResult(false, ex.Message);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<PumpControlResult> ClosePumpAsync(int fpId, CancellationToken ct)
+    {
+        if (!IsConnected) return new PumpControlResult(false, "Not connected");
+        try
+        {
+            var request = DomsPumpControlHandler.BuildCloseRequest(fpId);
+            var response = await _tcpClient.SendAsync(request, DomsPumpControlHandler.CloseResponse, ct);
+            return DomsPumpControlHandler.ValidateControlResponse(response);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "DOMS ClosePump failed for FP={FpId}", fpId);
+            return new PumpControlResult(false, ex.Message);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<PumpControlResult> OpenPumpAsync(int fpId, CancellationToken ct)
+    {
+        if (!IsConnected) return new PumpControlResult(false, "Not connected");
+        try
+        {
+            var request = DomsPumpControlHandler.BuildOpenRequest(fpId);
+            var response = await _tcpClient.SendAsync(request, DomsPumpControlHandler.OpenResponse, ct);
+            return DomsPumpControlHandler.ValidateControlResponse(response);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "DOMS OpenPump failed for FP={FpId}", fpId);
+            return new PumpControlResult(false, ex.Message);
+        }
+    }
+
+    // -- IFccPriceManagement (G-02: ported from legacy ForecourtClient) ───────
+
+    /// <inheritdoc/>
+    public async Task<PriceSetSnapshot?> GetCurrentPricesAsync(CancellationToken ct)
+    {
+        if (!IsConnected) return null;
+        try
+        {
+            var request = DomsPriceHandler.BuildPriceSetRequest();
+            var response = await _tcpClient.SendAsync(request, DomsPriceHandler.PriceSetResponse, ct);
+            return DomsPriceHandler.ParsePriceSetResponse(response, _currencyCode);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "DOMS GetCurrentPrices failed");
+            return null;
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<PriceUpdateResult> UpdatePricesAsync(PriceUpdateCommand command, CancellationToken ct)
+    {
+        if (!IsConnected) return new PriceUpdateResult(false, "Not connected");
+        try
+        {
+            var request = DomsPriceHandler.BuildPriceUpdateRequest(command);
+            var response = await _tcpClient.SendAsync(request, DomsPriceHandler.PriceUpdateResponse, ct);
+            return DomsPriceHandler.ValidatePriceUpdateResponse(response);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "DOMS UpdatePrices failed");
+            return new PriceUpdateResult(false, ex.Message);
+        }
+    }
+
+    // -- IFccTotalsProvider (G-07: ported from legacy FpTotals) ───────────────
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<PumpTotals>> GetPumpTotalsAsync(CancellationToken ct)
+    {
+        if (!IsConnected) return [];
+        try
+        {
+            var request = DomsTotalsHandler.BuildTotalsRequest();
+            var response = await _tcpClient.SendAsync(request, DomsTotalsHandler.TotalsResponse, ct);
+            return DomsTotalsHandler.ParseTotalsResponse(response, _currencyCode, _pumpNumberOffset);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "DOMS GetPumpTotals failed");
+            return [];
+        }
+    }
+
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
@@ -403,6 +529,39 @@ public sealed class DomsJplAdapter : IFccAdapter, IFccConnectionLifecycle, IAsyn
                     pumpNumber: pumpNumber,
                     volumeMicrolitres: DomsCanonicalMapper.CentilitresToMicrolitres(volumeCl),
                     amountMinorUnits: DomsCanonicalMapper.DomsAmountToMinorUnits(amountX10));
+                break;
+            }
+
+            // G-01: Peripheral device messages (ported from legacy DPP port 5006)
+            case "EptBnaReport":
+            {
+                var terminalId = data.TryGetValue("TerminalId", out var tid) ? tid : "";
+                var notesAccepted = data.TryGetValue("NotesAccepted", out var naStr) && int.TryParse(naStr, out var na) ? na : 0;
+                _eventListener?.OnBnaReport(new BnaReport(terminalId, notesAccepted, DateTimeOffset.UtcNow));
+                break;
+            }
+
+            case "DispenserInstallData":
+            {
+                var dispenserId = data.TryGetValue("DispenserId", out var did) ? did : "";
+                var model = data.TryGetValue("Model", out var m) ? m : "";
+                _eventListener?.OnDispenserInstallData(new DispenserInfo(dispenserId, model));
+                break;
+            }
+
+            case "EptInfo":
+            {
+                var eptTermId = data.TryGetValue("TerminalId", out var etid) ? etid : "";
+                var version = data.TryGetValue("Version", out var v) ? v : "";
+                _eventListener?.OnEptInfoReceived(new EptTerminalInfo(eptTermId, version));
+                break;
+            }
+
+            // G-02: Price change notification
+            case "FcPriceSetChanged":
+            {
+                var priceSetId = data.TryGetValue("PriceSetId", out var psId) ? psId : null;
+                _eventListener?.OnPriceChanged(priceSetId);
                 break;
             }
         }

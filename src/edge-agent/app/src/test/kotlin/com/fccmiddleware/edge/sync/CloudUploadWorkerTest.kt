@@ -5,6 +5,7 @@ import com.fccmiddleware.edge.buffer.dao.SyncStateDao
 import com.fccmiddleware.edge.buffer.entity.BufferedTransaction
 import com.fccmiddleware.edge.buffer.entity.SyncState
 import com.fccmiddleware.edge.config.ConfigManager
+import com.fccmiddleware.edge.config.canonicalEdgeConfig
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -12,6 +13,8 @@ import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.slot
+import io.mockk.verify
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -84,6 +87,7 @@ class CloudUploadWorkerTest {
         every { tokenProvider.markDecommissioned() } just Runs
         every { tokenProvider.getAccessToken() } returns "valid-jwt-token"
         every { tokenProvider.getLegalEntityId() } returns "10000000-0000-0000-0000-000000000001"
+        every { configManager.config } returns MutableStateFlow(canonicalEdgeConfig())
         coEvery { syncStateDao.get() } returns null
         coEvery { syncStateDao.upsert(any()) } returns Unit
     }
@@ -484,9 +488,7 @@ class CloudUploadWorkerTest {
     }
 
     @Test
-    fun `upload request includes legalEntityId from token provider`() = runTest {
-        val legalEntityId = "10000000-0000-0000-0000-000000000042"
-        every { tokenProvider.getLegalEntityId() } returns legalEntityId
+    fun `upload request maps fccVendor from buffered transaction`() = runTest {
         val tx = makeTransaction()
         coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
 
@@ -498,11 +500,11 @@ class CloudUploadWorkerTest {
 
         worker.uploadPendingBatch()
 
-        assertEquals(legalEntityId, requestSlot.captured.transactions.first().legalEntityId)
+        assertEquals(tx.fccVendor, requestSlot.captured.transactions.first().fccVendor)
     }
 
     @Test
-    fun `upload request sets isDuplicate to false for all records`() = runTest {
+    fun `upload request maps core fields from buffered transaction`() = runTest {
         val tx = makeTransaction()
         coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
 
@@ -514,7 +516,65 @@ class CloudUploadWorkerTest {
 
         worker.uploadPendingBatch()
 
-        assertFalse(requestSlot.captured.transactions.first().isDuplicate)
+        val dto = requestSlot.captured.transactions.first()
+        assertEquals(tx.fccTransactionId, dto.fccTransactionId)
+        assertEquals(tx.siteCode, dto.siteCode)
+        assertEquals(tx.fccVendor, dto.fccVendor)
+    }
+
+    @Test
+    fun `upload request includes leaderEpoch from current config`() = runTest {
+        val tx = makeTransaction()
+        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
+
+        val requestSlot = slot<CloudUploadRequest>()
+        coEvery { cloudApiClient.uploadBatch(capture(requestSlot), any()) } returns
+            CloudUploadResult.Success(
+                makeResponse(listOf(makeResult(tx.fccTransactionId, "ACCEPTED"))),
+            )
+
+        worker.uploadPendingBatch()
+
+        assertEquals(1L, requestSlot.captured.leaderEpoch)
+    }
+
+    // -------------------------------------------------------------------------
+    // P2-28: X-Peer-Directory-Version header extraction
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `upload response with peerDirectoryVersion triggers configManager update`() = runTest {
+        val tx = makeTransaction()
+        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
+        coEvery { cloudApiClient.uploadBatch(any(), any()) } returns CloudUploadResult.Success(
+            makeResponse(listOf(makeResult(tx.fccTransactionId, "ACCEPTED"))),
+            peerDirectoryVersion = 42L,
+        )
+        every { configManager.isPeerDirectoryStale(42L) } returns true
+        every { configManager.currentPeerDirectoryVersion } returns 10L
+        every { configManager.updatePeerDirectoryVersion(42L) } just Runs
+
+        worker.uploadPendingBatch()
+
+        coVerify { bufferManager.markUploaded(listOf(tx.id)) }
+        // The worker calls checkPeerDirectoryVersion which updates configManager
+        verify { configManager.isPeerDirectoryStale(42L) }
+        verify { configManager.updatePeerDirectoryVersion(42L) }
+    }
+
+    @Test
+    fun `upload response without peerDirectoryVersion does not update configManager version`() = runTest {
+        val tx = makeTransaction()
+        coEvery { bufferManager.getPendingBatch(any()) } returns listOf(tx)
+        coEvery { cloudApiClient.uploadBatch(any(), any()) } returns CloudUploadResult.Success(
+            makeResponse(listOf(makeResult(tx.fccTransactionId, "ACCEPTED"))),
+            peerDirectoryVersion = null,
+        )
+
+        worker.uploadPendingBatch()
+
+        coVerify { bufferManager.markUploaded(listOf(tx.id)) }
+        verify(exactly = 0) { configManager.isPeerDirectoryStale(any()) }
     }
 
     // -------------------------------------------------------------------------

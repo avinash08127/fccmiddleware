@@ -75,6 +75,8 @@ class AndroidAgentCommandExecutor(
             AgentCommandType.FORCE_CONFIG_PULL -> executeForceConfigPull(command)
             AgentCommandType.RESET_LOCAL_STATE -> executeResetLocalState(command)
             AgentCommandType.DECOMMISSION -> executeDecommission(command)
+            AgentCommandType.REFRESH_CONFIG -> executeRefreshConfig(command)
+            AgentCommandType.PLANNED_SWITCHOVER -> executeForceConfigPull(command)
         }
     }
 
@@ -103,7 +105,7 @@ class AndroidAgentCommandExecutor(
     }
 
     private suspend fun executeForceConfigPull(command: EdgeCommandDto): AgentCommandExecutionResult {
-        val requestedVersion = command.payload
+        val requestedVersion = (command.payload as? kotlinx.serialization.json.JsonObject)
             ?.get("configVersion")
             ?.jsonPrimitive
             ?.contentOrNull
@@ -167,6 +169,69 @@ class AndroidAgentCommandExecutor(
                     command = command,
                     failureCode = DEVICE_DECOMMISSIONED,
                     failureMessage = "Device was decommissioned during config pull",
+                )
+
+            is ConfigPollExecutionResult.TransportFailure ->
+                failure(
+                    command = command,
+                    failureCode = "CONFIG_PULL_FAILED",
+                    failureMessage = result.message,
+                )
+
+            is ConfigPollExecutionResult.Unavailable ->
+                failure(
+                    command = command,
+                    failureCode = "CONFIG_PULL_UNAVAILABLE",
+                    failureMessage = result.reason,
+                )
+        }
+    }
+
+    private suspend fun executeRefreshConfig(command: EdgeCommandDto): AgentCommandExecutionResult {
+        return when (val result = configPollWorker.pollConfig()) {
+            is ConfigPollExecutionResult.Applied ->
+                success(
+                    command,
+                    extra = mapOf("appliedConfigVersion" to result.configVersion.toString()),
+                )
+
+            is ConfigPollExecutionResult.Unchanged ->
+                success(
+                    command,
+                    extra = mapOf(
+                        "currentConfigVersion" to (result.currentConfigVersion?.toString() ?: "unknown"),
+                    ),
+                )
+
+            is ConfigPollExecutionResult.Skipped ->
+                success(
+                    command,
+                    extra = mapOf("currentConfigVersion" to result.configVersion.toString()),
+                )
+
+            is ConfigPollExecutionResult.Rejected ->
+                failure(
+                    command = command,
+                    failureCode = result.reason,
+                    failureMessage = "Config refresh rejected by local validation",
+                    extra = mapOf("configVersion" to result.configVersion.toString()),
+                )
+
+            is ConfigPollExecutionResult.RateLimited ->
+                failure(
+                    command = command,
+                    failureCode = "CONFIG_RATE_LIMITED",
+                    failureMessage = "Config refresh rate limited by cloud",
+                    extra = mapOf(
+                        "retryAfterSeconds" to (result.retryAfterSeconds?.toString() ?: "unknown"),
+                    ),
+                )
+
+            is ConfigPollExecutionResult.Decommissioned ->
+                failure(
+                    command = command,
+                    failureCode = DEVICE_DECOMMISSIONED,
+                    failureMessage = "Device was decommissioned during config refresh",
                 )
 
             is ConfigPollExecutionResult.TransportFailure ->

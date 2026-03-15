@@ -29,11 +29,11 @@ enum class DomsFpMainState(val code: Int) {
         FP_IDLE -> PumpState.IDLE
         FP_CALLING -> PumpState.CALLING
         FP_AUTHORIZED -> PumpState.AUTHORIZED
-        FP_STARTED -> PumpState.DISPENSING
+        FP_STARTED -> PumpState.AUTHORIZED   // G-13 fix: started = authorized, not yet dispensing
         FP_FUELLING -> PumpState.DISPENSING
         FP_SUSPENDED -> PumpState.PAUSED
         FP_COMPLETED -> PumpState.COMPLETED
-        FP_LOCKED -> PumpState.IDLE
+        FP_LOCKED -> PumpState.OFFLINE        // G-13 fix: locked = offline, must not accept transactions
         FP_ERROR -> PumpState.ERROR
         FP_EMERGENCY_STOP -> PumpState.ERROR
         FP_DISCONNECTED -> PumpState.OFFLINE

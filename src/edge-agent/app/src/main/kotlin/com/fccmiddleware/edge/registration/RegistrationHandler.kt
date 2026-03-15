@@ -36,6 +36,8 @@ class RegistrationHandler(
     private val siteDataManager: SiteDataManager,
     private val bufferDatabase: BufferDatabase,
     private val localOverrideManager: LocalOverrideManager,
+    /** P2-12: LAN peer announcer — broadcasts UDP after registration completes. */
+    private val lanPeerAnnouncer: com.fccmiddleware.edge.peer.LanPeerAnnouncer? = null,
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -175,6 +177,13 @@ class RegistrationHandler(
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Failed to sync site data — will populate on first config poll", e)
             }
+        }
+
+        // P2-12: Broadcast UDP peer announcement after registration so LAN peers discover us
+        try {
+            lanPeerAnnouncer?.broadcast()
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "LAN peer announcement after registration failed: ${e.message}")
         }
 
         AppLogger.i(

@@ -15,23 +15,21 @@ internal sealed class VelopackUpdateService : IUpdateService
     private readonly ILogger<VelopackUpdateService> _logger;
     private readonly IOptionsMonitor<AgentConfiguration> _config;
 
+    // P-DSK-002: Cache the install check — the installed state cannot change
+    // while the process is running, so avoid re-creating UpdateManager on every access.
+    private readonly Lazy<bool> _isInstalled;
+
     public VelopackUpdateService(
         ILogger<VelopackUpdateService> logger,
         IOptionsMonitor<AgentConfiguration> config)
     {
         _logger = logger;
         _config = config;
-    }
-
-    public bool IsInstalled
-    {
-        get
+        _isInstalled = new Lazy<bool>(() =>
         {
             try
             {
-                // IsInstalled is a local filesystem check — the URL is not contacted.
-                // Use the configured URL when available; otherwise a descriptive fallback.
-                var url = _config.CurrentValue.UpdateUrl;
+                var url = config.CurrentValue.UpdateUrl;
                 var source = new SimpleWebSource(
                     !string.IsNullOrWhiteSpace(url) ? url : "https://updates.not-configured");
                 var mgr = new UpdateManager(source);
@@ -41,8 +39,10 @@ internal sealed class VelopackUpdateService : IUpdateService
             {
                 return false;
             }
-        }
+        });
     }
+
+    public bool IsInstalled => _isInstalled.Value;
 
     public async Task<UpdateCheckResult> CheckForUpdatesAsync(CancellationToken ct = default)
     {

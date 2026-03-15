@@ -18,19 +18,22 @@ public sealed class VersionCheckService : IVersionChecker
     private const string VersionCheckPath = "/api/v1/agent/version-check";
 
     private readonly IHttpClientFactory _httpFactory;
-    private readonly IDeviceTokenProvider _tokenProvider;
     private readonly IOptions<AgentConfiguration> _config;
+    private readonly AuthenticatedCloudRequestHandler _authHandler;
+    private readonly IConfigManager _configManager;
     private readonly ILogger<VersionCheckService> _logger;
 
     public VersionCheckService(
         IHttpClientFactory httpFactory,
-        IDeviceTokenProvider tokenProvider,
         IOptions<AgentConfiguration> config,
+        AuthenticatedCloudRequestHandler authHandler,
+        IConfigManager configManager,
         ILogger<VersionCheckService> logger)
     {
         _httpFactory = httpFactory;
-        _tokenProvider = tokenProvider;
         _config = config;
+        _authHandler = authHandler;
+        _configManager = configManager;
         _logger = logger;
     }
 
@@ -43,28 +46,55 @@ public sealed class VersionCheckService : IVersionChecker
             return null;
         }
 
-        var token = await _tokenProvider.GetTokenAsync(ct);
-        if (token is null)
+        var agentVersion = GetAgentVersion();
+        _logger.LogInformation("Performing startup version check (agentVersion={Version})", agentVersion);
+
+        var result = await _authHandler.ExecuteAsync<VersionCheckApiResponse?>(
+            (token, innerCt) => SendVersionCheckAsync(agentVersion, token, config, innerCt),
+            "version check",
+            ct);
+
+        if (result.Outcome == AuthRequestOutcome.NoToken)
         {
             _logger.LogWarning("Version check skipped: no device token available (not yet registered)");
             return null;
         }
 
-        var agentVersion = GetAgentVersion();
-        _logger.LogInformation("Performing startup version check (agentVersion={Version})", agentVersion);
+        if (result.RequiresHalt)
+            return null;
 
-        var result = await CallVersionCheckAsync(agentVersion, token, config, ct);
-
-        // Retry once on 401 with token refresh
-        if (result is null)
+        if (result.Outcome == AuthRequestOutcome.AuthFailed)
         {
+            _logger.LogWarning("Version check skipped: token refresh failed");
             return null;
         }
 
-        return result;
+        if (!result.IsSuccess)
+        {
+            _logger.LogWarning(result.Error, "Version check failed — allowing FCC (fail-open)");
+            return null;
+        }
+
+        var response = result.Value;
+        if (response is null)
+        {
+            _logger.LogWarning("Version check returned empty body — allowing FCC (fail-open)");
+            return null;
+        }
+
+        return new VersionCheckResult
+        {
+            Compatible = response.Compatible,
+            MinimumVersion = response.MinimumVersion,
+            LatestVersion = response.LatestVersion,
+            UpdateRequired = response.UpdateRequired,
+            UpdateUrl = response.UpdateUrl,
+            UpdateAvailable = response.UpdateAvailable,
+            ReleaseNotes = response.ReleaseNotes,
+        };
     }
 
-    private async Task<VersionCheckResult?> CallVersionCheckAsync(
+    private async Task<VersionCheckApiResponse?> SendVersionCheckAsync(
         string agentVersion,
         string token,
         AgentConfiguration config,
@@ -72,57 +102,43 @@ public sealed class VersionCheckService : IVersionChecker
     {
         var url = $"{config.CloudBaseUrl.TrimEnd('/')}{VersionCheckPath}?agentVersion={Uri.EscapeDataString(agentVersion)}";
 
+        var http = _httpFactory.CreateClient("cloud");
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using var response = await http.SendAsync(request, ct);
+
+        PeerDirectoryVersionHelper.CheckAndTrigger(response, _configManager, _logger);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+            throw new UnauthorizedAccessException();
+
+        if (response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            var error = await TryReadErrorAsync(response, ct);
+            if (string.Equals(error?.ErrorCode, "DEVICE_DECOMMISSIONED", StringComparison.OrdinalIgnoreCase))
+                throw new DeviceDecommissionedException(error?.Message ?? "Device decommissioned");
+
+            throw new HttpRequestException(error?.Message ?? "403 Forbidden");
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await TryReadErrorAsync(response, ct);
+            throw new HttpRequestException(error?.Message ?? $"Version check failed with {(int)response.StatusCode}");
+        }
+
+        return await response.Content.ReadFromJsonAsync<VersionCheckApiResponse>(cancellationToken: ct);
+    }
+
+    private static async Task<ErrorResponse?> TryReadErrorAsync(HttpResponseMessage response, CancellationToken ct)
+    {
         try
         {
-            var http = _httpFactory.CreateClient("cloud");
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-            var response = await http.SendAsync(request, ct);
-
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                // Try token refresh once
-                _logger.LogDebug("Version check received 401; refreshing token and retrying");
-                var refreshedToken = await _tokenProvider.RefreshTokenAsync(ct);
-                if (refreshedToken is null)
-                {
-                    _logger.LogWarning("Version check skipped: token refresh failed — allowing FCC (fail-open)");
-                    return null;
-                }
-
-                using var retryRequest = new HttpRequestMessage(HttpMethod.Get, url);
-                retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshedToken);
-                response = await http.SendAsync(retryRequest, ct);
-            }
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Version check returned {StatusCode} — allowing FCC (fail-open)", response.StatusCode);
-                return null;
-            }
-
-            var body = await response.Content.ReadFromJsonAsync<VersionCheckApiResponse>(ct);
-            if (body is null)
-            {
-                _logger.LogWarning("Version check returned empty body — allowing FCC (fail-open)");
-                return null;
-            }
-
-            return new VersionCheckResult
-            {
-                Compatible = body.Compatible,
-                MinimumVersion = body.MinimumVersion,
-                LatestVersion = body.LatestVersion,
-                UpdateRequired = body.UpdateRequired,
-                UpdateUrl = body.UpdateUrl,
-                UpdateAvailable = body.UpdateAvailable,
-                ReleaseNotes = body.ReleaseNotes,
-            };
+            return await response.Content.ReadFromJsonAsync<ErrorResponse>(cancellationToken: ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch
         {
-            _logger.LogWarning(ex, "Version check failed — allowing FCC (fail-open)");
             return null;
         }
     }
@@ -133,18 +149,5 @@ public sealed class VersionCheckService : IVersionChecker
         return version is not null
             ? $"{version.Major}.{version.Minor}.{version.Build}"
             : "0.0.0";
-    }
-
-    // Internal DTO matching the cloud API response shape
-    private sealed class VersionCheckApiResponse
-    {
-        public bool Compatible { get; set; }
-        public string MinimumVersion { get; set; } = string.Empty;
-        public string LatestVersion { get; set; } = string.Empty;
-        public bool UpdateRequired { get; set; }
-        public string? UpdateUrl { get; set; }
-        public string AgentVersion { get; set; } = string.Empty;
-        public bool UpdateAvailable { get; set; }
-        public string? ReleaseNotes { get; set; }
     }
 }

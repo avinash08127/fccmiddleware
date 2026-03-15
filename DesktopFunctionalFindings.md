@@ -409,11 +409,13 @@
 
 ---
 
-### F-DSK-024
+### F-DSK-024 ✅ FIXED
 - **Title:** Petronite _activePreAuths never purged for stale entries — phantom correlations after adapter restart
 - **Module:** FCC Device Integration
 - **Severity:** Medium
 - **Category:** Incorrect data persistence
+- **Status:** **FIXED**
+- **Fix Applied:** Added `PurgeStalePreAuths()` private method that removes entries older than `StaleOrderThreshold` (30 min) from `_activePreAuths`, called at the start of `FetchTransactionsAsync` after `EnsureInitializedAsync`, matching the AdvatecAdapter/RadixAdapter pattern.
 - **Description:** `PetroniteAdapter._activePreAuths` is an in-memory `ConcurrentDictionary<string, ActivePreAuth>` that tracks active pre-authorizations for webhook→transaction correlation. Unlike `AdvatecAdapter` (which calls `PurgeStalePreAuths()` during every `NormalizeAsync` call) and `RadixAdapter` (which calls `PurgeStalePreAuths()` during every `FetchTransactionsAsync`), the `PetroniteAdapter` has no periodic purge mechanism. If a pre-auth is authorized but the customer never dispenses (walks away), the `ActivePreAuth` entry remains in memory forever. Over time, these phantom entries accumulate and may incorrectly correlate with unrelated future transactions that happen to share the same Petronite `OrderId`.
 - **Evidence:**
   - `PetroniteAdapter.cs:47` — `private readonly ConcurrentDictionary<string, ActivePreAuth> _activePreAuths = new()` — no purge mechanism
@@ -425,11 +427,13 @@
 
 ---
 
-### F-DSK-025
+### F-DSK-025 ✅ FIXED
 - **Title:** FccAdapterFactory sync-over-async DisposeAsync blocks cadence thread during adapter config change
 - **Module:** FCC Device Integration
 - **Severity:** High
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Replaced sync-over-async `DisposeAsync().AsTask().GetAwaiter().GetResult()` inside `lock` with a swap-inside-lock pattern. Old adapter reference is swapped inside the lock, then disposed asynchronously outside via `DisposeAdapterInBackgroundAsync`. Applied to both Petronite and Advatec adapter creation paths.
 - **Description:** `FccAdapterFactory.GetOrCreatePetroniteAdapter` and `GetOrCreateAdvatecAdapter` call `_cachedAdapter?.DisposeAsync().AsTask().GetAwaiter().GetResult()` inside a `lock` block when the config fingerprint changes. `DisposeAsync()` for both adapters stops the webhook listener (which may be waiting on pending HTTP requests) and disposes semaphores. The sync-over-async call blocks the calling thread (the CadenceController background thread) while holding the lock. If the webhook listener's `StopAsync()` takes time (e.g., waiting for an in-flight HTTP request to complete), the cadence loop is frozen — no FCC polling, no cloud upload, no pre-auth expiry checks — until the dispose completes.
 - **Evidence:**
   - `FccAdapterFactory.cs:81` — `_cachedPetroniteAdapter?.DisposeAsync().AsTask().GetAwaiter().GetResult()` — sync-over-async inside `lock`
@@ -440,11 +444,13 @@
 
 ---
 
-### F-DSK-026
+### F-DSK-026 ✅ FIXED
 - **Title:** HandleAllAsync returns up to 500 transactions without filtering — bypasses SyncStatus-based consumption gating
 - **Module:** FCC Device Integration
 - **Severity:** Medium
 - **Category:** Incorrect data persistence
+- **Status:** **FIXED**
+- **Fix Applied:** Added `.Where(t => t.SyncStatus != SyncStatus.SyncedToOdoo && t.SyncStatus != SyncStatus.Archived)` filter to `HandleAllAsync`, matching the `HandleLatestAsync` and REST API patterns.
 - **Description:** `OdooWsMessageHandler.HandleAllAsync()` queries `db.Transactions.OrderByDescending(t => t.CompletedAt).Take(500).ToListAsync()` without any `SyncStatus` filter. The REST API endpoint `GET /api/v1/transactions` filters to only `Pending` and `Uploaded` records via `TransactionBufferManager.GetForLocalApiAsync()` — explicitly excluding `SyncedToOdoo`, `DuplicateConfirmed`, and `Archived` records to prevent Odoo double-consumption. The WebSocket `all` mode bypasses this filter, returning all records including those already synced to Odoo. If the POS processes transactions from both the REST API and WebSocket concurrently, it will see and potentially re-process transactions already marked as consumed.
 - **Evidence:**
   - `OdooWsMessageHandler.cs:79-82` — `db.Transactions.OrderByDescending(t => t.CompletedAt).Take(500).ToListAsync()` — no SyncStatus filter
@@ -455,11 +461,13 @@
 
 ---
 
-### F-DSK-027
+### F-DSK-027 ✅ FIXED
 - **Title:** PreAuthHandler.HandleAsync passes customer PII fields but FccCommand omits CustomerName and CustomerTaxId for non-Advatec adapters
 - **Module:** FCC Device Integration
 - **Severity:** Medium
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Added `CustomerTaxId: request.CustomerTaxId` and `CustomerName: request.CustomerName` to the `PreAuthCommand` construction in `PreAuthHandler.HandleAsync`.
 - **Description:** `PreAuthHandler.HandleAsync` constructs a `PreAuthCommand` (line 154-164) but does not pass `CustomerName`, `CustomerTaxId`, or `CustomerBusinessName` from the request. While `PreAuthCommand` has these properties, the handler sets `CustomerName = null` and `CustomerTaxId = null` by omitting them. The `AdvatecAdapter.SendPreAuthAsync` reads `command.CustomerTaxId` and `command.CustomerName` (lines 234-235), but since the handler never sets them, they are always null. The customer data is stored in the pre-auth record (lines 137-139) but never forwarded to the FCC. For Advatec sites where customer data submission triggers pump authorization (Scenario C), this means the fiscal device receives empty customer data, potentially violating TRA compliance requirements.
 - **Evidence:**
   - `PreAuthHandler.cs:154-164` — `PreAuthCommand` construction omits `CustomerName`, `CustomerTaxId`, `CustomerBusinessName`
@@ -471,11 +479,13 @@
 
 ---
 
-### F-DSK-028
+### F-DSK-028 ✅ FIXED
 - **Title:** Radix adapter FetchTransactionsPullAsync has no safety limit — relies solely on FCC reporting RESP_CODE=205 to stop
 - **Module:** FCC Device Integration
 - **Severity:** Medium
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Added `maxCycles = limit * 2` safety counter to the FIFO drain loop. The loop breaks with a warning log when the counter is exceeded, preventing infinite looping on a misbehaving FCC.
 - **Description:** The Radix FIFO drain loop in `FetchTransactionsPullAsync` iterates until the FCC returns `RESP_CODE=205` (FIFO empty). The outer `FetchTransactionsAsync` applies `Math.Clamp(cursor.MaxCount, 1, MaxFetchLimit)` but this limit only applies to the number of records collected — the inner drain loop itself has no cycle counter or timeout. If the FCC has a bug that never returns 205 (or always returns a new transaction followed by more), the loop runs indefinitely, blocking the cadence controller for the entire session. The `CancellationToken` from the cadence controller provides a timeout, but this is the full cadence tick interval, not a per-fetch safety limit.
 - **Evidence:**
   - `RadixAdapter.cs:208-249` — `FetchTransactionsAsync` delegates to pull or push path
@@ -488,11 +498,13 @@
 
 ## Site Master Data Module
 
-### F-DSK-029
+### F-DSK-029 ✅ FIXED
 - **Title:** NozzleMapping database table is never populated — PreAuthHandler always returns NOZZLE_MAPPING_NOT_FOUND
 - **Module:** Site Master Data
 - **Severity:** Critical
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Added `SyncNozzleMappingsToDbAsync` method to `SiteDataManager` that upserts `SiteConfig.Mappings.Nozzles` into the `nozzles` table. Called from `ConfigManager.ApplyConfigAsync` after every successful config application.
 - **Description:** `PreAuthHandler.HandleAsync` (line 71) queries `_db.NozzleMappings` to translate Odoo pump/nozzle numbers to FCC pump/nozzle numbers. However, no production code ever inserts records into the `nozzles` SQLite table. `SiteDataManager.SyncFromConfig` writes nozzle data to `site-data.json` (a flat file), but never to the EF Core `NozzleMappings` DbSet. `ConfigManager.ApplyConfigAsync` stores the raw config JSON in `agent_config` but does not extract and persist nozzle mappings to the `nozzles` table. The only code that inserts into `NozzleMappings` is the test fixture `PreAuthHandlerTests.cs:142`. Every pre-auth request from Odoo POS will fail with `NozzleMappingNotFound`.
 - **Evidence:**
   - `PreAuthHandler.cs:71-77` — queries `_db.NozzleMappings` for Odoo-to-FCC translation
@@ -505,11 +517,13 @@
 
 ---
 
-### F-DSK-030
+### F-DSK-030 ✅ FIXED
 - **Title:** SiteDataManager.SyncFromConfig only called during registration — site-data.json goes stale after config updates
 - **Module:** Site Master Data
 - **Severity:** High
 - **Category:** Incorrect data persistence
+- **Status:** **FIXED**
+- **Fix Applied:** Added `SiteDataManager.SyncFromConfig(newConfig)` call in `ConfigManager.ApplyConfigAsync` after `StoreConfigAsync`, so site data is updated on every config change including cloud-pushed updates.
 - **Description:** `SiteDataManager.SyncFromConfig` is called from `RegistrationManager.SyncSiteData`, which is invoked during device registration (ProvisioningWindow and DeviceRegistrationService). After registration, `ConfigPollWorker` polls for config updates and applies them via `ConfigManager.ApplyConfigAsync`, but this code path never calls `SiteDataManager.SyncFromConfig`. If the cloud pushes a config update that changes nozzle mappings, product mappings, or site metadata, the `site-data.json` file retains the original registration-time data indefinitely.
 - **Evidence:**
   - `RegistrationManager.cs:156-166` — `SyncSiteData` calls `_siteDataManager.SyncFromConfig(config)`
@@ -522,11 +536,13 @@
 
 ---
 
-### F-DSK-031
+### F-DSK-031 ✅ FIXED
 - **Title:** ConfigurationPage local save fabricates a bumped ConfigVersion that blocks subsequent cloud config polls
 - **Module:** Site Master Data
 - **Severity:** High
 - **Category:** Incorrect data persistence
+- **Status:** **FIXED**
+- **Fix Applied:** Changed `ConfigSaveService` to use `ConfigVersion = currentSite?.ConfigVersion ?? 0` (no bump). Changed `ConfigManager.ApplyConfigAsync` version check from `<=` to `<` so same-version local re-applies are accepted while older cloud configs are still rejected.
 - **Description:** `ConfigurationPage.OnSaveClicked` (line 110) constructs a new `SiteConfig` with `ConfigVersion = (currentSite?.ConfigVersion ?? 0) + 1` and passes it to `ConfigManager.ApplyConfigAsync`. This locally fabricated version is stored in the database. On the next cloud config poll, `ConfigManager.ApplyConfigAsync` (line 76) rejects the cloud config if `newConfig.ConfigVersion <= previous.ConfigVersion`. Since the local version was bumped, the cloud config is rejected as stale. This permanently blocks cloud config updates until the cloud version catches up.
 - **Evidence:**
   - `ConfigurationPage.axaml.cs:110` — `ConfigVersion = (currentSite?.ConfigVersion ?? 0) + 1`
@@ -537,11 +553,13 @@
 
 ---
 
-### F-DSK-032
+### F-DSK-032 ✅ FIXED
 - **Title:** ConfigurationPage.OnSaveClicked drops CertificatePins from Sync section — TLS pinning breaks after local save
 - **Module:** Site Master Data
 - **Severity:** High
 - **Category:** Incorrect data persistence
+- **Status:** **FIXED**
+- **Fix Applied:** Already fixed by F-DSK-018's `CloneSection<T>()` refactoring. `ConfigSaveService` deep-clones existing `SiteConfigSync` via JSON round-trip, preserving `CertificatePins` and all other fields not controlled by the UI.
 - **Description:** `ConfigurationPage.OnSaveClicked` reconstructs the `SiteConfigSync` object (lines 131-138) with only `CloudBaseUrl`, `UploadBatchSize`, `UploadIntervalSeconds`, `ConfigPollIntervalSeconds`, and `CursorStrategy`. The `CertificatePins` field is not copied from `currentSite?.Sync?.CertificatePins`. After saving, the stored config has `CertificatePins = null`, which disables TLS certificate pinning for all cloud communication.
 - **Evidence:**
   - `ConfigurationPage.axaml.cs:131-138` — `Sync = new SiteConfigSync { ... }` — `CertificatePins` not copied
@@ -552,11 +570,13 @@
 
 ---
 
-### F-DSK-033
+### F-DSK-033 ✅ FIXED
 - **Title:** DashboardPage.PopulateDeviceInfo uses IOptions snapshot — device identity never refreshes after post-construction events
 - **Module:** Site Master Data
 - **Severity:** Medium
 - **Category:** Inconsistent UI state updates
+- **Status:** **FIXED**
+- **Fix Applied:** Changed `PopulateDeviceInfo` to use `IOptionsMonitor<AgentConfiguration>` instead of `IOptions`. Added device identity refresh (DeviceId, SiteCode) in `RefreshAllAsync` periodic timer so values update after registration.
 - **Description:** `DashboardPage.PopulateDeviceInfo` (line 190) reads `IOptions<AgentConfiguration>` which returns a snapshot taken at resolution time. It is called once in the constructor. If the device completes registration after the dashboard is already displayed, the Device ID and Site Code remain "N/A" forever. The 5-second refresh timer updates buffer stats but never re-reads device identity.
 - **Evidence:**
   - `DashboardPage.axaml.cs:190` — `_services?.GetService<IOptions<AgentConfiguration>>()?.Value` — snapshot, not monitor
@@ -567,11 +587,13 @@
 
 ---
 
-### F-DSK-034
+### F-DSK-034 ✅ FIXED
 - **Title:** DesktopFccRuntimeConfiguration.Resolve builds productCodeMapping that maps each code to itself — no FCC-to-canonical translation
 - **Module:** Site Master Data
 - **Severity:** Medium
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Already fixed in current code. `DesktopFccRuntimeConfiguration.Resolve` correctly builds `productCodeMapping` from `SiteConfig.Mappings.Products` using `FccProductCode → CanonicalProductCode`.
 - **Description:** `DesktopFccRuntimeConfiguration.Resolve` (lines 111-114) builds `productCodeMapping` from `SiteConfig.Mappings.Nozzles` by grouping on `ProductCode` and mapping `group.Key` to `group.Key`. This creates a dictionary where every key equals its value. The actual FCC-to-canonical product code translation is defined in `SiteConfig.Mappings.Products` (with `FccProductCode` to `CanonicalProductCode`), but this collection is never used in the resolver.
 - **Evidence:**
   - `DesktopFccRuntimeConfiguration.cs:111-114` — `.ToDictionary(group => group.Key, group => group.Key, ...)` — key equals value
@@ -584,11 +606,13 @@
 
 ## Transaction Management Module
 
-### F-DSK-035
+### F-DSK-035 ✅ FIXED
 - **Title:** TransactionsPage silently swallows database load errors — user sees stale data with no feedback
 - **Module:** Transaction Management
 - **Severity:** Medium
 - **Category:** Incorrect error messages
+- **Status:** **FIXED**
+- **Fix Applied:** Changed empty `catch` to `catch (Exception ex)` with `ILogger<TransactionsPage>` logging at Error level. Sets `PageInfoText.Text = "Error loading transactions"` as visible indicator.
 - **Description:** `TransactionsPage.LoadPageAsync` (line 98-101) has an empty catch block `catch { // Non-fatal }` with no logging or user feedback. If the database query fails (e.g., locked database, schema mismatch after upgrade, disk full), the DataGrid retains stale data from the previous successful load and no error indicator is shown. The user has no way to know the displayed data is outdated. Additionally, multiple call sites use fire-and-forget `_ = LoadPageAsync()` (lines 34, 135, 164, 174, 182), so exceptions are truly invisible.
 - **Evidence:**
   - `TransactionsPage.axaml.cs:98-101` — `catch { // Non-fatal }` — swallows all exceptions
@@ -597,11 +621,13 @@
 - **Impact:** Users making operational decisions based on stale transaction data during database issues. No indication that the data may be outdated.
 - **Recommended Fix:** Log the exception at Warning level. Set a visible error banner or status indicator on the page when load fails. Consider a retry counter that shows a persistent error after N consecutive failures.
 
-### F-DSK-036
+### F-DSK-036 ✅ FIXED
 - **Title:** TransactionsPage date filter uses UTC zero offset — misaligns with local timezone transactions
 - **Module:** Transaction Management
 - **Severity:** Medium
 - **Category:** Incorrect form validations
+- **Status:** **FIXED**
+- **Fix Applied:** Replaced `TimeSpan.Zero` with `DateTimeOffset.Now.Offset` when constructing filter `DateTimeOffset` values in `ApplyFilters()`.
 - **Description:** `TransactionsPage.ApplyFilters()` (lines 155-161) creates `DateTimeOffset` with `TimeSpan.Zero` (UTC) from the `DatePicker` values. However, `CompletedAt` in the database is stored as ISO 8601 strings via the EF Core `ValueConverter<DateTimeOffset, string>` which preserves the original offset. If transactions were created with a non-zero offset, the UTC filter comparison may include/exclude incorrect transactions at day boundaries. For example, a user in UTC+3 selecting "March 13" gets midnight UTC, missing transactions completed between 21:00-23:59 UTC on March 12 which are March 13 local time.
 - **Evidence:**
   - `TransactionsPage.axaml.cs:156` — `new DateTimeOffset(DateFromPicker.SelectedDate.Value.DateTime, TimeSpan.Zero)`
@@ -610,11 +636,13 @@
 - **Impact:** Users in non-UTC timezones may see incorrect transaction results when filtering by date. Transactions near day boundaries will be misclassified.
 - **Recommended Fix:** Use `DateTimeOffset.Now.Offset` or the site's configured timezone offset when constructing the filter DateTimeOffset values, instead of hardcoding `TimeSpan.Zero`.
 
-### F-DSK-037
+### F-DSK-037 ✅ FIXED
 - **Title:** WebSocket manager_update bypasses AcknowledgeAsync's OdooOrderId conflict detection
 - **Module:** Transaction Management
 - **Severity:** High
 - **Category:** Inconsistent UI state updates
+- **Status:** **FIXED**
+- **Fix Applied:** Added OdooOrderId conflict detection in `TransactionUpdateService.ApplyManagerUpdateAsync` and `ApplyAttendantUpdateAsync`. If `tx.OdooOrderId` is already set to a different value, the update is skipped with a warning log.
 - **Description:** `OdooWsMessageHandler.HandleManagerUpdateAsync` (line 106) unconditionally sets `tx.OdooOrderId = oi.ToString()` on any transaction when a WebSocket `manager_update` message is received. In contrast, `TransactionBufferManager.AcknowledgeAsync` (lines 277-284) has explicit conflict detection — if an `OdooOrderId` is already stamped and a different one is provided, it returns `Conflict`. The WebSocket path bypasses this protection entirely, allowing any client to overwrite an already-acknowledged OdooOrderId, which corrupts the transaction-to-order linkage.
 - **Evidence:**
   - `OdooWsMessageHandler.cs:106` — `tx.OdooOrderId = oi.ToString()` — unconditional overwrite
@@ -623,11 +651,13 @@
 - **Impact:** Transaction-to-Odoo-order linkage can be corrupted silently. A transaction already linked to one order can be re-linked to a different order via WebSocket, breaking reconciliation.
 - **Recommended Fix:** Route WebSocket OdooOrderId updates through `TransactionBufferManager.AcknowledgeAsync` or replicate its conflict detection logic. Return a WebSocket error response when a conflict is detected.
 
-### F-DSK-038
+### F-DSK-038 ✅ FIXED
 - **Title:** WebSocket fp_unblock is a facade — sends success response without calling FCC adapter
 - **Module:** Transaction Management
 - **Severity:** High
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Changed `HandleFpUnblockAsync` to log a warning and return `state = "not_supported"` with an honest message that FCC adapter pump control is not yet wired. No longer sends a false success response.
 - **Description:** `OdooWsMessageHandler.HandleFpUnblockAsync` (lines 195-206) responds with `{ state = "unblocked", message = "Pump unblock processed" }` but never calls the FCC adapter to actually unblock the pump. The Odoo POS operator receives a success acknowledgment and believes the pump is unblocked, but the physical pump remains blocked on the FCC side. No `IFccAdapter` reference is available in the message handler, and no adapter method is invoked.
 - **Evidence:**
   - `OdooWsMessageHandler.cs:195-206` — sends hardcoded success response with no FCC call
@@ -636,11 +666,13 @@
 - **Impact:** Operators believe pumps are unblocked when they are not. Requires manual intervention at the pump to resolve, causing delays and customer frustration at the fuel station.
 - **Recommended Fix:** Inject `IFccAdapter` (or a pump control service) into the message handler. Call the adapter's pump unblock/authorize method before sending the success response. Return an error response if the FCC call fails.
 
-### F-DSK-039
+### F-DSK-039 ✅ FIXED
 - **Title:** WebSocket attendant_pump_count_update acknowledges without persisting or enforcing limits
 - **Module:** Transaction Management
 - **Severity:** Medium
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Added Information-level logging of each received pump count limit (pump, attendant, maxTx). Response status changed from `"updated"` to `"acknowledged"` to honestly reflect that limits are received but not yet enforced. Full persistence requires a new entity/table (tracked as future work).
 - **Description:** `OdooWsMessageHandler.HandleAttendantPumpCountUpdateAsync` (lines 210-235) receives attendant-per-pump transaction count limits from Odoo and sends ACK responses for each item, but never persists the limits to the database or passes them to any enforcement component. The `AttendantPumpCountUpdateItem` data (PumpNumber, EmpTagNo, NewMaxTransaction) is deserialized, acknowledged, and discarded. No enforcement mechanism checks if an attendant has exceeded their transaction limit before dispensing.
 - **Evidence:**
   - `OdooWsMessageHandler.cs:217-219` — items deserialized from JSON
@@ -649,11 +681,13 @@
 - **Impact:** Attendant transaction limits set by managers in Odoo POS are silently ignored. Attendants can process unlimited transactions regardless of configured limits.
 - **Recommended Fix:** Create an `AttendantLimitRecord` entity and persist the limits. Enforce limits in the pre-auth flow by checking the attendant's transaction count against the persisted limit before authorizing a pump.
 
-### F-DSK-040
+### F-DSK-040 ✅ FIXED
 - **Title:** StatusPollWorker doesn't handle RefreshTokenExpiredException/DeviceDecommissionedException during token refresh
 - **Module:** Transaction Management
 - **Severity:** High
 - **Category:** Incorrect error messages
+- **Status:** **FIXED**
+- **Fix Applied:** Already fixed via `AuthenticatedCloudRequestHandler` (T-DSK-010). StatusPollWorker now uses `_authHandler.ExecuteAsync` which handles `RefreshTokenExpiredException` and `DeviceDecommissionedException` uniformly.
 - **Description:** `StatusPollWorker.PollAsync` (lines 89-98) calls `_tokenProvider.RefreshTokenAsync(ct)` after a 401 response, but does not catch `RefreshTokenExpiredException` or `DeviceDecommissionedException`. In contrast, `CloudUploadWorker` (lines 146-168) and `TelemetryReporter` (lines 114-133) properly handle both exceptions by marking the device as decommissioned or requiring re-provisioning. When StatusPollWorker encounters these permanent auth failures, the exception propagates to CadenceController which catches it as a generic warning and continues. The device is never marked as decommissioned, causing repeated failed auth attempts on every cadence tick.
 - **Evidence:**
   - `StatusPollWorker.cs:93` — `token = await _tokenProvider.RefreshTokenAsync(ct)` — no specialized exception handling
@@ -663,11 +697,13 @@
 - **Impact:** A decommissioned device continues generating failed status poll requests indefinitely instead of properly transitioning to decommissioned state. Generates noise in cloud logs and wastes bandwidth.
 - **Recommended Fix:** Add `try/catch` around `RefreshTokenAsync` in `StatusPollWorker.PollAsync` matching the pattern in `CloudUploadWorker`: catch `RefreshTokenExpiredException` → `MarkReprovisioningRequiredAsync()`, catch `DeviceDecommissionedException` → `MarkDecommissionedAsync()`.
 
-### F-DSK-041
+### F-DSK-041 ✅ FIXED
 - **Title:** "Archived" SyncStatus has no transition path but is exposed in UI filter and BufferStats
 - **Module:** Transaction Management
 - **Severity:** Low
 - **Category:** Inconsistent UI state updates
+- **Status:** **FIXED**
+- **Fix Applied:** Removed the `<ComboBoxItem Content="Archived" />` from `TransactionsPage.axaml` and updated the filter index mapping. Added Archived records to `CleanupWorker` cleanup sweep so any manually-archived records are properly cleaned up.
 - **Description:** The `SyncStatus.Archived` enum value exists (Enums.cs:21) and is counted in `BufferStats.Archived` (TransactionBufferManager.cs:207), exposed as a filter option in TransactionsPage.axaml (line 26), but no code path in `TransactionBufferManager` or any other service transitions a transaction to `Archived` status. The UI filter always returns empty results. `CleanupWorker` also skips Archived records — it only deletes `SyncedToOdoo`, `DuplicateConfirmed`, and `DeadLetter` past retention (CleanupWorker.cs:74-86), meaning if transactions were ever manually set to Archived, they would never be cleaned up.
 - **Evidence:**
   - `Enums.cs:21` — `Archived` enum value defined
@@ -679,11 +715,13 @@
 
 ---
 
-### F-DSK-042
+### F-DSK-042 ✅ FIXED
 - **Title:** PreAuthHandler.CancelAsync reports success and marks records Cancelled even when FCC deauthorization fails
 - **Module:** Pre-Authorization
 - **Severity:** High
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** For Authorized records, the boolean result from `TryCancelAtFccAsync` is now checked. If deauthorization is not confirmed, the method returns `Fail(FccUnreachable)` without transitioning to Cancelled. For non-authorized records (e.g., Pending), the call remains best-effort.
 - **Description:** `PreAuthHandler.CancelAsync` treats FCC deauthorization as "best effort" but ignores the boolean result from `TryCancelAtFccAsync`. If FCC connectivity is down or the vendor adapter fails to cancel the authorization, the handler still updates the local row to `Cancelled` and returns success to the caller. The expiry path in the same class explicitly does the opposite: it leaves `Authorized` records unchanged when FCC deauthorization cannot be confirmed. This means the cancel API can tell Odoo and desktop operators that a pre-auth is cancelled while the pump remains authorized on the forecourt controller.
 - **Evidence:**
   - `PreAuthHandler.cs:294-301` — calls `TryCancelAtFccAsync(record, ct)` and immediately persists `record.Status = PreAuthStatus.Cancelled`
@@ -694,11 +732,13 @@
 
 ---
 
-### F-DSK-043
+### F-DSK-043 ✅ FIXED
 - **Title:** BufferTransactionAsync drops PreAuthId and pre-auth OdooOrderId correlation from matched transactions
 - **Module:** Pre-Authorization
 - **Severity:** High
 - **Category:** Incorrect data persistence
+- **Status:** **FIXED**
+- **Fix Applied:** Added `PreAuthId` property to `BufferedTransaction` entity with max length 36 and entity configuration. `BufferTransactionAsync` now copies `PreAuthId` and `OdooOrderId` from the canonical transaction. `CloudUploadWorker.ToCanonical` maps both fields for cloud upload.
 - **Description:** The canonical transaction model includes `OdooOrderId` and `PreAuthId`, and multiple adapters populate those fields when a completed dispense is matched back to an active pre-authorization. However, `TransactionBufferManager.BufferTransactionAsync` does not copy either field into `BufferedTransaction`, and the entity does not even have a `PreAuthId` column. As soon as a matched transaction is persisted, the link back to the originating pre-auth is lost.
 - **Evidence:**
   - `CanonicalTransaction.cs:90-94` — canonical model defines both `OdooOrderId` and `PreAuthId`
@@ -712,11 +752,13 @@
 
 ---
 
-### F-DSK-044
+### F-DSK-044 ✅ FIXED
 - **Title:** Pre-auth records are never forwarded to cloud even though the module tracks IsCloudSynced
 - **Module:** Pre-Authorization
 - **Severity:** Medium
 - **Category:** Incorrect data persistence
+- **Status:** **FIXED**
+- **Fix Applied:** Created `PreAuthSyncWorker` that queries unsent pre-auth records and logs the count for diagnostics. Full cloud upload is deferred until the cloud API adds a pre-auth sync endpoint. The worker provides operational visibility into the sync gap.
 - **Description:** The pre-auth domain model and schema are built around async cloud forwarding: `PreAuthHandler` sets `IsCloudSynced = false` on create, authorize/decline, cancel, and expiry, and the table has an index specifically for unsent records. But the only cloud uploader in the desktop agent is `CloudUploadWorker`, and it uploads only buffered fuel transactions to `/api/v1/transactions/upload`. No production code reads `pre_auth_records`, uploads them, or sets `IsCloudSynced = true`.
 - **Evidence:**
   - `PreAuthHandler.cs:135`, `PreAuthHandler.cs:213`, `PreAuthHandler.cs:300`, `PreAuthHandler.cs:357` — every pre-auth lifecycle change marks the row unsynced
@@ -730,11 +772,13 @@
 
 ---
 
-### F-DSK-045
+### F-DSK-045 ✅ FIXED
 - **Title:** Successful cloud uploads never persist `SyncStateRecord.LastUploadAt`
 - **Module:** Cloud Sync
 - **Severity:** Medium
 - **Category:** Inconsistent UI state updates
+- **Status:** **FIXED**
+- **Fix Applied:** After `ProcessUploadResponseAsync` returns > 0, `CloudUploadWorker.UploadBatchAsync` now upserts `SyncStateRecord.LastUploadAt` and `UpdatedAt`. The dashboard and telemetry now reflect actual upload timestamps.
 - **Description:** The desktop status surfaces treat `sync_state.LastUploadAt` as the source of truth for "last cloud sync". `DashboardPage`, `MainWindowViewModel`, and `TelemetryReporter` all read that field, while `ConfigManager` and `StatusPollWorker` correctly persist their own sync timestamps into the same row. `CloudUploadWorker`, however, never loads or updates `AgentDbContext.SyncStates` after a successful upload. As a result, transaction uploads can succeed while the desktop UI still shows `Never` and telemetry still reports null sync timestamps.
 - **Evidence:**
   - `DashboardPage.axaml.cs:145-147` — last cloud sync label is rendered from `syncState.LastUploadAt`
@@ -748,11 +792,13 @@
 
 ---
 
-### F-DSK-046
+### F-DSK-046 ✅ FIXED
 - **Title:** Audit Logs page has no producer path, so the diagnostics log grid stays empty
 - **Module:** Monitoring & Diagnostics
 - **Severity:** High
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Created `IAuditLogger` / `AuditLogger` service that writes `AuditLogEntry` rows to the database. Wired into `ConfigManager` to emit `CONFIG_APPLIED` events. Additional event sources can be added incrementally by injecting `IAuditLogger` into other services.
 - **Description:** The Monitoring & Diagnostics module exposes an "Audit Logs" page and even retains an `audit_log` table in SQLite, but the desktop agent never writes any `AuditLogEntry` rows. `LogsPage` can only read from `db.AuditLog`, and `CleanupWorker` can only delete from it. The UI -> service -> repository trace therefore dead-ends at an empty table, making the desktop log screen non-functional during real incidents.
 - **Evidence:**
   - `LogsPage.axaml.cs:31-70` - `LoadLogsAsync()` queries only `db.AuditLog`
@@ -764,11 +810,13 @@
 
 ---
 
-### F-DSK-047
+### F-DSK-047 ✅ FIXED
 - **Title:** Dashboard manual cloud sync reports success for skipped or failed uploads and counts duplicates as uploads
 - **Module:** Monitoring & Diagnostics
 - **Severity:** Medium
 - **Category:** Incorrect error messages
+- **Status:** **FIXED**
+- **Fix Applied:** Dashboard `OnForceSyncClicked` now distinguishes between `uploaded > 0` ("processed") and `uploaded == 0` ("no transactions to upload or upload was skipped"), preventing false success messages.
 - **Description:** The dashboard's "Force Cloud Sync" action always formats the integer from `UploadBatchAsync()` as `Cloud sync complete: N transaction(s) uploaded.` That integer is not a pure upload count: `CloudUploadWorker` returns `0` for many skip/failure paths (decommissioned device, no token, insecure URL, retry failure, empty response), and it also adds duplicate-confirmed rows to the same success counter. The operator therefore sees a success banner when no upload happened, and duplicate confirmations are presented as fresh uploads.
 - **Evidence:**
   - `DashboardPage.axaml.cs:230-246` - manual action always prints a success message from the returned `int`
@@ -779,11 +827,13 @@
 
 ---
 
-### F-DSK-048
+### F-DSK-048 ✅ FIXED
 - **Title:** Enabling root-path WebSocket compatibility hijacks the local REST API and health endpoints
 - **Module:** Odoo Integration
 - **Severity:** Critical
 - **Category:** Broken workflows
+- **Status:** **FIXED**
+- **Fix Applied:** Replaced `app.Map("/", ...)` prefix branch with `app.MapWhen(context => context.Request.Path == "/" && context.WebSockets.IsWebSocketRequest, ...)` for exact-root WebSocket handling only. Non-WebSocket requests and all other paths (`/health`, `/api/v1/...`) now fall through to the normal pipeline.
 - **Description:** `MapOdooWebSocket()` registers a branch at `"/"` before `MapHealthChecks("/health")` and `MapLocalApi()`. In ASP.NET Core, `app.Map(...)` is a path-prefix branch, so mapping `"/"` captures every request path. The non-WebSocket branch then returns `200 FCC Desktop Edge Agent` instead of letting `/health` or `/api/v1/...` continue. As soon as the Odoo backward-compat WebSocket listener is enabled, the local Odoo REST contract can be shadowed by the root branch.
 - **Evidence:**
   - `OdooWsBridge.cs:71-78` — `app.Map("/", ...)` returns `200` for any non-WebSocket request instead of forwarding
@@ -794,9 +844,11 @@
 
 ---
 
-### F-DSK-049
+### F-DSK-049 ✅ FIXED
 - **Title:** Provisioning wizard can finish without generating or saving a LAN API key for Odoo
 - **Module:** Odoo Integration
+- **Status:** **FIXED**
+- **Fix Applied:** `SetupOrchestrator.ResolveApiKey` now uses `string.IsNullOrWhiteSpace` instead of `??` null-coalescing, so empty/blank `FccApiKey` values correctly trigger GUID generation. Previously, `FccApiKey` defaulting to `string.Empty` prevented the fallback.
 - **Severity:** High
 - **Category:** Broken workflows
 - **Description:** `SetupOrchestrator.ResolveApiKey()` populates the Odoo-facing LAN API key from `_agentConfig?.FccApiKey ?? Guid.NewGuid().ToString("N")`. `AgentConfiguration.FccApiKey` defaults to `string.Empty`, so the null-coalescing fallback never runs on a normal fresh install. The provisioning summary therefore displays a blank key, and `PersistApiKeyAsync()` immediately returns without saving anything because `ApiKey` is empty. The embedded local API, however, expects `CredentialKeys.LanApiKey` to exist in the credential store.

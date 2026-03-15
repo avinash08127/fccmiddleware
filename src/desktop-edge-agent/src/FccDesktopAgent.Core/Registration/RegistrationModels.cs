@@ -1,110 +1,6 @@
-using System.Text.Json.Serialization;
-using FccDesktopAgent.Core.Config;
-using FccDesktopAgent.Core.Security;
+using FccMiddleware.Contracts.Common;
 
 namespace FccDesktopAgent.Core.Registration;
-
-/// <summary>
-/// Request payload for <c>POST /api/v1/agent/register</c>.
-/// </summary>
-public sealed class DeviceRegistrationRequest
-{
-    [JsonPropertyName("provisioningToken")]
-    [SensitiveData]
-    public required string ProvisioningToken { get; init; }
-
-    [JsonPropertyName("siteCode")]
-    public required string SiteCode { get; init; }
-
-    [JsonPropertyName("deviceSerialNumber")]
-    public required string DeviceSerialNumber { get; init; }
-
-    [JsonPropertyName("deviceModel")]
-    public required string DeviceModel { get; init; }
-
-    [JsonPropertyName("osVersion")]
-    public required string OsVersion { get; init; }
-
-    [JsonPropertyName("agentVersion")]
-    public required string AgentVersion { get; init; }
-
-    [JsonPropertyName("deviceClass")]
-    public string DeviceClass { get; init; } = "DESKTOP";
-
-    [JsonPropertyName("roleCapability")]
-    public string? RoleCapability { get; init; } = "PRIMARY_ELIGIBLE";
-
-    [JsonPropertyName("siteHaPriority")]
-    public int? SiteHaPriority { get; init; } = 10;
-
-    [JsonPropertyName("capabilities")]
-    public string[] Capabilities { get; init; } = ["FCC_CONTROL", "PEER_API", "TRANSACTION_BUFFER", "TELEMETRY"];
-
-    [JsonPropertyName("peerApi")]
-    public PeerApiRegistrationMetadata? PeerApi { get; init; }
-
-    [JsonPropertyName("replacePreviousAgent")]
-    public bool ReplacePreviousAgent { get; init; }
-}
-
-public sealed class PeerApiRegistrationMetadata
-{
-    [JsonPropertyName("baseUrl")]
-    public string? BaseUrl { get; init; }
-
-    [JsonPropertyName("advertisedHost")]
-    public string? AdvertisedHost { get; init; }
-
-    [JsonPropertyName("port")]
-    public int? Port { get; init; }
-
-    [JsonPropertyName("tlsEnabled")]
-    public bool TlsEnabled { get; init; }
-}
-
-/// <summary>
-/// Response from <c>POST /api/v1/agent/register</c> (HTTP 201).
-/// </summary>
-public sealed class DeviceRegistrationResponse
-{
-    [JsonPropertyName("deviceId")]
-    public string DeviceId { get; init; } = string.Empty;
-
-    [JsonPropertyName("deviceToken")]
-    [SensitiveData]
-    public string DeviceToken { get; init; } = string.Empty;
-
-    [JsonPropertyName("refreshToken")]
-    [SensitiveData]
-    public string RefreshToken { get; init; } = string.Empty;
-
-    [JsonPropertyName("tokenExpiresAt")]
-    public DateTimeOffset TokenExpiresAt { get; init; }
-
-    [JsonPropertyName("siteCode")]
-    public string SiteCode { get; init; } = string.Empty;
-
-    [JsonPropertyName("legalEntityId")]
-    public string LegalEntityId { get; init; } = string.Empty;
-
-    [JsonPropertyName("siteConfig")]
-    public SiteConfig? SiteConfig { get; init; }
-
-    [JsonPropertyName("registeredAt")]
-    public DateTimeOffset RegisteredAt { get; init; }
-}
-
-/// <summary>
-/// Error response body from the registration endpoint (HTTP 4xx).
-/// </summary>
-public sealed class RegistrationErrorResponse
-{
-    [JsonPropertyName("errorCode")]
-    public string ErrorCode { get; init; } = string.Empty;
-
-    [JsonPropertyName("message")]
-    public string Message { get; init; } = string.Empty;
-}
 
 /// <summary>Known registration error codes returned by the cloud.</summary>
 public enum RegistrationErrorCode
@@ -120,6 +16,8 @@ public enum RegistrationErrorCode
     DeviceQuarantined,
     SiteNotFound,
     SiteMismatch,
+    ConfigNotFound,
+    RegistrationBlocked,
 }
 
 /// <summary>
@@ -154,6 +52,17 @@ internal static class RegistrationErrorCodeParser
         "DEVICE_QUARANTINED" => RegistrationErrorCode.DeviceQuarantined,
         "SITE_NOT_FOUND" => RegistrationErrorCode.SiteNotFound,
         "SITE_MISMATCH" => RegistrationErrorCode.SiteMismatch,
+        "CONFIG_NOT_FOUND" => RegistrationErrorCode.ConfigNotFound,
+        "REGISTRATION_BLOCKED" => RegistrationErrorCode.RegistrationBlocked,
         _ => RegistrationErrorCode.Unknown,
     };
+}
+
+internal static class RegistrationErrorExtensions
+{
+    public static string GetErrorCode(this ErrorResponse? error) =>
+        error?.ErrorCode ?? "UNKNOWN";
+
+    public static string GetMessage(this ErrorResponse? error, int statusCode) =>
+        error?.Message ?? $"HTTP {statusCode}";
 }

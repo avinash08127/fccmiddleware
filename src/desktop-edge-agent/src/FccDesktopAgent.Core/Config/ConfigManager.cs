@@ -2,6 +2,7 @@ using System.Text.Json;
 using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
+using FccDesktopAgent.Core.MasterData;
 using FccDesktopAgent.Core.Security;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -32,19 +33,23 @@ public sealed class ConfigManager
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ConfigManager> _logger;
+    private readonly IAuditLogger? _auditLogger;
     private readonly object _lock = new();
 
     private SiteConfig? _current;
     private string? _currentVersion;
     private bool _restartRequired;
+    private long _currentPeerDirectoryVersion;
     private CancellationTokenSource _changeTokenSource = new();
 
     public ConfigManager(
         IServiceScopeFactory scopeFactory,
-        ILogger<ConfigManager> logger)
+        ILogger<ConfigManager> logger,
+        IAuditLogger? auditLogger = null)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _auditLogger = auditLogger;
     }
 
     // ── IConfigManager ────────────────────────────────────────────────────────
@@ -64,6 +69,16 @@ public sealed class ConfigManager
         get { lock (_lock) return _restartRequired; }
     }
 
+    public long CurrentPeerDirectoryVersion => Interlocked.Read(ref _currentPeerDirectoryVersion);
+
+    public bool IsPeerDirectoryStale(long cloudVersion) =>
+        cloudVersion > Interlocked.Read(ref _currentPeerDirectoryVersion);
+
+    public void UpdatePeerDirectoryVersion(long version) =>
+        Interlocked.Exchange(ref _currentPeerDirectoryVersion, version);
+
+    public Action? OnPeerDirectoryStale { get; set; }
+
     public event EventHandler<ConfigChangedEventArgs>? ConfigChanged;
 
     public async Task<ConfigApplyResult> ApplyConfigAsync(
@@ -74,7 +89,7 @@ public sealed class ConfigManager
         lock (_lock)
         {
             previous = _current;
-            if (previous is not null && newConfig.ConfigVersion <= previous.ConfigVersion)
+            if (previous is not null && newConfig.ConfigVersion < previous.ConfigVersion)
             {
                 _logger.LogDebug(
                     "Config version {New} is not greater than current {Current}; ignoring",
@@ -112,6 +127,42 @@ public sealed class ConfigManager
         // Store in database
         await StoreConfigAsync(rawJson, configVersion, ct);
 
+        if (!string.IsNullOrWhiteSpace(newConfig.SiteHa.PeerSharedSecret))
+        {
+            try
+            {
+                await using var secretScope = _scopeFactory.CreateAsyncScope();
+                var credentialStore = secretScope.ServiceProvider.GetService<ICredentialStore>();
+                if (credentialStore is not null)
+                {
+                    await credentialStore.SetSecretAsync(
+                        CredentialKeys.PeerSharedSecret,
+                        newConfig.SiteHa.PeerSharedSecret,
+                        ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to persist peer shared secret from cloud config");
+            }
+        }
+
+        // F-DSK-029/030: Sync nozzle mappings and site data to DB on every config update.
+        try
+        {
+            await using var dataScope = _scopeFactory.CreateAsyncScope();
+            var siteDataManager = dataScope.ServiceProvider.GetService<SiteDataManager>();
+            if (siteDataManager is not null)
+            {
+                await siteDataManager.SyncFromConfigAsync(newConfig);
+                await siteDataManager.SyncNozzleMappingsToDbAsync(newConfig, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to sync site data/nozzle mappings from config (non-fatal)");
+        }
+
         // Apply in memory
         lock (_lock)
         {
@@ -148,6 +199,11 @@ public sealed class ConfigManager
             RestartRequiredSections = restartSections,
         });
 
+        // F-DSK-046: Audit log entry for config changes
+        _ = _auditLogger?.LogEventAsync("CONFIG_APPLIED",
+            $"Version {newConfig.ConfigVersion} applied (hot-reloaded: [{string.Join(", ", hotReloaded)}])",
+            "SiteConfig", newConfig.ConfigVersion.ToString(), ct: CancellationToken.None);
+
         return new ConfigApplyResult(
             ConfigApplyOutcome.Applied,
             newConfig.ConfigVersion,
@@ -174,6 +230,11 @@ public sealed class ConfigManager
 
             if (config is not null)
             {
+                // Restore peer directory version from SyncState
+                var syncState = await db.SyncStates.FindAsync([1], ct);
+                if (syncState is not null)
+                    Interlocked.Exchange(ref _currentPeerDirectoryVersion, syncState.PeerDirectoryVersion);
+
                 lock (_lock)
                 {
                     _current = config;
@@ -181,8 +242,8 @@ public sealed class ConfigManager
                 }
                 SignalOptionsChange();
                 _logger.LogInformation(
-                    "Loaded config version {Version} from database (applied at {AppliedAt})",
-                    record.ConfigVersion, record.AppliedAt);
+                    "Loaded config version {Version} from database (applied at {AppliedAt}, peerDirVersion={PeerDirVersion})",
+                    record.ConfigVersion, record.AppliedAt, Interlocked.Read(ref _currentPeerDirectoryVersion));
             }
         }
         catch (JsonException ex)
@@ -205,10 +266,13 @@ public sealed class ConfigManager
         {
             syncState.ConfigVersion = null;
             syncState.LastConfigSyncAt = null;
+            syncState.PeerDirectoryVersion = 0;
             syncState.UpdatedAt = DateTimeOffset.UtcNow;
         }
 
         await db.SaveChangesAsync(ct);
+
+        Interlocked.Exchange(ref _currentPeerDirectoryVersion, 0);
 
         lock (_lock)
         {
@@ -252,8 +316,8 @@ public sealed class ConfigManager
         if (!string.IsNullOrWhiteSpace(source.Identity?.SiteCode))
             target.SiteId = source.Identity.SiteCode;
 
-        if (!string.IsNullOrWhiteSpace(source.Identity?.LegalEntityId))
-            target.LegalEntityId = source.Identity.LegalEntityId;
+        if (source.Identity is { LegalEntityId: { } legalEntityId } && legalEntityId != Guid.Empty)
+            target.LegalEntityId = legalEntityId.ToString();
 
         // ── FCC runtime fields ──
         if (DesktopFccRuntimeConfiguration.TryParseVendor(source.Fcc?.Vendor, out var vendor))
@@ -272,10 +336,6 @@ public sealed class ConfigManager
         if (source.Fcc?.HeartbeatIntervalSeconds > 0)
             target.ConnectivityProbeIntervalSeconds = source.Fcc.HeartbeatIntervalSeconds;
 
-        // Petronite webhook listener port
-        if (source.Fcc?.WebhookListenerPort is > 0)
-            target.PetroniteWebhookListenerPort = source.Fcc.WebhookListenerPort.Value;
-
         // ── Sync intervals ──
         if (source.Sync is not null)
         {
@@ -283,8 +343,12 @@ public sealed class ConfigManager
                 target.CloudSyncIntervalSeconds = source.Sync.UploadIntervalSeconds;
             if (source.Sync.UploadBatchSize > 0)
                 target.UploadBatchSize = source.Sync.UploadBatchSize;
+            if (source.Sync.SyncedStatusPollIntervalSeconds > 0)
+                target.StatusPollIntervalSeconds = source.Sync.SyncedStatusPollIntervalSeconds;
             if (source.Sync.ConfigPollIntervalSeconds > 0)
                 target.ConfigPollIntervalSeconds = source.Sync.ConfigPollIntervalSeconds;
+            if (!string.IsNullOrWhiteSpace(source.Sync.Environment))
+                target.Environment = source.Sync.Environment;
             // S-DSK-019: Validate HTTPS before accepting a cloud-pushed CloudBaseUrl
             if (!string.IsNullOrWhiteSpace(source.Sync.CloudBaseUrl))
             {
@@ -310,6 +374,22 @@ public sealed class ConfigManager
                 target.LocalApiPort = source.LocalApi.LocalhostPort;
         }
 
+        if (source.SiteHa is not null)
+        {
+            target.SiteHaEnabled = source.SiteHa.Enabled;
+            target.AutoFailoverEnabled = source.SiteHa.AutoFailoverEnabled;
+            target.SiteHaPriority = source.SiteHa.Priority;
+            target.RoleCapability = source.SiteHa.RoleCapability;
+            target.CurrentRole = source.SiteHa.CurrentRole;
+            target.HeartbeatIntervalSeconds = source.SiteHa.HeartbeatIntervalSeconds;
+            target.FailoverTimeoutSeconds = source.SiteHa.FailoverTimeoutSeconds;
+            target.MaxReplicationLagSeconds = source.SiteHa.MaxReplicationLagSeconds;
+            target.ReplicationEnabled = source.SiteHa.ReplicationEnabled;
+            target.ProxyingEnabled = source.SiteHa.ProxyingEnabled;
+            target.LeaderEpoch = source.SiteHa.LeaderEpoch;
+            target.PeerApiPort = source.SiteHa.PeerApiPort;
+        }
+
         // ── Telemetry ──
         if (source.Telemetry is not null)
         {
@@ -319,9 +399,9 @@ public sealed class ConfigManager
 
         // T-DSK-015: Load additional certificate pins from cloud config so emergency
         // pin rotations can be pushed without a software update.
-        if (source.Sync?.CertificatePins is { Count: > 0 })
+        if (source.Sync?.CertificatePins is { Length: > 0 })
         {
-            target.AdditionalCertificatePins = source.Sync.CertificatePins;
+            target.AdditionalCertificatePins = [.. source.Sync.CertificatePins];
             CertificatePinValidator.LoadAdditionalPins(source.Sync.CertificatePins);
         }
     }
@@ -349,6 +429,7 @@ public sealed class ConfigManager
         CheckSection("telemetry", previous.Telemetry, newConfig.Telemetry, restartRequiredSet, hotReloaded, restartSections);
         CheckSection("fiscalization", previous.Fiscalization, newConfig.Fiscalization, restartRequiredSet, hotReloaded, restartSections);
         CheckSection("mappings", previous.Mappings, newConfig.Mappings, restartRequiredSet, hotReloaded, restartSections);
+        CheckSection("siteHa", previous.SiteHa, newConfig.SiteHa, restartRequiredSet, hotReloaded, restartSections);
         CheckSection("rollout", previous.Rollout, newConfig.Rollout, restartRequiredSet, hotReloaded, restartSections);
     }
 
@@ -427,6 +508,7 @@ public sealed class ConfigManager
                 Id = 1,
                 ConfigVersion = configVersion,
                 LastConfigSyncAt = now,
+                PeerDirectoryVersion = Interlocked.Read(ref _currentPeerDirectoryVersion),
                 UpdatedAt = now,
             };
             db.SyncStates.Add(syncState);
@@ -435,6 +517,7 @@ public sealed class ConfigManager
         {
             syncState.ConfigVersion = configVersion;
             syncState.LastConfigSyncAt = now;
+            syncState.PeerDirectoryVersion = Interlocked.Read(ref _currentPeerDirectoryVersion);
             syncState.UpdatedAt = now;
         }
 

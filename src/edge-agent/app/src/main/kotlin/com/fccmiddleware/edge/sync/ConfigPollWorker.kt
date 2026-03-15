@@ -123,10 +123,10 @@ class ConfigPollWorker(
     ): ConfigPollAttemptResult {
         return when (val result = client.getConfig(currentVersion, token)) {
             is CloudConfigPollResult.Success ->
-                ConfigPollAttemptResult.NewConfig(result.rawJson, result.etag)
+                ConfigPollAttemptResult.NewConfig(result.rawJson, result.etag, result.peerDirectoryVersion)
 
             is CloudConfigPollResult.NotModified ->
-                ConfigPollAttemptResult.Unchanged
+                ConfigPollAttemptResult.Unchanged(result.peerDirectoryVersion)
 
             is CloudConfigPollResult.Unauthorized -> {
                 AppLogger.i(TAG, "Config poll returned 401 — attempting token refresh")
@@ -144,13 +144,17 @@ class ConfigPollWorker(
                 AppLogger.i(TAG, "Token refreshed; retrying config poll")
                 when (val retryResult = client.getConfig(currentVersion, freshToken)) {
                     is CloudConfigPollResult.Success ->
-                        ConfigPollAttemptResult.NewConfig(retryResult.rawJson, retryResult.etag)
+                        ConfigPollAttemptResult.NewConfig(retryResult.rawJson, retryResult.etag, retryResult.peerDirectoryVersion)
                     is CloudConfigPollResult.NotModified ->
-                        ConfigPollAttemptResult.Unchanged
+                        ConfigPollAttemptResult.Unchanged(retryResult.peerDirectoryVersion)
                     is CloudConfigPollResult.Unauthorized ->
                         ConfigPollAttemptResult.TransportFailure("401 Unauthorized after token refresh retry")
                     is CloudConfigPollResult.Forbidden ->
                         resolveForbidden(retryResult.errorCode)
+                    is CloudConfigPollResult.NotFound -> {
+                        AppLogger.w(TAG, "Config poll 404 after retry: ${retryResult.errorCode}")
+                        ConfigPollAttemptResult.TransportFailure("404 Not Found: ${retryResult.errorCode}")
+                    }
                     is CloudConfigPollResult.RateLimited ->
                         ConfigPollAttemptResult.RateLimited(retryResult.retryAfterSeconds)
                     is CloudConfigPollResult.TransportError ->
@@ -162,6 +166,11 @@ class ConfigPollWorker(
                 ConfigPollAttemptResult.RateLimited(result.retryAfterSeconds)
 
             is CloudConfigPollResult.Forbidden -> resolveForbidden(result.errorCode)
+
+            is CloudConfigPollResult.NotFound -> {
+                AppLogger.w(TAG, "Config poll 404: ${result.errorCode}")
+                ConfigPollAttemptResult.TransportFailure("404 Not Found: ${result.errorCode}")
+            }
 
             is CloudConfigPollResult.TransportError ->
                 ConfigPollAttemptResult.TransportFailure(result.message)
@@ -189,6 +198,12 @@ class ConfigPollWorker(
                     return ConfigPollExecutionResult.TransportFailure(
                         "JSON parse error: ${e.message}",
                     )
+                }
+
+                // P2-08: Update peer directory version from config response
+                result.peerDirectoryVersion?.let { version ->
+                    cm.updatePeerDirectoryVersion(version)
+                    persistPeerDirectoryVersion(version)
                 }
 
                 val applyResult = cm.applyConfig(parsed, result.rawJson)
@@ -225,6 +240,11 @@ class ConfigPollWorker(
                 AppLogger.d(TAG, "Config unchanged (304 Not Modified)")
                 circuitBreaker.recordSuccess()
                 updateLastConfigPullAt()
+                // Persist peer directory version even on 304 — cloud emits the header on every response
+                result.peerDirectoryVersion?.let { version ->
+                    cm.updatePeerDirectoryVersion(version)
+                    persistPeerDirectoryVersion(version)
+                }
                 return ConfigPollExecutionResult.Unchanged(cm.currentConfigVersion)
             }
 
@@ -286,6 +306,16 @@ class ConfigPollWorker(
         }
     }
 
+    /** Persist peer directory version to Room so it survives restarts. */
+    private suspend fun persistPeerDirectoryVersion(version: Long) {
+        val dao = syncStateDao ?: return
+        try {
+            dao.updatePeerDirectoryVersion(version, Instant.now().toString())
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to persist peerDirectoryVersion=$version to SyncState", e)
+        }
+    }
+
     /** Update lastConfigPullAt only (304 or skipped config). */
     private suspend fun updateLastConfigPullAt() {
         val dao = syncStateDao ?: return
@@ -312,8 +342,12 @@ class ConfigPollWorker(
     // -------------------------------------------------------------------------
 
     private sealed class ConfigPollAttemptResult {
-        data class NewConfig(val rawJson: String, val etag: String?) : ConfigPollAttemptResult()
-        data object Unchanged : ConfigPollAttemptResult()
+        data class NewConfig(
+            val rawJson: String,
+            val etag: String?,
+            val peerDirectoryVersion: Long? = null,
+        ) : ConfigPollAttemptResult()
+        data class Unchanged(val peerDirectoryVersion: Long? = null) : ConfigPollAttemptResult()
         data object Decommissioned : ConfigPollAttemptResult()
         data class RateLimited(val retryAfterSeconds: Long?) : ConfigPollAttemptResult()
         data class TransportFailure(val message: String) : ConfigPollAttemptResult()

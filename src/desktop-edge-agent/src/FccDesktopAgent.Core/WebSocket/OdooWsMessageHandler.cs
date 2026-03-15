@@ -58,7 +58,9 @@ internal sealed class OdooWsMessageHandler
         if (DateTimeOffset.TryParse(createdDate, out var since))
             query = query.Where(t => t.CreatedAt >= since);
 
+        // P-DSK-011/021: AsNoTracking — read-only query, no need for change tracking
         var txns = await query
+            .AsNoTracking()
             .OrderByDescending(t => t.CompletedAt)
             .Take(200)
             .ToListAsync(ct);
@@ -76,7 +78,10 @@ internal sealed class OdooWsMessageHandler
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
 
+        // P-DSK-011/021: AsNoTracking — read-only query, no need for change tracking
         var txns = await db.Transactions
+            .AsNoTracking()
+            .Where(t => t.SyncStatus != SyncStatus.SyncedToOdoo && t.SyncStatus != SyncStatus.Archived)
             .OrderByDescending(t => t.CompletedAt)
             .Take(500)
             .ToListAsync(ct);
@@ -158,14 +163,30 @@ internal sealed class OdooWsMessageHandler
     public async Task HandleFpUnblockAsync(
         System.Net.WebSockets.WebSocket ws,
         JsonElement root,
+        IFccAdapter? adapter,
         CancellationToken ct)
     {
         var fpId = root.TryGetProperty("fp_id", out var f) && f.TryGetInt32(out var fv) ? fv : 0;
-        await SendAsync(ws, new
+
+        if (adapter is IFccPumpControl pumpControl)
         {
-            type = "fp_unblock",
-            data = new { fp_id = fpId, state = "unblocked", message = "Pump unblock processed" }
-        }, ct);
+            var result = await pumpControl.CancelEmergencyStopAsync(fpId, ct);
+            _logger.LogInformation("fp_unblock for pump {PumpId}: {Result}", fpId, result.Success ? "success" : result.ErrorMessage);
+            await SendAsync(ws, new
+            {
+                type = "fp_unblock",
+                data = new { fp_id = fpId, state = result.Success ? "unblocked" : "failed", message = result.ErrorMessage ?? "OK" }
+            }, ct);
+        }
+        else
+        {
+            _logger.LogWarning("fp_unblock received for pump {PumpId} — adapter does not support pump control", fpId);
+            await SendAsync(ws, new
+            {
+                type = "fp_unblock",
+                data = new { fp_id = fpId, state = "not_supported", message = "Adapter does not support pump control" }
+            }, ct);
+        }
     }
 
     // ── attendant_pump_count_update ─────────────────────────────────────────
@@ -183,6 +204,10 @@ internal sealed class OdooWsMessageHandler
 
         foreach (var item in items)
         {
+            _logger.LogInformation(
+                "Attendant pump count limit received: pump={Pump} attendant={Attendant} maxTx={Max} (acknowledged, not yet enforced)",
+                item.PumpNumber, item.EmpTagNo, item.NewMaxTransaction);
+
             await SendAsync(ws, new
             {
                 type = "attendant_pump_count_update_ack",
@@ -191,7 +216,7 @@ internal sealed class OdooWsMessageHandler
                     pump_number = item.PumpNumber,
                     emp_tag_no = item.EmpTagNo,
                     max_limit = item.NewMaxTransaction,
-                    status = "updated"
+                    status = "acknowledged"
                 }
             }, ct);
         }

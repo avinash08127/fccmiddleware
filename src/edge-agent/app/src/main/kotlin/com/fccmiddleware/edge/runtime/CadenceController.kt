@@ -24,6 +24,12 @@ import com.fccmiddleware.edge.sync.ConfigPollWorker
 import com.fccmiddleware.edge.sync.ConfigPollExecutionResult
 import com.fccmiddleware.edge.sync.PreAuthCloudForwardWorker
 import com.fccmiddleware.edge.sync.AndroidInstallationSyncManager
+import com.fccmiddleware.edge.config.ConfigManager
+import com.fccmiddleware.edge.peer.PeerCoordinator
+import com.fccmiddleware.edge.replication.ElectionCoordinator
+import com.fccmiddleware.edge.replication.ElectionResult
+import com.fccmiddleware.edge.replication.RecoveryManager
+import com.fccmiddleware.edge.replication.ReplicationSyncWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -83,6 +89,16 @@ class CadenceController(
     private val encryptedPrefsManager: EncryptedPrefsManager? = null,
     /** Best-effort Android installation token sync (FCM). */
     private val androidInstallationSyncManager: AndroidInstallationSyncManager? = null,
+    /** HA peer coordinator — heartbeat exchange and peer state tracking. */
+    private val peerCoordinator: PeerCoordinator? = null,
+    /** HA replication sync worker — pulls data from primary. */
+    private val replicationSyncWorker: ReplicationSyncWorker? = null,
+    /** HA election coordinator — manages leader election for failover. */
+    private val electionCoordinator: ElectionCoordinator? = null,
+    /** HA recovery manager — handles role transitions after election. */
+    private val recoveryManager: RecoveryManager? = null,
+    /** P2-10: ConfigManager for dynamic config poll frequency based on cloud-delivered interval. */
+    private val configManager: ConfigManager? = null,
     fccAdapter: IFccAdapter? = null,
     val config: CadenceConfig = CadenceConfig(),
 ) {
@@ -100,7 +116,7 @@ class CadenceController(
         /** Run SYNCED_TO_ODOO poll every N ticks to share the cloud health cycle. */
         val syncedToOdooTickFrequency: Int = 2,
         /** Run config poll every N ticks. */
-        val configPollTickFrequency: Int = 6,
+        val configPollTickFrequency: Int = 10,
         /** Run command poll every N ticks while internet is reachable. */
         val commandPollTickFrequency: Int = 2,
         /** Run telemetry report every N ticks. */
@@ -207,6 +223,23 @@ class CadenceController(
      */
     internal val tickModulus: Long = computeTickModulus(config)
 
+    /**
+     * P2-10: Derive config poll tick frequency dynamically from the cloud-delivered
+     * `configPollIntervalSeconds`. Falls back to static [CadenceConfig.configPollTickFrequency]
+     * when no runtime config is available (pre-registration).
+     * HA-enabled sites receive configPollIntervalSeconds=60 from cloud, yielding tick frequency 2
+     * (60s / 30s base = every 2 ticks). Non-HA sites default to 300s / 30s = every 10 ticks.
+     */
+    private val effectiveConfigPollTickFrequency: Long
+        get() {
+            val runtimeInterval = configManager?.config?.value?.sync?.configPollIntervalSeconds
+            if (runtimeInterval != null && runtimeInterval >= 10) {
+                val baseSeconds = (config.baseIntervalMs / 1000).toInt().coerceAtLeast(1)
+                return (runtimeInterval / baseSeconds).toLong().coerceAtLeast(1)
+            }
+            return config.configPollTickFrequency.toLong().coerceAtLeast(1)
+        }
+
     companion object {
         private const val TAG = "CadenceController"
 
@@ -231,6 +264,11 @@ class CadenceController(
      * so repeated calls from [onStartCommand] (e.g. START_STICKY restart) are safe.
      */
     fun start() {
+        // P2-08: Wire peer directory staleness callbacks so workers trigger immediate config poll
+        cloudUploadWorker.onPeerDirectoryStale = { triggerImmediateConfigPoll("peer_directory_stale_upload") }
+        commandPollWorker?.onPeerDirectoryStale = { triggerImmediateConfigPoll("peer_directory_stale_command") }
+        preAuthCloudForwardWorker?.onPeerDirectoryStale = { triggerImmediateConfigPoll("peer_directory_stale_preauth") }
+
         cadenceJob?.cancel()
         cadenceJob = scope.launch {
             // Version check on startup — per requirements §15.13, agent calls
@@ -472,7 +510,7 @@ class CadenceController(
 
             runTick(state, backlogDepth)
             // L-07: Wrap tickCount at LCM of all frequencies to prevent Long overflow
-            tickCount = (tickCount + 1) % tickModulus
+            tickCount += 1
 
             val interval = computeInterval(state, backlogDepth)
             AppLogger.d(TAG, "Tick $tickCount done (state=$state, backlog=$backlogDepth, next=${interval}ms)")
@@ -523,7 +561,7 @@ class CadenceController(
                     cloudUploadWorker.reportTelemetry()
                     cloudUploadWorker.reportDiagnosticLogs()
                 }
-                if (tickCount % config.configPollTickFrequency == 0L) {
+                if (tickCount % effectiveConfigPollTickFrequency == 0L) {
                     val configResult = configPollWorker?.pollConfig()
                     clearPendingConfigHintIfSatisfied(configResult)
                 }
@@ -556,7 +594,7 @@ class CadenceController(
                     cloudUploadWorker.reportTelemetry()
                     cloudUploadWorker.reportDiagnosticLogs()
                 }
-                if (tickCount % config.configPollTickFrequency == 0L) {
+                if (tickCount % effectiveConfigPollTickFrequency == 0L) {
                     val configResult = configPollWorker?.pollConfig()
                     clearPendingConfigHintIfSatisfied(configResult)
                 }
@@ -589,7 +627,7 @@ class CadenceController(
                     cloudUploadWorker.reportTelemetry()
                     cloudUploadWorker.reportDiagnosticLogs()
                 }
-                if (tickCount % config.configPollTickFrequency == 0L) {
+                if (tickCount % effectiveConfigPollTickFrequency == 0L) {
                     val configResult = configPollWorker?.pollConfig()
                     clearPendingConfigHintIfSatisfied(configResult)
                 }
@@ -622,6 +660,9 @@ class CadenceController(
             // AT-051: Key rotation piggybacks on the cleanup tick (~24h).
             performKeyRotationIfDue()
         }
+
+        // ── HA Peer heartbeat + replication + election ──────────────────────
+        runHaPeerTick()
     }
 
     // -------------------------------------------------------------------------
@@ -714,6 +755,12 @@ class CadenceController(
                 } else {
                     AppLogger.w(TAG, "Version check skipped: token refresh failed — allowing FCC (fail-open)")
                 }
+            }
+            is CloudVersionCheckResult.BadRequest -> {
+                AppLogger.w(TAG, "Version check 400: ${result.errorCode} — allowing FCC (fail-open)")
+            }
+            is CloudVersionCheckResult.ServerError -> {
+                AppLogger.w(TAG, "Version check 500: ${result.message} — allowing FCC (fail-open)")
             }
             is CloudVersionCheckResult.TransportError -> {
                 AppLogger.w(TAG, "Version check failed: ${result.message} — allowing FCC (fail-open)")
@@ -812,6 +859,80 @@ class CadenceController(
         } catch (e: Exception) {
             AppLogger.e(TAG, "Key rotation failed for alias=$alias: ${e.message}", e)
             false
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // HA Peer tick — heartbeat, replication, election, recovery
+    // -------------------------------------------------------------------------
+
+    /**
+     * Execute HA peer work for this tick.
+     *
+     * When HA is enabled and the peer coordinator is available:
+     * 1. Send heartbeats to all peers and evaluate suspect status.
+     * 2. If local role is STANDBY_HOT or RECOVERING: run replication sync.
+     * 3. After sync: if primary is suspected and auto-failover is enabled,
+     *    attempt leader election.
+     * 4. If election is won: transition to PRIMARY via recovery manager.
+     * 5. If role is RECOVERING: check if recovery is complete.
+     */
+    private suspend fun runHaPeerTick() {
+        val coordinator = peerCoordinator ?: return
+        val syncWorker = replicationSyncWorker
+        val election = electionCoordinator
+        val recovery = recoveryManager
+
+        // Initialize from config on first tick if not yet done
+        if (coordinator.peers.isEmpty() && coordinator.currentRole == "STANDBY_HOT") {
+            coordinator.initializeFromConfig()
+        }
+
+        // HA is considered active when the coordinator has been initialized with peers
+        if (coordinator.peers.isEmpty() && !coordinator.initialized) return
+
+        try {
+            // Step 1: Send heartbeats to all peers
+            coordinator.sendHeartbeatToAllPeers()
+            coordinator.evaluateSuspects()
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "HA heartbeat tick failed: ${e.message}")
+        }
+
+        val role = coordinator.currentRole
+
+        // Step 2: Replication sync for standby/recovering agents
+        if (role == "STANDBY_HOT" || role == "RECOVERING") {
+            try {
+                syncWorker?.sync()
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "HA replication sync failed: ${e.message}")
+            }
+
+            // Step 3: Auto-failover check — ElectionCoordinator verifies
+            // autoFailoverEnabled internally, so we only gate on suspect status here.
+            if (coordinator.isPrimarySuspected) {
+                AppLogger.w(TAG, "Primary suspected down — evaluating auto-failover")
+                try {
+                    val result = election?.tryElection()
+                    if (result is ElectionResult.Won) {
+                        // Step 4: Transition to PRIMARY
+                        recovery?.finalizePromotion(result.epoch)
+                        AppLogger.i(TAG, "Auto-failover complete: promoted to PRIMARY at epoch ${result.epoch}")
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "HA election failed: ${e.message}", e)
+                }
+            }
+        }
+
+        // Step 5: Recovery completion check
+        if (role == "RECOVERING") {
+            try {
+                recovery?.evaluateRecoveryCompletion()
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "HA recovery evaluation failed: ${e.message}")
+            }
         }
     }
 

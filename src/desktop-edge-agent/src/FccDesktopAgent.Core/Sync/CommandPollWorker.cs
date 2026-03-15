@@ -4,7 +4,6 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
-using FccDesktopAgent.Core.Sync.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -51,6 +50,8 @@ internal enum CommandAckTransportOutcome
     Applied,
     DuplicateApplied,
     Conflict,
+    FeatureDisabled,
+    CommandNotFound,
     ForbiddenDecommissioned,
     TransportFailure
 }
@@ -78,6 +79,7 @@ public sealed class CommandPollWorker : IAgentCommandPoller
     private readonly IAgentCommandExecutor _executor;
     private readonly IAgentCommandStateStore _stateStore;
     private readonly IRegistrationManager _registrationManager;
+    private readonly IConfigManager _configManager;
     private readonly ILogger<CommandPollWorker> _logger;
 
     public CommandPollWorker(
@@ -87,6 +89,7 @@ public sealed class CommandPollWorker : IAgentCommandPoller
         IAgentCommandExecutor executor,
         IAgentCommandStateStore stateStore,
         IRegistrationManager registrationManager,
+        IConfigManager configManager,
         ILogger<CommandPollWorker> logger)
     {
         _httpFactory = httpFactory;
@@ -95,6 +98,7 @@ public sealed class CommandPollWorker : IAgentCommandPoller
         _executor = executor;
         _stateStore = stateStore;
         _registrationManager = registrationManager;
+        _configManager = configManager;
         _logger = logger;
     }
 
@@ -208,7 +212,9 @@ public sealed class CommandPollWorker : IAgentCommandPoller
             }
 
             if (execution.PostAckAction != PostAckAction.None
-                && ack.Outcome == CommandAckTransportOutcome.Conflict)
+                && ack.Outcome is CommandAckTransportOutcome.Conflict
+                    or CommandAckTransportOutcome.CommandNotFound
+                    or CommandAckTransportOutcome.FeatureDisabled)
             {
                 await _stateStore.ClearPendingActionAsync(ct);
                 await _stateStore.ClearNoticeAsync(ct);
@@ -234,6 +240,8 @@ public sealed class CommandPollWorker : IAgentCommandPoller
         var http = _httpFactory.CreateClient("cloud");
         using var response = await http.SendAsync(request, ct);
 
+        PeerDirectoryVersionHelper.CheckAndTrigger(response, _configManager, _logger);
+
         if (response.StatusCode == HttpStatusCode.Unauthorized)
             throw new UnauthorizedAccessException();
 
@@ -246,7 +254,24 @@ public sealed class CommandPollWorker : IAgentCommandPoller
             throw new HttpRequestException($"403 Forbidden: {body}");
         }
 
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            var error = await ReadErrorAsync(response, ct);
+            if (string.Equals(error.ErrorCode, "FEATURE_DISABLED", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("Command poll skipped: cloud command API is disabled");
+                return new EdgeCommandPollResponse
+                {
+                    ServerTimeUtc = DateTimeOffset.UtcNow,
+                    Commands = []
+                };
+            }
+
+            throw new HttpRequestException(error.Message ?? "404 Not Found");
+        }
+
         response.EnsureSuccessStatusCode();
+
         return await response.Content.ReadFromJsonAsync<EdgeCommandPollResponse>(JsonOptions, ct);
     }
 
@@ -289,6 +314,8 @@ public sealed class CommandPollWorker : IAgentCommandPoller
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
         using var response = await http.SendAsync(message, ct);
+        PeerDirectoryVersionHelper.CheckAndTrigger(response, _configManager, _logger);
+
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
             return new CommandAckTransportResult
@@ -308,6 +335,39 @@ public sealed class CommandPollWorker : IAgentCommandPoller
                 return new CommandAckTransportResult
                 {
                     Outcome = CommandAckTransportOutcome.ForbiddenDecommissioned,
+                    ErrorCode = error.ErrorCode,
+                    Message = error.Message
+                };
+            }
+
+            return new CommandAckTransportResult
+            {
+                Outcome = CommandAckTransportOutcome.TransportFailure,
+                ErrorCode = error.ErrorCode,
+                Message = error.Message
+            };
+        }
+
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            var error = await ReadErrorAsync(response, ct);
+            if (string.Equals(error.ErrorCode, "FEATURE_DISABLED", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("Command acknowledgement skipped: cloud command API is disabled");
+                return new CommandAckTransportResult
+                {
+                    Outcome = CommandAckTransportOutcome.FeatureDisabled,
+                    ErrorCode = error.ErrorCode,
+                    Message = error.Message
+                };
+            }
+
+            if (string.Equals(error.ErrorCode, "COMMAND_NOT_FOUND", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("Command acknowledgement skipped: command {CommandId} no longer exists", commandId);
+                return new CommandAckTransportResult
+                {
+                    Outcome = CommandAckTransportOutcome.CommandNotFound,
                     ErrorCode = error.ErrorCode,
                     Message = error.Message
                 };

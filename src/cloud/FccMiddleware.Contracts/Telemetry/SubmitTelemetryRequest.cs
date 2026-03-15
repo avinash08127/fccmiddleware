@@ -125,6 +125,22 @@ public sealed class SubmitTelemetryBufferStatusRequest
 
     [Range(0, int.MaxValue)]
     public int BufferSizeMb { get; set; }
+
+    /// <summary>Count of records permanently failed after max upload retries (DEAD_LETTER status).</summary>
+    [Range(0, int.MaxValue)]
+    public int DeadLetterCount { get; set; }
+
+    /// <summary>Count of records archived after successful sync lifecycle completion.</summary>
+    [Range(0, int.MaxValue)]
+    public int ArchivedCount { get; set; }
+
+    /// <summary>Count of records pending fiscalization.</summary>
+    [Range(0, int.MaxValue)]
+    public int FiscalPendingCount { get; set; }
+
+    /// <summary>Count of records permanently failed fiscalization.</summary>
+    [Range(0, int.MaxValue)]
+    public int FiscalDeadLetterCount { get; set; }
 }
 
 public sealed class SubmitTelemetrySyncStatusRequest

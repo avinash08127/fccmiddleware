@@ -3,6 +3,8 @@ package com.fccmiddleware.edge.sync
 import com.fccmiddleware.edge.adapter.common.PreAuthStatus
 import com.fccmiddleware.edge.buffer.dao.PreAuthDao
 import com.fccmiddleware.edge.buffer.entity.PreAuthRecord
+import com.fccmiddleware.edge.config.ConfigManager
+import com.fccmiddleware.edge.config.canonicalEdgeConfig
 import com.fccmiddleware.edge.security.KeystoreBackedStringCipher
 import com.fccmiddleware.edge.security.KeystoreManager
 import io.mockk.Runs
@@ -12,6 +14,7 @@ import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.slot
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -52,6 +55,7 @@ class PreAuthCloudForwardWorkerTest {
     private val cloudApiClient: CloudApiClient = mockk()
     private val tokenProvider: DeviceTokenProvider = mockk()
     private val keystoreManager: KeystoreManager = mockk()
+    private val configManager: ConfigManager = mockk(relaxed = true)
 
     private val config = PreAuthCloudForwardWorkerConfig(
         batchSize = 10,
@@ -68,11 +72,13 @@ class PreAuthCloudForwardWorkerTest {
             cloudApiClient = cloudApiClient,
             tokenProvider = tokenProvider,
             keystoreManager = keystoreManager,
+            configManager = configManager,
             config = config,
         )
         every { tokenProvider.isDecommissioned() } returns false
         every { tokenProvider.markDecommissioned() } just Runs
         every { tokenProvider.getAccessToken() } returns "valid-jwt-token"
+        every { configManager.config } returns MutableStateFlow(canonicalEdgeConfig())
         every { keystoreManager.storeSecret(any(), any()) } answers {
             secondArg<String>().toByteArray(Charsets.UTF_8)
         }
@@ -268,6 +274,20 @@ class PreAuthCloudForwardWorkerTest {
                 match { it?.startsWith(KeystoreBackedStringCipher.ENCRYPTED_PREFIX_V1) == true },
             )
         }
+    }
+
+    @Test
+    fun `forward request includes leaderEpoch from current config`() = runTest {
+        val record = makePreAuth()
+        coEvery { preAuthDao.getUnsynced(any()) } returns listOf(record)
+
+        val requestSlot = slot<PreAuthForwardRequest>()
+        coEvery { cloudApiClient.forwardPreAuth(capture(requestSlot), any()) } returns
+            CloudPreAuthForwardResult.Success(makeForwardResponse(record))
+
+        worker.forwardUnsyncedPreAuths()
+
+        assertEquals(1L, requestSlot.captured.leaderEpoch)
     }
 
     @Test

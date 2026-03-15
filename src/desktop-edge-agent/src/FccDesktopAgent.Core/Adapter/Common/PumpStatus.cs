@@ -57,4 +57,11 @@ public sealed record PumpStatus
 
     [JsonPropertyName("lastChangedAtUtc")]
     public DateTimeOffset? LastChangedAtUtc { get; init; }
+
+    /// <summary>
+    /// Extended supplemental status from FpStatus_3 (16 parameter IDs).
+    /// Null when the FCC does not include supplemental data in the response.
+    /// </summary>
+    [JsonPropertyName("supplemental")]
+    public PumpStatusSupplemental? Supplemental { get; init; }
 }

@@ -210,7 +210,7 @@ public sealed class UploadTransactionBatchHandler
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private static SingleUploadResult Rejected(string fccTransactionId, string errorCode, string errorMessage) =>
-        new() { FccTransactionId = fccTransactionId, Outcome = "REJECTED", ErrorCode = errorCode };
+        new() { FccTransactionId = fccTransactionId, Outcome = "REJECTED", ErrorCode = errorCode, ErrorMessage = errorMessage };
 
     private static SingleUploadResult Duplicate(string fccTransactionId, Guid? originalId) =>
         new() { FccTransactionId = fccTransactionId, Outcome = "DUPLICATE", OriginalTransactionId = originalId };

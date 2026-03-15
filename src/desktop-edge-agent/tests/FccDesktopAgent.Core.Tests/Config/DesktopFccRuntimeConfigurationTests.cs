@@ -18,51 +18,40 @@ public sealed class DesktopFccRuntimeConfigurationTests
     [Fact]
     public void SiteConfig_Deserializes_NewerAdapterFields()
     {
-        const string rawJson = """
+        var rawJson = JsonSerializer.Serialize(
+            TestSiteConfigFactory.Create(12) with
             {
-              "configVersion": 12,
-              "configId": "cfg-001",
-              "issuedAtUtc": "2026-03-13T00:00:00Z",
-              "effectiveAtUtc": "2026-03-13T00:00:00Z",
-              "identity": {
-                "deviceId": "device-001",
-                "siteCode": "SITE-001",
-                "legalEntityId": "legal-001"
-              },
-              "site": {
-                "currency": "TZS",
-                "timezone": "Africa/Dar_es_Salaam"
-              },
-              "fcc": {
-                "enabled": true,
-                "vendor": "DOMS",
-                "connectionProtocol": "TCP",
-                "hostAddress": "192.168.10.20",
-                "port": 8080,
-                "catchUpPullIntervalSeconds": 25,
-                "hybridCatchUpIntervalSeconds": 35,
-                "jplPort": 4711,
-                "fcAccessCode": "fc-secret",
-                "domsCountryCode": "TZ",
-                "posVersionId": "Desktop/1.2.3",
-                "configuredPumps": "1,2,3",
-                "dppPorts": "2001,2002",
-                "reconnectBackoffMaxSeconds": 90,
-                "clientId": "pet-client",
-                "clientSecret": "pet-secret",
-                "webhookSecret": "pet-hook",
-                "oauthTokenEndpoint": "https://pet.example/token",
-                "advatecPumpMap": "{\"SERIAL-1\":4}",
-                "pushSourceIpAllowList": ["10.0.0.10"]
-              },
-              "sync": {},
-              "buffer": {},
-              "localApi": {},
-              "telemetry": {},
-              "mappings": {},
-              "rollout": {}
-            }
-            """;
+                Identity = TestSiteConfigFactory.Create().Identity with
+                {
+                    DeviceId = "device-001",
+                    SiteCode = "SITE-001",
+                    LegalEntityId = Guid.Parse("44444444-4444-4444-4444-444444444444"),
+                    CurrencyCode = "TZS",
+                    Timezone = "Africa/Dar_es_Salaam"
+                },
+                Fcc = TestSiteConfigFactory.Create().Fcc with
+                {
+                    ConnectionProtocol = "TCP",
+                    HostAddress = "192.168.10.20",
+                    Port = 8080,
+                    CatchUpPullIntervalSeconds = 25,
+                    HybridCatchUpIntervalSeconds = 35,
+                    JplPort = 4711,
+                    FcAccessCode = "fc-secret",
+                    DomsCountryCode = "TZ",
+                    PosVersionId = "Desktop/1.2.3",
+                    ConfiguredPumps = "1,2,3",
+                    DppPorts = "2001,2002",
+                    ReconnectBackoffMaxSeconds = 90,
+                    ClientId = "pet-client",
+                    ClientSecret = "pet-secret",
+                    WebhookSecret = "pet-hook",
+                    OAuthTokenEndpoint = "https://pet.example/token",
+                    AdvatecPumpMap = "{\"SERIAL-1\":4}",
+                    PushSourceIpAllowList = ["10.0.0.10"]
+                }
+            },
+            CamelCase);
 
         var parsed = JsonSerializer.Deserialize<SiteConfig>(rawJson, CamelCase);
 
@@ -103,22 +92,17 @@ public sealed class DesktopFccRuntimeConfigurationTests
                 FccApiKey = "api-key",
             };
 
-            var siteConfig = new SiteConfig
+            var siteConfig = TestSiteConfigFactory.Create() with
             {
-                Identity = new SiteConfigIdentity
+                Identity = TestSiteConfigFactory.Create().Identity with
                 {
                     SiteCode = "SITE-001",
-                    LegalEntityId = "legal-001",
+                    LegalEntityId = Guid.Parse("55555555-5555-5555-5555-555555555555"),
+                    CurrencyCode = "TZS",
+                    Timezone = "Africa/Dar_es_Salaam"
                 },
-                Site = new SiteConfigSite
+                Fcc = TestSiteConfigFactory.Create().Fcc with
                 {
-                    Currency = "TZS",
-                    Timezone = "Africa/Dar_es_Salaam",
-                },
-                Fcc = new SiteConfigFcc
-                {
-                    Enabled = true,
-                    Vendor = "DOMS",
                     ConnectionProtocol = "TCP",
                     HostAddress = "192.168.10.20",
                     Port = 8080,
@@ -143,7 +127,7 @@ public sealed class DesktopFccRuntimeConfigurationTests
                     AdvatecCustIdType = 2,
                     AdvatecPumpMap = "{\"SERIAL-1\":4}",
                 },
-                Mappings = new SiteConfigMappings
+                Mappings = TestSiteConfigFactory.Create().Mappings with
                 {
                     PumpNumberOffset = 4,
                     Products =

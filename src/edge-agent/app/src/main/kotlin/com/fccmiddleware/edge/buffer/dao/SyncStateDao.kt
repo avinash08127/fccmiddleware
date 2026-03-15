@@ -41,6 +41,9 @@ abstract class SyncStateDao {
     @Query("UPDATE sync_state SET last_upload_attempt_at = :now, updated_at = :now WHERE id = 1")
     protected abstract suspend fun setUploadAttemptAt(now: String)
 
+    @Query("UPDATE sync_state SET peer_directory_version = :version, updated_at = :now WHERE id = 1")
+    protected abstract suspend fun setPeerDirectoryVersion(version: Long, now: String)
+
     /** Atomically ensure the row exists and update [last_upload_at]. */
     @Transaction
     open suspend fun updateUploadAt(now: String) {
@@ -60,6 +63,13 @@ abstract class SyncStateDao {
     open suspend fun updateUploadAttemptAt(now: String) {
         ensureRow(now)
         setUploadAttemptAt(now)
+    }
+
+    /** Atomically ensure the row exists and update [peer_directory_version]. */
+    @Transaction
+    open suspend fun updatePeerDirectoryVersion(version: Long, now: String) {
+        ensureRow(now)
+        setPeerDirectoryVersion(version, now)
     }
 
     /**

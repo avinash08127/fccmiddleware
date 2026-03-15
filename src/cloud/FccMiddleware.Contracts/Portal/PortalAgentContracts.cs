@@ -147,3 +147,20 @@ public sealed record AgentAuditEventDto
     public required DateTimeOffset OccurredAtUtc { get; init; }
     public JsonElement? Metadata { get; init; }
 }
+
+// ── Planned Switchover ──────────────────────────────────────────────────
+
+public sealed record PlannedSwitchoverRequest
+{
+    public required string SiteCode { get; init; }
+    public required Guid TargetAgentId { get; init; }
+    public string? Reason { get; init; }
+}
+
+public sealed record PlannedSwitchoverResponse
+{
+    public required Guid CommandId { get; init; }
+    public required Guid CurrentPrimaryId { get; init; }
+    public required Guid TargetAgentId { get; init; }
+    public required long CurrentEpoch { get; init; }
+}

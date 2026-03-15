@@ -24,4 +24,15 @@ public interface IAgentConfigDbContext
     /// Finds the agent registration for the given device ID.
     /// </summary>
     Task<AgentRegistration?> FindAgentByDeviceIdAsync(Guid deviceId, CancellationToken ct);
+
+    /// <summary>
+    /// P2-15: Loads the site entity by ID for HA leader epoch validation.
+    /// </summary>
+    Task<Site?> GetSiteByIdAsync(Guid siteId, CancellationToken ct);
+
+    /// <summary>
+    /// P2-15: Records the agent-elected leader and epoch on the site.
+    /// Called when the cloud accepts a write with a higher epoch than previously recorded.
+    /// </summary>
+    Task UpdateSiteHaLeaderAsync(Guid siteId, Guid leaderAgentId, long epoch, CancellationToken ct);
 }

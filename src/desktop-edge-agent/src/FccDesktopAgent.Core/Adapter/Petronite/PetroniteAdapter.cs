@@ -199,6 +199,23 @@ public sealed class PetroniteAdapter : IFccAdapter, IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Purges pre-auth entries older than <see cref="StaleOrderThreshold"/> to prevent memory leaks.
+    /// Called during each fetch cycle.
+    /// </summary>
+    private void PurgeStalePreAuths()
+    {
+        var cutoff = DateTimeOffset.UtcNow - StaleOrderThreshold;
+        foreach (var kvp in _activePreAuths)
+        {
+            if (kvp.Value.CreatedAt < cutoff)
+            {
+                if (_activePreAuths.TryRemove(kvp.Key, out _))
+                    _logger.LogWarning("Purged stale pre-auth: OrderId={OrderId}, age > {TtlMinutes}m", kvp.Key, StaleOrderThreshold.TotalMinutes);
+            }
+        }
+    }
+
     // ── PN-2.2 + PN-4.1: Fetch Transactions (drain webhook queue) ──────────
 
     /// <inheritdoc/>
@@ -211,6 +228,18 @@ public sealed class PetroniteAdapter : IFccAdapter, IAsyncDisposable
     public async Task<TransactionBatch> FetchTransactionsAsync(FetchCursor cursor, CancellationToken ct)
     {
         await EnsureInitializedAsync(ct);
+
+        var cutoff = DateTimeOffset.UtcNow - StaleOrderThreshold;
+        foreach (var kvp in _activePreAuths)
+        {
+            if (kvp.Value.CreatedAt < cutoff && _activePreAuths.TryRemove(kvp.Key, out _))
+            {
+                _logger.LogWarning(
+                    "Purged stale pre-auth: OrderId={OrderId}, age > {TtlMinutes}m",
+                    kvp.Key,
+                    StaleOrderThreshold.TotalMinutes);
+            }
+        }
 
         if (_webhookQueue.IsEmpty)
             return new TransactionBatch([], null, false);

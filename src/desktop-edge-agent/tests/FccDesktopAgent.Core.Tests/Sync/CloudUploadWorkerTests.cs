@@ -7,7 +7,6 @@ using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Sync;
-using FccDesktopAgent.Core.Sync.Models;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -64,7 +63,7 @@ public sealed class CloudUploadWorkerTests : IDisposable
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
-    private CloudUploadWorker CreateWorker(HttpMessageHandler httpHandler, bool noRetry = false)
+    private CloudUploadWorker CreateWorker(HttpMessageHandler httpHandler, bool noRetry = false, IConfigManager? configManager = null)
     {
         var factory = new TestHttpClientFactory(httpHandler);
         var config = Options.Create(new AgentConfiguration
@@ -72,6 +71,7 @@ public sealed class CloudUploadWorkerTests : IDisposable
             CloudBaseUrl = "https://cloud.test",
             SiteId = "SITE-A",
             UploadBatchSize = 50,
+            LeaderEpoch = 7,
         });
 
         var registrationManager = Substitute.For<IRegistrationManager>();
@@ -80,12 +80,14 @@ public sealed class CloudUploadWorkerTests : IDisposable
             NullLogger<AuthenticatedCloudRequestHandler>.Instance);
 
         // noRetry: use ResiliencePipeline.Empty so tests don't wait for backoff delays.
+        configManager ??= Substitute.For<IConfigManager>();
         return new CloudUploadWorker(
             _serviceProvider.GetRequiredService<IServiceScopeFactory>(),
             factory,
             config,
             authHandler,
             registrationManager,
+            configManager,
             NullLogger<CloudUploadWorker>.Instance,
             noRetry ? ResiliencePipeline.Empty : null);
     }
@@ -261,6 +263,8 @@ public sealed class CloudUploadWorkerTests : IDisposable
             {
                 Results = [new UploadResultItem { FccTransactionId = "FCC-401", Outcome = "ACCEPTED" }],
                 AcceptedCount = 1,
+                DuplicateCount = 0,
+                RejectedCount = 0,
             };
             return FakeHandler.JsonResponse(JsonSerializer.Serialize(response));
         });
@@ -391,6 +395,8 @@ public sealed class CloudUploadWorkerTests : IDisposable
             {
                 Results = [new UploadResultItem { FccTransactionId = "FCC-HDR", Outcome = "ACCEPTED" }],
                 AcceptedCount = 1,
+                DuplicateCount = 0,
+                RejectedCount = 0,
             };
             return FakeHandler.JsonResponse(JsonSerializer.Serialize(response));
         });
@@ -402,6 +408,82 @@ public sealed class CloudUploadWorkerTests : IDisposable
         captured!.Headers.Authorization.Should().NotBeNull();
         captured.Headers.Authorization!.Scheme.Should().Be("Bearer");
         captured.Headers.Authorization.Parameter.Should().Be("test-jwt-token");
+    }
+
+    [Fact]
+    public async Task UploadBatchAsync_IncludesLeaderEpoch()
+    {
+        await SeedTransactionAsync("FCC-EPOCH", "SITE-A");
+        long? capturedLeaderEpoch = null;
+
+        var handler = new FakeHandler(req =>
+        {
+            var body = req.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            var uploadReq = JsonSerializer.Deserialize<UploadRequest>(body);
+            capturedLeaderEpoch = uploadReq?.LeaderEpoch;
+
+            var response = new UploadResponse
+            {
+                Results = [new UploadResultItem { FccTransactionId = "FCC-EPOCH", Outcome = "ACCEPTED" }],
+                AcceptedCount = 1,
+                DuplicateCount = 0,
+                RejectedCount = 0,
+            };
+            return FakeHandler.JsonResponse(JsonSerializer.Serialize(response));
+        });
+
+        var worker = CreateWorker(handler);
+        await worker.UploadBatchAsync(CancellationToken.None);
+
+        capturedLeaderEpoch.Should().Be(7);
+    }
+
+    // ── P2-28: X-Peer-Directory-Version header extraction ───────────────────
+
+    [Fact]
+    public async Task UploadBatchAsync_WithPeerDirectoryVersionHeader_UpdatesConfigManager()
+    {
+        await SeedTransactionAsync("FCC-PDV", "SITE-A");
+
+        var configManager = Substitute.For<IConfigManager>();
+        configManager.IsPeerDirectoryStale(42).Returns(true);
+        configManager.CurrentPeerDirectoryVersion.Returns(10L);
+
+        var handler = new FakeHandler(_ =>
+        {
+            var response = new UploadResponse
+            {
+                Results = [new UploadResultItem { FccTransactionId = "FCC-PDV", Outcome = "ACCEPTED" }],
+                AcceptedCount = 1,
+                DuplicateCount = 0,
+                RejectedCount = 0,
+            };
+            var httpResponse = FakeHandler.JsonResponse(JsonSerializer.Serialize(response));
+            httpResponse.Headers.Add("X-Peer-Directory-Version", "42");
+            return httpResponse;
+        });
+
+        var worker = CreateWorker(handler, configManager: configManager);
+        var result = await worker.UploadBatchAsync(CancellationToken.None);
+
+        result.Should().Be(1);
+        configManager.Received().UpdatePeerDirectoryVersion(42);
+    }
+
+    [Fact]
+    public async Task UploadBatchAsync_WithoutPeerDirectoryVersionHeader_DoesNotUpdateConfigManager()
+    {
+        await SeedTransactionAsync("FCC-NOPDV", "SITE-A");
+
+        var configManager = Substitute.For<IConfigManager>();
+
+        var worker = CreateWorker(
+            RespondWithUploadResult("FCC-NOPDV", "SITE-A", "ACCEPTED"),
+            configManager: configManager);
+        var result = await worker.UploadBatchAsync(CancellationToken.None);
+
+        result.Should().Be(1);
+        configManager.DidNotReceive().UpdatePeerDirectoryVersion(Arg.Any<long>());
     }
 
     // ── Ordering: oldest Pending first ────────────────────────────────────────
@@ -430,6 +512,8 @@ public sealed class CloudUploadWorkerTests : IDisposable
                     new UploadResultItem { FccTransactionId = "FCC-NEW", Outcome = "ACCEPTED" },
                 ],
                 AcceptedCount = 2,
+                DuplicateCount = 0,
+                RejectedCount = 0,
             };
             return FakeHandler.JsonResponse(JsonSerializer.Serialize(response));
         });

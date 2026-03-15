@@ -68,6 +68,8 @@
 | OFF-4 | Recovery after 1-day outage (1,000 txns buffered) | Seed 1,000 buffered records, restore connectivity | Full replay completes without OOM; all records reach SYNCED status |
 | OFF-5 | Recovery after 7-day outage (30,000 txns buffered) | Seed 30,000 buffered records, restore connectivity | Replay completes; memory stays below 256MB; battery drain < 5% on Urovo i9100 |
 | OFF-6 | Simultaneous internet + FCC drop then staggered recovery | Toxiproxy cuts both, restores FCC first, then internet | Agent transitions through FULLY_OFFLINE → FCC_UNREACHABLE → INTERNET_DOWN → FULLY_ONLINE correctly |
+| OFF-7 | Primary agent crash with healthy warm standby | Kill primary process, keep standby reachable on LAN | Standby promotes within 30s, localhost facade continues serving Odoo, no duplicate FCC command execution |
+| OFF-8 | Stale former primary returns after failover | Restore old primary after a higher epoch is active | Returning node rejoins as `RECOVERING`; stale authoritative writes are rejected by leader epoch fencing |
 
 **Execution environment:** Docker Compose locally and in CI. OFF-5 also runs on physical Urovo i9100 during Phase 6 hardening.
 
@@ -81,6 +83,7 @@
 1. FCC Simulator generates transactions → Edge Agent polls and buffers → Edge uploads to Cloud → Cloud stores → Odoo poll API returns transactions → Odoo acknowledges → verify SYNCED_TO_ODOO
 2. Pre-auth: Edge receives pre-auth → forwards to FCC Simulator → stores record → uploads to Cloud → Cloud stores pre-auth record
 3. Offline replay: same as OFF-3/OFF-4 but verified end-to-end through Odoo acknowledge
+4. Multi-agent failover: desktop + two Android agents run in parallel → primary crash or network partition → verify promotion, epoch fencing, and continuity of localhost behavior on Android HHTs
 
 ### 5.6 Load / Performance Testing
 
@@ -107,6 +110,25 @@
 **Version skew handling:** Pact contracts are versioned by Edge Agent APK version. CI runs provider verification against the latest 2 APK versions' contracts. A Cloud deploy that breaks a contract for any supported APK version fails the pipeline.
 
 **Broker:** Pact Broker (Docker container in dev/CI, hosted service in staging/prod). Contract artifacts published on consumer CI build; provider CI verifies on every build.
+
+### 5.8 FCC Session Takeover Testing (per vendor)
+
+Tests verifying correct behavior when agent leadership transitions occur while the FCC hardware maintains active sessions. These scenarios are critical for multi-agent HA deployments where the FCC connection must be transferred without data loss.
+
+| Scenario ID | Scenario | Vendor | Expected Result |
+|---|---|---|---|
+| TAKE-1 | New primary connects while old session is active | DOMS | TBD — pending P2-16 research: document whether DOMS accepts or rejects the new connection |
+| TAKE-2 | New primary connects after old primary crash (no graceful close) | DOMS | TBD — pending P2-16 research: document TCP session timeout behavior and reconnection latency |
+| TAKE-3 | Two agents connect simultaneously | DOMS | TBD — pending P2-16 research: document whether FCC accepts both, rejects second, or drops first |
+| TAKE-4 | Primary sends pre-auth, crashes, new primary connects | DOMS | TBD — pending P2-16 research: document whether pre-auth remains active on FCC after session loss |
+| TAKE-5 | New primary connects while old session is active | Petronite | TBD — to be tested when Petronite adapter supports multi-agent |
+| TAKE-6 | New primary connects after old primary crash | Petronite | TBD — to be tested when Petronite adapter supports multi-agent |
+| TAKE-7 | Two agents connect simultaneously | Petronite | TBD — to be tested when Petronite adapter supports multi-agent |
+| TAKE-8 | Primary sends pre-auth, crashes, new primary connects | Petronite | TBD — to be tested when Petronite adapter supports multi-agent |
+
+**Execution:** DOMS scenarios are executable in the virtual lab once P2-16 research is complete. Results from P2-16 will inform the "Expected Result" column. Repeat the scenario matrix for each vendor as their adapter is onboarded to multi-agent HA.
+
+**Dependencies:** P2-16 (FCC vendor takeover research) provides the empirical data to fill expected results. Virtual lab must support multi-agent connection scenarios.
 
 ## 6. Validation and Edge Cases
 - Flaky offline tests: use deterministic Toxiproxy control (API calls, not timing); set generous timeouts for CI

@@ -122,6 +122,9 @@ data class PreAuthCommand(
 
     /** NET-008: B2B customer business name for reconciliation. */
     val customerBusinessName: String? = null,
+
+    /** Odoo user ID of the fuel attendant, if captured. */
+    val attendantId: String? = null,
 ) {
     override fun toString(): String = SensitiveFieldFilter.redactToString(this)
 }

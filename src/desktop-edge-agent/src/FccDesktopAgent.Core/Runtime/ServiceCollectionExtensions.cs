@@ -8,15 +8,18 @@ using FccDesktopAgent.Core.Buffer.Interceptors;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Ingestion;
+using FccDesktopAgent.Core.Peer;
 using FccDesktopAgent.Core.PreAuth;
 using FccDesktopAgent.Core.MasterData;
 using FccDesktopAgent.Core.Registration;
+using FccDesktopAgent.Core.Replication;
 using FccDesktopAgent.Core.Security;
 using FccDesktopAgent.Core.Sync;
 using FccDesktopAgent.Core.WebSocket;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace FccDesktopAgent.Core.Runtime;
@@ -83,6 +86,12 @@ public static class ServiceCollectionExtensions
             ServerCertificateCustomValidationCallback = CertificatePinValidator.Validate,
         });
 
+        // Named HTTP client for peer-to-peer HA calls — short timeout, LAN-only
+        services.AddHttpClient("peer", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(5);
+        });
+
         // FCC adapter factory (DEA-2.5: pre-auth handler support)
         services.AddSingleton<IFccAdapterFactory, FccAdapterFactory>();
 
@@ -125,6 +134,9 @@ public static class ServiceCollectionExtensions
         // DEA-3.4: Telemetry reporter and error tracker.
         services.AddSingleton<IErrorCountTracker, ErrorCountTracker>();
         services.AddSingleton<ITelemetryReporter, TelemetryReporter>();
+        services.AddSingleton<OperationalDataEventSink>();
+        services.AddSingleton<IOperationalDataCloudSyncService, OperationalDataCloudSyncService>();
+        services.AddSingleton<IDiagnosticLogUploadService, DiagnosticLogUploadService>();
 
         // Version checker — called on startup to validate agent compatibility with cloud.
         services.AddSingleton<IVersionChecker, VersionCheckService>();
@@ -132,6 +144,29 @@ public static class ServiceCollectionExtensions
         // Odoo backward-compat WebSocket server.
         services.AddSingleton<OdooWebSocketServer>();
         services.Configure<WebSocketServerOptions>(config.GetSection(WebSocketServerOptions.SectionName));
+
+        // ── Multi-Agent HA: Peer coordination and replication services ──────
+        services.AddSingleton<IPeerCoordinator, PeerCoordinator>();
+        services.AddSingleton<IPeerHttpClient, PeerHttpClient>();
+        services.AddSingleton<ReplicationSequenceAssignor>();
+        services.AddSingleton<PeerSyncHandler>();
+        services.AddSingleton<IReplicationSyncWorker, ReplicationSyncWorker>();
+        services.AddSingleton<IElectionCoordinator, ElectionCoordinator>();
+        services.AddSingleton<IRecoveryManager, RecoveryManager>();
+        services.AddSingleton<IPlannedSwitchoverOrchestrator, PlannedSwitchoverOrchestrator>();
+
+        // F-DSK-046: Audit logger for HA events.
+        services.AddSingleton<IAuditLogger, AuditLogger>();
+
+        // P2-12: LAN UDP peer announcement — broadcast on startup and after registration.
+        services.AddSingleton<LanPeerAnnouncer>();
+
+        // P2-13: LAN UDP peer listener — listens for announcements from other agents.
+        // Gated internally on SiteHaEnabled so it registers unconditionally.
+        services.AddHostedService<LanPeerListener>();
+
+        // G-03: Pump limit enforcer — ported from legacy ForecourtClient.CheckAndApplyPumpLimitAsync().
+        services.AddSingleton<Pump.PumpLimitEnforcer>();
 
         return services;
     }
@@ -194,6 +229,11 @@ public static class ServiceCollectionExtensions
         // Generic Host starts IHostedServices in registration order.
         services.AddHostedService<CadenceController>();
         services.AddHostedService<CleanupWorker>();
+
+        // Multi-Agent HA: HeartbeatWorker runs on its own timer (critical for failure detection).
+        // Internally gated on SiteHaEnabled — registers unconditionally so the worker can
+        // start if HA is enabled at runtime via config hot-reload.
+        services.AddHostedService<HeartbeatWorker>();
 
         // DEA-1.x: Additional hosted services registered here as they are implemented.
         return services;

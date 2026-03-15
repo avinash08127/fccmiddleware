@@ -62,7 +62,7 @@ Set these Azure App Settings on the Web App:
 | Setting | Required | Purpose |
 |---------|----------|---------|
 | `DOTNET_ENVIRONMENT` | Yes | Use `Production` for Azure Web App unless you intentionally load another appsettings environment. |
-| `VirtualLab__Persistence__Provider` | Yes | `Sqlite` for single-instance/shared-demo environments, `SqlServer` for Azure SQL. |
+| `VirtualLab__Persistence__Provider` | Yes | `Sqlite` for single-instance/shared-demo environments, `SqlServer` for Azure SQL, or `PostgreSQL`/`Npgsql` for PostgreSQL. |
 | `VirtualLab__Persistence__ConnectionString` | Yes | Database connection string for the selected provider. |
 | `VirtualLab__Seed__ApplyOnStartup` | Yes | `false` for shared Azure environments unless you explicitly want startup reseeding. |
 | `VirtualLab__Seed__ResetOnStartup` | No | Keep `false` outside disposable environments. |
@@ -98,14 +98,20 @@ VirtualLab__Persistence__ConnectionString=Server=tcp:<server>.database.windows.n
 
 This is the recommended path once the virtual lab becomes a shared integration environment or you need better concurrency, durability, and operational visibility than a file-backed SQLite database provides.
 
-#### PostgreSQL upgrade path
+#### PostgreSQL for shared environments
 
-The domain and configuration boundaries remain clean enough for PostgreSQL, but the current codebase does not yet ship the Npgsql EF Core provider. To move a shared environment to PostgreSQL later:
+The API now accepts `PostgreSQL`, `Postgres`, or `Npgsql` as the provider and can bootstrap a fresh PostgreSQL schema directly from the EF Core model:
 
-1. Add `Npgsql.EntityFrameworkCore.PostgreSQL` to `VirtualLab.Infrastructure`.
-2. Extend the provider switch in `DependencyInjection.cs`.
-3. Validate the existing migrations against PostgreSQL semantics or create a provider-specific migration set.
-4. Set `VirtualLab__Persistence__Provider` and `VirtualLab__Persistence__ConnectionString` for the PostgreSQL target.
+```text
+VirtualLab__Persistence__Provider=PostgreSQL
+VirtualLab__Persistence__ConnectionString=Host=<host>;Port=5432;Database=<db>;Username=<user>;Password=<password>;SSL Mode=Require;Trust Server Certificate=false
+```
+
+Notes:
+
+- PostgreSQL startup uses `EnsureCreated` for fresh environments because the checked-in migration set is still SQLite/SQL Server oriented.
+- Use PostgreSQL for new deployments rather than trying to apply the existing migration history to an already-created schema.
+- If you need migration-managed PostgreSQL upgrades later, add a provider-specific migration set before rolling schema changes across an existing PostgreSQL environment.
 
 ## Independent deployment checklist
 

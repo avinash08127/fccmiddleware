@@ -141,7 +141,7 @@ class ConfigPollWorkerTest {
     @Test
     fun `304 not modified does not apply config`() = runTest {
         coEvery { cloudApiClient.getConfig(4, VALID_TOKEN) } returns
-            CloudConfigPollResult.NotModified
+            CloudConfigPollResult.NotModified()
 
         worker.pollConfig()
 
@@ -152,7 +152,7 @@ class ConfigPollWorkerTest {
     @Test
     fun `304 not modified updates lastConfigPullAt`() = runTest {
         coEvery { cloudApiClient.getConfig(4, VALID_TOKEN) } returns
-            CloudConfigPollResult.NotModified
+            CloudConfigPollResult.NotModified()
 
         worker.pollConfig()
 

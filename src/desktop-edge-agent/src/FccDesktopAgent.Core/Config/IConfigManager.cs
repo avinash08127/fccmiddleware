@@ -17,6 +17,21 @@ public interface IConfigManager
     /// <summary>Whether a restart is pending due to restart-required config changes.</summary>
     bool RestartRequired { get; }
 
+    /// <summary>Current peer directory version from cloud responses.</summary>
+    long CurrentPeerDirectoryVersion { get; }
+
+    /// <summary>Returns true if the cloud version is newer than the local version.</summary>
+    bool IsPeerDirectoryStale(long cloudVersion);
+
+    /// <summary>Update the local peer directory version (thread-safe).</summary>
+    void UpdatePeerDirectoryVersion(long version);
+
+    /// <summary>
+    /// Callback invoked when a cloud response indicates the peer directory is stale.
+    /// Set by <see cref="Runtime.CadenceController"/> to trigger an immediate config poll.
+    /// </summary>
+    Action? OnPeerDirectoryStale { get; set; }
+
     /// <summary>Raised when config changes are applied.</summary>
     event EventHandler<ConfigChangedEventArgs>? ConfigChanged;
 

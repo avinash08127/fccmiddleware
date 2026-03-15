@@ -5,7 +5,6 @@ using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
-using FccDesktopAgent.Core.Sync.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -36,6 +35,7 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
     private readonly IOptions<AgentConfiguration> _config;
     private readonly AuthenticatedCloudRequestHandler _authHandler;
     private readonly IRegistrationManager _registrationManager;
+    private readonly IConfigManager _configManager;
     private readonly ILogger<StatusPollWorker> _logger;
 
     public StatusPollWorker(
@@ -44,6 +44,7 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
         IOptions<AgentConfiguration> config,
         AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
+        IConfigManager configManager,
         ILogger<StatusPollWorker> logger)
     {
         _scopeFactory = scopeFactory;
@@ -51,6 +52,7 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
         _config = config;
         _authHandler = authHandler;
         _registrationManager = registrationManager;
+        _configManager = configManager;
         _logger = logger;
     }
 
@@ -68,7 +70,7 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
         var bufferManager = scope.ServiceProvider.GetRequiredService<TransactionBufferManager>();
         var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
 
-        var since = await GetLastStatusSyncAtAsync(db, ct);
+        var since = await DetermineSinceAsync(db, ct);
 
         _logger.LogDebug("SYNCED_TO_ODOO poll: querying since {Since:O}", since);
 
@@ -86,7 +88,8 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
         var response = result.Value;
         if (response is null || response.FccTransactionIds.Count == 0)
         {
-            // No new synced records — advance the timestamp so the next poll window moves forward.
+            // Record the successful poll time for telemetry/visibility, but never use it
+            // as the sole source of truth for the next query lower bound.
             await UpdateLastStatusSyncAtAsync(db, DateTimeOffset.UtcNow, ct);
             return 0;
         }
@@ -124,6 +127,8 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
 
         var response = await http.SendAsync(request, ct);
 
+        PeerDirectoryVersionHelper.CheckAndTrigger(response, _configManager, _logger);
+
         if (response.StatusCode == HttpStatusCode.Unauthorized)
             throw new UnauthorizedAccessException();
 
@@ -138,16 +143,30 @@ public sealed class StatusPollWorker : ISyncedToOdooPoller
 
         response.EnsureSuccessStatusCode();
 
-        return await response.Content.ReadFromJsonAsync<SyncedStatusResponse>(cancellationToken: ct);
+        return await response.Content.ReadFromJsonAsync<SyncedStatusResponse>(cancellationToken: ct)
+            ?? new SyncedStatusResponse { FccTransactionIds = [] };
     }
 
     // ── SyncState helpers ─────────────────────────────────────────────────────
 
-    private static async Task<DateTimeOffset> GetLastStatusSyncAtAsync(AgentDbContext db, CancellationToken ct)
+    private static async Task<DateTimeOffset> DetermineSinceAsync(AgentDbContext db, CancellationToken ct)
     {
         var state = await db.SyncStates.FindAsync([1], ct);
-        // On first run fall back to 24 hours ago to catch any recently synced records.
-        return state?.LastStatusSyncAt ?? DateTimeOffset.UtcNow.AddDays(-1);
+        var lastSuccessfulPollAt = state?.LastStatusSyncAt ?? DateTimeOffset.UtcNow.AddDays(-1);
+
+        var oldestOutstandingUploadAt = await db.Transactions
+            .AsNoTracking()
+            .Where(t => t.SyncStatus == Adapter.Common.SyncStatus.Uploaded)
+            .Select(t => (DateTimeOffset?)(t.LastUploadAttemptAt ?? t.CompletedAt))
+            .OrderBy(timestamp => timestamp)
+            .FirstOrDefaultAsync(ct);
+
+        if (!oldestOutstandingUploadAt.HasValue)
+            return lastSuccessfulPollAt;
+
+        return oldestOutstandingUploadAt.Value < lastSuccessfulPollAt
+            ? oldestOutstandingUploadAt.Value
+            : lastSuccessfulPollAt;
     }
 
     private static async Task UpdateLastStatusSyncAtAsync(

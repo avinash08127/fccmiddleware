@@ -34,6 +34,11 @@ public sealed class OdooWebSocketServer : IDisposable
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
+    // P-DSK-012/020: Single shared pump status broadcast loop instead of per-connection loops.
+    private CancellationTokenSource? _broadcastLoopCts;
+    private Task? _broadcastLoopTask;
+    private readonly object _broadcastLoopLock = new();
+
     /// <summary>Late-bound: wired when FCC adapter becomes available.</summary>
     public IFccAdapter? FccAdapter { get; set; }
 
@@ -72,8 +77,8 @@ public sealed class OdooWebSocketServer : IDisposable
         _clients[webSocket] = cts;
         _logger.LogInformation("WebSocket client connected (total={Total})", _clients.Count);
 
-        // Start per-connection pump status broadcast
-        var pumpStatusTask = PumpStatusBroadcastLoopAsync(webSocket, cts.Token);
+        // P-DSK-012/020: Start the shared pump status broadcast loop when the first client connects
+        EnsureSharedBroadcastLoopStarted(ct);
 
         try
         {
@@ -177,7 +182,7 @@ public sealed class OdooWebSocketServer : IDisposable
                     await handler.HandleFuelPumpStatusAsync(ws, PumpStatusService, ct);
                     break;
                 case "fp_unblock":
-                    await handler.HandleFpUnblockAsync(ws, root, ct);
+                    await handler.HandleFpUnblockAsync(ws, root, FccAdapter, ct);
                     break;
                 case "attendant_pump_count_update":
                     await handler.HandleAttendantPumpCountUpdateAsync(ws, root, ct);
@@ -204,17 +209,36 @@ public sealed class OdooWebSocketServer : IDisposable
         }
     }
 
-    // ── Pump status broadcast (per-connection, every 3s) ────────────────────
+    // ── Pump status broadcast (shared site-wide loop) ───────────────────────
 
-    private async Task PumpStatusBroadcastLoopAsync(
-        System.Net.WebSockets.WebSocket ws,
-        CancellationToken ct)
+    // P-DSK-012/020: Single shared broadcast loop that queries pump status once
+    // and sends to all connected clients, instead of per-connection loops.
+    private void EnsureSharedBroadcastLoopStarted(CancellationToken ct)
+    {
+        lock (_broadcastLoopLock)
+        {
+            if (_broadcastLoopTask is not null && !_broadcastLoopTask.IsCompleted)
+                return;
+
+            _broadcastLoopCts?.Dispose();
+            _broadcastLoopCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _broadcastLoopTask = SharedPumpStatusBroadcastLoopAsync(_broadcastLoopCts.Token);
+        }
+    }
+
+    private async Task SharedPumpStatusBroadcastLoopAsync(CancellationToken ct)
     {
         var interval = TimeSpan.FromSeconds(Math.Max(1, Options.PumpStatusBroadcastIntervalSeconds));
         await Task.Delay(interval, ct); // Initial delay before first broadcast
 
-        while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
+        while (!ct.IsCancellationRequested)
         {
+            if (_clients.IsEmpty)
+            {
+                await Task.Delay(interval, ct);
+                continue;
+            }
+
             try
             {
                 var svc = PumpStatusService;
@@ -224,15 +248,14 @@ public sealed class OdooWebSocketServer : IDisposable
                     foreach (var status in result.Pumps)
                     {
                         var dto = status.ToWsDto();
-                        await SendAsync(ws, dto, ct);
+                        await BroadcastToAllAsync("FuelPumpStatus", dto, ct);
                     }
                 }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Pump status broadcast failed for connection");
-                break;
+                _logger.LogDebug(ex, "Shared pump status broadcast failed");
             }
 
             await Task.Delay(interval, ct);
@@ -241,24 +264,31 @@ public sealed class OdooWebSocketServer : IDisposable
 
     // ── Broadcast to all ────────────────────────────────────────────────────
 
+    // P-DSK-025: Send to all clients in parallel with bounded concurrency so one slow
+    // socket doesn't delay delivery to every other terminal.
     internal async Task BroadcastToAllAsync(string type, object? data, CancellationToken ct)
     {
         var payload = JsonSerializer.Serialize(new { type, data }, _jsonOptions);
         var bytes = Encoding.UTF8.GetBytes(payload);
-        var dead = new List<System.Net.WebSockets.WebSocket>();
+        var dead = new ConcurrentBag<System.Net.WebSockets.WebSocket>();
+        var snapshot = _clients.Keys.ToArray();
 
-        foreach (var (ws, _) in _clients)
+        await Parallel.ForEachAsync(snapshot, new ParallelOptions
         {
-            if (ws.State != WebSocketState.Open) { dead.Add(ws); continue; }
+            MaxDegreeOfParallelism = Math.Min(snapshot.Length, 10),
+            CancellationToken = ct,
+        }, async (ws, token) =>
+        {
+            if (ws.State != WebSocketState.Open) { dead.Add(ws); return; }
             try
             {
-                await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+                await ws.SendAsync(bytes, WebSocketMessageType.Text, true, token);
             }
             catch
             {
                 dead.Add(ws);
             }
-        }
+        });
 
         foreach (var ws in dead)
         {
@@ -277,6 +307,9 @@ public sealed class OdooWebSocketServer : IDisposable
 
     public void Dispose()
     {
+        _broadcastLoopCts?.Cancel();
+        _broadcastLoopCts?.Dispose();
+
         foreach (var (ws, cts) in _clients)
         {
             cts.Cancel();

@@ -3,7 +3,6 @@ using System.Text.Json;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Sync;
-using FccDesktopAgent.Core.Sync.Models;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -135,6 +134,7 @@ public sealed class CommandPollWorkerTests
 
     private CommandPollWorker CreateWorker(HttpMessageHandler handler)
     {
+        var configManager = Substitute.For<IConfigManager>();
         return new CommandPollWorker(
             new TestHttpClientFactory(handler),
             Options.Create(new AgentConfiguration { CloudBaseUrl = "https://cloud.test" }),
@@ -142,6 +142,7 @@ public sealed class CommandPollWorkerTests
             _executor,
             _stateStore,
             _registrationManager,
+            configManager,
             NullLogger<CommandPollWorker>.Instance);
     }
 

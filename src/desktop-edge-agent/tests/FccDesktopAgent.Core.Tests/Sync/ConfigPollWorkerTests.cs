@@ -56,15 +56,7 @@ public sealed class ConfigPollWorkerTests
 
     private static string BuildSiteConfigJson(int configVersion = 1, DateTimeOffset? effectiveAt = null)
     {
-        var config = new SiteConfig
-        {
-            ConfigVersion = configVersion,
-            ConfigId = Guid.NewGuid().ToString(),
-            IssuedAtUtc = DateTimeOffset.UtcNow,
-            EffectiveAtUtc = effectiveAt ?? DateTimeOffset.UtcNow.AddMinutes(-1),
-            Sync = new SiteConfigSync { ConfigPollIntervalSeconds = 60 },
-            Telemetry = new SiteConfigTelemetry { TelemetryIntervalSeconds = 300 },
-        };
+        var config = TestSiteConfigFactory.Create(configVersion, effectiveAt);
         return JsonSerializer.Serialize(config, new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -310,6 +302,47 @@ public sealed class ConfigPollWorkerTests
         var result = await worker.PollAsync(CancellationToken.None);
 
         result.Should().BeFalse();
+    }
+
+    // ── P2-28: X-Peer-Directory-Version header extraction ───────────────────
+
+    [Fact]
+    public async Task PollAsync_WithPeerDirectoryVersionHeader_UpdatesConfigManager()
+    {
+        _configManager.ApplyConfigAsync(
+                Arg.Any<SiteConfig>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new ConfigApplyResult(ConfigApplyOutcome.Applied, 1, ["initial"], []));
+        _configManager.IsPeerDirectoryStale(99).Returns(true);
+        _configManager.CurrentPeerDirectoryVersion.Returns(50L);
+
+        var handler = new FakeHandler(_ =>
+        {
+            var json = BuildSiteConfigJson(configVersion: 1);
+            var response = FakeHandler.JsonResponse(json);
+            response.Headers.ETag = new System.Net.Http.Headers.EntityTagHeaderValue("\"1\"");
+            response.Headers.Add("X-Peer-Directory-Version", "99");
+            return response;
+        });
+
+        var worker = CreateWorker(handler);
+        var result = await worker.PollAsync(CancellationToken.None);
+
+        result.Should().BeTrue();
+        _configManager.Received().UpdatePeerDirectoryVersion(99);
+    }
+
+    [Fact]
+    public async Task PollAsync_WithoutPeerDirectoryVersionHeader_DoesNotUpdateVersion()
+    {
+        _configManager.ApplyConfigAsync(
+                Arg.Any<SiteConfig>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new ConfigApplyResult(ConfigApplyOutcome.Applied, 1, ["initial"], []));
+
+        var worker = CreateWorker(RespondWithConfig(configVersion: 1, etag: "1"));
+        var result = await worker.PollAsync(CancellationToken.None);
+
+        result.Should().BeTrue();
+        _configManager.DidNotReceive().UpdatePeerDirectoryVersion(Arg.Any<long>());
     }
 
     // ── ETag extraction from response ─────────────────────────────────────────

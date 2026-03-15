@@ -127,7 +127,7 @@ data class SyncDto(
     val uploadBatchSize: Int = 50,
     val uploadIntervalSeconds: Int = 30,
     val syncedStatusPollIntervalSeconds: Int = 30,
-    val configPollIntervalSeconds: Int = 60,
+    val configPollIntervalSeconds: Int = 300,
     val cursorStrategy: String = "LAST_SUCCESSFUL_TIMESTAMP",
     val maxReplayBackoffSeconds: Int = 300,
     val initialReplayBackoffSeconds: Int = 5,
@@ -140,6 +140,7 @@ data class SyncDto(
      * Applied on next app restart (OkHttp CertificatePinner is immutable after construction).
      */
     val certificatePins: List<String> = emptyList(),
+    val environment: String? = null,
 )
 
 @Serializable
@@ -177,6 +178,11 @@ data class SiteHaDto(
     val leaderEpoch: Long = 0,
     val leaderSinceUtc: String? = null,
     val peerDirectory: List<PeerDirectoryEntryDto> = emptyList(),
+    val peerApiPort: Int = 8586,
+    val peerSharedSecret: String? = null,
+    val replicationEnabled: Boolean = true,
+    val proxyingEnabled: Boolean = true,
+    val peerDirectoryVersion: Long = 0,
 )
 
 @Serializable

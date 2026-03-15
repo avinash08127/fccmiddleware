@@ -18,6 +18,8 @@ public sealed class ScenarioSetupDefinition
     public string? ProfileKey { get; init; }
     public TransactionDeliveryMode? DeliveryMode { get; init; }
     public PreAuthFlowMode? PreAuthMode { get; init; }
+    /// <summary>Target FCC vendor protocol for this scenario (advisory, not routing).</summary>
+    public string? FccVendor { get; init; }
 }
 
 public sealed class ScenarioActionDefinition
@@ -85,6 +87,7 @@ public sealed record ScenarioRunSummaryView(
     string CorrelationId,
     int ReplaySeed,
     string ReplaySignature,
+    string OutputSignature,
     ScenarioRunStatus Status,
     DateTimeOffset StartedAtUtc,
     DateTimeOffset? CompletedAtUtc,
@@ -121,6 +124,7 @@ public sealed record ScenarioRunDetailView(
     string CorrelationId,
     int ReplaySeed,
     string ReplaySignature,
+    string OutputSignature,
     ScenarioRunStatus Status,
     string InputSnapshotJson,
     string ResultSummaryJson,

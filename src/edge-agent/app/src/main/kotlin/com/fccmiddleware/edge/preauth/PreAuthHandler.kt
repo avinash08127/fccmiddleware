@@ -206,6 +206,7 @@ class PreAuthHandler(
             createdAt = now,
             vehicleNumber = command.vehicleNumber,
             customerBusinessName = command.customerBusinessName,
+            attendantId = command.attendantId,
         )
 
         val insertedRowId = preAuthDao.insert(record)

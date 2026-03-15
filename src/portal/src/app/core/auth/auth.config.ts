@@ -34,16 +34,14 @@ export function msalGuardConfigFactory(): MsalGuardConfiguration {
   return {
     interactionType: InteractionType.Redirect,
     authRequest: {
-      scopes: [`${environment.msalClientId}/.default`],
+      scopes: [environment.msalApiScope],
     },
   };
 }
 
 export function msalInterceptorConfigFactory(): MsalInterceptorConfiguration {
   const protectedResourceMap = new Map<string, string[]>();
-  protectedResourceMap.set(environment.apiBaseUrl, [
-    `${environment.msalClientId}/.default`,
-  ]);
+  protectedResourceMap.set(`${environment.apiBaseUrl}/api/*`, [environment.msalApiScope]);
 
   return {
     interactionType: InteractionType.Redirect,

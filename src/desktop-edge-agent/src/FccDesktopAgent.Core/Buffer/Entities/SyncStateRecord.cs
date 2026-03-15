@@ -21,5 +21,11 @@ public sealed class SyncStateRecord
 
     public string? ConfigVersion { get; set; }
 
+    /// <summary>
+    /// Tracks the cloud's peer directory version so the agent can detect
+    /// staleness across restarts. Updated from X-Peer-Directory-Version response header.
+    /// </summary>
+    public long PeerDirectoryVersion { get; set; }
+
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

@@ -409,6 +409,8 @@ class TransactionBufferManager(
             ingestionSource = ingestionSource.name,
             rawPayloadJson = encryptRawPayload(rawPayloadJson),
             correlationId = correlationId,
+            fccCorrelationId = fccCorrelationId,
+            odooOrderId = odooOrderId,
             uploadAttempts = 0,
             lastUploadAttemptAt = null,
             lastUploadError = null,
@@ -448,6 +450,7 @@ class TransactionBufferManager(
         schemaVersion = schemaVersion,
         isDuplicate = false,  // Not stored in buffer; always false for buffered records
         correlationId = correlationId,
+        fccCorrelationId = fccCorrelationId,
         fiscalReceiptNumber = fiscalReceiptNumber,
         attendantId = attendantId,
         rawPayloadJson = decryptRawPayload(rawPayloadJson),

@@ -371,7 +371,10 @@
       "Bash(powershell.exe -Command \"Get-Process -Id 3372 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path | Format-List; Get-Process -Id 6008 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path | Format-List\" 2>&1)",
       "Bash(\"$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe\" install:*)",
       "Bash(find:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(grep:*)",
+      "Bash(for file:*)",
+      "Bash(python:*)"
     ]
   }
 }

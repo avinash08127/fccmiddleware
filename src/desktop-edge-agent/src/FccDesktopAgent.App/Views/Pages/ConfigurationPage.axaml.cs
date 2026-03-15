@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
@@ -215,7 +216,9 @@ public sealed partial class ConfigurationPage : UserControl, IDisposable
 
     private void OnRegenerateApiKeyClicked(object? sender, RoutedEventArgs e)
     {
-        var newKey = Guid.NewGuid().ToString("N");
+        // S-DSK-024: Use cryptographically secure random bytes instead of Guid.NewGuid
+        // for full 256-bit entropy and non-recognizable format.
+        var newKey = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
         CfgApiKey.Text = newKey;
         // Show the new key briefly so the user can verify, then auto-hide
         CfgApiKey.PasswordChar = default;

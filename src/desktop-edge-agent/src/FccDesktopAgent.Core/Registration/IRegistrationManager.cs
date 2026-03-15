@@ -55,5 +55,5 @@ public interface IRegistrationManager
     /// Syncs site equipment data from the cloud config to a local JSON file.
     /// Called after successful registration when the site config is available.
     /// </summary>
-    void SyncSiteData(Config.SiteConfig config);
+    Task SyncSiteDataAsync(SiteConfig config);
 }

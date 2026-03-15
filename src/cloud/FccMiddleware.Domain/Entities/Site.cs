@@ -33,6 +33,25 @@ public class Site : ITenantScoped
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 
+    /// <summary>
+    /// Monotonically increasing counter incremented on any peer-directory-affecting event
+    /// (agent registration, deactivation, role change, heartbeat expiry).
+    /// Agents compare this to their cached value to detect peer directory staleness.
+    /// </summary>
+    public long PeerDirectoryVersion { get; set; }
+
+    /// <summary>
+    /// P2-15: The highest leader epoch the cloud has accepted from any agent at this site.
+    /// Agent-side elections are authoritative; the cloud records the result.
+    /// </summary>
+    public long HaLeaderEpoch { get; set; }
+
+    /// <summary>
+    /// P2-15: The agent ID that claimed the current <see cref="HaLeaderEpoch"/>.
+    /// Null until the first agent reports a leadership epoch.
+    /// </summary>
+    public Guid? HaLeaderAgentId { get; set; }
+
     // Navigation properties
     public LegalEntity LegalEntity { get; set; } = null!;
     public ICollection<Pump> Pumps { get; set; } = [];

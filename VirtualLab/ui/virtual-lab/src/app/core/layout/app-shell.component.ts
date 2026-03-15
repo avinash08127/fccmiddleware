@@ -157,6 +157,7 @@ export class AppShellComponent implements OnInit {
   readonly navItems: NavItem[] = [
     { label: 'Dashboard', path: '/dashboard' },
     { label: 'Sites', path: '/sites' },
+    { label: 'Products', path: '/products' },
     { label: 'FCC Profiles', path: '/fcc-profiles' },
     { label: 'Forecourt Designer', path: '/forecourt-designer' },
     { label: 'Live Pump Console', path: '/live-console' },

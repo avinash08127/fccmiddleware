@@ -251,9 +251,23 @@ public sealed class DomsAdapter : IFccAdapter
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
+    private bool _fccHttpWarningLogged;
+
     private HttpRequestMessage BuildRequest(HttpMethod method, string path, HttpContent? content = null)
     {
         var baseUri = new Uri(_config.BaseUrl.TrimEnd('/') + "/");
+
+        // S-DSK-023: Warn when FCC API key is sent over non-HTTPS connection.
+        if (!_fccHttpWarningLogged
+            && !string.Equals(baseUri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "FCC base URL uses {Scheme} — X-API-Key header will be sent without TLS encryption. " +
+                "Use HTTPS for production FCC connections to prevent credential exposure on the LAN",
+                baseUri.Scheme);
+            _fccHttpWarningLogged = true;
+        }
+
         var requestUri = new Uri(baseUri, path.TrimStart('/'));
         var request = new HttpRequestMessage(method, requestUri);
         request.Headers.Add("X-API-Key", _config.ApiKey);

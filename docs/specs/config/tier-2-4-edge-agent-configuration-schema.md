@@ -39,7 +39,8 @@
 | `compatibility.minAgentVersion` | string | Yes | Cloud policy | SemVer | Cloud | Yes | Gate only | If current agent version is lower, keep last-known-good and disable FCC communication. |
 | `compatibility.maxAgentVersion` | string or null | No | `null` | SemVer when present | Cloud | Yes | Gate only | Used for phased rollout or version freeze. |
 | `agent.deviceId` | UUID | Yes | Issued at registration | Valid UUID | Provisioning | No | Reprovision | Bound to one device installation. |
-| `agent.isPrimaryAgent` | boolean | Yes | `true` | `true` for MVP-supported deployments | Provisioning | No | Reprovision | Manual primary reassignment is deferred to post-MVP. |
+| `agent.deviceClass` | enum | Yes | `ANDROID` | `ANDROID`, `DESKTOP` | Provisioning | No | Reprovision | Registration-time device class used by the HA priority policy. |
+| `agent.isPrimaryAgent` | boolean | Yes | `true` | Boolean | Cloud | Yes | Hot-reload | Legacy compatibility field only. New HA ownership is driven by `siteHa.currentRole` and leader epoch. |
 | `site.siteCode` | string | Yes | None | `^[A-Z0-9-]{3,32}$` | Provisioning | No | Reprovision | Stable site identity used in polling and audit. |
 | `site.legalEntityId` | UUID | Yes | None | Must map to active legal entity | Provisioning | No | Reprovision | Trust boundary and data-isolation anchor. |
 | `site.timezone` | string | Yes | Legal entity default | IANA timezone name | Cloud | Yes | Hot-reload | Used for timestamp normalization. |
@@ -68,6 +69,20 @@
 | `api.localApiPort` | integer | Yes | `8585` | `1024-65535` | Provisioning | No | Restart-required | Odoo offline integration contract port. |
 | `api.enableLanApi` | boolean | Yes | `false` | Boolean | Cloud | Yes | Restart-required | Enables station-LAN exposure for non-primary HHTs. |
 | `api.lanApiKeyRef` | string or null | No | `null` | Required when `enableLanApi = true` | Cloud | Yes | Restart-required | Secret reference for LAN API authentication. |
+| `siteHa.enabled` | boolean | Yes | `false` | Boolean | Cloud | Yes | Hot-reload | Enables multi-agent active-standby behavior for the site. |
+| `siteHa.autoFailoverEnabled` | boolean | Yes | `false` | Boolean | Cloud | Yes | Hot-reload | Automatic promotion stays off until warm replication is validated. |
+| `siteHa.priority` | integer | Yes | device-class default | `1-1000`; lower wins | Cloud | Yes | Hot-reload | Default policy is desktop-preferred, then Android agents by configured priority. |
+| `siteHa.roleCapability` | enum | Yes | `PRIMARY_ELIGIBLE` | `PRIMARY_ELIGIBLE`, `STANDBY_ONLY`, `READ_ONLY` | Cloud | Yes | Hot-reload | Promotion eligibility for the current device. |
+| `siteHa.currentRole` | enum | Yes | `STANDBY_HOT` | `PRIMARY`, `STANDBY_HOT`, `RECOVERING`, `READ_ONLY`, `OFFLINE` | Cloud | Yes | Hot-reload | Cloud bootstrap view of the device's current HA role. |
+| `siteHa.heartbeatIntervalSeconds` | integer | Yes | `5` | `1-300` | Cloud | Yes | Hot-reload | Peer heartbeat cadence used for suspect detection. |
+| `siteHa.failoverTimeoutSeconds` | integer | Yes | `30` | `5-300` | Cloud | Yes | Hot-reload | Promotion timeout target for suspected primary failure. |
+| `siteHa.maxReplicationLagSeconds` | integer | Yes | `15` | `0-3600` | Cloud | Yes | Hot-reload | Promotion gate for standby readiness. |
+| `siteHa.peerDiscoveryMode` | enum | Yes | `HYBRID` | `CLOUD_DIRECTORY`, `LAN_BROADCAST`, `HYBRID` | Cloud | Yes | Hot-reload | Controls how agents combine cloud directory bootstrap and LAN discovery. |
+| `siteHa.allowFailback` | boolean | Yes | `false` | Boolean | Cloud | Yes | Hot-reload | Former primaries do not auto-preempt the current leader by default. |
+| `siteHa.leaderAgentId` | UUID or null | Yes | `null` | Valid UUID when present | Cloud | Yes | Hot-reload | Current cloud-known leader identity for epoch fencing. |
+| `siteHa.leaderEpoch` | integer | Yes | `0` | `>= 0` | Cloud | Yes | Hot-reload | Monotonic leader epoch carried on authoritative writes. |
+| `siteHa.leaderSinceUtc` | date-time or null | Yes | `null` | Valid UTC timestamp when present | Cloud | Yes | Hot-reload | When the current leader epoch became active. |
+| `siteHa.peerDirectory[]` | array | Yes | `[]` | Peer directory entries with agent ID, role capability, priority, peer API metadata, capabilities, and app version | Cloud | Yes | Hot-reload | Bootstrap peer directory for cross-device coordination before live probes converge. |
 | `telemetry.telemetryIntervalSeconds` | integer | Yes | `60` | `30-3600` | Cloud | Yes | Hot-reload | Cloud health-report interval. |
 | `telemetry.logLevel` | enum | Yes | `INFO` | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` | Cloud | Yes | Hot-reload | Runtime log verbosity. |
 | `telemetry.logRotationMaxFileSizeMb` | integer | Yes | `10` | `1-50` | Cloud | Yes | Hot-reload | Rotate the active local log file when the size threshold is reached. |
@@ -81,7 +96,7 @@
 | Rule | Behavior |
 |---|---|
 | Atomicity | Agent validates the full snapshot first, stores it as staged, then swaps active config only if all validations pass. |
-| Provisioning-only fields | Any delta to `agent.deviceId`, `agent.isPrimaryAgent`, `site.siteCode`, `site.legalEntityId`, or `api.localApiPort` is rejected and flagged as `REPROVISION_REQUIRED`. |
+| Provisioning-only fields | Any delta to `agent.deviceId`, `agent.deviceClass`, `site.siteCode`, `site.legalEntityId`, or `api.localApiPort` is rejected and flagged as `REPROVISION_REQUIRED`. |
 | Restart-required fields | Agent stores the new version, restarts the foreground service, and applies the new config on startup. No APK reinstall is required. |
 | Hot-reload fields | New values take effect in the next in-memory scheduler cycle without service restart. |
 | Disconnected sites | When `site.connectivityMode = DISCONNECTED`, agent suspends FCC polling, heartbeat, and local pump-status calls. Existing buffered records remain readable. |
@@ -111,6 +126,8 @@
 
 ## 6. Validation and Edge Cases
 - `api.enableLanApi = true` requires non-null `api.lanApiKeyRef`; otherwise config is invalid.
+- `siteHa.enabled = true` requires `siteHa.peerDirectory[]` support in the cloud snapshot even if the array is temporarily empty.
+- `siteHa.leaderEpoch` is the fencing token for authoritative writes. Upload, ingest-relay, and pre-auth command APIs must reject stale epochs once HA fencing is active.
 - `fccConnection.ingestionMode = CLOUD_DIRECT` still requires `polling.pullIntervalSeconds` because the Edge Agent runs a LAN catch-up poll.
 - `fccConnection.transactionMode = PUSH` does not disable polling in `CLOUD_DIRECT`; it only means the FCC's primary upstream path is push.
 - `fiscalization.mode = FCC_DIRECT` requires `fiscalization.fiscalReceiptRequired = true`.

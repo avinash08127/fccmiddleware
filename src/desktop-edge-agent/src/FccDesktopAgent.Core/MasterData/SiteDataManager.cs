@@ -1,7 +1,10 @@
 using System.Text.Json;
 using FccDesktopAgent.Core.Buffer;
+using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.MasterData.Models;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace FccDesktopAgent.Core.MasterData;
@@ -22,12 +25,14 @@ public sealed class SiteDataManager
     };
 
     private const string FileName = "site-data.json";
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SiteDataManager> _logger;
     private readonly object _lock = new();
     private SiteDataSnapshot? _cached;
 
-    public SiteDataManager(ILogger<SiteDataManager> logger)
+    public SiteDataManager(IServiceScopeFactory scopeFactory, ILogger<SiteDataManager> logger)
     {
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
@@ -35,7 +40,7 @@ public sealed class SiteDataManager
     /// Extracts products, pumps, nozzles, and site info from <paramref name="config"/>
     /// and persists to <c>site-data.json</c> in the agent data directory.
     /// </summary>
-    public void SyncFromConfig(SiteConfig config)
+    public async Task SyncFromConfigAsync(SiteConfig config)
     {
         var snapshot = new SiteDataSnapshot
         {
@@ -43,9 +48,9 @@ public sealed class SiteDataManager
             Site = new SiteInfo
             {
                 SiteCode = config.Identity?.SiteCode ?? string.Empty,
-                LegalEntityCode = config.Identity?.LegalEntityId ?? string.Empty,
-                Timezone = config.Site?.Timezone ?? string.Empty,
-                CurrencyCode = config.Site?.Currency ?? string.Empty,
+                LegalEntityCode = config.Identity?.LegalEntityCode ?? string.Empty,
+                Timezone = config.Identity?.Timezone ?? string.Empty,
+                CurrencyCode = config.Identity?.CurrencyCode ?? string.Empty,
                 OperatingModel = config.Site?.OperatingModel ?? string.Empty,
                 FccVendor = config.Fcc?.Vendor,
                 IngestionMode = config.Fcc?.IngestionMode,
@@ -53,7 +58,7 @@ public sealed class SiteDataManager
         };
 
         // Products from mappings
-        if (config.Mappings?.Products is { Count: > 0 } products)
+        if (config.Mappings?.Products is { Length: > 0 } products)
         {
             snapshot.Products = products.Select(p => new LocalProduct
             {
@@ -65,7 +70,7 @@ public sealed class SiteDataManager
         }
 
         // Derive unique pumps from nozzle mappings
-        if (config.Mappings?.Nozzles is { Count: > 0 } nozzles)
+        if (config.Mappings?.Nozzles is { Length: > 0 } nozzles)
         {
             snapshot.Pumps = nozzles
                 .Select(n => new { n.OdooPumpNumber, n.FccPumpNumber })
@@ -88,8 +93,11 @@ public sealed class SiteDataManager
         }
 
         var path = GetFilePath();
+        var dir = Path.GetDirectoryName(path);
+        if (dir is not null) Directory.CreateDirectory(dir);
         var json = JsonSerializer.Serialize(snapshot, JsonOptions);
-        File.WriteAllText(path, json);
+        // P-DSK-017: Use async file I/O to avoid blocking the calling thread
+        await File.WriteAllTextAsync(path, json);
 
         lock (_lock) _cached = snapshot;
 
@@ -102,7 +110,7 @@ public sealed class SiteDataManager
     /// Loads the site data snapshot from <c>site-data.json</c>.
     /// Returns <c>null</c> if the file does not exist (first boot before registration).
     /// </summary>
-    public SiteDataSnapshot? LoadSiteData()
+    public async Task<SiteDataSnapshot?> LoadSiteDataAsync()
     {
         lock (_lock)
         {
@@ -119,7 +127,8 @@ public sealed class SiteDataManager
 
         try
         {
-            var json = File.ReadAllText(path);
+            // P-DSK-017: Use async file I/O to avoid blocking the calling thread
+            var json = await File.ReadAllTextAsync(path);
             var snapshot = JsonSerializer.Deserialize<SiteDataSnapshot>(json, JsonOptions);
             lock (_lock) _cached = snapshot;
 
@@ -137,6 +146,65 @@ public sealed class SiteDataManager
             _logger.LogWarning(ex, "Failed to read site-data.json");
             return null;
         }
+    }
+
+    /// <summary>
+    /// F-DSK-029: Upserts nozzle mappings from <paramref name="config"/> into
+    /// the <c>nozzles</c> DB table so that <see cref="PreAuth.PreAuthHandler"/>
+    /// can resolve Odoo→FCC pump/nozzle translations.
+    /// </summary>
+    public async Task SyncNozzleMappingsToDbAsync(SiteConfig config, CancellationToken ct)
+    {
+        var nozzles = config.Mappings?.Nozzles;
+        if (nozzles is not { Length: > 0 })
+            return;
+
+        var siteCode = config.Identity?.SiteCode ?? string.Empty;
+        var now = DateTimeOffset.UtcNow;
+
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
+
+        foreach (var n in nozzles)
+        {
+            var existing = await db.NozzleMappings.FirstOrDefaultAsync(
+                e => e.SiteCode == siteCode
+                     && e.OdooPumpNumber == n.OdooPumpNumber
+                     && e.OdooNozzleNumber == n.OdooNozzleNumber,
+                ct);
+
+            if (existing is null)
+            {
+                db.NozzleMappings.Add(new NozzleMapping
+                {
+                    SiteCode = siteCode,
+                    OdooPumpNumber = n.OdooPumpNumber,
+                    FccPumpNumber = n.FccPumpNumber,
+                    OdooNozzleNumber = n.OdooNozzleNumber,
+                    FccNozzleNumber = n.FccNozzleNumber,
+                    ProductCode = n.ProductCode,
+                    IsActive = true,
+                    SyncedAt = now,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+            }
+            else
+            {
+                existing.FccPumpNumber = n.FccPumpNumber;
+                existing.FccNozzleNumber = n.FccNozzleNumber;
+                existing.ProductCode = n.ProductCode;
+                existing.IsActive = true;
+                existing.SyncedAt = now;
+                existing.UpdatedAt = now;
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Synced {Count} nozzle mapping(s) to DB for site {SiteCode}",
+            nozzles.Length, siteCode);
     }
 
     public void Clear()

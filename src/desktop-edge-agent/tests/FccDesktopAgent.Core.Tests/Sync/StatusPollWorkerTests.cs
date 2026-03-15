@@ -6,7 +6,6 @@ using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Sync;
-using FccDesktopAgent.Core.Sync.Models;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -71,6 +70,7 @@ public sealed class StatusPollWorkerTests : IDisposable
         });
 
         var registrationManager = Substitute.For<IRegistrationManager>();
+        var configManager = Substitute.For<IConfigManager>();
         var authHandler = new AuthenticatedCloudRequestHandler(
             _tokenProvider, registrationManager,
             NullLogger<AuthenticatedCloudRequestHandler>.Instance);
@@ -81,6 +81,7 @@ public sealed class StatusPollWorkerTests : IDisposable
             config,
             authHandler,
             registrationManager,
+            configManager,
             NullLogger<StatusPollWorker>.Instance);
     }
 
@@ -257,7 +258,7 @@ public sealed class StatusPollWorkerTests : IDisposable
         {
             capturedUrl = req.RequestUri?.ToString();
             return FakeHandler.JsonResponse(
-                JsonSerializer.Serialize(new SyncedStatusResponse()));
+                JsonSerializer.Serialize(new SyncedStatusResponse { FccTransactionIds = [] }));
         });
 
         var worker = CreateWorker(handler);

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using FccDesktopAgent.Core.Adapter.Common;
 using Microsoft.Extensions.Logging;
@@ -230,8 +231,18 @@ public sealed class AdvatecWebhookListener : IDisposable
                     providedToken = request.QueryString["token"];
                 }
 
-                if (string.IsNullOrEmpty(providedToken) ||
-                    !string.Equals(providedToken, _webhookToken, StringComparison.Ordinal))
+                // S-DSK-022: Use constant-time comparison to prevent timing side-channel attacks.
+                if (string.IsNullOrEmpty(providedToken))
+                {
+                    _logger.LogWarning("Advatec webhook: rejected request with invalid or missing webhook token");
+                    // Still return 200 to avoid leaking information about token validation.
+                    await WriteResponse(response, 200, "OK");
+                    return;
+                }
+
+                var providedBytes = Encoding.UTF8.GetBytes(providedToken);
+                var expectedBytes = Encoding.UTF8.GetBytes(_webhookToken);
+                if (!CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes))
                 {
                     _logger.LogWarning("Advatec webhook: rejected request with invalid or missing webhook token");
                     // Still return 200 to avoid leaking information about token validation.

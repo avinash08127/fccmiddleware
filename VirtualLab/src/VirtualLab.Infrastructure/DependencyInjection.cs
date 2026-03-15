@@ -20,9 +20,12 @@ using VirtualLab.Infrastructure.Management;
 using VirtualLab.Infrastructure.Persistence;
 using VirtualLab.Infrastructure.Persistence.Seed;
 using VirtualLab.Infrastructure.Diagnostics;
+using VirtualLab.Infrastructure.Advatec;
 using VirtualLab.Infrastructure.AdvatecSimulator;
+using VirtualLab.Infrastructure.Petronite;
 using VirtualLab.Infrastructure.PetroniteSimulator;
 using VirtualLab.Infrastructure.PreAuth;
+using VirtualLab.Infrastructure.Radix;
 using VirtualLab.Infrastructure.RadixSimulator;
 using VirtualLab.Infrastructure.Scenarios;
 
@@ -63,9 +66,23 @@ public static class DependencyInjection
                             sqlServerOptions.EnableRetryOnFailure();
                         });
                     break;
+                case "Postgres":
+                case "postgres":
+                case "PostgreSQL":
+                case "postgresql":
+                case "Npgsql":
+                case "npgsql":
+                    options.UseNpgsql(
+                        persistenceOptions.ConnectionString,
+                        npgsqlOptions =>
+                        {
+                            npgsqlOptions.MigrationsAssembly(typeof(VirtualLabDbContext).Assembly.FullName);
+                            npgsqlOptions.EnableRetryOnFailure();
+                        });
+                    break;
                 default:
                     throw new InvalidOperationException(
-                        $"Unsupported VirtualLab provider '{persistenceOptions.Provider}'. Supported providers are Sqlite and SqlServer.");
+                        $"Unsupported VirtualLab provider '{persistenceOptions.Provider}'. Supported providers are Sqlite, SqlServer, and PostgreSQL.");
             }
 
             options.ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.PendingModelChangesWarning));
@@ -114,6 +131,7 @@ public static class DependencyInjection
         services.AddScoped<IObservabilityService, ObservabilityService>();
         services.AddSingleton<IVirtualLabTelemetry, VirtualLabTelemetry>();
         services.AddScoped<ICallbackCaptureService, CallbackCaptureService>();
+        services.AddScoped<ScenarioExecutionScope>();
         services.AddScoped<IScenarioService, ScenarioService>();
         services.AddScoped<CallbackDeliveryService>();
         services.AddScoped<IForecourtSimulationService, ForecourtSimulationService>();
@@ -134,6 +152,9 @@ public static class DependencyInjection
         services.AddHostedService(sp => sp.GetRequiredService<RadixSimulatorService>());
         services.AddHttpClient("RadixSimulator", client => client.Timeout = TimeSpan.FromSeconds(10));
 
+        // Petronite vendor-faithful protocol state (VLE-02)
+        services.AddSingleton<PetroniteProtocolState>();
+
         // Petronite REST/JSON simulator (VL-4.3)
         services.Configure<PetroniteSimulatorOptions>(configuration.GetSection(PetroniteSimulatorOptions.SectionName));
         services.AddSingleton<PetroniteSimulatorState>();
@@ -147,6 +168,12 @@ public static class DependencyInjection
         services.AddSingleton<AdvatecSimulatorService>();
         services.AddHostedService(sp => sp.GetRequiredService<AdvatecSimulatorService>());
         services.AddHttpClient("AdvatecSimulator", client => client.Timeout = TimeSpan.FromSeconds(10));
+
+        // Advatec vendor-faithful protocol state (VLE-03)
+        services.AddSingleton<AdvatecProtocolState>();
+
+        // Radix vendor-faithful protocol options (VLE-04)
+        services.Configure<RadixVendorOptions>(configuration.GetSection(RadixVendorOptions.SectionName));
 
         return services;
     }

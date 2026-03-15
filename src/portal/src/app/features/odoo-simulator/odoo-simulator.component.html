@@ -1,0 +1,349 @@
+<div class="simulator-page">
+  <section class="hero">
+    <div class="hero__content">
+      <p class="eyebrow">Odoo POS Test Harness</p>
+      <h1>Odoo Simulator</h1>
+      <p class="hero__summary">
+        Built from the current FCC middleware requirements: PreAuth always goes to the Edge Agent,
+        while Odoo-style transaction pull can target either Cloud Middleware or the Edge Agent local
+        API. This page intentionally stops at request/response testing only.
+      </p>
+    </div>
+
+    <div class="hero__chips">
+      <span class="chip">PreAuth → Edge Agent</span>
+      <span class="chip">Pull → Cloud or Edge</span>
+      <span class="chip">No order create / acknowledge</span>
+    </div>
+  </section>
+
+  <section class="panel panel--settings">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Transport</p>
+        <h2>Connection Settings</h2>
+      </div>
+    </div>
+
+    <div class="settings-grid">
+      <label class="field">
+        <span>Execution mode</span>
+        <select [(ngModel)]="executionMode" name="executionMode">
+          @for (mode of executionModeOptions; track mode.value) {
+            <option [value]="mode.value">{{ mode.label }}</option>
+          }
+        </select>
+      </label>
+
+      @if (executionMode === 'direct') {
+        <label class="field">
+          <span>Edge base URL</span>
+          <input
+            type="text"
+            [(ngModel)]="settings.edgeBaseUrl"
+            name="edgeBaseUrl"
+            placeholder="http://127.0.0.1:8585"
+          />
+        </label>
+
+        <label class="field">
+          <span>Cloud base URL</span>
+          <input
+            type="text"
+            [(ngModel)]="settings.cloudBaseUrl"
+            name="cloudBaseUrl"
+            placeholder="http://localhost:5070"
+          />
+        </label>
+      } @else {
+        <div class="proxy-box">
+          <span class="proxy-box__label">Proxy target</span>
+          <code>Edge → http://127.0.0.1:8585</code>
+          <code>Cloud → http://localhost:5070</code>
+        </div>
+      }
+
+      <label class="field">
+        <span>Edge X-Api-Key (optional)</span>
+        <input
+          type="text"
+          [(ngModel)]="settings.edgeApiKey"
+          name="edgeApiKey"
+          placeholder="Only needed for LAN-style access"
+        />
+      </label>
+
+      <label class="field">
+        <span>Cloud X-Api-Key (optional)</span>
+        <input
+          type="text"
+          [(ngModel)]="settings.cloudApiKey"
+          name="cloudApiKey"
+          placeholder="Odoo API key if your cloud pull requires it"
+        />
+      </label>
+    </div>
+
+    <p class="hint">{{ modeHint }}</p>
+  </section>
+
+  <div class="workspace">
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Edge Agent</p>
+          <h2>PreAuth Push</h2>
+        </div>
+
+        <button
+          type="button"
+          pButton
+          severity="secondary"
+          label="Use Sample"
+          (click)="resetPreAuth()"
+        ></button>
+      </div>
+
+      <form class="form-grid" (ngSubmit)="submitPreAuth()">
+        <label class="field">
+          <span>Site code</span>
+          <input type="text" [(ngModel)]="preAuth.siteCode" name="siteCode" required />
+        </label>
+
+        <label class="field">
+          <span>Odoo order ID</span>
+          <input type="text" [(ngModel)]="preAuth.odooOrderId" name="odooOrderId" required />
+        </label>
+
+        <label class="field">
+          <span>Pump number</span>
+          <input type="number" [(ngModel)]="preAuth.pumpNumber" name="pumpNumber" min="1" required />
+        </label>
+
+        <label class="field">
+          <span>Nozzle number</span>
+          <input
+            type="number"
+            [(ngModel)]="preAuth.nozzleNumber"
+            name="nozzleNumber"
+            min="1"
+            required
+          />
+        </label>
+
+        <label class="field">
+          <span>Amount (minor units)</span>
+          <input
+            type="number"
+            [(ngModel)]="preAuth.amountMinorUnits"
+            name="amountMinorUnits"
+            min="1"
+            required
+          />
+        </label>
+
+        <label class="field">
+          <span>Unit price (minor units/L)</span>
+          <input type="number" [(ngModel)]="preAuth.unitPrice" name="unitPrice" min="1" required />
+        </label>
+
+        <label class="field">
+          <span>Currency</span>
+          <input
+            type="text"
+            [(ngModel)]="preAuth.currencyCode"
+            name="currencyCode"
+            maxlength="3"
+            required
+          />
+        </label>
+
+        <label class="field">
+          <span>Customer TIN (optional)</span>
+          <input type="text" [(ngModel)]="preAuth.customerTaxId" name="customerTaxId" />
+        </label>
+
+        <div class="form-actions">
+          <button
+            type="submit"
+            pButton
+            label="Send PreAuth"
+            [loading]="preAuthLoading()"
+          ></button>
+        </div>
+      </form>
+
+      <div class="preview-grid">
+        <article class="preview-card">
+          <h3>Endpoint</h3>
+          <code>{{ servicePreAuthUrl }}</code>
+        </article>
+
+        <article class="preview-card">
+          <h3>Headers</h3>
+          <pre>{{ preAuthHeadersPreview }}</pre>
+        </article>
+
+        <article class="preview-card preview-card--wide">
+          <h3>Request Body</h3>
+          <pre>{{ preAuthPayloadPreview }}</pre>
+        </article>
+
+        <article class="preview-card preview-card--wide">
+          <h3>cURL</h3>
+          <pre>{{ preAuthCurlPreview }}</pre>
+        </article>
+      </div>
+
+      @if (preAuthResult(); as result) {
+        <section class="result" [class.result--error]="!result.ok">
+          <div class="result__header">
+            <div>
+              <span class="result__status">{{ result.statusLabel }}</span>
+              <p class="result__meta">{{ result.method }} {{ result.serviceUrl }}</p>
+            </div>
+
+            @if (result.durationMs !== null) {
+              <span class="result__duration">{{ result.durationMs }} ms</span>
+            }
+          </div>
+
+          @if (result.note) {
+            <p class="result__note">{{ result.note }}</p>
+          }
+
+          <pre>{{ result.responsePreview }}</pre>
+        </section>
+      }
+    </section>
+
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Transactions</p>
+          <h2>Pull Test</h2>
+        </div>
+      </div>
+
+      <form class="form-grid" (ngSubmit)="runPull()">
+        <label class="field">
+          <span>Target</span>
+          <select [(ngModel)]="pullTarget" name="pullTarget">
+            @for (option of pullTargetOptions; track option.value) {
+              <option [value]="option.value">{{ option.label }}</option>
+            }
+          </select>
+        </label>
+
+        @if (pullTarget === 'cloud') {
+          <label class="field">
+            <span>Site code (optional)</span>
+            <input type="text" [(ngModel)]="cloudPull.siteCode" name="cloudSiteCode" />
+          </label>
+
+          <label class="field">
+            <span>Pump number (optional)</span>
+            <input type="number" [(ngModel)]="cloudPull.pumpNumber" name="cloudPumpNumber" min="1" />
+          </label>
+
+          <label class="field">
+            <span>From (UTC ISO)</span>
+            <input
+              type="text"
+              [(ngModel)]="cloudPull.from"
+              name="cloudFrom"
+              placeholder="2026-03-11T14:00:00Z"
+            />
+          </label>
+
+          <label class="field">
+            <span>Page size</span>
+            <input type="number" [(ngModel)]="cloudPull.pageSize" name="cloudPageSize" min="1" max="100" />
+          </label>
+
+          <label class="field field--span-2">
+            <span>Cursor (optional)</span>
+            <input type="text" [(ngModel)]="cloudPull.cursor" name="cloudCursor" />
+          </label>
+        } @else {
+          <label class="field">
+            <span>Pump number (optional)</span>
+            <input type="number" [(ngModel)]="edgePull.pumpNumber" name="edgePumpNumber" min="1" />
+          </label>
+
+          <label class="field">
+            <span>Since (UTC ISO)</span>
+            <input
+              type="text"
+              [(ngModel)]="edgePull.since"
+              name="edgeSince"
+              placeholder="2026-03-11T14:00:00Z"
+            />
+          </label>
+
+          <label class="field">
+            <span>Limit</span>
+            <input type="number" [(ngModel)]="edgePull.limit" name="edgeLimit" min="1" max="100" />
+          </label>
+
+          <label class="field">
+            <span>Offset</span>
+            <input type="number" [(ngModel)]="edgePull.offset" name="edgeOffset" min="0" />
+          </label>
+        }
+
+        <div class="form-actions">
+          <button
+            type="submit"
+            pButton
+            label="Run Pull"
+            [loading]="pullLoading()"
+          ></button>
+        </div>
+      </form>
+
+      <div class="preview-grid">
+        <article class="preview-card">
+          <h3>Endpoint</h3>
+          <code>{{ servicePullUrl }}</code>
+        </article>
+
+        <article class="preview-card">
+          <h3>Headers</h3>
+          <pre>{{ pullHeadersPreview }}</pre>
+        </article>
+
+        <article class="preview-card">
+          <h3>Query</h3>
+          <pre>{{ pullParametersPreview }}</pre>
+        </article>
+
+        <article class="preview-card preview-card--wide">
+          <h3>cURL</h3>
+          <pre>{{ pullCurlPreview }}</pre>
+        </article>
+      </div>
+
+      @if (pullResult(); as result) {
+        <section class="result" [class.result--error]="!result.ok">
+          <div class="result__header">
+            <div>
+              <span class="result__status">{{ result.statusLabel }}</span>
+              <p class="result__meta">{{ result.method }} {{ result.serviceUrl }}</p>
+            </div>
+
+            @if (result.durationMs !== null) {
+              <span class="result__duration">{{ result.durationMs }} ms</span>
+            }
+          </div>
+
+          @if (result.note) {
+            <p class="result__note">{{ result.note }}</p>
+          }
+
+          <pre>{{ result.responsePreview }}</pre>
+        </section>
+      }
+    </section>
+  </div>
+</div>

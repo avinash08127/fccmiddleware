@@ -1,3 +1,4 @@
+using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Adapter.Doms.Model;
 
 namespace FccDesktopAgent.Core.Adapter.Doms.Protocol;
@@ -19,6 +20,20 @@ public static class DomsSupParamParser
     /// <exception cref="ArgumentException">If required fields are missing or invalid.</exception>
     public static DomsJplTransactionDto Parse(IReadOnlyDictionary<string, string> data, int bufferIndex)
     {
+        // G-05: Decode TransInfoMask if present in the supervised buffer response
+        TransactionInfoMask? infoMask = null;
+        if (data.TryGetValue("TransInfoMask", out var maskStr) && int.TryParse(maskStr, out var maskBits))
+        {
+            infoMask = TransactionInfoMask.FromBits(maskBits);
+
+            if (infoMask.MoneyDueIncluded && data.TryGetValue("MoneyDue", out var mdStr) && long.TryParse(mdStr, out var md))
+                infoMask = infoMask with { MoneyDue = md };
+            if (data.TryGetValue("TransSeqNo", out var seqStr) && int.TryParse(seqStr, out var seq))
+                infoMask = infoMask with { TransSequenceNo = seq };
+            if (data.TryGetValue("TransLockId", out var lockStr) && int.TryParse(lockStr, out var lockId))
+                infoMask = infoMask with { TransLockId = lockId };
+        }
+
         return new DomsJplTransactionDto(
             TransactionId: RequireField(data, "TransId"),
             FpId: ParseIntOrFail(RequireField(data, "FpId"), "FpId"),
@@ -29,7 +44,8 @@ public static class DomsSupParamParser
             UnitPriceX10: ParseLongOrFail(RequireField(data, "UnitPrice"), "UnitPrice"),
             Timestamp: RequireField(data, "Timestamp"),
             AttendantId: data.TryGetValue("AttendantId", out var aid) ? aid : null,
-            BufferIndex: bufferIndex);
+            BufferIndex: bufferIndex,
+            InfoMask: infoMask);
     }
 
     private static string RequireField(IReadOnlyDictionary<string, string> data, string key)

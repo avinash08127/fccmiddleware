@@ -278,6 +278,29 @@ public sealed class DeviceRegistrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Register_SameSerial_ReusesExistingDeviceIdentity()
+    {
+        var firstToken = await GenerateBootstrapTokenAsync();
+        var firstResponse = await SendRegistrationAsync(_client, firstToken, "SN-REUSE-001");
+        firstResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        var firstBody = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var firstDeviceId = firstBody.GetProperty("deviceId").GetString();
+
+        var secondToken = await GenerateBootstrapTokenAsync();
+        var secondResponse = await SendRegistrationAsync(_client, secondToken, "SN-REUSE-001");
+        secondResponse.StatusCode.Should().Be(HttpStatusCode.Created);
+        var secondBody = await secondResponse.Content.ReadFromJsonAsync<JsonElement>();
+        secondBody.GetProperty("deviceId").GetString().Should().Be(firstDeviceId);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<FccMiddlewareDbContext>();
+        var activeAgents = await db.AgentRegistrations.IgnoreQueryFilters()
+            .Where(agent => agent.SiteCode == TestSiteCode && agent.IsActive && agent.Status == AgentRegistrationStatus.ACTIVE)
+            .ToListAsync();
+        activeAgents.Should().ContainSingle(agent => agent.DeviceSerialNumber == "SN-REUSE-001");
+    }
+
+    [Fact]
     public async Task Register_ExpiredBootstrapToken_Returns401()
     {
         // Manually insert an expired bootstrap token

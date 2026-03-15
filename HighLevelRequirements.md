@@ -278,13 +278,13 @@ All devices on the station LAN. Internet outages do not affect LAN connectivity.
 
 ### 15.8 Multi-HHT Site Handling
 
-At a site with multiple HHTs (multiple attendants), only **one HHT should act as the Edge Agent** for FCC communication to avoid conflicts:
+At a site with multiple HHTs (multiple attendants), one Desktop Edge Agent and one or more Android Edge Agents may run in parallel:
 
-- **Primary Agent Election**: On setup, one HHT at each site is designated as the primary Edge Agent. This is a configuration choice (not automatic election, to keep it simple for MVP).
-- **Other HHTs**: Run Odoo POS only. They interact with the cloud middleware (when online) or query the primary Edge Agent's API over the station LAN (when offline).
-- **Shared visibility**: All HHTs at a site must see the **same transaction data**. When an attendant creates an order (pre-auth or normal), they select the pump and nozzle. Non-primary HHTs must be able to query the primary agent over LAN to see buffered transactions.
-- The primary agent's LAN API must be accessible to other HHTs on the same WiFi (not just localhost). Requests from non-primary HHTs require an API key (see section 15.10).
-- **Failover (Post-MVP)**: If the primary HHT goes offline, a secondary HHT can be manually promoted. Automatic failover is complex and deferred.
+- **Single-primary invariant**: Exactly one eligible online agent is `PRIMARY` at a time. All others remain `STANDBY_HOT`, `RECOVERING`, or `READ_ONLY`.
+- **Priority policy**: Prefer Desktop first where available, then Android agents by configured priority. The policy is configuration-driven per site.
+- **Shared visibility**: All HHTs at a site must see the **same transaction data**. When an attendant creates an order (pre-auth or normal), they select the pump and nozzle. Every Android HHT continues to use `localhost`; the local agent proxies or serves replicated state as needed.
+- **LAN access**: Peer traffic still uses the station LAN and must be authenticated. The Android localhost contract stays stable for Odoo POS.
+- **Failover**: Automatic failover promotes a warm, healthy standby within 30 seconds of confirmed primary failure. A recovered former primary rejoins as standby and does not auto-preempt.
 
 ### 15.9 Connectivity Detection and Mode Switching
 

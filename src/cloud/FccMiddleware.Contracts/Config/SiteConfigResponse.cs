@@ -176,6 +176,10 @@ public sealed record SiteHaDto
     public required long LeaderEpoch { get; init; }
     public DateTimeOffset? LeaderSinceUtc { get; init; }
     public required PeerDirectoryEntryDto[] PeerDirectory { get; init; }
+    public required int PeerApiPort { get; init; }
+    public string? PeerSharedSecret { get; init; }
+    public required bool ReplicationEnabled { get; init; }
+    public required bool ProxyingEnabled { get; init; }
 }
 
 public sealed record PeerDirectoryEntryDto

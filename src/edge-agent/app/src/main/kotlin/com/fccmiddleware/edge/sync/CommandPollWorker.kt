@@ -1,5 +1,6 @@
 package com.fccmiddleware.edge.sync
 
+import com.fccmiddleware.edge.config.ConfigManager
 import com.fccmiddleware.edge.logging.AppLogger
 import com.fccmiddleware.edge.security.EncryptedPrefsManager
 import java.time.Instant
@@ -16,7 +17,10 @@ sealed class CommandPollExecutionResult {
 }
 
 private sealed class CommandPollAttemptResult {
-    data class Success(val response: EdgeCommandPollResponse) : CommandPollAttemptResult()
+    data class Success(
+        val response: EdgeCommandPollResponse,
+        val peerDirectoryVersion: Long? = null,
+    ) : CommandPollAttemptResult()
     data class RateLimited(val retryAfterSeconds: Long?) : CommandPollAttemptResult()
     data object Decommissioned : CommandPollAttemptResult()
     data class TransportFailure(val message: String) : CommandPollAttemptResult()
@@ -27,7 +31,14 @@ class CommandPollWorker(
     private val tokenProvider: DeviceTokenProvider? = null,
     private val commandExecutor: AgentCommandExecutor? = null,
     private val encryptedPrefs: EncryptedPrefsManager? = null,
+    private val configManager: ConfigManager? = null,
 ) {
+
+    /**
+     * P2-08: Callback invoked when a cloud response indicates the peer directory is stale.
+     * Wired by [CadenceController] to trigger an immediate config poll.
+     */
+    var onPeerDirectoryStale: (() -> Unit)? = null
 
     companion object {
         private const val TAG = "CommandPollWorker"
@@ -87,7 +98,8 @@ class CommandPollWorker(
         bearerToken: String,
     ): CommandPollAttemptResult {
         return when (val result = client.pollCommands(bearerToken)) {
-            is CloudCommandPollResult.Success -> CommandPollAttemptResult.Success(result.response)
+            is CloudCommandPollResult.Success ->
+                CommandPollAttemptResult.Success(result.response, result.peerDirectoryVersion)
             is CloudCommandPollResult.RateLimited -> CommandPollAttemptResult.RateLimited(result.retryAfterSeconds)
             is CloudCommandPollResult.Forbidden -> {
                 if (result.errorCode == DECOMMISSIONED_ERROR_CODE) {
@@ -95,6 +107,10 @@ class CommandPollWorker(
                 } else {
                     CommandPollAttemptResult.TransportFailure("403 Forbidden: ${result.errorCode}")
                 }
+            }
+            is CloudCommandPollResult.NotFound -> {
+                AppLogger.w(TAG, "Command poll 404: ${result.errorCode} — feature disabled")
+                CommandPollAttemptResult.TransportFailure("404 Not Found: ${result.errorCode}")
             }
             is CloudCommandPollResult.TransportError ->
                 CommandPollAttemptResult.TransportFailure(result.message)
@@ -113,7 +129,8 @@ class CommandPollWorker(
                         )
                     } else {
                         when (val retry = client.pollCommands(refreshedToken)) {
-                            is CloudCommandPollResult.Success -> CommandPollAttemptResult.Success(retry.response)
+                            is CloudCommandPollResult.Success ->
+                                CommandPollAttemptResult.Success(retry.response, retry.peerDirectoryVersion)
                             is CloudCommandPollResult.RateLimited ->
                                 CommandPollAttemptResult.RateLimited(retry.retryAfterSeconds)
                             is CloudCommandPollResult.Forbidden -> {
@@ -124,6 +141,10 @@ class CommandPollWorker(
                                         "403 Forbidden after refresh: ${retry.errorCode}",
                                     )
                                 }
+                            }
+                            is CloudCommandPollResult.NotFound -> {
+                                AppLogger.w(TAG, "Command poll 404 after retry: ${retry.errorCode}")
+                                CommandPollAttemptResult.TransportFailure("404 Not Found: ${retry.errorCode}")
                             }
                             is CloudCommandPollResult.TransportError ->
                                 CommandPollAttemptResult.TransportFailure(retry.message)
@@ -147,6 +168,8 @@ class CommandPollWorker(
         return when (result) {
             is CommandPollAttemptResult.Success -> {
                 circuitBreaker.recordSuccess()
+                // P2-08: Check peer directory version from command poll response
+                checkPeerDirectoryVersion(result.peerDirectoryVersion)
                 if (result.response.commands.isEmpty()) {
                     CommandPollExecutionResult.Empty
                 } else {
@@ -305,6 +328,11 @@ class CommandPollWorker(
                 }
             }
 
+            is CloudCommandAckResult.NotFound -> {
+                AppLogger.w(TAG, "Command ack 404 for ${command.commandId}: ${initialResult.errorCode} — command not found, skipping")
+                true // Treat as acked — no point retrying a non-existent command
+            }
+
             is CloudCommandAckResult.TransportError -> {
                 AppLogger.w(TAG, "Command ack transport failure for ${command.commandId}: ${initialResult.message}")
                 false
@@ -331,6 +359,19 @@ class CommandPollWorker(
                 handledAtUtc = Instant.now().toString(),
                 result = resultJson,
             )
+        }
+    }
+
+    /** P2-08: Check if cloud's peer directory version indicates staleness and trigger config refresh. */
+    private fun checkPeerDirectoryVersion(cloudVersion: Long?) {
+        val cm = configManager ?: return
+        if (cloudVersion == null) return
+        if (cm.isPeerDirectoryStale(cloudVersion)) {
+            AppLogger.i(TAG, "Peer directory stale: cloud=$cloudVersion > local=${cm.currentPeerDirectoryVersion}")
+            cm.updatePeerDirectoryVersion(cloudVersion)
+            onPeerDirectoryStale?.invoke()
+        } else {
+            cm.updatePeerDirectoryVersion(cloudVersion)
         }
     }
 

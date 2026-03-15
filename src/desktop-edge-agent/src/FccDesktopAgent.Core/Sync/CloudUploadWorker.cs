@@ -1,13 +1,14 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using FccDesktopAgent.Core.Adapter.Common;
 using FccDesktopAgent.Core.Buffer;
 using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Registration;
 using FccDesktopAgent.Core.Security;
-using FccDesktopAgent.Core.Sync.Models;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -34,12 +35,15 @@ public sealed class CloudUploadWorker : ICloudSyncService
     private const string OutcomeDuplicate = "DUPLICATE";
     private const string OutcomeRejected = "REJECTED";
     private const string DecommissionedCode = "DEVICE_DECOMMISSIONED";
+    private const string NonLeaderWriteCode = "CONFLICT.NON_LEADER_WRITE";
+    private const string StaleLeaderEpochCode = "CONFLICT.STALE_LEADER_EPOCH";
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IOptions<AgentConfiguration> _config;
     private readonly AuthenticatedCloudRequestHandler _authHandler;
     private readonly IRegistrationManager _registrationManager;
+    private readonly IConfigManager _configManager;
     private readonly ILogger<CloudUploadWorker> _logger;
 
     // Polly retry pipeline for transient HTTP failures (network errors, 5xx responses).
@@ -52,8 +56,9 @@ public sealed class CloudUploadWorker : ICloudSyncService
         IOptions<AgentConfiguration> config,
         AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
+        IConfigManager configManager,
         ILogger<CloudUploadWorker> logger)
-        : this(scopeFactory, httpFactory, config, authHandler, registrationManager, logger, retryPipeline: null)
+        : this(scopeFactory, httpFactory, config, authHandler, registrationManager, configManager, logger, retryPipeline: null)
     {
     }
 
@@ -64,6 +69,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
         IOptions<AgentConfiguration> config,
         AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
+        IConfigManager configManager,
         ILogger<CloudUploadWorker> logger,
         ResiliencePipeline? retryPipeline)
     {
@@ -72,6 +78,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
         _config = config;
         _authHandler = authHandler;
         _registrationManager = registrationManager;
+        _configManager = configManager;
         _logger = logger;
 
         _retryPipeline = retryPipeline ?? new ResiliencePipelineBuilder()
@@ -127,7 +134,7 @@ public sealed class CloudUploadWorker : ICloudSyncService
         }
 
         // T-DSK-010: Delegate auth flow to the shared handler.
-        var authResult = await _authHandler.ExecuteAsync<UploadResponse?>(
+        var authResult = await _authHandler.ExecuteAsync<UploadRequestResult?>(
             (token, innerCt) => SendWithRetryAsync(request, token, config, innerCt),
             "cloud upload", ct);
 
@@ -151,36 +158,84 @@ public sealed class CloudUploadWorker : ICloudSyncService
             return 0;
         }
 
-        var uploadResponse = authResult.Value;
-        if (uploadResponse is null)
+        var uploadResult = authResult.Value;
+        if (uploadResult is null)
         {
             await RecordBatchFailureAsync(bufferManager, batch, "Empty response from cloud", ct);
             return 0;
         }
 
-        return await ProcessUploadResponseAsync(bufferManager, batch, uploadResponse, ct);
+        if (uploadResult.Outcome == UploadRequestOutcome.AuthoritativeConflict)
+        {
+            _logger.LogWarning(
+                "Cloud upload paused: {ErrorCode} {Message}",
+                uploadResult.ErrorCode ?? "CONFLICT",
+                uploadResult.Message ?? "authoritative write rejected");
+            _configManager.OnPeerDirectoryStale?.Invoke();
+            return 0;
+        }
+
+        if (uploadResult.Response is null)
+        {
+            await RecordBatchFailureAsync(bufferManager, batch, "Empty response from cloud", ct);
+            return 0;
+        }
+
+        var result = await ProcessUploadResponseAsync(bufferManager, batch, uploadResult.Response, ct);
+
+        // F-DSK-045: Persist LastUploadAt after successful upload
+        if (result > 0)
+        {
+            try
+            {
+                var db = scope.ServiceProvider.GetRequiredService<AgentDbContext>();
+                var syncState = await db.SyncStates.FindAsync(new object[] { 1 }, ct);
+                var now = DateTimeOffset.UtcNow;
+                if (syncState is null)
+                {
+                    syncState = new SyncStateRecord { Id = 1, LastUploadAt = now, UpdatedAt = now };
+                    db.SyncStates.Add(syncState);
+                }
+                else
+                {
+                    syncState.LastUploadAt = now;
+                    syncState.UpdatedAt = now;
+                }
+                await db.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to update LastUploadAt (non-fatal)");
+            }
+        }
+
+        return result;
     }
 
     // ── HTTP send with Polly retry ────────────────────────────────────────────
 
-    private async Task<UploadResponse?> SendWithRetryAsync(
+    private async Task<UploadRequestResult?> SendWithRetryAsync(
         UploadRequest request,
         string token,
         AgentConfiguration config,
         CancellationToken ct)
     {
-        UploadResponse? captured = null;
+        UploadRequestResult? captured = null;
         var url = $"{config.CloudBaseUrl.TrimEnd('/')}{UploadPath}";
 
         await _retryPipeline.ExecuteAsync(async pipelineCt =>
         {
-            var http = _httpFactory.CreateClient("Cloud");
+            // S-DSK-031: Use lowercase "cloud" to match the registered named client
+            // with TLS 1.2+ enforcement and certificate pinning.
+            var http = _httpFactory.CreateClient("cloud");
 
             using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url);
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             httpRequest.Content = JsonContent.Create(request);
 
             var httpResponse = await http.SendAsync(httpRequest, pipelineCt);
+
+            PeerDirectoryVersionHelper.CheckAndTrigger(httpResponse, _configManager, _logger);
 
             // 401 / 403 are application-level decisions — NOT retried by Polly.
             if (httpResponse.StatusCode == HttpStatusCode.Unauthorized)
@@ -196,11 +251,27 @@ public sealed class CloudUploadWorker : ICloudSyncService
                 throw new HttpRequestException($"403 Forbidden: {body}");
             }
 
+            if (httpResponse.StatusCode == HttpStatusCode.Conflict)
+            {
+                var error = await TryReadErrorAsync(httpResponse, pipelineCt);
+                if (string.Equals(error?.ErrorCode, NonLeaderWriteCode, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(error?.ErrorCode, StaleLeaderEpochCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    captured = UploadRequestResult.AuthoritativeConflict(
+                        error?.ErrorCode,
+                        error?.Message ?? "authoritative write rejected");
+                    return;
+                }
+
+                throw new HttpRequestException(error?.Message ?? "409 Conflict");
+            }
+
             // 5xx → HttpRequestException → Polly retries
             httpResponse.EnsureSuccessStatusCode();
 
-            captured = await httpResponse.Content.ReadFromJsonAsync<UploadResponse>(
+            var response = await httpResponse.Content.ReadFromJsonAsync<UploadResponse>(
                 cancellationToken: pipelineCt);
+            captured = UploadRequestResult.Success(response);
         }, ct);
 
         return captured;
@@ -308,20 +379,19 @@ public sealed class CloudUploadWorker : ICloudSyncService
         IReadOnlyList<BufferedTransaction> batch,
         AgentConfiguration config)
     {
-        var transactions = batch.Select(t => ToCanonical(t, config)).ToList();
+        var transactions = batch.Select(ToUploadRecord).ToList();
         return new UploadRequest
         {
             Transactions = transactions,
-            UploadBatchId = Guid.NewGuid().ToString()
+            LeaderEpoch = config.LeaderEpoch > 0 ? config.LeaderEpoch : null,
+            UploadBatchId = ComputeStableBatchId(batch, config.LeaderEpoch)
         };
     }
 
-    private static CanonicalTransaction ToCanonical(BufferedTransaction t, AgentConfiguration config) => new()
+    private static UploadTransactionRecord ToUploadRecord(BufferedTransaction t) => new()
     {
-        Id = t.Id,
         FccTransactionId = t.FccTransactionId,
         SiteCode = t.SiteCode,
-        LegalEntityId = !string.IsNullOrWhiteSpace(config.LegalEntityId) ? config.LegalEntityId : config.SiteId,
         PumpNumber = t.PumpNumber,
         NozzleNumber = t.NozzleNumber,
         ProductCode = t.ProductCode,
@@ -331,14 +401,59 @@ public sealed class CloudUploadWorker : ICloudSyncService
         CurrencyCode = t.CurrencyCode,
         StartedAt = t.StartedAt,
         CompletedAt = t.CompletedAt,
+        FccCorrelationId = t.CorrelationId,
+        OdooOrderId = t.OdooOrderId,
         FiscalReceiptNumber = t.FiscalReceiptNumber,
         FccVendor = t.FccVendor,
         AttendantId = t.AttendantId,
-        IngestionSource = t.IngestionSource,
-        RawPayloadJson = t.RawPayloadJson,
-        CorrelationId = t.CorrelationId,
-        SchemaVersion = t.SchemaVersion,
-        IngestedAt = t.CreatedAt,
-        UpdatedAt = t.UpdatedAt,
     };
+
+    private static string ComputeStableBatchId(IReadOnlyList<BufferedTransaction> batch, long leaderEpoch)
+    {
+        var builder = new StringBuilder();
+        builder.Append(leaderEpoch).Append('|');
+        foreach (var item in batch.OrderBy(t => t.CompletedAt).ThenBy(t => t.Id, StringComparer.Ordinal))
+        {
+            builder.Append(item.Id)
+                .Append('|')
+                .Append(item.FccTransactionId)
+                .Append('|')
+                .Append(item.SiteCode)
+                .Append(';');
+        }
+
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()));
+        return Convert.ToHexString(hash);
+    }
+
+    private static async Task<ErrorResponse?> TryReadErrorAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<ErrorResponse>(cancellationToken: ct);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
+
+internal enum UploadRequestOutcome
+{
+    Success,
+    AuthoritativeConflict,
+}
+
+internal sealed record UploadRequestResult(
+    UploadRequestOutcome Outcome,
+    UploadResponse? Response = null,
+    string? ErrorCode = null,
+    string? Message = null)
+{
+    public static UploadRequestResult Success(UploadResponse? response) =>
+        new(UploadRequestOutcome.Success, Response: response);
+
+    public static UploadRequestResult AuthoritativeConflict(string? errorCode, string? message) =>
+        new(UploadRequestOutcome.AuthoritativeConflict, ErrorCode: errorCode, Message: message);
 }

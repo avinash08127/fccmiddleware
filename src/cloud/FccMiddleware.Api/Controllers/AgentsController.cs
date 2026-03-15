@@ -1,9 +1,11 @@
 using System.Text.Json;
 using FccMiddleware.Api.AgentControl;
 using FccMiddleware.Api.Portal;
+using FccMiddleware.Application.AgentConfig;
 using FccMiddleware.Contracts.AgentControl;
 using FccMiddleware.Contracts.Common;
 using FccMiddleware.Contracts.Portal;
+using FccMiddleware.Domain.Constants;
 using FccMiddleware.Domain.Entities;
 using FccMiddleware.Domain.Enums;
 using FccMiddleware.Domain.Models;
@@ -148,22 +150,18 @@ public sealed class AgentsController : PortalControllerBase
             .ThenBy(agent => agent.RegisteredAt)
             .ToListAsync(cancellationToken);
 
-        var leaderBySite = sitePeers
+        var leadershipBySite = sitePeers
             .GroupBy(agent => agent.SiteId)
-            .ToDictionary(group => group.Key, group => DetermineLeader(group));
-        var epochBySite = sitePeers
-            .GroupBy(agent => agent.SiteId)
-            .ToDictionary(
-                group => group.Key,
-                group => group.Any() ? Math.Max(1, group.Max(agent => agent.LeaderEpochSeen ?? 0)) : 0L);
+            .ToDictionary(group => group.Key, group => SiteHaLeadershipResolver.ResolveSnapshot(group));
 
         var data = page
             .Select(agent =>
             {
                 snapshots.TryGetValue(agent.Id, out var snapshot);
-                leaderBySite.TryGetValue(agent.SiteId, out var leader);
-                epochBySite.TryGetValue(agent.SiteId, out var leaderEpoch);
-                var currentRole = ResolveCurrentRole(agent, leader);
+                leadershipBySite.TryGetValue(agent.SiteId, out var leadership);
+                var leader = leadership?.Leader;
+                var leaderEpoch = leadership?.LeaderEpoch ?? 0;
+                var currentRole = SiteHaLeadershipResolver.ResolveCurrentRole(agent, leader);
                 return new AgentHealthSummaryDto
                 {
                     DeviceId = agent.Id,
@@ -483,34 +481,6 @@ public sealed class AgentsController : PortalControllerBase
             ApprovalGrantedByActorDisplay = agent.ApprovalGrantedByActorDisplay
         };
 
-    private static AgentRegistration? DetermineLeader(IEnumerable<AgentRegistration> agents) =>
-        agents
-            .Where(agent => !string.Equals(agent.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(agent => agent.SiteHaPriority)
-            .ThenBy(agent => string.Equals(agent.DeviceClass, "DESKTOP", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-            .ThenBy(agent => agent.RegisteredAt)
-            .FirstOrDefault();
-
-    private static string ResolveCurrentRole(AgentRegistration agent, AgentRegistration? leader)
-    {
-        if (!string.IsNullOrWhiteSpace(agent.CurrentRole))
-        {
-            return agent.CurrentRole!;
-        }
-
-        if (!agent.IsActive || agent.Status != AgentRegistrationStatus.ACTIVE)
-        {
-            return "OFFLINE";
-        }
-
-        if (string.Equals(agent.RoleCapability, "READ_ONLY", StringComparison.OrdinalIgnoreCase))
-        {
-            return "READ_ONLY";
-        }
-
-        return leader?.Id == agent.Id ? "PRIMARY" : "STANDBY_HOT";
-    }
-
     private static string[] DeserializeCapabilities(string? capabilitiesJson)
     {
         if (string.IsNullOrWhiteSpace(capabilitiesJson))
@@ -691,6 +661,155 @@ public sealed class AgentsController : PortalControllerBase
         }
 
         return false;
+    }
+
+    // ── Planned Switchover ────────────────────────────────────────────────
+
+    [HttpPost("switchover")]
+    [Authorize(Policy = "PortalAdminWrite")]
+    [ProducesResponseType(typeof(PlannedSwitchoverResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> PlannedSwitchover(
+        [FromBody] PlannedSwitchoverRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.SiteCode))
+            return BadRequest(BuildError("VALIDATION.SITE_CODE_REQUIRED", "siteCode is required."));
+
+        if (request.TargetAgentId == Guid.Empty)
+            return BadRequest(BuildError("VALIDATION.TARGET_AGENT_REQUIRED", "targetAgentId is required."));
+
+        var access = _accessResolver.Resolve(User);
+        if (!access.IsValid)
+            return Unauthorized();
+
+        // Find all active agents for the site
+        var agents = await _db.AgentRegistrations
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(a => a.SiteCode == request.SiteCode && a.IsActive && a.Status == AgentRegistrationStatus.ACTIVE)
+            .OrderBy(a => a.SiteHaPriority)
+            .ThenBy(a => a.RegisteredAt)
+            .ToListAsync(cancellationToken);
+
+        if (agents.Count == 0)
+            return NotFound(BuildError("NOT_FOUND.SITE", $"No active agents found for site '{request.SiteCode}'."));
+
+        if (!access.CanAccess(agents[0].LegalEntityId))
+            return Forbid();
+
+        var leadership = SiteHaLeadershipResolver.ResolveSnapshot(agents);
+        if (leadership.Leader is null)
+            return Conflict(BuildError("CONFLICT.NO_ACTIVE_LEADER", "Site does not currently have an active primary."));
+
+        var target = agents.FirstOrDefault(a => a.Id == request.TargetAgentId);
+        if (target is null)
+            return NotFound(BuildError("NOT_FOUND.TARGET_AGENT", $"Target agent '{request.TargetAgentId}' not found for this site."));
+
+        if (target.Id == leadership.Leader.Id)
+            return Conflict(BuildError("CONFLICT.ALREADY_PRIMARY", "Target agent is already the primary."));
+
+        if (target.RoleCapability == "READ_ONLY")
+            return Conflict(BuildError("CONFLICT.READ_ONLY_AGENT", "Target agent is READ_ONLY and cannot become primary."));
+
+        // Validate standby readiness
+        if (target.LastReplicationLagSeconds is > 0 and var lagSeconds)
+        {
+            // MaxReplicationLagSeconds default is 15
+            var maxLag = 15;
+            if (lagSeconds > maxLag)
+            {
+                return Conflict(BuildError(
+                    "CONFLICT.STANDBY_NOT_READY",
+                    $"Target standby replication lag ({lagSeconds}s) exceeds threshold ({maxLag}s)."));
+            }
+        }
+
+        // Create PLANNED_SWITCHOVER command targeting the current primary
+        var now = DateTimeOffset.UtcNow;
+        var actorId = _accessResolver.ResolveUserId(User);
+        var actorDisplay = _accessResolver.ResolveUserDisplay(User) ?? actorId ?? "system";
+
+        var command = new AgentCommand
+        {
+            Id = Guid.NewGuid(),
+            DeviceId = leadership.Leader.Id,
+            LegalEntityId = leadership.Leader.LegalEntityId,
+            SiteCode = request.SiteCode,
+            CommandType = AgentCommandType.PLANNED_SWITCHOVER,
+            Reason = request.Reason ?? $"Planned switchover to agent {request.TargetAgentId}",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                TargetAgentId = request.TargetAgentId,
+                CurrentPrimaryId = leadership.Leader.Id,
+                CurrentEpoch = leadership.LeaderEpoch,
+            }),
+            Status = AgentCommandStatus.PENDING,
+            CreatedByActorId = actorId,
+            CreatedByActorDisplay = actorDisplay,
+            CreatedAt = now,
+            ExpiresAt = now.AddMinutes(5),
+            UpdatedAt = now
+        };
+
+        // P2-05: Increment peer directory version so agents detect the role change.
+        var site = await _db.Sites.FirstOrDefaultAsync(s => s.SiteCode == request.SiteCode, cancellationToken);
+        if (site is not null)
+            site.PeerDirectoryVersion++;
+
+        _db.AgentCommands.Add(command);
+
+        // P2-07: Enqueue REFRESH_CONFIG for all other agents at the site
+        // so they detect the role change via peer directory refresh.
+        foreach (var peer in agents.Where(a => a.Id != leadership.Leader.Id))
+        {
+            _db.AgentCommands.Add(new AgentCommand
+            {
+                Id = Guid.NewGuid(),
+                DeviceId = peer.Id,
+                LegalEntityId = peer.LegalEntityId,
+                SiteCode = request.SiteCode,
+                CommandType = AgentCommandType.REFRESH_CONFIG,
+                Reason = $"Peer directory changed: planned switchover to {request.TargetAgentId}",
+                Status = AgentCommandStatus.PENDING,
+                CreatedAt = now,
+                ExpiresAt = now.AddMinutes(10),
+                UpdatedAt = now,
+            });
+        }
+
+        _db.AuditEvents.Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(),
+            CreatedAt = now,
+            LegalEntityId = leadership.Leader.LegalEntityId,
+            EventType = FailoverAuditEventTypes.HaSwitchoverStarted,
+            CorrelationId = Guid.NewGuid(),
+            SiteCode = request.SiteCode,
+            Source = nameof(AgentsController),
+            EntityId = leadership.Leader.Id,
+            Payload = JsonSerializer.Serialize(new
+            {
+                CommandId = command.Id,
+                CurrentPrimaryId = leadership.Leader.Id,
+                TargetAgentId = request.TargetAgentId,
+                CurrentEpoch = leadership.LeaderEpoch,
+                Reason = command.Reason,
+                CreatedByActorId = actorId,
+            })
+        });
+
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return Ok(new PlannedSwitchoverResponse
+        {
+            CommandId = command.Id,
+            CurrentPrimaryId = leadership.Leader.Id,
+            TargetAgentId = request.TargetAgentId,
+            CurrentEpoch = leadership.LeaderEpoch,
+        });
     }
 
     private static bool TryParseConnectivityState(string? value, out ConnectivityState? state)

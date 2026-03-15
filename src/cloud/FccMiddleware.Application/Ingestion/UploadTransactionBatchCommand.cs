@@ -52,4 +52,10 @@ public sealed record UploadTransactionBatchCommand : IRequest<UploadTransactionB
     /// for a cached result before processing and caches the result after processing.
     /// </summary>
     public string? UploadBatchId { get; init; }
+
+    /// <summary>
+    /// Current leader epoch supplied by the agent when HA fencing is enabled.
+    /// Validated at the API boundary before the handler executes.
+    /// </summary>
+    public long? LeaderEpoch { get; init; }
 }

@@ -18,6 +18,9 @@ public sealed record SingleUploadResult
 
     /// <summary>Structured error code for REJECTED records. Null otherwise.</summary>
     public string? ErrorCode { get; init; }
+
+    /// <summary>Human-readable error detail for REJECTED records. Null otherwise.</summary>
+    public string? ErrorMessage { get; init; }
 }
 
 /// <summary>

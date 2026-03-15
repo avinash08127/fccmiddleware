@@ -9,7 +9,6 @@ using FccDesktopAgent.Core.Buffer.Entities;
 using FccDesktopAgent.Core.Config;
 using FccDesktopAgent.Core.Connectivity;
 using FccDesktopAgent.Core.Registration;
-using FccDesktopAgent.Core.Sync.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -38,6 +37,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
     private readonly AuthenticatedCloudRequestHandler _authHandler;
     private readonly IRegistrationManager _registrationManager;
     private readonly IErrorCountTracker _errorTracker;
+    private readonly IConfigManager _configManager;
     private readonly ILogger<TelemetryReporter> _logger;
 
     // In-memory monotonic sequence number. Starts at 1 per process lifetime.
@@ -54,6 +54,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
         AuthenticatedCloudRequestHandler authHandler,
         IRegistrationManager registrationManager,
         IErrorCountTracker errorTracker,
+        IConfigManager configManager,
         ILogger<TelemetryReporter> logger)
     {
         _scopeFactory = scopeFactory;
@@ -63,6 +64,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
         _authHandler = authHandler;
         _registrationManager = registrationManager;
         _errorTracker = errorTracker;
+        _configManager = configManager;
         _logger = logger;
     }
 
@@ -124,6 +126,8 @@ public sealed class TelemetryReporter : ITelemetryReporter
 
         var response = await http.SendAsync(request, ct);
 
+        PeerDirectoryVersionHelper.CheckAndTrigger(response, _configManager, _logger);
+
         if (response.StatusCode == HttpStatusCode.Unauthorized)
             throw new UnauthorizedAccessException();
 
@@ -164,12 +168,22 @@ public sealed class TelemetryReporter : ITelemetryReporter
                 .FirstOrDefaultAsync(s => s.Id == 1, ct);
         }
 
+        if (!Guid.TryParse(config.DeviceId, out var deviceId))
+            throw new InvalidOperationException($"Telemetry requires a valid device UUID. Current value: '{config.DeviceId}'.");
+
+        var legalEntityValue = !string.IsNullOrWhiteSpace(config.LegalEntityId) ? config.LegalEntityId : config.SiteId;
+        if (!Guid.TryParse(legalEntityValue, out var legalEntityId))
+        {
+            throw new InvalidOperationException(
+                $"Telemetry requires a valid legal-entity UUID. Current value: '{legalEntityValue}'.");
+        }
+
         return new TelemetryPayload
         {
             SchemaVersion = "1.0",
-            DeviceId = config.DeviceId,
+            DeviceId = deviceId,
             SiteCode = config.SiteId,
-            LegalEntityId = !string.IsNullOrWhiteSpace(config.LegalEntityId) ? config.LegalEntityId : config.SiteId,
+            LegalEntityId = legalEntityId,
             ReportedAtUtc = now,
             SequenceNumber = sequence,
             ConnectivityState = MapConnectivityState(snapshot.State),
@@ -259,7 +273,7 @@ public sealed class TelemetryReporter : ITelemetryReporter
             IsReachable = snapshot.IsFccUp,
             LastHeartbeatAtUtc = lastHeartbeat,
             HeartbeatAgeSeconds = heartbeatAge,
-            FccVendor = config.FccVendor.ToString().ToUpperInvariant(),
+            FccVendor = MapFccVendor(config.FccVendor),
             FccHost = host,
             FccPort = port,
             ConsecutiveHeartbeatFailures = _connectivity.FccConsecutiveFailures,
@@ -333,13 +347,22 @@ public sealed class TelemetryReporter : ITelemetryReporter
 
     // ── Connectivity state mapping ────────────────────────────────────────────
 
-    private static string MapConnectivityState(ConnectivityState state) => state switch
+    private static FccMiddleware.Domain.Enums.ConnectivityState MapConnectivityState(ConnectivityState state) => state switch
     {
-        Connectivity.ConnectivityState.FullyOnline => "FULLY_ONLINE",
-        Connectivity.ConnectivityState.InternetDown => "INTERNET_DOWN",
-        Connectivity.ConnectivityState.FccUnreachable => "FCC_UNREACHABLE",
-        Connectivity.ConnectivityState.FullyOffline => "FULLY_OFFLINE",
-        _ => "FULLY_OFFLINE",
+        Connectivity.ConnectivityState.FullyOnline => FccMiddleware.Domain.Enums.ConnectivityState.FULLY_ONLINE,
+        Connectivity.ConnectivityState.InternetDown => FccMiddleware.Domain.Enums.ConnectivityState.INTERNET_DOWN,
+        Connectivity.ConnectivityState.FccUnreachable => FccMiddleware.Domain.Enums.ConnectivityState.FCC_UNREACHABLE,
+        Connectivity.ConnectivityState.FullyOffline => FccMiddleware.Domain.Enums.ConnectivityState.FULLY_OFFLINE,
+        _ => FccMiddleware.Domain.Enums.ConnectivityState.FULLY_OFFLINE,
+    };
+
+    private static FccMiddleware.Domain.Enums.FccVendor MapFccVendor(Adapter.Common.FccVendor vendor) => vendor switch
+    {
+        Adapter.Common.FccVendor.Doms => FccMiddleware.Domain.Enums.FccVendor.DOMS,
+        Adapter.Common.FccVendor.Radix => FccMiddleware.Domain.Enums.FccVendor.RADIX,
+        Adapter.Common.FccVendor.Petronite => FccMiddleware.Domain.Enums.FccVendor.PETRONITE,
+        Adapter.Common.FccVendor.Advatec => FccMiddleware.Domain.Enums.FccVendor.ADVATEC,
+        _ => FccMiddleware.Domain.Enums.FccVendor.DOMS,
     };
 
     // ── Helpers ───────────────────────────────────────────────────────────────

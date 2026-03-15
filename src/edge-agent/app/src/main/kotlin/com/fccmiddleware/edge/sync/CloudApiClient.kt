@@ -60,7 +60,11 @@ sealed class CloudStatusPollResult {
 
 sealed class CloudUploadResult {
     /** HTTP 200 — batch processed. Check per-record outcomes in [response]. */
-    data class Success(val response: CloudUploadResponse) : CloudUploadResult()
+    data class Success(
+        val response: CloudUploadResponse,
+        /** Cloud's peer directory version from X-Peer-Directory-Version header. */
+        val peerDirectoryVersion: Long? = null,
+    ) : CloudUploadResult()
 
     /** HTTP 401 — access token expired or invalid; caller should refresh and retry. */
     data object Unauthorized : CloudUploadResult()
@@ -79,11 +83,18 @@ sealed class CloudUploadResult {
     data class RateLimited(val retryAfterSeconds: Long?) : CloudUploadResult()
 
     /**
+     * HTTP 409 — HA fencing conflict. The upload was rejected because this agent is
+     * no longer the authoritative writer. This is a permanent error for the current
+     * leader epoch — do not retry without re-acquiring leadership.
+     */
+    data class Conflict(val errorCode: String?, val message: String?) : CloudUploadResult()
+
+    /**
      * M-15: HTTP 413 — request payload too large. Caller should reduce batch size and retry.
      */
     data object PayloadTooLarge : CloudUploadResult()
 
-    /** Network or non-2xx/401/403/429/413 failure. Retry on next cadence tick. */
+    /** Network or non-2xx/401/403/409/429/413 failure. Retry on next cadence tick. */
     data class TransportError(val message: String) : CloudUploadResult()
 }
 
@@ -95,6 +106,10 @@ sealed class CloudDiagnosticLogResult {
     data object Success : CloudDiagnosticLogResult()
     data object Unauthorized : CloudDiagnosticLogResult()
     data class Forbidden(val errorCode: String?) : CloudDiagnosticLogResult()
+    /** HTTP 400 — malformed payload (permanent, do not retry). */
+    data class BadRequest(val errorCode: String?, val message: String?) : CloudDiagnosticLogResult()
+    /** HTTP 404 — device not found (permanent, do not retry). */
+    data class NotFound(val errorCode: String?, val message: String?) : CloudDiagnosticLogResult()
     data class TransportError(val message: String) : CloudDiagnosticLogResult()
 }
 
@@ -300,6 +315,10 @@ class HttpCloudApiClient(
     /** NET-007: Guards atomic update of cloudBaseUrl + httpClient in updateBaseUrl(). */
     private val urlUpdateLock = Any()
 
+    /** P2-08: Extract peer directory version from cloud response headers. */
+    private fun extractPeerDirectoryVersion(response: io.ktor.client.statement.HttpResponse): Long? =
+        response.headers[PEER_DIR_VERSION_HEADER]?.toLongOrNull()
+
     init {
         cloudBaseUrl = resolveBaseUrl(cloudBaseUrl)
     }
@@ -370,6 +389,16 @@ class HttpCloudApiClient(
             when (response.status) {
                 HttpStatusCode.OK -> CloudVersionCheckResult.Success(response.body())
                 HttpStatusCode.Unauthorized -> CloudVersionCheckResult.Unauthorized
+                HttpStatusCode.BadRequest -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudVersionCheckResult.BadRequest(error?.errorCode, error?.message)
+                }
+                HttpStatusCode.InternalServerError ->
+                    CloudVersionCheckResult.ServerError(buildTransportErrorMessage(response))
                 else -> {
                     CloudVersionCheckResult.TransportError(
                         buildTransportErrorMessage(response),
@@ -421,7 +450,10 @@ class HttpCloudApiClient(
                 setBody(request)
             }
             when (response.status) {
-                HttpStatusCode.OK -> CloudUploadResult.Success(response.body())
+                HttpStatusCode.OK -> {
+                    val peerDirVersion = extractPeerDirectoryVersion(response)
+                    CloudUploadResult.Success(response.body(), peerDirVersion)
+                }
                 HttpStatusCode.Unauthorized -> CloudUploadResult.Unauthorized
                 HttpStatusCode.Forbidden -> {
                     val errorCode = try {
@@ -434,6 +466,14 @@ class HttpCloudApiClient(
                 HttpStatusCode.TooManyRequests -> {
                     val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
                     CloudUploadResult.RateLimited(retryAfter)
+                }
+                HttpStatusCode.Conflict -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudUploadResult.Conflict(error?.errorCode, error?.message)
                 }
                 HttpStatusCode.PayloadTooLarge -> CloudUploadResult.PayloadTooLarge
                 else -> {
@@ -501,9 +541,13 @@ class HttpCloudApiClient(
                 HttpStatusCode.OK -> {
                     val rawJson = response.bodyAsText()
                     val etag = response.headers[HttpHeaders.ETag]
-                    CloudConfigPollResult.Success(rawJson, etag)
+                    val peerDirVersion = extractPeerDirectoryVersion(response)
+                    CloudConfigPollResult.Success(rawJson, etag, peerDirVersion)
                 }
-                HttpStatusCode.NotModified -> CloudConfigPollResult.NotModified
+                HttpStatusCode.NotModified -> {
+                    val peerDirVersion = extractPeerDirectoryVersion(response)
+                    CloudConfigPollResult.NotModified(peerDirVersion)
+                }
                 HttpStatusCode.Unauthorized -> CloudConfigPollResult.Unauthorized
                 HttpStatusCode.Forbidden -> {
                     val errorCode = try {
@@ -512,6 +556,14 @@ class HttpCloudApiClient(
                         null
                     }
                     CloudConfigPollResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.NotFound -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudConfigPollResult.NotFound(error?.errorCode, error?.message)
                 }
                 HttpStatusCode.TooManyRequests -> {
                     val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
@@ -551,6 +603,22 @@ class HttpCloudApiClient(
                     }
                     CloudTelemetryResult.Forbidden(errorCode)
                 }
+                HttpStatusCode.BadRequest -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudTelemetryResult.BadRequest(error?.errorCode, error?.message)
+                }
+                HttpStatusCode.NotFound -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudTelemetryResult.NotFound(error?.errorCode, error?.message)
+                }
                 HttpStatusCode.TooManyRequests -> {
                     val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
                     CloudTelemetryResult.RateLimited(retryAfter)
@@ -580,7 +648,10 @@ class HttpCloudApiClient(
             }
             when (response.status) {
                 HttpStatusCode.Created,
-                HttpStatusCode.OK -> CloudPreAuthForwardResult.Success(response.body())
+                HttpStatusCode.OK -> {
+                    val peerDirVersion = extractPeerDirectoryVersion(response)
+                    CloudPreAuthForwardResult.Success(response.body(), peerDirVersion)
+                }
                 HttpStatusCode.Unauthorized -> CloudPreAuthForwardResult.Unauthorized
                 HttpStatusCode.Forbidden -> {
                     val errorCode = try {
@@ -593,6 +664,14 @@ class HttpCloudApiClient(
                 HttpStatusCode.TooManyRequests -> {
                     val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
                     CloudPreAuthForwardResult.RateLimited(retryAfter)
+                }
+                HttpStatusCode.BadRequest -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudPreAuthForwardResult.BadRequest(error?.errorCode, error?.message)
                 }
                 HttpStatusCode.Conflict -> {
                     val error = try {
@@ -631,6 +710,11 @@ class HttpCloudApiClient(
                 }
                 when (response.status) {
                     HttpStatusCode.Created -> CloudRegistrationResult.Success(response.body())
+                    HttpStatusCode.Unauthorized -> CloudRegistrationResult.Unauthorized
+                    HttpStatusCode.TooManyRequests -> {
+                        val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
+                        CloudRegistrationResult.RateLimited(retryAfter)
+                    }
                     HttpStatusCode.BadRequest, HttpStatusCode.Conflict -> {
                         val error = try {
                             response.body<CloudErrorResponse>()
@@ -691,7 +775,10 @@ class HttpCloudApiClient(
                 bearerAuth(bearerToken)
             }
             when (response.status) {
-                HttpStatusCode.OK -> CloudCommandPollResult.Success(response.body())
+                HttpStatusCode.OK -> {
+                    val peerDirVersion = extractPeerDirectoryVersion(response)
+                    CloudCommandPollResult.Success(response.body(), peerDirVersion)
+                }
                 HttpStatusCode.Unauthorized -> CloudCommandPollResult.Unauthorized
                 HttpStatusCode.Forbidden -> {
                     val errorCode = try {
@@ -700,6 +787,14 @@ class HttpCloudApiClient(
                         null
                     }
                     CloudCommandPollResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.NotFound -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudCommandPollResult.NotFound(error?.errorCode, error?.message)
                 }
                 HttpStatusCode.TooManyRequests -> {
                     val retryAfter = parseRetryAfterSeconds(response.headers["Retry-After"])
@@ -737,6 +832,14 @@ class HttpCloudApiClient(
                         null
                     }
                     CloudCommandAckResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.NotFound -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudCommandAckResult.NotFound(error?.errorCode, error?.message)
                 }
                 HttpStatusCode.Conflict -> {
                     val error = try {
@@ -777,6 +880,22 @@ class HttpCloudApiClient(
                         null
                     }
                     CloudInstallationUpsertResult.Forbidden(errorCode)
+                }
+                HttpStatusCode.NotFound -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudInstallationUpsertResult.NotFound(error?.errorCode, error?.message)
+                }
+                HttpStatusCode.Conflict -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    CloudInstallationUpsertResult.Conflict(error?.errorCode, error?.message)
                 }
                 else -> CloudInstallationUpsertResult.TransportError(
                     buildTransportErrorMessage(response),
@@ -825,6 +944,18 @@ class HttpCloudApiClient(
                     } catch (_: Exception) { null }
                     CloudDiagnosticLogResult.Forbidden(errorCode)
                 }
+                HttpStatusCode.BadRequest -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) { null }
+                    CloudDiagnosticLogResult.BadRequest(error?.errorCode, error?.message)
+                }
+                HttpStatusCode.NotFound -> {
+                    val error = try {
+                        response.body<CloudErrorResponse>()
+                    } catch (_: Exception) { null }
+                    CloudDiagnosticLogResult.NotFound(error?.errorCode, error?.message)
+                }
                 else -> CloudDiagnosticLogResult.TransportError(
                     buildTransportErrorMessage(response),
                 )
@@ -838,6 +969,7 @@ class HttpCloudApiClient(
 
     companion object {
         private const val TAG = "HttpCloudApiClient"
+        private const val PEER_DIR_VERSION_HEADER = "X-Peer-Directory-Version"
 
         /**
          * S-006: APK-bundled fallback certificate pins (SHA-256 SPKI hashes).

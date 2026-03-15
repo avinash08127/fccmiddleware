@@ -33,7 +33,19 @@ public sealed class TransactionUpdateService : ITransactionUpdateService
         }
 
         if (fields.OrderUuid is not null) tx.OrderUuid = fields.OrderUuid;
-        if (fields.OdooOrderId is not null) tx.OdooOrderId = fields.OdooOrderId;
+        if (fields.OdooOrderId is not null)
+        {
+            if (!string.IsNullOrEmpty(tx.OdooOrderId) && tx.OdooOrderId != fields.OdooOrderId)
+            {
+                _logger.LogWarning(
+                    "Manager update: OdooOrderId conflict on {FccId} — existing={Existing}, incoming={Incoming}; skipping OdooOrderId update",
+                    fccTransactionId, tx.OdooOrderId, fields.OdooOrderId);
+            }
+            else
+            {
+                tx.OdooOrderId = fields.OdooOrderId;
+            }
+        }
         if (fields.PaymentId is not null) tx.PaymentId = fields.PaymentId;
         if (fields.AddToCart.HasValue) tx.AddToCart = fields.AddToCart.Value;
 
@@ -69,7 +81,18 @@ public sealed class TransactionUpdateService : ITransactionUpdateService
         {
             tx.OrderUuid = fields.OrderUuid;
             if (fields.OdooOrderId is not null)
-                tx.OdooOrderId = fields.OdooOrderId;
+            {
+                if (!string.IsNullOrEmpty(tx.OdooOrderId) && tx.OdooOrderId != fields.OdooOrderId)
+                {
+                    _logger.LogWarning(
+                        "Attendant update: OdooOrderId conflict on {FccId} — existing={Existing}, incoming={Incoming}; skipping OdooOrderId update",
+                        fccTransactionId, tx.OdooOrderId, fields.OdooOrderId);
+                }
+                else
+                {
+                    tx.OdooOrderId = fields.OdooOrderId;
+                }
+            }
             if (fields.PaymentId is not null)
                 tx.PaymentId = fields.PaymentId;
             shouldBroadcast = true;

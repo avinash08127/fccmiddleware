@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.net.URI
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * ConfigManager — manages runtime configuration received from cloud.
@@ -29,6 +30,7 @@ class ConfigManager(
     private val agentConfigDao: AgentConfigDao,
     private val keystoreManager: KeystoreManager? = null,
     private val encryptedPrefsManager: com.fccmiddleware.edge.security.EncryptedPrefsManager? = null,
+    private val syncStateDao: com.fccmiddleware.edge.buffer.dao.SyncStateDao? = null,
 ) {
 
     companion object {
@@ -44,6 +46,22 @@ class ConfigManager(
     /** Current config version, or null if no config has been applied. */
     val currentConfigVersion: Int?
         get() = _config.value?.configVersion
+
+    // ── P2-08: Peer directory version tracking ────────────────────────────────
+
+    private val _peerDirectoryVersion = AtomicLong(0L)
+
+    /** Current peer directory version from cloud responses. */
+    val currentPeerDirectoryVersion: Long get() = _peerDirectoryVersion.get()
+
+    /** Update the local peer directory version (thread-safe). */
+    fun updatePeerDirectoryVersion(version: Long) {
+        _peerDirectoryVersion.set(version)
+    }
+
+    /** Returns true if the cloud version is newer than the local version. */
+    fun isPeerDirectoryStale(cloudVersion: Long): Boolean =
+        cloudVersion > _peerDirectoryVersion.get()
 
     /**
      * Load the last-known-good config from Room into memory.
@@ -63,10 +81,21 @@ class ConfigManager(
             }
             val parsed = EdgeAgentConfigJson.decode(configJsonPlain)
             _config.value = parsed
+
+            // P2-08: Restore peer directory version from SyncState
+            try {
+                val syncState = syncStateDao?.get()
+                if (syncState != null) {
+                    _peerDirectoryVersion.set(syncState.peerDirectoryVersion)
+                }
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Failed to restore peerDirectoryVersion from SyncState", e)
+            }
+
             AppLogger.i(
                 TAG,
                 "Loaded config from local: version=${parsed.configVersion}, " +
-                    "configId=${parsed.configId}",
+                    "configId=${parsed.configId}, peerDirVersion=${_peerDirectoryVersion.get()}",
             )
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to load config from local storage", e)

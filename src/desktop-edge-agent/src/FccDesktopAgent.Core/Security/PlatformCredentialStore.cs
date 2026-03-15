@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -31,8 +32,17 @@ public sealed class PlatformCredentialStore : ICredentialStore
     // used by the file-backed code paths.
     private readonly SemaphoreSlim _fileLock = new(1, 1);
 
+    // P-DSK-006: In-memory cache for decrypted secrets on file-backed platforms (Windows/Linux).
+    // Reads return from cache without acquiring the file lock, eliminating convoy effects
+    // when multiple workers read tokens concurrently during a refresh cycle.
+    private readonly ConcurrentDictionary<string, string> _secretCache = new();
+
     // Lazy-evaluated Linux fallback flag
     private bool? _linuxHasSecretTool;
+
+    // P-DSK-008: Cache the derived AES key — inputs (machine-id + salt) don't change
+    // during process lifetime, so re-deriving with 100K PBKDF2 iterations is wasteful.
+    private byte[]? _cachedLinuxDerivedKey;
 
     public PlatformCredentialStore(ILogger<PlatformCredentialStore> logger)
     {
@@ -51,6 +61,8 @@ public sealed class PlatformCredentialStore : ICredentialStore
         else
             await SetSecretLinuxAsync(key, secret, ct);
 
+        // P-DSK-006: Update in-memory cache after successful write
+        _secretCache[key] = secret;
         _logger.LogDebug("Stored secret under key {Key}", key);
     }
 
@@ -58,11 +70,22 @@ public sealed class PlatformCredentialStore : ICredentialStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
 
+        // P-DSK-006: Return from in-memory cache if available, avoiding file lock contention
+        if (_secretCache.TryGetValue(key, out var cached))
+            return cached;
+
+        string? result;
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return await GetSecretWindowsAsync(key, ct);
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            return await GetSecretMacOsAsync(key, ct);
-        return await GetSecretLinuxAsync(key, ct);
+            result = await GetSecretWindowsAsync(key, ct);
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            result = await GetSecretMacOsAsync(key, ct);
+        else
+            result = await GetSecretLinuxAsync(key, ct);
+
+        // Populate cache on successful read
+        if (result is not null)
+            _secretCache[key] = result;
+        return result;
     }
 
     public async Task DeleteSecretAsync(string key, CancellationToken ct = default)
@@ -76,6 +99,8 @@ public sealed class PlatformCredentialStore : ICredentialStore
         else
             await DeleteSecretLinuxAsync(key, ct);
 
+        // P-DSK-006: Remove from in-memory cache
+        _secretCache.TryRemove(key, out _);
         _logger.LogDebug("Deleted secret under key {Key}", key);
     }
 
@@ -327,6 +352,10 @@ public sealed class PlatformCredentialStore : ICredentialStore
     /// </summary>
     private byte[] DeriveLinuxMachineKey()
     {
+        // P-DSK-008: Return cached key if available — inputs don't change during process lifetime.
+        if (_cachedLinuxDerivedKey is not null)
+            return _cachedLinuxDerivedKey;
+
         var machineId = "fcc-desktop-agent-fallback";
         try
         {
@@ -341,12 +370,13 @@ public sealed class PlatformCredentialStore : ICredentialStore
         }
 
         var installationSalt = GetOrCreateInstallationSalt();
-        return Rfc2898DeriveBytes.Pbkdf2(
+        _cachedLinuxDerivedKey = Rfc2898DeriveBytes.Pbkdf2(
             Encoding.UTF8.GetBytes(machineId),
             installationSalt,
             iterations: 100_000,
             HashAlgorithmName.SHA256,
             outputLength: 32);
+        return _cachedLinuxDerivedKey;
     }
 
     /// <summary>

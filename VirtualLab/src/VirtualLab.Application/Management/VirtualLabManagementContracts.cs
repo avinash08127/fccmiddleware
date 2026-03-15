@@ -261,6 +261,7 @@ public sealed class SiteSnapshot
     public string BasicAuthPassword { get; set; } = string.Empty;
     public TransactionDeliveryMode DeliveryMode { get; set; }
     public PreAuthFlowMode PreAuthMode { get; set; }
+    public string FccVendor { get; set; } = "Generic";
     public string SettingsJson { get; set; } = "{}";
     public bool IsActive { get; set; } = true;
     public DateTimeOffset CreatedAtUtc { get; set; }
@@ -467,6 +468,7 @@ public class SiteListItemView
     public string BasicAuthPassword { get; set; } = string.Empty;
     public TransactionDeliveryMode DeliveryMode { get; set; }
     public PreAuthFlowMode PreAuthMode { get; set; }
+    public string FccVendor { get; set; } = "Generic";
     public SiteSettingsView Settings { get; set; } = new();
     public FccProfileSummary ActiveProfile { get; set; } = new(Guid.Empty, string.Empty, string.Empty, string.Empty, SimulatedAuthMode.None, TransactionDeliveryMode.Pull, PreAuthFlowMode.CreateOnly, false, false);
     public SiteForecourtSummaryView Forecourt { get; set; } = new();
@@ -496,6 +498,7 @@ public sealed class SiteUpsertRequest
     public string BasicAuthPassword { get; set; } = string.Empty;
     public TransactionDeliveryMode DeliveryMode { get; set; }
     public PreAuthFlowMode PreAuthMode { get; set; }
+    public string FccVendor { get; set; } = "Generic";
     public bool IsActive { get; set; } = true;
     public SiteSettingsView Settings { get; set; } = new();
     public IReadOnlyList<CallbackTargetUpsertRequest>? CallbackTargets { get; set; }

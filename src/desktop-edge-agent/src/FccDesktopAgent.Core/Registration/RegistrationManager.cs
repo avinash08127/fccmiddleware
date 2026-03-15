@@ -30,6 +30,10 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
     private readonly string? _baseDirectoryOverride;
     private readonly object _lock = new();
     private RegistrationState? _cached;
+    // P-DSK-010: Version counter incremented on SaveStateAsync. PostConfigure only
+    // re-reads from disk when _lastSeenVersion != _cacheVersion (i.e. state changed).
+    private volatile int _cacheVersion;
+    private int _lastSeenVersion = -1; // force first load
 
     public RegistrationManager(
         ILogger<RegistrationManager> logger,
@@ -147,6 +151,8 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
             File.Move(tmpPath, path);
 
         lock (_lock) _cached = state;
+        // P-DSK-010: Bump version so PostConfigure knows to re-read
+        Interlocked.Increment(ref _cacheVersion);
 
         _logger.LogInformation("Registration state saved (registered={IsRegistered}, deviceId={DeviceId})",
             state.IsRegistered, state.DeviceId);
@@ -202,7 +208,7 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
     /// Syncs site equipment data from the cloud config to a local JSON file.
     /// Called after successful registration when the site config is available.
     /// </summary>
-    public void SyncSiteData(SiteConfig config)
+    public async Task SyncSiteDataAsync(SiteConfig config)
     {
         // L-04: Log when SiteDataManager is unavailable so silent no-ops are visible in diagnostics
         if (_siteDataManager is null)
@@ -211,18 +217,22 @@ public sealed class RegistrationManager : IRegistrationManager, IPostConfigureOp
             return;
         }
 
-        _siteDataManager.SyncFromConfig(config);
+        await _siteDataManager.SyncFromConfigAsync(config);
     }
 
     // ── IPostConfigureOptions<AgentConfiguration> ────────────────────────────
 
     public void PostConfigure(string? name, AgentConfiguration options)
     {
-        // H-08: Clear cached state so LoadState re-reads from disk.
-        // IOptions<T> caches its value after first resolution, so PostConfigure must
-        // see the latest persisted state — not a stale in-memory snapshot from before
-        // registration completed.
-        lock (_lock) _cached = null;
+        // P-DSK-010: Only invalidate the cache when the registration state has actually
+        // changed (after SaveStateAsync bumps the version counter). This avoids a
+        // synchronous File.ReadAllText on every IOptions/IOptionsMonitor resolution.
+        var currentVersion = _cacheVersion;
+        if (_lastSeenVersion != currentVersion)
+        {
+            lock (_lock) _cached = null;
+            _lastSeenVersion = currentVersion;
+        }
 
         var state = LoadState();
         if (!state.IsRegistered) return;

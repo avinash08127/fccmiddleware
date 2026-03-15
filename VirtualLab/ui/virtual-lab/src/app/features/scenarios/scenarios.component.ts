@@ -138,6 +138,7 @@ import {
             <div>
               <h4>Latest selected run</h4>
               <p>{{ run.status }} · {{ run.correlationId }}</p>
+              <small>Input {{ run.replaySignature }} · Output {{ run.outputSignature || 'n/a' }}</small>
             </div>
             <small>{{ formatDateTime(run.startedAtUtc) }}</small>
           </div>
@@ -191,7 +192,7 @@ import {
           >
             <div>
               <strong>{{ run.scenarioName }}</strong>
-              <p>{{ run.siteCode }} · {{ run.replaySeed }}</p>
+              <p>{{ run.siteCode }} · {{ run.replaySeed }} · {{ run.outputSignature || 'n/a' }}</p>
             </div>
             <div class="row-meta">
               <span class="pill" [class.pill--warning]="run.status !== 'Completed'">{{ run.status }}</span>

@@ -10,6 +10,9 @@ namespace FccMiddleware.Api.Infrastructure;
 /// </summary>
 public sealed class DeviceActiveCheckMiddleware
 {
+    /// <summary>Key used to store the resolved <see cref="Domain.Entities.AgentRegistration"/> in <see cref="HttpContext.Items"/>.</summary>
+    internal const string ResolvedDeviceKey = "ResolvedDevice";
+
     private readonly RequestDelegate _next;
 
     public DeviceActiveCheckMiddleware(RequestDelegate next)
@@ -53,6 +56,9 @@ public sealed class DeviceActiveCheckMiddleware
                     });
                     return;
                 }
+
+                // Store resolved device for downstream middleware (e.g. PeerDirectoryVersionMiddleware).
+                context.Items[ResolvedDeviceKey] = device;
             }
         }
 

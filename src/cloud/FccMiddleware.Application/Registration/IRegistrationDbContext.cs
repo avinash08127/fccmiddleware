@@ -22,6 +22,7 @@ public interface IRegistrationDbContext
     void AddBootstrapToken(BootstrapToken token);
     void AddDeviceRefreshToken(DeviceRefreshToken token);
     void AddAuditEvent(AuditEvent auditEvent);
+    void AddAgentCommand(AgentCommand command);
 
     Task<int> SaveChangesAsync(CancellationToken ct);
 

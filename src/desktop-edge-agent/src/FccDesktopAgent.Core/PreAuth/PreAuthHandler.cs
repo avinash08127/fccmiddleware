@@ -161,7 +161,9 @@ public sealed class PreAuthHandler : IPreAuthHandler
             UnitPriceMinorPerLitre: request.UnitPriceMinorPerLitre,
             Currency: request.Currency,
             VehicleNumber: request.VehicleNumber,
-            FccCorrelationId: null);
+            FccCorrelationId: null,
+            CustomerTaxId: request.CustomerTaxId,
+            CustomerName: request.CustomerName);
 
         IFccAdapter adapter;
         try
@@ -291,8 +293,25 @@ public sealed class PreAuthHandler : IPreAuthHandler
             return PreAuthHandlerResult.Ok(record);
         }
 
-        // Best-effort FCC deauthorization
-        await TryCancelAtFccAsync(record, ct);
+        // Best-effort FCC deauthorization — for Authorized records, require confirmation
+        if (record.Status == PreAuthStatus.Authorized)
+        {
+            var deauthorized = await TryCancelAtFccAsync(record, ct);
+            if (!deauthorized)
+            {
+                _logger.LogWarning(
+                    "Cancel pre-auth {Id}: FCC deauthorization not confirmed; keeping status as {Status}",
+                    record.Id, record.Status);
+                return PreAuthHandlerResult.Fail(
+                    PreAuthHandlerError.FccUnreachable,
+                    "FCC deauthorization could not be confirmed. The cancel will be retried.");
+            }
+        }
+        else
+        {
+            // Non-authorized records (e.g. Pending): best-effort, proceed regardless
+            await TryCancelAtFccAsync(record, ct);
+        }
 
         record.Status = PreAuthStatus.Cancelled;
         record.CancelledAt = DateTimeOffset.UtcNow;
@@ -330,26 +349,68 @@ public sealed class PreAuthHandler : IPreAuthHandler
         var expiredCount = 0;
         var deferredAuthorizedCount = 0;
 
-        foreach (var record in expired)
-        {
-            _logger.LogInformation(
-                "Expiring pre-auth {Id} (was {Status}, expired at {ExpiresAt}) for order {OrderId}",
-                record.Id, record.Status, record.ExpiresAt, record.OdooOrderId);
+        // P-DSK-018: Separate authorized records (need FCC deauth) from non-authorized.
+        // Process FCC deauthorizations with bounded parallelism and per-record timeouts
+        // to prevent blocking the cadence loop for minutes.
+        var authorizedRecords = expired.Where(r => r.Status == PreAuthStatus.Authorized).ToList();
+        var nonAuthorizedRecords = expired.Where(r => r.Status != PreAuthStatus.Authorized).ToList();
 
-            if (record.Status == PreAuthStatus.Authorized)
+        // Process authorized records with bounded parallelism (max 5 concurrent FCC calls)
+        if (authorizedRecords.Count > 0)
+        {
+            var semaphore = new SemaphoreSlim(5);
+            var tasks = authorizedRecords.Select(async record =>
             {
-                var deauthorized = await TryCancelAtFccAsync(record, ct);
+                await semaphore.WaitAsync(ct);
+                try
+                {
+                    // P-DSK-018: Per-record timeout of 5 seconds for FCC deauth
+                    using var perRecordCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    perRecordCts.CancelAfter(TimeSpan.FromSeconds(5));
+
+                    var deauthorized = await TryCancelAtFccAsync(record, perRecordCts.Token);
+                    return (record, deauthorized);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // Per-record timeout — treat as deferred
+                    _logger.LogWarning(
+                        "FCC deauthorization timed out for pre-auth {Id}", record.Id);
+                    return (record, deauthorized: false);
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }).ToList();
+
+            var results = await Task.WhenAll(tasks);
+            foreach (var (record, deauthorized) in results)
+            {
                 if (!deauthorized)
                 {
                     deferredAuthorizedCount++;
                     _logger.LogWarning(
                         "Pre-auth {Id} remains {Status} after expiry because FCC deauthorization could not be confirmed; " +
                         "the next expiry cycle will retry",
-                        record.Id,
-                        record.Status);
+                        record.Id, record.Status);
                     continue;
                 }
+
+                record.Status = PreAuthStatus.Expired;
+                record.ExpiredAt = now;
+                record.UpdatedAt = now;
+                record.IsCloudSynced = false;
+                expiredCount++;
             }
+        }
+
+        // Non-authorized records transition immediately
+        foreach (var record in nonAuthorizedRecords)
+        {
+            _logger.LogInformation(
+                "Expiring pre-auth {Id} (was {Status}, expired at {ExpiresAt}) for order {OrderId}",
+                record.Id, record.Status, record.ExpiresAt, record.OdooOrderId);
 
             record.Status = PreAuthStatus.Expired;
             record.ExpiredAt = now;
